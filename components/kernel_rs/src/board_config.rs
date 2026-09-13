@@ -69,7 +69,35 @@ const MAX_SPI_BUSES: usize = 4;
 const MAX_I2C_BUSES: usize = 4;
 const MAX_DRIVERS: usize = 16;
 
+/// An SPI bus declaration from a board profile.
+#[derive(Debug, PartialEq, Eq)]
+struct SpiBus {
+    host: i32,
+    mosi: i32,
+    miso: i32,
+    sclk: i32,
+    max_transfer_bytes: i32,
+}
+
+/// An I²C bus declaration from a board profile.
+#[derive(Debug, PartialEq, Eq)]
+struct I2cBus {
+    port: i32,
+    sda: i32,
+    scl: i32,
+    freq_hz: i32,
+}
+
+/// A board-level GPIO output declaration from a board profile.
+#[derive(Debug, PartialEq, Eq)]
+struct GpioOutput {
+    gpio: i32,
+    level: i32,
+    delay_ms: i32,
+}
+
 /// A driver's declaration inside a board profile, parsed and ready to load.
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct DriverEntry {
     id: String,
     /// The HAL interface the driver registers.
@@ -82,22 +110,24 @@ struct DriverEntry {
 
 /// The side effects the board profile boot sequence performs.
 ///
+/// These are the raw operations only. Which ELF a driver entry resolves to,
+/// and whether it falls back to a compiled-in driver, is sequence policy and
+/// lives above this seam so that a test can observe it.
+///
 /// Only bus initialisation reports failure: a GPIO output or a driver that
 /// cannot be brought up must not stop the rest of the board coming up, while
 /// a bus that is unavailable takes every driver configured on it with it.
 trait BootEffects {
-    fn set_gpio_output(&mut self, gpio: i32, level: i32, delay_ms: i32);
-    fn init_spi_bus(
-        &mut self,
-        host: i32,
-        mosi: i32,
-        miso: i32,
-        sclk: i32,
-        max_transfer_bytes: i32,
-    ) -> i32;
-    fn init_i2c_bus(&mut self, port: i32, sda: i32, scl: i32, freq_hz: i32) -> i32;
+    fn set_gpio_output(&mut self, output: &GpioOutput);
+    fn init_spi_bus(&mut self, bus: &SpiBus) -> i32;
+    fn init_i2c_bus(&mut self, bus: &I2cBus) -> i32;
     fn init_driver_loader(&mut self);
-    fn load_driver(&mut self, driver: &DriverEntry);
+    /// Whether a driver ELF is present at `path`.
+    fn driver_elf_exists(&mut self, path: &str) -> bool;
+    /// Load the driver ELF at `path`, which `driver_elf_exists` reported present.
+    fn load_driver_elf(&mut self, path: &str, driver: &DriverEntry);
+    /// Load the compiled-in driver for an entry whose ELF is not on disk.
+    fn load_builtin_driver(&mut self, driver: &DriverEntry);
 }
 
 /// Run the boot sequence a board profile describes.
@@ -120,11 +150,13 @@ fn run_boot_sequence<E: BootEffects>(profile: &str, effects: &mut E) -> i32 {
 /// Drive board-level GPIO outputs (power enables, resets) before bus init.
 fn apply_gpio_outputs<E: BootEffects>(profile: &str, effects: &mut E) {
     for entry in objects_in(profile, "gpio_outputs", MAX_GPIO_OUTPUTS) {
-        let gpio = json_get_int(&entry, "gpio").unwrap_or(-1) as i32;
-        let level = json_get_int(&entry, "level").unwrap_or(0) as i32;
-        let delay_ms = json_get_int(&entry, "delay_ms").unwrap_or(0) as i32;
-        if gpio >= 0 {
-            effects.set_gpio_output(gpio, level, delay_ms);
+        let output = GpioOutput {
+            gpio: json_get_int(&entry, "gpio").unwrap_or(-1) as i32,
+            level: json_get_int(&entry, "level").unwrap_or(0) as i32,
+            delay_ms: json_get_int(&entry, "delay_ms").unwrap_or(0) as i32,
+        };
+        if output.gpio >= 0 {
+            effects.set_gpio_output(&output);
         }
     }
 }
@@ -135,23 +167,25 @@ fn initialize_buses<E: BootEffects>(profile: &str, effects: &mut E) -> i32 {
     };
 
     for bus in objects_in(&buses, "spi", MAX_SPI_BUSES) {
-        let host = json_get_int(&bus, "host").unwrap_or(1) as i32;
-        let mosi = json_get_int(&bus, "mosi").unwrap_or(-1) as i32;
-        let miso = json_get_int(&bus, "miso").unwrap_or(-1) as i32;
-        let sclk = json_get_int(&bus, "sclk").unwrap_or(-1) as i32;
-        let max_bytes = json_get_int(&bus, "max_transfer_bytes").unwrap_or(4096) as i32;
-        let ret = effects.init_spi_bus(host, mosi, miso, sclk, max_bytes);
+        let ret = effects.init_spi_bus(&SpiBus {
+            host: json_get_int(&bus, "host").unwrap_or(1) as i32,
+            mosi: json_get_int(&bus, "mosi").unwrap_or(-1) as i32,
+            miso: json_get_int(&bus, "miso").unwrap_or(-1) as i32,
+            sclk: json_get_int(&bus, "sclk").unwrap_or(-1) as i32,
+            max_transfer_bytes: json_get_int(&bus, "max_transfer_bytes").unwrap_or(4096) as i32,
+        });
         if ret != ESP_OK {
             return ret;
         }
     }
 
     for bus in objects_in(&buses, "i2c", MAX_I2C_BUSES) {
-        let port = json_get_int(&bus, "port").unwrap_or(0) as i32;
-        let sda = json_get_int(&bus, "sda").unwrap_or(-1) as i32;
-        let scl = json_get_int(&bus, "scl").unwrap_or(-1) as i32;
-        let freq_hz = json_get_int(&bus, "freq_hz").unwrap_or(400000) as i32;
-        let ret = effects.init_i2c_bus(port, sda, scl, freq_hz);
+        let ret = effects.init_i2c_bus(&I2cBus {
+            port: json_get_int(&bus, "port").unwrap_or(0) as i32,
+            sda: json_get_int(&bus, "sda").unwrap_or(-1) as i32,
+            scl: json_get_int(&bus, "scl").unwrap_or(-1) as i32,
+            freq_hz: json_get_int(&bus, "freq_hz").unwrap_or(400000) as i32,
+        });
         if ret != ESP_OK {
             return ret;
         }
@@ -177,13 +211,35 @@ fn load_drivers<E: BootEffects>(profile: &str, effects: &mut E) {
         let raw_config = extract_object(&drv, "config").unwrap_or_else(|| "{}".to_string());
         let config = normalize_driver_config(&id, &board_arch, &raw_config);
 
-        effects.load_driver(&DriverEntry {
+        let driver = DriverEntry {
             id,
             hal: json_get_string(&drv, "hal").unwrap_or_default(),
             elf,
             config,
-        });
+        };
+
+        match driver_elf_search_paths(&driver.elf)
+            .into_iter()
+            .find(|path| effects.driver_elf_exists(path))
+        {
+            Some(path) => effects.load_driver_elf(&path, &driver),
+            // ELF not on disk — fall back to the compiled-in driver, which
+            // needs both an id and a HAL interface to be identifiable.
+            None => {
+                if !driver.id.is_empty() && !driver.hal.is_empty() {
+                    effects.load_builtin_driver(&driver);
+                }
+            }
+        }
     }
+}
+
+/// Where a driver ELF is looked for, in order: SPIFFS first, then SD card.
+fn driver_elf_search_paths(elf: &str) -> [String; 2] {
+    [
+        format!("/spiffs/drivers/{}", elf),
+        format!("/tmp/thistle_sdcard/drivers/{}", elf),
+    ]
 }
 
 /// Reject traversal, absolute and hidden paths — a driver entry's ELF filename
@@ -205,28 +261,29 @@ struct HardwareEffects;
 
 #[cfg(not(test))]
 impl BootEffects for HardwareEffects {
-    fn set_gpio_output(&mut self, gpio: i32, level: i32, delay_ms: i32) {
+    fn set_gpio_output(&mut self, output: &GpioOutput) {
         extern "C" {
             fn board_gpio_set_output(pin: i32, level: i32, delay_ms: i32) -> i32;
         }
         unsafe {
-            board_gpio_set_output(gpio, level, delay_ms);
+            board_gpio_set_output(output.gpio, output.level, output.delay_ms);
         }
     }
 
-    fn init_spi_bus(
-        &mut self,
-        host: i32,
-        mosi: i32,
-        miso: i32,
-        sclk: i32,
-        max_transfer_bytes: i32,
-    ) -> i32 {
-        unsafe { board_bus_init_spi(host, mosi, miso, sclk, max_transfer_bytes) }
+    fn init_spi_bus(&mut self, bus: &SpiBus) -> i32 {
+        unsafe {
+            board_bus_init_spi(
+                bus.host,
+                bus.mosi,
+                bus.miso,
+                bus.sclk,
+                bus.max_transfer_bytes,
+            )
+        }
     }
 
-    fn init_i2c_bus(&mut self, port: i32, sda: i32, scl: i32, freq_hz: i32) -> i32 {
-        unsafe { board_bus_init_i2c(port, sda, scl, freq_hz) }
+    fn init_i2c_bus(&mut self, bus: &I2cBus) -> i32 {
+        unsafe { board_bus_init_i2c(bus.port, bus.sda, bus.scl, bus.freq_hz) }
     }
 
     fn init_driver_loader(&mut self) {
@@ -235,37 +292,27 @@ impl BootEffects for HardwareEffects {
         }
     }
 
-    fn load_driver(&mut self, driver: &DriverEntry) {
-        // Try SPIFFS first, then SD
-        let paths = [
-            format!("/spiffs/drivers/{}", driver.elf),
-            format!("/tmp/thistle_sdcard/drivers/{}", driver.elf),
-        ];
+    fn driver_elf_exists(&mut self, path: &str) -> bool {
+        Path::new(path).exists()
+    }
 
-        for path in &paths {
-            if Path::new(path).exists() {
-                if let (Ok(cpath), Ok(cconfig)) = (
-                    CString::new(path.as_str()),
-                    CString::new(driver.config.as_str()),
-                ) {
-                    unsafe {
-                        driver_loader_load_with_config(cpath.as_ptr(), cconfig.as_ptr());
-                    }
-                }
-                return;
+    fn load_driver_elf(&mut self, path: &str, driver: &DriverEntry) {
+        if let (Ok(cpath), Ok(cconfig)) = (CString::new(path), CString::new(driver.config.as_str()))
+        {
+            unsafe {
+                driver_loader_load_with_config(cpath.as_ptr(), cconfig.as_ptr());
             }
         }
+    }
 
-        // ELF not on disk — fall back to compiled-in driver
-        if !driver.id.is_empty() && !driver.hal.is_empty() {
-            if let (Ok(cid), Ok(chal), Ok(cconfig)) = (
-                CString::new(driver.id.as_str()),
-                CString::new(driver.hal.as_str()),
-                CString::new(driver.config.as_str()),
-            ) {
-                unsafe {
-                    board_builtin_driver_init(cid.as_ptr(), chal.as_ptr(), cconfig.as_ptr());
-                }
+    fn load_builtin_driver(&mut self, driver: &DriverEntry) {
+        if let (Ok(cid), Ok(chal), Ok(cconfig)) = (
+            CString::new(driver.id.as_str()),
+            CString::new(driver.hal.as_str()),
+            CString::new(driver.config.as_str()),
+        ) {
+            unsafe {
+                board_builtin_driver_init(cid.as_ptr(), chal.as_ptr(), cconfig.as_ptr());
             }
         }
     }
@@ -611,17 +658,28 @@ mod tests {
             freq_hz: i32,
         },
         DriverLoaderInit,
-        Driver {
+        ElfProbe {
+            path: String,
+        },
+        DriverElf {
+            id: String,
+            path: String,
+        },
+        BuiltinDriver {
             id: String,
         },
     }
 
-    /// Records every effect the boot sequence performs, and can fail a chosen bus.
+    /// Records every effect the boot sequence performs. A chosen bus can be
+    /// made to fail, and chosen driver ELFs can be made to exist on disk.
     #[derive(Default)]
     struct Recorder {
         steps: Vec<BootStep>,
         fail_spi_host: Option<(i32, i32)>,
         fail_i2c_port: Option<(i32, i32)>,
+        present_elfs: Vec<String>,
+        /// Every driver entry handed to an effect, whatever it resolved to.
+        loaded: Vec<DriverEntry>,
     }
 
     impl Recorder {
@@ -639,11 +697,21 @@ mod tests {
             }
         }
 
+        /// A recorder for which these driver ELF paths are present on disk.
+        fn with_elfs_on_disk(paths: &[&str]) -> Self {
+            Recorder {
+                present_elfs: paths.iter().map(|p| p.to_string()).collect(),
+                ..Default::default()
+            }
+        }
+
         fn driver_ids(&self) -> Vec<&str> {
             self.steps
                 .iter()
                 .filter_map(|step| match step {
-                    BootStep::Driver { id } => Some(id.as_str()),
+                    BootStep::DriverElf { id, .. } | BootStep::BuiltinDriver { id } => {
+                        Some(id.as_str())
+                    }
                     _ => None,
                 })
                 .collect()
@@ -652,47 +720,64 @@ mod tests {
         fn position(&self, step: &BootStep) -> Option<usize> {
             self.steps.iter().position(|s| s == step)
         }
+
+        /// The configuration a named driver was loaded with.
+        fn loaded_config(&self, id: &str) -> Option<&str> {
+            self.loaded
+                .iter()
+                .find(|d| d.id == id)
+                .map(|d| d.config.as_str())
+        }
+
+        /// The recorded steps as phase labels, for asserting order alone.
+        fn phases(&self) -> Vec<&'static str> {
+            self.steps
+                .iter()
+                .map(|step| match step {
+                    BootStep::Gpio { .. } => "gpio",
+                    BootStep::Spi { .. } => "spi",
+                    BootStep::I2c { .. } => "i2c",
+                    BootStep::DriverLoaderInit => "driver-loader-init",
+                    BootStep::ElfProbe { .. } => "elf-probe",
+                    BootStep::DriverElf { .. } => "driver-elf",
+                    BootStep::BuiltinDriver { .. } => "builtin-driver",
+                })
+                .collect()
+        }
     }
 
     impl BootEffects for Recorder {
-        fn set_gpio_output(&mut self, gpio: i32, level: i32, delay_ms: i32) {
+        fn set_gpio_output(&mut self, output: &GpioOutput) {
             self.steps.push(BootStep::Gpio {
-                gpio,
-                level,
-                delay_ms,
+                gpio: output.gpio,
+                level: output.level,
+                delay_ms: output.delay_ms,
             });
         }
 
-        fn init_spi_bus(
-            &mut self,
-            host: i32,
-            mosi: i32,
-            miso: i32,
-            sclk: i32,
-            max_transfer_bytes: i32,
-        ) -> i32 {
+        fn init_spi_bus(&mut self, bus: &SpiBus) -> i32 {
             self.steps.push(BootStep::Spi {
-                host,
-                mosi,
-                miso,
-                sclk,
-                max_transfer_bytes,
+                host: bus.host,
+                mosi: bus.mosi,
+                miso: bus.miso,
+                sclk: bus.sclk,
+                max_transfer_bytes: bus.max_transfer_bytes,
             });
             match self.fail_spi_host {
-                Some((failing, err)) if failing == host => err,
+                Some((failing, err)) if failing == bus.host => err,
                 _ => ESP_OK,
             }
         }
 
-        fn init_i2c_bus(&mut self, port: i32, sda: i32, scl: i32, freq_hz: i32) -> i32 {
+        fn init_i2c_bus(&mut self, bus: &I2cBus) -> i32 {
             self.steps.push(BootStep::I2c {
-                port,
-                sda,
-                scl,
-                freq_hz,
+                port: bus.port,
+                sda: bus.sda,
+                scl: bus.scl,
+                freq_hz: bus.freq_hz,
             });
             match self.fail_i2c_port {
-                Some((failing, err)) if failing == port => err,
+                Some((failing, err)) if failing == bus.port => err,
                 _ => ESP_OK,
             }
         }
@@ -701,10 +786,26 @@ mod tests {
             self.steps.push(BootStep::DriverLoaderInit);
         }
 
-        fn load_driver(&mut self, driver: &DriverEntry) {
-            self.steps.push(BootStep::Driver {
+        fn driver_elf_exists(&mut self, path: &str) -> bool {
+            self.steps.push(BootStep::ElfProbe {
+                path: path.to_string(),
+            });
+            self.present_elfs.iter().any(|p| p == path)
+        }
+
+        fn load_driver_elf(&mut self, path: &str, driver: &DriverEntry) {
+            self.steps.push(BootStep::DriverElf {
+                id: driver.id.clone(),
+                path: path.to_string(),
+            });
+            self.loaded.push(driver.clone());
+        }
+
+        fn load_builtin_driver(&mut self, driver: &DriverEntry) {
+            self.steps.push(BootStep::BuiltinDriver {
                 id: driver.id.clone(),
             });
+            self.loaded.push(driver.clone());
         }
     }
 
@@ -725,13 +826,37 @@ mod tests {
 
     #[test]
     fn boot_sequence_runs_gpio_outputs_then_buses_then_drivers() {
-        let mut rec = Recorder::default();
+        let mut rec = Recorder::with_elfs_on_disk(&[
+            "/spiffs/drivers/epaper.drv.elf",
+            "/spiffs/drivers/kbd.drv.elf",
+        ]);
         let result = run_boot_sequence(FULL_PROFILE, &mut rec);
 
         assert_eq!(result, ESP_OK);
         assert_eq!(
-            rec.steps,
+            rec.phases(),
             vec![
+                "gpio",
+                "gpio",
+                "spi",
+                "i2c",
+                "driver-loader-init",
+                "elf-probe",
+                "driver-elf",
+                "elf-probe",
+                "driver-elf",
+            ]
+        );
+    }
+
+    #[test]
+    fn boot_sequence_passes_each_declared_pin_through_unchanged() {
+        let mut rec = Recorder::default();
+        run_boot_sequence(FULL_PROFILE, &mut rec);
+
+        assert_eq!(
+            rec.steps[..4],
+            [
                 BootStep::Gpio {
                     gpio: 10,
                     level: 1,
@@ -755,13 +880,6 @@ mod tests {
                     scl: 14,
                     freq_hz: 100000
                 },
-                BootStep::DriverLoaderInit,
-                BootStep::Driver {
-                    id: "com.thistle.drv.epaper".to_string()
-                },
-                BootStep::Driver {
-                    id: "com.thistle.drv.kbd".to_string()
-                },
             ]
         );
     }
@@ -773,11 +891,71 @@ mod tests {
 
         let loader_init = rec.position(&BootStep::DriverLoaderInit).unwrap();
         let first_driver = rec
-            .position(&BootStep::Driver {
+            .position(&BootStep::BuiltinDriver {
                 id: "com.thistle.drv.epaper".to_string(),
             })
             .unwrap();
         assert!(loader_init < first_driver);
+    }
+
+    #[test]
+    fn a_driver_elf_is_looked_for_on_spiffs_before_the_sd_card() {
+        let json = r#"{
+            "drivers": [{"id": "sd-only", "hal": "storage", "entry": "late.drv.elf"}]
+        }"#;
+        let mut rec = Recorder::with_elfs_on_disk(&["/tmp/thistle_sdcard/drivers/late.drv.elf"]);
+
+        run_boot_sequence(json, &mut rec);
+
+        assert_eq!(
+            rec.steps,
+            vec![
+                BootStep::DriverLoaderInit,
+                BootStep::ElfProbe {
+                    path: "/spiffs/drivers/late.drv.elf".to_string()
+                },
+                BootStep::ElfProbe {
+                    path: "/tmp/thistle_sdcard/drivers/late.drv.elf".to_string()
+                },
+                BootStep::DriverElf {
+                    id: "sd-only".to_string(),
+                    path: "/tmp/thistle_sdcard/drivers/late.drv.elf".to_string()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_driver_with_no_elf_on_disk_falls_back_to_the_compiled_in_driver() {
+        let json = r#"{
+            "drivers": [{"id": "com.thistle.drv.epaper", "hal": "display", "entry": "epaper.drv.elf"}]
+        }"#;
+        let mut rec = Recorder::default();
+
+        run_boot_sequence(json, &mut rec);
+
+        assert_eq!(
+            rec.steps.last(),
+            Some(&BootStep::BuiltinDriver {
+                id: "com.thistle.drv.epaper".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn the_builtin_fallback_needs_both_an_id_and_a_hal_interface() {
+        let json = r#"{
+            "drivers": [
+                {"id": "", "hal": "display", "entry": "no-id.drv.elf"},
+                {"id": "no-hal", "entry": "no-hal.drv.elf"},
+                {"id": "complete", "hal": "display", "entry": "complete.drv.elf"}
+            ]
+        }"#;
+        let mut rec = Recorder::default();
+
+        run_boot_sequence(json, &mut rec);
+
+        assert_eq!(rec.driver_ids(), vec!["complete"]);
     }
 
     #[test]
@@ -861,17 +1039,12 @@ mod tests {
         let json = r#"{
             "drivers": [{"id": "com.thistle.drv.sdcard", "hal": "storage", "entry": "sdcard.drv.elf"}]
         }"#;
-        let mut rec = Recorder::default();
+        let mut rec = Recorder::with_elfs_on_disk(&["/spiffs/drivers/sdcard.drv.elf"]);
 
         assert_eq!(run_boot_sequence(json, &mut rec), ESP_OK);
         assert_eq!(
-            rec.steps,
-            vec![
-                BootStep::DriverLoaderInit,
-                BootStep::Driver {
-                    id: "com.thistle.drv.sdcard".to_string()
-                },
-            ]
+            rec.phases(),
+            vec!["driver-loader-init", "elf-probe", "driver-elf"]
         );
     }
 
@@ -922,26 +1095,12 @@ mod tests {
             }]
         }"#;
 
-        struct ConfigCapture(String);
-        impl BootEffects for ConfigCapture {
-            fn set_gpio_output(&mut self, _: i32, _: i32, _: i32) {}
-            fn init_spi_bus(&mut self, _: i32, _: i32, _: i32, _: i32, _: i32) -> i32 {
-                ESP_OK
-            }
-            fn init_i2c_bus(&mut self, _: i32, _: i32, _: i32, _: i32) -> i32 {
-                ESP_OK
-            }
-            fn init_driver_loader(&mut self) {}
-            fn load_driver(&mut self, driver: &DriverEntry) {
-                self.0 = driver.config.clone();
-            }
-        }
+        let mut rec = Recorder::default();
+        run_boot_sequence(json, &mut rec);
 
-        let mut capture = ConfigCapture(String::new());
-        run_boot_sequence(json, &mut capture);
-
-        assert!(capture.0.contains(r#""adc_channel": 3"#));
-        assert!(capture.0.contains(r#""pin_charge_status": 10"#));
+        let config = rec.loaded_config("com.thistle.drv.power-tp4065b").unwrap();
+        assert!(config.contains(r#""adc_channel": 3"#));
+        assert!(config.contains(r#""pin_charge_status": 10"#));
     }
 
     #[test]

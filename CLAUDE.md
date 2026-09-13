@@ -6,9 +6,29 @@ ThistleOS is a portable ESP32 family operating system with an immutable kernel, 
 ## Build System
 - **Firmware**: ESP-IDF v5.5 with CMake. `idf.py build`, `idf.py flash monitor`
 - **Simulator**: SDL2 desktop build. `cd simulator/build && cmake .. && make -j8 && ./thistle_sim`
-- **Rust kernel**: `cargo +esp check` in `components/kernel_rs/`. Tests: `cargo test --target aarch64-apple-darwin -- --test-threads=1` (1231 tests)
+- **Rust kernel**: `cargo +esp check` in `components/kernel_rs/`. Tests: `cargo test --target <host-triple> -- --test-threads=1` (1366 tests)
 - **Recovery OS**: `cd recovery && cargo +esp build --release`
 - **CI**: GitHub Actions — firmware build (espressif/idf:v5.5), Semgrep SAST, Trivy security scan
+
+### Rust toolchains
+
+Two toolchains, for two different jobs:
+
+- **`esp`** — the Xtensa fork, for anything targeting the device (`cargo +esp check`, `cargo +esp build`). Installed by `espup`, *not* by rustup.
+- **host stable** — for the kernel test suite, which runs natively. Pass your own host triple to `--target`; the crate's `.cargo/config.toml` defaults to `xtensa-esp32s3-espidf`, so an unqualified `cargo test` cross-compiles and dies with `'esp32s3' is not a recognized processor for this target`.
+
+Install or update the `esp` toolchain with:
+
+```sh
+cargo install espup --version 0.16.0 --locked --force
+espup install
+```
+
+**Pin espup to 0.16.0.** 0.17.x aborts with `Unsuported file extension: 'part'`, and CI pins the same version (`.github/workflows/build.yml`) — keep the two in step.
+
+The `esp` toolchain must be recent enough for the dependency tree: `cargo +esp check` fails at manifest-parse time with `feature 'edition2024' is required` on anything older than Xtensa Rust 1.85. espup 0.16.0 currently installs 1.97.0.0. If you see that error, your `esp` toolchain is stale — reinstall with the commands above rather than editing dependency versions.
+
+Do **not** source `~/export-esp.sh` in the shell you run `idf.py` from — it overrides ESP-IDF's GCC with an incompatible version and breaks the C build. `components/kernel_rs/CMakeLists.txt` writes a throwaway script that sources it in an isolated subshell for the cargo invocation alone, which is exactly why the firmware build works without it in your environment.
 
 ## Architecture (three-tier immutable trust chain)
 
@@ -90,3 +110,13 @@ The kernel is **100% Rust and hardware-independent**. It never calls ESP-IDF har
 2. Build as `.wm.elf`
 3. Set `"window_manager"` in `system.json`
 4. Or: register compiled-in via `display_server_register_wm()`
+
+## Agent skills
+
+### Issue tracker
+
+Issues and specs live as markdown files under `.scratch/<feature-slug>/`. See `docs/agents/issue-tracker.md`.
+
+### Domain docs
+
+Single-context: `CONTEXT.md` + `docs/adr/` at the repo root (created lazily as needed). See `docs/agents/domain.md`.
