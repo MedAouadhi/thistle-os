@@ -56,49 +56,219 @@ fn set_board_name(name: &str) {
     }
 }
 
-fn initialize_configured_buses<S, I>(json: &str, mut init_spi: S, mut init_i2c: I) -> i32
-where
-    S: FnMut(i32, i32, i32, i32, i32) -> i32,
-    I: FnMut(i32, i32, i32, i32) -> i32,
-{
-    let Some(buses_obj) = extract_object(json, "buses") else {
+// ── Board profile boot sequence ─────────────────────────────────────
+//
+// The sequence a board profile describes — board-level GPIO outputs, then
+// buses, then drivers — runs through one function generic over its side
+// effects. Production supplies the real implementations; tests supply a
+// recorder and assert the order phases ran in.
+
+// Every board profile array is bounded, so a malformed profile cannot spin.
+const MAX_GPIO_OUTPUTS: usize = 16;
+const MAX_SPI_BUSES: usize = 4;
+const MAX_I2C_BUSES: usize = 4;
+const MAX_DRIVERS: usize = 16;
+
+/// A driver's declaration inside a board profile, parsed and ready to load.
+struct DriverEntry {
+    id: String,
+    /// The HAL interface the driver registers.
+    hal: String,
+    /// The driver's ELF filename.
+    elf: String,
+    /// The driver's part-specific configuration, as JSON.
+    config: String,
+}
+
+/// The side effects the board profile boot sequence performs.
+///
+/// Only bus initialisation reports failure: a GPIO output or a driver that
+/// cannot be brought up must not stop the rest of the board coming up, while
+/// a bus that is unavailable takes every driver configured on it with it.
+trait BootEffects {
+    fn set_gpio_output(&mut self, gpio: i32, level: i32, delay_ms: i32);
+    fn init_spi_bus(
+        &mut self,
+        host: i32,
+        mosi: i32,
+        miso: i32,
+        sclk: i32,
+        max_transfer_bytes: i32,
+    ) -> i32;
+    fn init_i2c_bus(&mut self, port: i32, sda: i32, scl: i32, freq_hz: i32) -> i32;
+    fn init_driver_loader(&mut self);
+    fn load_driver(&mut self, driver: &DriverEntry);
+}
+
+/// Run the boot sequence a board profile describes.
+///
+/// Returns the bus error that aborted the sequence, or `ESP_OK`.
+fn run_boot_sequence<E: BootEffects>(profile: &str, effects: &mut E) -> i32 {
+    apply_gpio_outputs(profile, effects);
+
+    let ret = initialize_buses(profile, effects);
+    if ret != ESP_OK {
+        // Do not load or start drivers whose configured bus is unavailable.
+        return ret;
+    }
+
+    load_drivers(profile, effects);
+
+    ESP_OK
+}
+
+/// Drive board-level GPIO outputs (power enables, resets) before bus init.
+fn apply_gpio_outputs<E: BootEffects>(profile: &str, effects: &mut E) {
+    for entry in objects_in(profile, "gpio_outputs", MAX_GPIO_OUTPUTS) {
+        let gpio = json_get_int(&entry, "gpio").unwrap_or(-1) as i32;
+        let level = json_get_int(&entry, "level").unwrap_or(0) as i32;
+        let delay_ms = json_get_int(&entry, "delay_ms").unwrap_or(0) as i32;
+        if gpio >= 0 {
+            effects.set_gpio_output(gpio, level, delay_ms);
+        }
+    }
+}
+
+fn initialize_buses<E: BootEffects>(profile: &str, effects: &mut E) -> i32 {
+    let Some(buses) = extract_object(profile, "buses") else {
         return ESP_OK;
     };
 
-    if let Some(spi_arr) = find_array(&buses_obj, "spi") {
-        for i in 0..4 {
-            let Some(bus) = nth_object(&spi_arr, i) else {
-                break;
-            };
-            let host = json_get_int(&bus, "host").unwrap_or(1) as i32;
-            let mosi = json_get_int(&bus, "mosi").unwrap_or(-1) as i32;
-            let miso = json_get_int(&bus, "miso").unwrap_or(-1) as i32;
-            let sclk = json_get_int(&bus, "sclk").unwrap_or(-1) as i32;
-            let max_bytes = json_get_int(&bus, "max_transfer_bytes").unwrap_or(4096) as i32;
-            let ret = init_spi(host, mosi, miso, sclk, max_bytes);
-            if ret != ESP_OK {
-                return ret;
-            }
+    for bus in objects_in(&buses, "spi", MAX_SPI_BUSES) {
+        let host = json_get_int(&bus, "host").unwrap_or(1) as i32;
+        let mosi = json_get_int(&bus, "mosi").unwrap_or(-1) as i32;
+        let miso = json_get_int(&bus, "miso").unwrap_or(-1) as i32;
+        let sclk = json_get_int(&bus, "sclk").unwrap_or(-1) as i32;
+        let max_bytes = json_get_int(&bus, "max_transfer_bytes").unwrap_or(4096) as i32;
+        let ret = effects.init_spi_bus(host, mosi, miso, sclk, max_bytes);
+        if ret != ESP_OK {
+            return ret;
         }
     }
 
-    if let Some(i2c_arr) = find_array(&buses_obj, "i2c") {
-        for i in 0..4 {
-            let Some(bus) = nth_object(&i2c_arr, i) else {
-                break;
-            };
-            let port = json_get_int(&bus, "port").unwrap_or(0) as i32;
-            let sda = json_get_int(&bus, "sda").unwrap_or(-1) as i32;
-            let scl = json_get_int(&bus, "scl").unwrap_or(-1) as i32;
-            let freq_hz = json_get_int(&bus, "freq_hz").unwrap_or(400000) as i32;
-            let ret = init_i2c(port, sda, scl, freq_hz);
-            if ret != ESP_OK {
-                return ret;
-            }
+    for bus in objects_in(&buses, "i2c", MAX_I2C_BUSES) {
+        let port = json_get_int(&bus, "port").unwrap_or(0) as i32;
+        let sda = json_get_int(&bus, "sda").unwrap_or(-1) as i32;
+        let scl = json_get_int(&bus, "scl").unwrap_or(-1) as i32;
+        let freq_hz = json_get_int(&bus, "freq_hz").unwrap_or(400000) as i32;
+        let ret = effects.init_i2c_bus(port, sda, scl, freq_hz);
+        if ret != ESP_OK {
+            return ret;
         }
     }
 
     ESP_OK
+}
+
+fn load_drivers<E: BootEffects>(profile: &str, effects: &mut E) {
+    effects.init_driver_loader();
+
+    let board_arch = extract_object(profile, "board")
+        .and_then(|board| json_get_string(&board, "arch"))
+        .unwrap_or_default();
+
+    for drv in objects_in(profile, "drivers", MAX_DRIVERS) {
+        let elf = json_get_string(&drv, "entry").unwrap_or_default();
+        if elf.is_empty() || !is_safe_elf_filename(&elf) {
+            continue;
+        }
+
+        let id = json_get_string(&drv, "id").unwrap_or_default();
+        let raw_config = extract_object(&drv, "config").unwrap_or_else(|| "{}".to_string());
+        let config = normalize_driver_config(&id, &board_arch, &raw_config);
+
+        effects.load_driver(&DriverEntry {
+            id,
+            hal: json_get_string(&drv, "hal").unwrap_or_default(),
+            elf,
+            config,
+        });
+    }
+}
+
+/// Reject traversal, absolute and hidden paths — a driver entry's ELF filename
+/// names a file inside the drivers directory, nothing else.
+fn is_safe_elf_filename(elf: &str) -> bool {
+    !elf.contains("..") && !elf.contains('/') && !elf.contains('\\') && !elf.starts_with('.')
+}
+
+/// The objects of a board profile array, up to the bound the schema allows.
+/// A missing array, or one holding fewer objects than the bound, simply ends.
+fn objects_in(json: &str, key: &str, max: usize) -> impl Iterator<Item = String> {
+    let array = find_array(json, key);
+    (0..max).map_while(move |i| nth_object(array.as_deref()?, i))
+}
+
+/// The boot sequence's effects as performed on a real board.
+#[cfg(not(test))]
+struct HardwareEffects;
+
+#[cfg(not(test))]
+impl BootEffects for HardwareEffects {
+    fn set_gpio_output(&mut self, gpio: i32, level: i32, delay_ms: i32) {
+        extern "C" {
+            fn board_gpio_set_output(pin: i32, level: i32, delay_ms: i32) -> i32;
+        }
+        unsafe {
+            board_gpio_set_output(gpio, level, delay_ms);
+        }
+    }
+
+    fn init_spi_bus(
+        &mut self,
+        host: i32,
+        mosi: i32,
+        miso: i32,
+        sclk: i32,
+        max_transfer_bytes: i32,
+    ) -> i32 {
+        unsafe { board_bus_init_spi(host, mosi, miso, sclk, max_transfer_bytes) }
+    }
+
+    fn init_i2c_bus(&mut self, port: i32, sda: i32, scl: i32, freq_hz: i32) -> i32 {
+        unsafe { board_bus_init_i2c(port, sda, scl, freq_hz) }
+    }
+
+    fn init_driver_loader(&mut self) {
+        unsafe {
+            driver_loader_init();
+        }
+    }
+
+    fn load_driver(&mut self, driver: &DriverEntry) {
+        // Try SPIFFS first, then SD
+        let paths = [
+            format!("/spiffs/drivers/{}", driver.elf),
+            format!("/tmp/thistle_sdcard/drivers/{}", driver.elf),
+        ];
+
+        for path in &paths {
+            if Path::new(path).exists() {
+                if let (Ok(cpath), Ok(cconfig)) = (
+                    CString::new(path.as_str()),
+                    CString::new(driver.config.as_str()),
+                ) {
+                    unsafe {
+                        driver_loader_load_with_config(cpath.as_ptr(), cconfig.as_ptr());
+                    }
+                }
+                return;
+            }
+        }
+
+        // ELF not on disk — fall back to compiled-in driver
+        if !driver.id.is_empty() && !driver.hal.is_empty() {
+            if let (Ok(cid), Ok(chal), Ok(cconfig)) = (
+                CString::new(driver.id.as_str()),
+                CString::new(driver.hal.as_str()),
+                CString::new(driver.config.as_str()),
+            ) {
+                unsafe {
+                    board_builtin_driver_init(cid.as_ptr(), chal.as_ptr(), cconfig.as_ptr());
+                }
+            }
+        }
+    }
 }
 
 // This function does the main work but requires ESP-IDF APIs for bus init.
@@ -143,8 +313,6 @@ fn load_config(config_path: &str) -> i32 {
         return ESP_ERR_INVALID_SIZE;
     }
 
-    let mut board_arch = String::new();
-
     // If the cached board.json is missing the buses section (written by an older
     // version of the firmware), force re-detection to get a fresh copy.
     if extract_object(&json, "buses").is_none() {
@@ -166,9 +334,6 @@ fn load_config(config_path: &str) -> i32 {
                 }
             }
         }
-        if let Some(arch) = json_get_string(&board_section, "arch") {
-            board_arch = arch;
-        }
     }
 
     // Disable deep sleep GPIO hold before configuring any pins.
@@ -185,116 +350,14 @@ fn load_config(config_path: &str) -> i32 {
         }
     }
 
-    // Configure board-level GPIO outputs (power enables, etc.) before bus init
-    #[cfg(not(test))]
-    if let Some(gpio_arr) = find_array(&json, "gpio_outputs") {
-        extern "C" {
-            fn board_gpio_set_output(pin: i32, level: i32, delay_ms: i32) -> i32;
-        }
-        for i in 0..16 {
-            if let Some(entry) = nth_object(&gpio_arr, i) {
-                let gpio = json_get_int(&entry, "gpio").unwrap_or(-1) as i32;
-                let level = json_get_int(&entry, "level").unwrap_or(0) as i32;
-                let delay_ms = json_get_int(&entry, "delay_ms").unwrap_or(0) as i32;
-                if gpio >= 0 {
-                    unsafe {
-                        board_gpio_set_output(gpio, level, delay_ms);
-                    }
-                }
-            } else {
-                break;
-            }
-        }
-    }
-
-    // Initialize SPI and I2C buses from board.json
+    // Run the sequence the board profile describes: GPIO outputs, buses, drivers.
+    // Gated to hardware builds because every effect here is an ESP-IDF call;
+    // the sequence itself is covered by tests that inject their own effects.
     #[cfg(not(test))]
     {
-        let ret = initialize_configured_buses(
-            &json,
-            |host, mosi, miso, sclk, max_bytes| unsafe {
-                board_bus_init_spi(host, mosi, miso, sclk, max_bytes)
-            },
-            |port, sda, scl, freq_hz| unsafe { board_bus_init_i2c(port, sda, scl, freq_hz) },
-        );
+        let ret = run_boot_sequence(&json, &mut HardwareEffects);
         if ret != ESP_OK {
-            // Do not load or start drivers whose configured bus is unavailable.
             return ret;
-        }
-    }
-
-    // Load drivers from config
-    unsafe {
-        driver_loader_init();
-    }
-
-    if let Some(drivers_arr) = find_array(&json, "drivers") {
-        for i in 0..16 {
-            if let Some(drv) = nth_object(&drivers_arr, i) {
-                let entry = json_get_string(&drv, "entry").unwrap_or_default();
-                let driver_id = json_get_string(&drv, "id").unwrap_or_default();
-                let hal_type = json_get_string(&drv, "hal").unwrap_or_default();
-
-                if entry.is_empty() {
-                    continue;
-                }
-
-                // Sanitize entry path — reject traversal and absolute paths
-                if entry.contains("..")
-                    || entry.contains('/')
-                    || entry.contains('\\')
-                    || entry.starts_with('.')
-                {
-                    continue;
-                }
-
-                // Extract config sub-object
-                let raw_config = extract_object(&drv, "config").unwrap_or_else(|| "{}".to_string());
-                let config = normalize_driver_config(&driver_id, &board_arch, &raw_config);
-
-                // Try SPIFFS first, then SD
-                let paths = [
-                    format!("/spiffs/drivers/{}", entry),
-                    format!("/tmp/thistle_sdcard/drivers/{}", entry),
-                ];
-
-                let mut found = false;
-                for path in &paths {
-                    if Path::new(path).exists() {
-                        if let (Ok(cpath), Ok(cconfig)) =
-                            (CString::new(path.as_str()), CString::new(config.as_str()))
-                        {
-                            unsafe {
-                                driver_loader_load_with_config(cpath.as_ptr(), cconfig.as_ptr());
-                            }
-                        }
-                        found = true;
-                        break;
-                    }
-                }
-
-                if !found {
-                    // ELF not on disk — fall back to compiled-in driver
-                    #[cfg(not(test))]
-                    if !driver_id.is_empty() && !hal_type.is_empty() {
-                        if let (Ok(cid), Ok(chal), Ok(cconfig)) = (
-                            CString::new(driver_id.as_str()),
-                            CString::new(hal_type.as_str()),
-                            CString::new(config.as_str()),
-                        ) {
-                            unsafe {
-                                board_builtin_driver_init(
-                                    cid.as_ptr(),
-                                    chal.as_ptr(),
-                                    cconfig.as_ptr(),
-                                );
-                            }
-                        }
-                    }
-                }
-            } else {
-                break;
-            }
         }
     }
 
@@ -525,7 +588,197 @@ pub extern "C" fn board_config_get_wm_name() -> *const c_char {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::Cell;
+
+    /// One side effect the boot sequence performed, in the order it happened.
+    #[derive(Debug, PartialEq, Eq)]
+    enum BootStep {
+        Gpio {
+            gpio: i32,
+            level: i32,
+            delay_ms: i32,
+        },
+        Spi {
+            host: i32,
+            mosi: i32,
+            miso: i32,
+            sclk: i32,
+            max_transfer_bytes: i32,
+        },
+        I2c {
+            port: i32,
+            sda: i32,
+            scl: i32,
+            freq_hz: i32,
+        },
+        DriverLoaderInit,
+        Driver {
+            id: String,
+        },
+    }
+
+    /// Records every effect the boot sequence performs, and can fail a chosen bus.
+    #[derive(Default)]
+    struct Recorder {
+        steps: Vec<BootStep>,
+        fail_spi_host: Option<(i32, i32)>,
+        fail_i2c_port: Option<(i32, i32)>,
+    }
+
+    impl Recorder {
+        fn failing_spi(host: i32, err: i32) -> Self {
+            Recorder {
+                fail_spi_host: Some((host, err)),
+                ..Default::default()
+            }
+        }
+
+        fn failing_i2c(port: i32, err: i32) -> Self {
+            Recorder {
+                fail_i2c_port: Some((port, err)),
+                ..Default::default()
+            }
+        }
+
+        fn driver_ids(&self) -> Vec<&str> {
+            self.steps
+                .iter()
+                .filter_map(|step| match step {
+                    BootStep::Driver { id } => Some(id.as_str()),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        fn position(&self, step: &BootStep) -> Option<usize> {
+            self.steps.iter().position(|s| s == step)
+        }
+    }
+
+    impl BootEffects for Recorder {
+        fn set_gpio_output(&mut self, gpio: i32, level: i32, delay_ms: i32) {
+            self.steps.push(BootStep::Gpio {
+                gpio,
+                level,
+                delay_ms,
+            });
+        }
+
+        fn init_spi_bus(
+            &mut self,
+            host: i32,
+            mosi: i32,
+            miso: i32,
+            sclk: i32,
+            max_transfer_bytes: i32,
+        ) -> i32 {
+            self.steps.push(BootStep::Spi {
+                host,
+                mosi,
+                miso,
+                sclk,
+                max_transfer_bytes,
+            });
+            match self.fail_spi_host {
+                Some((failing, err)) if failing == host => err,
+                _ => ESP_OK,
+            }
+        }
+
+        fn init_i2c_bus(&mut self, port: i32, sda: i32, scl: i32, freq_hz: i32) -> i32 {
+            self.steps.push(BootStep::I2c {
+                port,
+                sda,
+                scl,
+                freq_hz,
+            });
+            match self.fail_i2c_port {
+                Some((failing, err)) if failing == port => err,
+                _ => ESP_OK,
+            }
+        }
+
+        fn init_driver_loader(&mut self) {
+            self.steps.push(BootStep::DriverLoaderInit);
+        }
+
+        fn load_driver(&mut self, driver: &DriverEntry) {
+            self.steps.push(BootStep::Driver {
+                id: driver.id.clone(),
+            });
+        }
+    }
+
+    const FULL_PROFILE: &str = r#"{
+        "gpio_outputs": [
+            {"gpio": 10, "level": 1, "delay_ms": 5},
+            {"gpio": 11, "level": 0}
+        ],
+        "buses": {
+            "spi": [{"host": 2, "mosi": 41, "miso": 38, "sclk": 40, "max_transfer_bytes": 8192}],
+            "i2c": [{"port": 0, "sda": 13, "scl": 14, "freq_hz": 100000}]
+        },
+        "drivers": [
+            {"id": "com.thistle.drv.epaper", "hal": "display", "entry": "epaper.drv.elf"},
+            {"id": "com.thistle.drv.kbd", "hal": "input", "entry": "kbd.drv.elf"}
+        ]
+    }"#;
+
+    #[test]
+    fn boot_sequence_runs_gpio_outputs_then_buses_then_drivers() {
+        let mut rec = Recorder::default();
+        let result = run_boot_sequence(FULL_PROFILE, &mut rec);
+
+        assert_eq!(result, ESP_OK);
+        assert_eq!(
+            rec.steps,
+            vec![
+                BootStep::Gpio {
+                    gpio: 10,
+                    level: 1,
+                    delay_ms: 5
+                },
+                BootStep::Gpio {
+                    gpio: 11,
+                    level: 0,
+                    delay_ms: 0
+                },
+                BootStep::Spi {
+                    host: 2,
+                    mosi: 41,
+                    miso: 38,
+                    sclk: 40,
+                    max_transfer_bytes: 8192
+                },
+                BootStep::I2c {
+                    port: 0,
+                    sda: 13,
+                    scl: 14,
+                    freq_hz: 100000
+                },
+                BootStep::DriverLoaderInit,
+                BootStep::Driver {
+                    id: "com.thistle.drv.epaper".to_string()
+                },
+                BootStep::Driver {
+                    id: "com.thistle.drv.kbd".to_string()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn boot_sequence_initializes_driver_loader_before_loading_any_driver() {
+        let mut rec = Recorder::default();
+        run_boot_sequence(FULL_PROFILE, &mut rec);
+
+        let loader_init = rec.position(&BootStep::DriverLoaderInit).unwrap();
+        let first_driver = rec
+            .position(&BootStep::Driver {
+                id: "com.thistle.drv.epaper".to_string(),
+            })
+            .unwrap();
+        assert!(loader_init < first_driver);
+    }
 
     #[test]
     fn bus_failure_stops_initialization_before_dependent_buses() {
@@ -537,51 +790,158 @@ mod tests {
                     {"host": 3}
                 ],
                 "i2c": [{"port": 0}]
-            }
+            },
+            "drivers": [{"id": "com.thistle.drv.epaper", "hal": "display", "entry": "epaper.drv.elf"}]
         }"#;
-        let spi_calls = Cell::new(0);
-        let i2c_calls = Cell::new(0);
+        let mut rec = Recorder::failing_spi(3, ESP_ERR_NO_MEM);
 
-        let result = initialize_configured_buses(
-            json,
-            |host, _, _, _, _| {
-                spi_calls.set(spi_calls.get() + 1);
-                if host == 3 {
-                    ESP_ERR_NO_MEM
-                } else {
-                    ESP_OK
-                }
-            },
-            |_, _, _, _| {
-                i2c_calls.set(i2c_calls.get() + 1);
-                ESP_OK
-            },
-        );
+        let result = run_boot_sequence(json, &mut rec);
 
         assert_eq!(result, ESP_ERR_NO_MEM);
-        assert_eq!(spi_calls.get(), 3);
-        assert_eq!(i2c_calls.get(), 0);
+        assert_eq!(
+            rec.steps,
+            vec![
+                BootStep::Spi {
+                    host: 1,
+                    mosi: -1,
+                    miso: -1,
+                    sclk: -1,
+                    max_transfer_bytes: 4096
+                },
+                BootStep::Spi {
+                    host: 2,
+                    mosi: -1,
+                    miso: -1,
+                    sclk: -1,
+                    max_transfer_bytes: 4096
+                },
+                BootStep::Spi {
+                    host: 3,
+                    mosi: -1,
+                    miso: -1,
+                    sclk: -1,
+                    max_transfer_bytes: 4096
+                },
+            ]
+        );
     }
 
     #[test]
     fn i2c_initialization_preserves_original_error() {
         let json = r#"{"buses":{"i2c":[{"port":0},{"port":1}]}}"#;
-        let calls = Cell::new(0);
-        let result = initialize_configured_buses(
-            json,
-            |_, _, _, _, _| ESP_OK,
-            |port, _, _, _| {
-                calls.set(calls.get() + 1);
-                if port == 1 {
-                    ESP_ERR_INVALID_ARG
-                } else {
-                    ESP_OK
-                }
-            },
-        );
+        let mut rec = Recorder::failing_i2c(1, ESP_ERR_INVALID_ARG);
+
+        let result = run_boot_sequence(json, &mut rec);
 
         assert_eq!(result, ESP_ERR_INVALID_ARG);
-        assert_eq!(calls.get(), 2);
+        assert_eq!(rec.steps.len(), 2);
+    }
+
+    #[test]
+    fn gpio_outputs_are_applied_before_a_bus_that_fails() {
+        let json = r#"{
+            "gpio_outputs": [{"gpio": 7, "level": 1}],
+            "buses": {"i2c": [{"port": 0}]}
+        }"#;
+        let mut rec = Recorder::failing_i2c(0, ESP_ERR_NO_MEM);
+
+        assert_eq!(run_boot_sequence(json, &mut rec), ESP_ERR_NO_MEM);
+        assert_eq!(
+            rec.steps.first(),
+            Some(&BootStep::Gpio {
+                gpio: 7,
+                level: 1,
+                delay_ms: 0
+            })
+        );
+    }
+
+    #[test]
+    fn profile_without_optional_sections_loads_drivers_only() {
+        let json = r#"{
+            "drivers": [{"id": "com.thistle.drv.sdcard", "hal": "storage", "entry": "sdcard.drv.elf"}]
+        }"#;
+        let mut rec = Recorder::default();
+
+        assert_eq!(run_boot_sequence(json, &mut rec), ESP_OK);
+        assert_eq!(
+            rec.steps,
+            vec![
+                BootStep::DriverLoaderInit,
+                BootStep::Driver {
+                    id: "com.thistle.drv.sdcard".to_string()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn driver_entries_with_unsafe_paths_are_skipped() {
+        let json = r#"{
+            "drivers": [
+                {"id": "traversal", "hal": "display", "entry": "../evil.drv.elf"},
+                {"id": "absolute", "hal": "display", "entry": "/spiffs/evil.drv.elf"},
+                {"id": "hidden", "hal": "display", "entry": ".evil.drv.elf"},
+                {"id": "missing-entry", "hal": "display"},
+                {"id": "ok", "hal": "display", "entry": "good.drv.elf"}
+            ]
+        }"#;
+        let mut rec = Recorder::default();
+
+        run_boot_sequence(json, &mut rec);
+
+        assert_eq!(rec.driver_ids(), vec!["ok"]);
+    }
+
+    #[test]
+    fn gpio_entries_without_a_pin_are_skipped() {
+        let json = r#"{"gpio_outputs": [{"level": 1}, {"gpio": 3, "level": 1}]}"#;
+        let mut rec = Recorder::default();
+
+        run_boot_sequence(json, &mut rec);
+
+        assert_eq!(
+            rec.steps.first(),
+            Some(&BootStep::Gpio {
+                gpio: 3,
+                level: 1,
+                delay_ms: 0
+            })
+        );
+    }
+
+    #[test]
+    fn driver_config_is_normalized_for_the_board_arch() {
+        let json = r#"{
+            "board": {"id": "tdeck-pro", "arch": "esp32s3"},
+            "drivers": [{
+                "id": "com.thistle.drv.power-tp4065b",
+                "hal": "power",
+                "entry": "power.drv.elf",
+                "config": {"adc_pin": 4, "charge_pin": 10}
+            }]
+        }"#;
+
+        struct ConfigCapture(String);
+        impl BootEffects for ConfigCapture {
+            fn set_gpio_output(&mut self, _: i32, _: i32, _: i32) {}
+            fn init_spi_bus(&mut self, _: i32, _: i32, _: i32, _: i32, _: i32) -> i32 {
+                ESP_OK
+            }
+            fn init_i2c_bus(&mut self, _: i32, _: i32, _: i32, _: i32) -> i32 {
+                ESP_OK
+            }
+            fn init_driver_loader(&mut self) {}
+            fn load_driver(&mut self, driver: &DriverEntry) {
+                self.0 = driver.config.clone();
+            }
+        }
+
+        let mut capture = ConfigCapture(String::new());
+        run_boot_sequence(json, &mut capture);
+
+        assert!(capture.0.contains(r#""adc_channel": 3"#));
+        assert!(capture.0.contains(r#""pin_charge_status": 10"#));
     }
 
     #[test]
