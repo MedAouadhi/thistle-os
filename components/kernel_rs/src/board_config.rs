@@ -37,6 +37,7 @@ extern "C" {
         max_transfer_bytes: i32,
     ) -> i32;
     fn board_bus_init_i2c(port: i32, sda: i32, scl: i32, freq_hz: i32) -> i32;
+    fn board_delay_ms(ms: i32);
     fn board_builtin_driver_init(
         id: *const c_char,
         hal_type: *const c_char,
@@ -59,15 +60,21 @@ fn set_board_name(name: &str) {
 // ── Board profile boot sequence ─────────────────────────────────────
 //
 // The sequence a board profile describes — board-level GPIO outputs, then
-// buses, then drivers — runs through one function generic over its side
-// effects. Production supplies the real implementations; tests supply a
-// recorder and assert the order phases ran in.
+// buses, then IO expanders, then their pins, then drivers — runs through one
+// function generic over its side effects. Production supplies the real
+// implementations; tests supply a recorder and assert the order phases ran in.
 
 // Every board profile array is bounded, so a malformed profile cannot spin.
 const MAX_GPIO_OUTPUTS: usize = 16;
 const MAX_SPI_BUSES: usize = 4;
 const MAX_I2C_BUSES: usize = 4;
+const MAX_IO_EXPANDERS: usize = 4;
+const MAX_EXPANDER_OUTPUTS: usize = 16;
 const MAX_DRIVERS: usize = 16;
+
+/// Expander pins are numbered `0..MAX_EXPANDER_PINS`. Sixteen is the width of
+/// the PCA9535-compatible family the kernel supports, the XL9555 included.
+const MAX_EXPANDER_PINS: i32 = 16;
 
 /// An SPI bus declaration from a board profile.
 #[derive(Debug, PartialEq, Eq)]
@@ -96,6 +103,26 @@ struct GpioOutput {
     delay_ms: i32,
 }
 
+/// An IO expander declaration from a board profile.
+#[derive(Debug, PartialEq, Eq)]
+struct IoExpander {
+    /// The driver that speaks to this part.
+    id: String,
+    /// Bus index into the profile's declared I²C buses.
+    i2c_bus: i32,
+    i2c_addr: i32,
+}
+
+/// An expander pin a board profile drives, and the level it drives it at.
+#[derive(Debug, PartialEq, Eq)]
+struct ExpanderOutput {
+    /// Index into the profile's `io_expanders` array — never a GPIO number.
+    expander: usize,
+    pin: i32,
+    level: i32,
+    delay_ms: i32,
+}
+
 /// A driver's declaration inside a board profile, parsed and ready to load.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DriverEntry {
@@ -114,13 +141,22 @@ struct DriverEntry {
 /// and whether it falls back to a compiled-in driver, is sequence policy and
 /// lives above this seam so that a test can observe it.
 ///
-/// Only bus initialisation reports failure: a GPIO output or a driver that
-/// cannot be brought up must not stop the rest of the board coming up, while
-/// a bus that is unavailable takes every driver configured on it with it.
+/// Only a bus or an expander that cannot be brought up stops the sequence: a
+/// GPIO output or a driver that fails must not take the rest of the board with
+/// it, while a bus that is unavailable takes every driver configured on it,
+/// and an expander that is unreachable takes the peripheral rails behind it.
 trait BootEffects {
     fn set_gpio_output(&mut self, output: &GpioOutput);
     fn init_spi_bus(&mut self, bus: &SpiBus) -> i32;
     fn init_i2c_bus(&mut self, bus: &I2cBus) -> i32;
+    /// Bring up a declared IO expander. Expanders are handed over in
+    /// declaration order, so the nth successful call owns expander index n.
+    fn init_io_expander(&mut self, expander: &IoExpander) -> i32;
+    /// Configure an expander pin as an output, before anything drives it.
+    fn configure_expander_output(&mut self, output: &ExpanderOutput) -> i32;
+    fn set_expander_level(&mut self, output: &ExpanderOutput) -> i32;
+    /// Wait, for a settling delay a board profile declares.
+    fn delay(&mut self, ms: i32);
     fn init_driver_loader(&mut self);
     /// Whether a driver ELF is present at `path`.
     fn driver_elf_exists(&mut self, path: &str) -> bool;
@@ -141,6 +177,15 @@ fn run_boot_sequence<E: BootEffects>(profile: &str, effects: &mut E) -> i32 {
         // Do not load or start drivers whose configured bus is unavailable.
         return ret;
     }
+
+    // Expanders sit on a bus, so they come up once the buses do. Their pins
+    // carry the peripheral rails drivers probe for, so they are driven before
+    // any driver loads.
+    let expanders = match initialize_io_expanders(profile, effects) {
+        Ok(addressable) => addressable,
+        Err(ret) => return ret,
+    };
+    apply_expander_outputs(profile, effects, &expanders);
 
     load_drivers(profile, effects);
 
@@ -192,6 +237,107 @@ fn initialize_buses<E: BootEffects>(profile: &str, effects: &mut E) -> i32 {
     }
 
     ESP_OK
+}
+
+/// Bring up the IO expanders a board profile declares, in declaration order.
+///
+/// Returns one flag per declaration saying whether that expander is
+/// addressable, which is what an output entry's expander index is checked
+/// against. A declaration the kernel cannot make sense of still consumes its
+/// index: dropping it would shift the indices of those after it, silently
+/// moving every pin that follows onto the wrong part.
+fn initialize_io_expanders<E: BootEffects>(
+    profile: &str,
+    effects: &mut E,
+) -> Result<Vec<bool>, i32> {
+    let mut addressable = Vec::new();
+    for entry in objects_in(profile, "io_expanders", MAX_IO_EXPANDERS) {
+        let expander = IoExpander {
+            id: json_get_string(&entry, "id").unwrap_or_default(),
+            i2c_bus: json_get_int(&entry, "i2c_bus").unwrap_or(0) as i32,
+            i2c_addr: json_get_address(&entry, "i2c_addr").unwrap_or(-1),
+        };
+        if expander.id.is_empty() || expander.i2c_addr < 0 || expander.i2c_bus < 0 {
+            addressable.push(false);
+            continue;
+        }
+
+        // A declared expander that cannot be reached is a different matter:
+        // the rails behind it stay down, so drivers must not go looking for
+        // the peripherals they feed.
+        let ret = effects.init_io_expander(&expander);
+        if ret != ESP_OK {
+            return Err(ret);
+        }
+        addressable.push(true);
+    }
+    Ok(addressable)
+}
+
+/// Drive the expander pins a board profile declares, in declaration order.
+///
+/// A pin is configured as an output before it is driven, because the XL9555's
+/// configuration registers reset to all-inputs: a pin given a level but left
+/// an input floats, and the rail behind it stays off. A pin that could not be
+/// configured is not then driven, so the rest of the board still comes up but
+/// nothing pretends that rail is live.
+fn apply_expander_outputs<E: BootEffects>(profile: &str, effects: &mut E, expanders: &[bool]) {
+    for entry in objects_in(profile, "expander_outputs", MAX_EXPANDER_OUTPUTS) {
+        let Some(output) = parse_expander_output(&entry, expanders) else {
+            continue;
+        };
+
+        if effects.configure_expander_output(&output) != ESP_OK {
+            continue;
+        }
+        if effects.set_expander_level(&output) != ESP_OK {
+            continue;
+        }
+        if output.delay_ms > 0 {
+            effects.delay(output.delay_ms);
+        }
+    }
+}
+
+/// Read one `expander_outputs` entry, or `None` if the kernel cannot address
+/// the pin it names. Rejecting an entry leaves the rest of the boot alone —
+/// unlike a bad expander declaration, a bad pin entry moves nothing else.
+fn parse_expander_output(entry: &str, expanders: &[bool]) -> Option<ExpanderOutput> {
+    // Direction is required rather than inferred: an entry that sets a level
+    // without setting direction would leave the pin floating and its rail off.
+    if json_get_string(entry, "direction")? != "output" {
+        return None;
+    }
+
+    let expander = json_get_int(entry, "expander").unwrap_or(0) as i32;
+    if expander < 0 || !expanders.get(expander as usize).copied().unwrap_or(false) {
+        return None;
+    }
+
+    let pin = json_get_int(entry, "pin")? as i32;
+    if !(0..MAX_EXPANDER_PINS).contains(&pin) {
+        return None;
+    }
+
+    Some(ExpanderOutput {
+        expander: expander as usize,
+        pin,
+        level: json_get_int(entry, "level").unwrap_or(0) as i32,
+        delay_ms: json_get_int(entry, "delay_ms").unwrap_or(0) as i32,
+    })
+}
+
+/// Read an I²C address, which board profiles write either as a bare integer or
+/// as the quoted hex string driver entries use (`"0x20"`).
+fn json_get_address(json: &str, key: &str) -> Option<i32> {
+    let Some(text) = json_get_string(json, key) else {
+        return json_get_int(json, key).map(|value| value as i32);
+    };
+    let text = text.trim();
+    match text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+        Some(hex) => i32::from_str_radix(hex, 16).ok(),
+        None => text.parse().ok(),
+    }
 }
 
 fn load_drivers<E: BootEffects>(profile: &str, effects: &mut E) {
@@ -260,6 +406,17 @@ fn objects_in(json: &str, key: &str, max: usize) -> impl Iterator<Item = String>
 struct HardwareEffects;
 
 #[cfg(not(test))]
+impl HardwareEffects {
+    /// Start from a board that has nothing attached, so a second run of the
+    /// sequence re-numbers the expanders from zero rather than appending to
+    /// the previous run's table.
+    fn new() -> Self {
+        crate::drv_ioexp_xl9555::detach_all();
+        HardwareEffects
+    }
+}
+
+#[cfg(not(test))]
 impl BootEffects for HardwareEffects {
     fn set_gpio_output(&mut self, output: &GpioOutput) {
         extern "C" {
@@ -284,6 +441,32 @@ impl BootEffects for HardwareEffects {
 
     fn init_i2c_bus(&mut self, bus: &I2cBus) -> i32 {
         unsafe { board_bus_init_i2c(bus.port, bus.sda, bus.scl, bus.freq_hz) }
+    }
+
+    fn init_io_expander(&mut self, expander: &IoExpander) -> i32 {
+        match expander.id.as_str() {
+            "com.thistle.drv.ioexp-xl9555" => {
+                crate::drv_ioexp_xl9555::attach(expander.i2c_bus, expander.i2c_addr as u8)
+            }
+            // An expander the kernel has no driver for leaves its rails down,
+            // so it stops the boot rather than letting drivers probe for
+            // peripherals that were never powered.
+            _ => ESP_ERR_NOT_FOUND,
+        }
+    }
+
+    fn configure_expander_output(&mut self, output: &ExpanderOutput) -> i32 {
+        crate::drv_ioexp_xl9555::set_as_output(output.expander, output.pin as u8)
+    }
+
+    fn set_expander_level(&mut self, output: &ExpanderOutput) -> i32 {
+        crate::drv_ioexp_xl9555::set_level(output.expander, output.pin as u8, output.level != 0)
+    }
+
+    fn delay(&mut self, ms: i32) {
+        unsafe {
+            board_delay_ms(ms);
+        }
     }
 
     fn init_driver_loader(&mut self) {
@@ -397,12 +580,13 @@ fn load_config(config_path: &str) -> i32 {
         }
     }
 
-    // Run the sequence the board profile describes: GPIO outputs, buses, drivers.
+    // Run the sequence the board profile describes: GPIO outputs, buses,
+    // IO expanders, expander pins, drivers.
     // Gated to hardware builds because every effect here is an ESP-IDF call;
     // the sequence itself is covered by tests that inject their own effects.
     #[cfg(not(test))]
     {
-        let ret = run_boot_sequence(&json, &mut HardwareEffects);
+        let ret = run_boot_sequence(&json, &mut HardwareEffects::new());
         if ret != ESP_OK {
             return ret;
         }
@@ -644,6 +828,23 @@ mod tests {
             level: i32,
             delay_ms: i32,
         },
+        ExpanderInit {
+            id: String,
+            i2c_bus: i32,
+            i2c_addr: i32,
+        },
+        ExpanderConfigured {
+            expander: usize,
+            pin: i32,
+        },
+        ExpanderLevel {
+            expander: usize,
+            pin: i32,
+            level: i32,
+        },
+        Delay {
+            ms: i32,
+        },
         Spi {
             host: i32,
             mosi: i32,
@@ -677,6 +878,9 @@ mod tests {
         steps: Vec<BootStep>,
         fail_spi_host: Option<(i32, i32)>,
         fail_i2c_port: Option<(i32, i32)>,
+        fail_expander_addr: Option<(i32, i32)>,
+        /// An expander pin that refuses to be configured as an output.
+        unconfigurable_pin: Option<(usize, i32)>,
         present_elfs: Vec<String>,
         /// Every driver entry handed to an effect, whatever it resolved to.
         loaded: Vec<DriverEntry>,
@@ -693,6 +897,22 @@ mod tests {
         fn failing_i2c(port: i32, err: i32) -> Self {
             Recorder {
                 fail_i2c_port: Some((port, err)),
+                ..Default::default()
+            }
+        }
+
+        /// A recorder for which the expander at this address cannot be reached.
+        fn failing_expander(i2c_addr: i32, err: i32) -> Self {
+            Recorder {
+                fail_expander_addr: Some((i2c_addr, err)),
+                ..Default::default()
+            }
+        }
+
+        /// A recorder for which this expander pin refuses to be configured.
+        fn failing_pin(expander: usize, pin: i32) -> Self {
+            Recorder {
+                unconfigurable_pin: Some((expander, pin)),
                 ..Default::default()
             }
         }
@@ -737,6 +957,10 @@ mod tests {
                     BootStep::Gpio { .. } => "gpio",
                     BootStep::Spi { .. } => "spi",
                     BootStep::I2c { .. } => "i2c",
+                    BootStep::ExpanderInit { .. } => "expander-init",
+                    BootStep::ExpanderConfigured { .. } => "expander-configure",
+                    BootStep::ExpanderLevel { .. } => "expander-level",
+                    BootStep::Delay { .. } => "delay",
                     BootStep::DriverLoaderInit => "driver-loader-init",
                     BootStep::ElfProbe { .. } => "elf-probe",
                     BootStep::DriverElf { .. } => "driver-elf",
@@ -780,6 +1004,44 @@ mod tests {
                 Some((failing, err)) if failing == bus.port => err,
                 _ => ESP_OK,
             }
+        }
+
+        fn init_io_expander(&mut self, expander: &IoExpander) -> i32 {
+            self.steps.push(BootStep::ExpanderInit {
+                id: expander.id.clone(),
+                i2c_bus: expander.i2c_bus,
+                i2c_addr: expander.i2c_addr,
+            });
+            match self.fail_expander_addr {
+                Some((failing, err)) if failing == expander.i2c_addr => err,
+                _ => ESP_OK,
+            }
+        }
+
+        fn configure_expander_output(&mut self, output: &ExpanderOutput) -> i32 {
+            self.steps.push(BootStep::ExpanderConfigured {
+                expander: output.expander,
+                pin: output.pin,
+            });
+            match self.unconfigurable_pin {
+                Some((expander, pin)) if (expander, pin) == (output.expander, output.pin) => {
+                    ESP_ERR_INVALID_ARG
+                }
+                _ => ESP_OK,
+            }
+        }
+
+        fn set_expander_level(&mut self, output: &ExpanderOutput) -> i32 {
+            self.steps.push(BootStep::ExpanderLevel {
+                expander: output.expander,
+                pin: output.pin,
+                level: output.level,
+            });
+            ESP_OK
+        }
+
+        fn delay(&mut self, ms: i32) {
+            self.steps.push(BootStep::Delay { ms });
         }
 
         fn init_driver_loader(&mut self) {
@@ -1080,6 +1342,329 @@ mod tests {
                 level: 1,
                 delay_ms: 0
             })
+        );
+    }
+
+    // ── IO expander phase ───────────────────────────────────────────
+
+    /// A board whose peripheral rails sit behind an I²C expander.
+    const EXPANDER_PROFILE: &str = r#"{
+        "gpio_outputs": [{"gpio": 10, "level": 1}],
+        "buses": {
+            "i2c": [{"port": 0, "sda": 13, "scl": 14, "freq_hz": 400000}]
+        },
+        "io_expanders": [
+            {"id": "com.thistle.drv.ioexp-xl9555", "i2c_bus": 0, "i2c_addr": "0x20"}
+        ],
+        "expander_outputs": [
+            {"expander": 0, "pin": 1, "direction": "output", "level": 1, "delay_ms": 10},
+            {"expander": 0, "pin": 2, "direction": "output", "level": 0}
+        ],
+        "drivers": [
+            {"id": "com.thistle.drv.epaper", "hal": "display", "entry": "epaper.drv.elf"}
+        ]
+    }"#;
+
+    #[test]
+    fn expanders_come_up_after_buses_and_their_pins_are_driven_before_drivers_load() {
+        let mut rec = Recorder::default();
+
+        assert_eq!(run_boot_sequence(EXPANDER_PROFILE, &mut rec), ESP_OK);
+        assert_eq!(
+            rec.phases(),
+            vec![
+                "gpio",
+                "i2c",
+                "expander-init",
+                "expander-configure",
+                "expander-level",
+                "delay",
+                "expander-configure",
+                "expander-level",
+                "driver-loader-init",
+                "elf-probe",
+                "elf-probe",
+                "builtin-driver",
+            ]
+        );
+    }
+
+    #[test]
+    fn an_expander_declaration_reaches_the_driver_unchanged() {
+        let mut rec = Recorder::default();
+
+        run_boot_sequence(EXPANDER_PROFILE, &mut rec);
+
+        assert_eq!(
+            rec.position(&BootStep::ExpanderInit {
+                id: "com.thistle.drv.ioexp-xl9555".to_string(),
+                i2c_bus: 0,
+                i2c_addr: 0x20,
+            }),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn an_expander_pin_is_configured_as_an_output_before_it_is_driven() {
+        let mut rec = Recorder::default();
+
+        run_boot_sequence(EXPANDER_PROFILE, &mut rec);
+
+        let direction = rec
+            .position(&BootStep::ExpanderConfigured {
+                expander: 0,
+                pin: 1,
+            })
+            .unwrap();
+        let level = rec
+            .position(&BootStep::ExpanderLevel {
+                expander: 0,
+                pin: 1,
+                level: 1,
+            })
+            .unwrap();
+        assert!(direction < level);
+    }
+
+    #[test]
+    fn a_declared_delay_follows_the_pin_it_is_declared_on() {
+        let mut rec = Recorder::default();
+
+        run_boot_sequence(EXPANDER_PROFILE, &mut rec);
+
+        let level = rec
+            .position(&BootStep::ExpanderLevel {
+                expander: 0,
+                pin: 1,
+                level: 1,
+            })
+            .unwrap();
+        assert_eq!(rec.steps[level + 1], BootStep::Delay { ms: 10 });
+    }
+
+    #[test]
+    fn an_expander_that_cannot_be_reached_stops_the_boot_before_drivers_load() {
+        let mut rec = Recorder::failing_expander(0x20, ESP_ERR_NOT_FOUND);
+
+        let result = run_boot_sequence(EXPANDER_PROFILE, &mut rec);
+
+        assert_eq!(result, ESP_ERR_NOT_FOUND);
+        assert_eq!(rec.phases(), vec!["gpio", "i2c", "expander-init"]);
+    }
+
+    #[test]
+    fn a_second_expander_is_not_touched_once_the_first_has_failed() {
+        let json = r#"{
+            "io_expanders": [
+                {"id": "com.thistle.drv.ioexp-xl9555", "i2c_bus": 0, "i2c_addr": "0x20"},
+                {"id": "com.thistle.drv.ioexp-xl9555", "i2c_bus": 0, "i2c_addr": "0x21"}
+            ],
+            "expander_outputs": [{"expander": 1, "pin": 0, "direction": "output", "level": 1}]
+        }"#;
+        let mut rec = Recorder::failing_expander(0x20, ESP_ERR_NO_MEM);
+
+        assert_eq!(run_boot_sequence(json, &mut rec), ESP_ERR_NO_MEM);
+        assert_eq!(rec.phases(), vec!["expander-init"]);
+    }
+
+    #[test]
+    fn an_expander_declaration_missing_its_address_is_never_reached_for() {
+        let json = r#"{
+            "io_expanders": [{"id": "com.thistle.drv.ioexp-xl9555", "i2c_bus": 0}],
+            "expander_outputs": [{"expander": 0, "pin": 1, "direction": "output", "level": 1}],
+            "drivers": [{"id": "com.thistle.drv.epaper", "hal": "display", "entry": "e.drv.elf"}]
+        }"#;
+        let mut rec = Recorder::default();
+
+        assert_eq!(run_boot_sequence(json, &mut rec), ESP_OK);
+        assert_eq!(
+            rec.phases(),
+            vec![
+                "driver-loader-init",
+                "elf-probe",
+                "elf-probe",
+                "builtin-driver"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_decimal_expander_address_is_read_the_same_as_a_hex_one() {
+        let json = r#"{
+            "io_expanders": [{"id": "com.thistle.drv.ioexp-xl9555", "i2c_bus": 1, "i2c_addr": 32}]
+        }"#;
+        let mut rec = Recorder::default();
+
+        run_boot_sequence(json, &mut rec);
+
+        assert_eq!(
+            rec.steps[0],
+            BootStep::ExpanderInit {
+                id: "com.thistle.drv.ioexp-xl9555".to_string(),
+                i2c_bus: 1,
+                i2c_addr: 0x20,
+            }
+        );
+    }
+
+    #[test]
+    fn expander_outputs_the_kernel_cannot_address_are_skipped_without_stopping_the_boot() {
+        let json = r#"{
+            "io_expanders": [
+                {"id": "com.thistle.drv.ioexp-xl9555", "i2c_bus": 0, "i2c_addr": "0x20"}
+            ],
+            "expander_outputs": [
+                {"expander": 0, "pin": 3, "level": 1},
+                {"expander": 1, "pin": 3, "direction": "output", "level": 1},
+                {"expander": 0, "pin": 16, "direction": "output", "level": 1},
+                {"expander": 0, "pin": -1, "direction": "output", "level": 1},
+                {"expander": 0, "direction": "output", "level": 1},
+                {"expander": 0, "pin": 3, "direction": "sideways", "level": 1},
+                {"expander": 0, "pin": 4, "direction": "output", "level": 1}
+            ]
+        }"#;
+        let mut rec = Recorder::default();
+
+        assert_eq!(run_boot_sequence(json, &mut rec), ESP_OK);
+        assert_eq!(
+            rec.phases(),
+            vec![
+                "expander-init",
+                "expander-configure",
+                "expander-level",
+                "driver-loader-init",
+            ]
+        );
+        assert_eq!(
+            rec.steps[1],
+            BootStep::ExpanderConfigured {
+                expander: 0,
+                pin: 4,
+            }
+        );
+    }
+
+    #[test]
+    fn a_pin_that_cannot_be_configured_as_an_output_is_not_then_driven() {
+        let mut rec = Recorder::failing_pin(0, 1);
+
+        assert_eq!(run_boot_sequence(EXPANDER_PROFILE, &mut rec), ESP_OK);
+        assert_eq!(
+            rec.phases(),
+            vec![
+                "gpio",
+                "i2c",
+                "expander-init",
+                // Pin 1 is configured, fails, and is then neither driven nor
+                // waited on. Pin 2 carries on regardless.
+                "expander-configure",
+                "expander-configure",
+                "expander-level",
+                "driver-loader-init",
+                "elf-probe",
+                "elf-probe",
+                "builtin-driver",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_malformed_expander_declaration_keeps_its_index_without_stopping_the_boot() {
+        let json = r#"{
+            "io_expanders": [
+                {"i2c_bus": 0, "i2c_addr": "0x20"},
+                {"id": "com.thistle.drv.ioexp-xl9555", "i2c_bus": 0, "i2c_addr": "0x21"}
+            ],
+            "expander_outputs": [
+                {"expander": 0, "pin": 1, "direction": "output", "level": 1},
+                {"expander": 1, "pin": 2, "direction": "output", "level": 1}
+            ]
+        }"#;
+        let mut rec = Recorder::default();
+
+        assert_eq!(run_boot_sequence(json, &mut rec), ESP_OK);
+        assert_eq!(
+            rec.phases(),
+            vec![
+                "expander-init",
+                "expander-configure",
+                "expander-level",
+                "driver-loader-init",
+            ]
+        );
+        // The nameless declaration is unusable, so its pins are dropped — but
+        // it keeps index 0, leaving the second expander addressable as 1.
+        assert_eq!(
+            rec.steps[1],
+            BootStep::ExpanderConfigured {
+                expander: 1,
+                pin: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn a_profile_declaring_no_expanders_runs_exactly_as_before() {
+        let mut rec = Recorder::default();
+
+        run_boot_sequence(FULL_PROFILE, &mut rec);
+
+        assert!(!rec
+            .phases()
+            .iter()
+            .any(|phase| phase.starts_with("expander")));
+    }
+
+    #[test]
+    fn every_board_in_the_catalogue_boots_without_an_expander_phase() {
+        let catalogue =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../sdcard_layout/config/boards");
+        let profiles: Vec<_> = fs::read_dir(&catalogue)
+            .expect("board catalogue")
+            .filter_map(|entry| {
+                let path = entry.ok()?.path();
+                (path.extension()? == "json").then(|| fs::read_to_string(&path).ok())?
+            })
+            .collect();
+        assert!(
+            !profiles.is_empty(),
+            "no board profiles found in {catalogue:?}"
+        );
+
+        for profile in &profiles {
+            let mut rec = Recorder::default();
+
+            assert_eq!(run_boot_sequence(profile, &mut rec), ESP_OK);
+            assert!(
+                !rec.phases()
+                    .iter()
+                    .any(|phase| phase.starts_with("expander")),
+                "a shipped board profile gained an expander phase: {:?}",
+                rec.phases()
+            );
+            // The boards still load every driver they declare, unchanged.
+            assert!(!rec.driver_ids().is_empty());
+        }
+    }
+
+    #[test]
+    fn expander_outputs_are_ignored_when_no_expander_is_declared() {
+        let json = r#"{
+            "expander_outputs": [{"expander": 0, "pin": 1, "direction": "output", "level": 1}],
+            "drivers": [{"id": "com.thistle.drv.sdcard", "hal": "storage", "entry": "sd.drv.elf"}]
+        }"#;
+        let mut rec = Recorder::default();
+
+        assert_eq!(run_boot_sequence(json, &mut rec), ESP_OK);
+        assert_eq!(
+            rec.phases(),
+            vec![
+                "driver-loader-init",
+                "elf-probe",
+                "elf-probe",
+                "builtin-driver"
+            ]
         );
     }
 

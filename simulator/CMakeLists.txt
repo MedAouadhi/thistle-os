@@ -258,6 +258,7 @@ add_executable(thistle_sim_tests
     tests/test_sim_main.c
     tests/test_sim_assert.c
     tests/test_i2c_bus.c
+    tests/test_xl9555.c
     tests/test_http_client_shim.c
     sim_assert.c
     platform/sim_i2c_bus.c
@@ -270,6 +271,7 @@ add_executable(thistle_sim_tests
     devices/dev_tca8418.c
     devices/dev_cst328.c
     devices/dev_ltr553.c
+    devices/dev_xl9555.c
 )
 
 target_include_directories(thistle_sim_tests PRIVATE

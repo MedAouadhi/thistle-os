@@ -37,6 +37,7 @@ pub mod drv_display_co5300;
 pub mod drv_epaper_gdeq031t10;
 pub mod drv_gps_mia_m10q;
 pub mod drv_imu_bhi260ap;
+pub mod drv_ioexp_xl9555;
 pub mod drv_kbd_cardkb;
 pub mod drv_kbd_tca8418;
 pub mod drv_lcd_ili9341;

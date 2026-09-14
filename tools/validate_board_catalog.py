@@ -12,6 +12,13 @@ from pathlib import Path
 
 REQUIRED_BOARD_KEYS = {"name", "arch", "board_id", "version"}
 VALID_ARCHES = {"esp32", "esp32s2", "esp32s3", "esp32c3", "esp32c6"}
+
+# Bounds mirroring the kernel's board profile parser (board_config.rs). A
+# profile the validator accepts but the kernel truncates is a board that comes
+# up short of its declaration with nothing reporting it.
+MAX_IO_EXPANDERS = 4
+MAX_EXPANDER_OUTPUTS = 16
+MAX_EXPANDER_PINS = 16
 DRIVER_ENTRY_ALIASES = {
     "lcd-st7789-i80.drv.elf": "lcd-st7789.drv.elf",
     "qmi8658.drv.elf": "accel-qmi8658.drv.elf",
@@ -39,6 +46,83 @@ def driver_sources(repo: Path) -> tuple[set[str], set[str]]:
     return known_ids, known_entries
 
 
+def parse_address(value: object) -> int | None:
+    """Read an I2C address written either bare or as a quoted hex string."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value, 0)
+        except ValueError:
+            return None
+    return None
+
+
+def validate_io_expanders(label: str, data: dict, known_ids: set[str]) -> list[str]:
+    """Validate the IO expander declarations and the pin states applied to them."""
+    errors: list[str] = []
+    expanders = data.get("io_expanders", [])
+    outputs = data.get("expander_outputs", [])
+
+    if not isinstance(expanders, list):
+        return [f"{label}: io_expanders must be an array"]
+    if not isinstance(outputs, list):
+        return [f"{label}: expander_outputs must be an array"]
+
+    if len(expanders) > MAX_IO_EXPANDERS:
+        errors.append(f"{label}: at most {MAX_IO_EXPANDERS} io_expanders, got {len(expanders)}")
+    if len(outputs) > MAX_EXPANDER_OUTPUTS:
+        errors.append(
+            f"{label}: at most {MAX_EXPANDER_OUTPUTS} expander_outputs, got {len(outputs)}"
+        )
+    if outputs and not expanders:
+        errors.append(f"{label}: expander_outputs declared with no io_expanders to apply them to")
+
+    for idx, expander in enumerate(expanders):
+        where = f"{label}: io_expanders[{idx}]"
+        expander_id = expander.get("id")
+        if not expander_id:
+            errors.append(f"{where} missing id")
+        elif expander_id not in known_ids:
+            errors.append(f"{where} {expander_id} has no manifest/source driver")
+        if not isinstance(expander.get("i2c_bus"), int):
+            errors.append(f"{where} missing i2c_bus index")
+        if parse_address(expander.get("i2c_addr")) is None:
+            errors.append(f"{where} missing or malformed i2c_addr")
+
+    for idx, output in enumerate(outputs):
+        where = f"{label}: expander_outputs[{idx}]"
+        expander = output.get("expander")
+        if not isinstance(expander, int) or isinstance(expander, bool):
+            errors.append(f"{where} missing expander index")
+        elif not 0 <= expander < len(expanders):
+            errors.append(f"{where} expander {expander} is not declared in io_expanders")
+
+        pin = output.get("pin")
+        if not isinstance(pin, int) or isinstance(pin, bool):
+            errors.append(f"{where} missing pin")
+        elif not 0 <= pin < MAX_EXPANDER_PINS:
+            errors.append(f"{where} pin {pin} is outside 0-{MAX_EXPANDER_PINS - 1}")
+
+        # Direction is required rather than inferred: the XL9555's
+        # configuration registers reset to all-inputs, so a pin given a level
+        # but left an input floats and the rail behind it never comes up.
+        direction = output.get("direction")
+        if direction != "output":
+            errors.append(f"{where} direction must be \"output\", got {direction!r}")
+
+        if output.get("level") not in (0, 1):
+            errors.append(f"{where} level must be 0 or 1, got {output.get('level')!r}")
+
+        delay_ms = output.get("delay_ms", 0)
+        if not isinstance(delay_ms, int) or isinstance(delay_ms, bool) or delay_ms < 0:
+            errors.append(f"{where} delay_ms must be a non-negative integer")
+
+    return errors
+
+
 def validate_board(path: Path, known_ids: set[str], known_entries: set[str]) -> list[str]:
     errors: list[str] = []
     data = json.loads(path.read_text())
@@ -52,6 +136,8 @@ def validate_board(path: Path, known_ids: set[str], known_entries: set[str]) -> 
         errors.append(f"{path}: board_id must match filename stem {path.stem!r}")
     if not data.get("drivers"):
         errors.append(f"{path}: must declare at least one driver")
+
+    errors.extend(validate_io_expanders(str(path), data, known_ids))
 
     for idx, drv in enumerate(data.get("drivers", [])):
         drv_id = drv.get("id")

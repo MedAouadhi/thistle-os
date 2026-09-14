@@ -390,6 +390,9 @@ int board_bus_init_i2c(int port, int sda, int scl, int freq_hz) {
     return ESP_OK;
 }
 
+/* Settling delays are real time the simulator has no reason to spend. */
+void board_delay_ms(int ms) { (void)ms; }
+
 int board_builtin_driver_init(const char *id, const char *hal_type, const char *config_json) {
     (void)id; (void)hal_type; (void)config_json;
     return ESP_ERR_NOT_SUPPORTED;

@@ -25,6 +25,14 @@ extern void test_tca8418_key_injection(void);
 extern void test_cst328_no_touch(void);
 extern void test_cst328_touch_injection(void);
 
+/* test_xl9555.c */
+extern void test_xl9555_resets_to_all_inputs_with_its_latches_high(void);
+extern void test_xl9555_records_every_write_in_order(void);
+extern void test_xl9555_log_distinguishes_configuration_writes_from_output_writes(void);
+extern void test_xl9555_raising_one_rail_leaves_the_rest_of_the_port_alone(void);
+extern void test_xl9555_reads_back_a_driven_pin_and_floats_the_rest_high(void);
+extern void test_xl9555_never_writes_its_input_ports(void);
+
 /* test_http_client_shim.c */
 extern void test_http_shim_delivers_fixture_bytes_status_and_cleanup(void);
 
@@ -59,6 +67,14 @@ int main(void)
     printf("\n[cst328]\n");
     RUN_TEST(cst328_no_touch);
     RUN_TEST(cst328_touch_injection);
+
+    printf("\n[xl9555]\n");
+    RUN_TEST(xl9555_resets_to_all_inputs_with_its_latches_high);
+    RUN_TEST(xl9555_records_every_write_in_order);
+    RUN_TEST(xl9555_log_distinguishes_configuration_writes_from_output_writes);
+    RUN_TEST(xl9555_raising_one_rail_leaves_the_rest_of_the_port_alone);
+    RUN_TEST(xl9555_reads_back_a_driven_pin_and_floats_the_rest_high);
+    RUN_TEST(xl9555_never_writes_its_input_ports);
 
     printf("\n[http_client_shim]\n");
     RUN_TEST(http_shim_delivers_fixture_bytes_status_and_cleanup);

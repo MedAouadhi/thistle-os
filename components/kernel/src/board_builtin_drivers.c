@@ -188,6 +188,18 @@ esp_err_t board_builtin_driver_init(const char *id, const char *hal_type,
 #endif
 
 // ---------------------------------------------------------------------------
+// Settling delay — called from board_config.rs to honour the delay a board
+// profile declares on an expander pin, once the rail behind it is raised.
+// ---------------------------------------------------------------------------
+
+#ifndef THISTLE_BUS_INIT_HOST_TEST
+void board_delay_ms(int ms)
+{
+    if (ms > 0) vTaskDelay(pdMS_TO_TICKS(ms));
+}
+#endif
+
+// ---------------------------------------------------------------------------
 // GPIO pre-init helper — called from board_config.rs to configure power-enable
 // and other board-level GPIOs before driver initialization.
 // ---------------------------------------------------------------------------

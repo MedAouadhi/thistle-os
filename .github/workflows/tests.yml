@@ -134,6 +134,9 @@ jobs:
           python3 tools/test_wasm_migration.py
           python3 tools/test_validate_package_matrix.py
 
+      - name: Test board profile validation
+        run: python3 tools/test_validate_board_catalog.py
+
       - name: Test release input and provenance validation
         run: python3 tools/test_validate_release.py
 
