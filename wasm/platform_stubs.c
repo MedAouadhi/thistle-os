@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <emscripten.h>
 #include <emscripten/eventloop.h>
 
@@ -138,6 +139,26 @@ int esp_http_client_get_status_code(void *c) { (void)c; return 0; }
 int esp_http_client_close(void *c) { (void)c; return 0; }
 int esp_http_client_cleanup(void *c) { (void)c; return 0; }
 
+/* ── thistle_http_client stubs ────────────────────────────────────── */
+/* The Rust kernel calls the typed shim in components/kernel_rs rather than
+ * esp_http_client directly. The native simulator compiles that shim on top
+ * of the stubs above; the browser has no HTTP client to put under it, so it
+ * is stubbed here instead and the app store finds no network. Signatures
+ * must match components/kernel_rs/include/thistle_http_shim.h. */
+typedef int (*thistle_http_data_cb_t)(const uint8_t *data, int data_len, void *user_data);
+
+void *thistle_http_client_init(const char *url, int timeout_ms,
+                               thistle_http_data_cb_t data_cb, void *user_data) {
+    (void)url; (void)timeout_ms; (void)data_cb; (void)user_data; return NULL;
+}
+int thistle_http_client_perform(void *c) { (void)c; return -1; }
+int thistle_http_client_get_status_code(void *c) { (void)c; return 0; }
+int thistle_http_client_open(void *c, int write_len) { (void)c; (void)write_len; return -1; }
+int64_t thistle_http_client_fetch_headers(void *c) { (void)c; return -1; }
+int thistle_http_client_read(void *c, char *b, int l) { (void)c; (void)b; (void)l; return -1; }
+int thistle_http_client_close(void *c) { (void)c; return 0; }
+int thistle_http_client_cleanup(void *c) { (void)c; return 0; }
+
 /* ── sim_http stubs (backing for simulator/platform/esp_http_client.h inlines) */
 #include "sim_http.h"
 sim_http_client_handle_t sim_http_client_init(const sim_http_client_config_t *c) { (void)c; return NULL; }
@@ -181,6 +202,8 @@ void gpio_deep_sleep_hold_dis(void) {}
 /* ── Board config helpers ─────────────────────────────────────────── */
 int board_detect_and_write(void) { return -1; }
 int board_gpio_set_output(int pin, int level, int delay_ms) { (void)pin; (void)level; (void)delay_ms; return 0; }
+/* Settling delay declared on an expander pin entry. Nothing to settle here. */
+void board_delay_ms(int ms) { (void)ms; }
 int board_bus_init_spi(int host, int mosi, int miso, int sclk, int max_transfer_bytes) {
     (void)host; (void)mosi; (void)miso; (void)sclk; (void)max_transfer_bytes; return 0;
 }

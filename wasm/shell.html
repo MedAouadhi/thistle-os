@@ -91,6 +91,7 @@
         <option value="tdeck">T-Deck (320x240)</option>
         <option value="tdeck-pro">T-Deck Pro (E-Paper)</option>
         <option value="tdeck-plus">T-Deck Plus (+GPS)</option>
+        <option value="tdeck-max">T-Deck Pro Max (E-Paper)</option>
         <option value="tdisplay">T-Display-S3 (320x170)</option>
         <option value="heltec-v3">Heltec V3 (128x64)</option>
         <option value="cardputer">Cardputer (240x135)</option>
@@ -283,7 +284,9 @@ var Module = {
   preRun: [function() {
     /* Set device before main() — use addOnPreMain so exports are available */
     addOnPreMain(function() {
-      var devs = ['tdeck','tdeck-pro','tdeck-plus','tdisplay',
+      /* Order must match DEVICE_NAMES in wasm/main.c — the index is what
+         crosses into C. */
+      var devs = ['tdeck','tdeck-pro','tdeck-plus','tdeck-max','tdisplay',
                   'heltec-v3','cardputer','t3-s3','rak3312'];
       var dev = new URLSearchParams(window.location.search).get('device') || 'tdeck';
       var idx = devs.indexOf(dev);

@@ -122,6 +122,7 @@ set(WASM_SRCS
     ${SIM_DIR}/devices/dev_tca8418.c
     ${SIM_DIR}/devices/dev_cst328.c
     ${SIM_DIR}/devices/dev_ltr553.c
+    ${SIM_DIR}/devices/dev_xl9555.c
     ${SIM_DIR}/sim_assert.c
     ${SIM_DIR}/board_simulator.c
     ${SIM_DIR}/platform/sim_vfs.c

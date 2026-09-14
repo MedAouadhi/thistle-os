@@ -35,6 +35,10 @@ __pycache__/
 # Claude Code
 .claude/
 simulator/build/
+wasm/build/
+# Local copy of the WASM simulator, so docs/index.html's "simulator/" link
+# resolves when the docs are served from disk. CI builds this into _site.
+docs/simulator/
 .playwright-mcp/
 appstore-site/
 external/ghostty

@@ -72,11 +72,12 @@ extern bool sim_board_has_gps(void);
 /* Device selection — JS calls _wasm_set_device(idx) before main      */
 /* ------------------------------------------------------------------ */
 
+/* Order must match the devs array in wasm/shell.html — JS sends the index. */
 static const char *DEVICE_NAMES[] = {
-    "tdeck", "tdeck-pro", "tdeck-plus", "tdisplay",
+    "tdeck", "tdeck-pro", "tdeck-plus", "tdeck-max", "tdisplay",
     "heltec-v3", "cardputer", "t3-s3", "rak3312"
 };
-#define NUM_DEVICES 8
+#define NUM_DEVICES ((int)(sizeof(DEVICE_NAMES) / sizeof(DEVICE_NAMES[0])))
 static const char *wasm_device_name = "tdeck";
 
 EMSCRIPTEN_KEEPALIVE
