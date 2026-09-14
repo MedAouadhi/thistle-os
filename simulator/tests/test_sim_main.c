@@ -33,6 +33,21 @@ extern void test_xl9555_raising_one_rail_leaves_the_rest_of_the_port_alone(void)
 extern void test_xl9555_reads_back_a_driven_pin_and_floats_the_rest_high(void);
 extern void test_xl9555_never_writes_its_input_ports(void);
 
+/* test_board_fingerprint.c */
+extern void test_fingerprint_a_max_is_told_apart_from_the_pro_it_is_a_revision_of(void);
+extern void test_fingerprint_a_max_is_recognised_before_its_rails_are_raised(void);
+extern void test_fingerprint_a_pro_is_unaffected_by_the_max_rule(void);
+extern void test_fingerprint_a_keyboard_and_an_imu_alone_do_not_name_a_pro(void);
+extern void test_fingerprint_a_keyboard_and_touch_on_the_pros_pins_are_ambiguous(void);
+extern void test_fingerprint_a_keyboard_and_touch_on_the_tdecks_pins_name_a_tdeck(void);
+extern void test_fingerprint_a_keyboard_alone_on_the_tdecks_pins_still_names_a_tdeck(void);
+extern void test_fingerprint_an_oled_on_unexpected_pins_is_ambiguous(void);
+extern void test_fingerprint_an_oled_pin_pair_chooses_between_the_two_boards_that_share_it(void);
+extern void test_fingerprint_a_bus_with_nothing_on_it_is_unidentified(void);
+extern void test_fingerprint_a_scan_reports_whether_anything_answered(void);
+extern void test_fingerprint_a_board_with_no_i2c_at_all_is_assumed_headless(void);
+extern void test_fingerprint_a_match_carries_the_profile_for_the_board_it_names(void);
+
 /* test_http_client_shim.c */
 extern void test_http_shim_delivers_fixture_bytes_status_and_cleanup(void);
 
@@ -75,6 +90,21 @@ int main(void)
     RUN_TEST(xl9555_raising_one_rail_leaves_the_rest_of_the_port_alone);
     RUN_TEST(xl9555_reads_back_a_driven_pin_and_floats_the_rest_high);
     RUN_TEST(xl9555_never_writes_its_input_ports);
+
+    printf("\n[board_fingerprint]\n");
+    RUN_TEST(fingerprint_a_max_is_told_apart_from_the_pro_it_is_a_revision_of);
+    RUN_TEST(fingerprint_a_max_is_recognised_before_its_rails_are_raised);
+    RUN_TEST(fingerprint_a_pro_is_unaffected_by_the_max_rule);
+    RUN_TEST(fingerprint_a_keyboard_and_an_imu_alone_do_not_name_a_pro);
+    RUN_TEST(fingerprint_a_keyboard_and_touch_on_the_pros_pins_are_ambiguous);
+    RUN_TEST(fingerprint_a_keyboard_and_touch_on_the_tdecks_pins_name_a_tdeck);
+    RUN_TEST(fingerprint_a_keyboard_alone_on_the_tdecks_pins_still_names_a_tdeck);
+    RUN_TEST(fingerprint_an_oled_on_unexpected_pins_is_ambiguous);
+    RUN_TEST(fingerprint_an_oled_pin_pair_chooses_between_the_two_boards_that_share_it);
+    RUN_TEST(fingerprint_a_bus_with_nothing_on_it_is_unidentified);
+    RUN_TEST(fingerprint_a_scan_reports_whether_anything_answered);
+    RUN_TEST(fingerprint_a_board_with_no_i2c_at_all_is_assumed_headless);
+    RUN_TEST(fingerprint_a_match_carries_the_profile_for_the_board_it_names);
 
     printf("\n[http_client_shim]\n");
     RUN_TEST(http_shim_delivers_fixture_bytes_status_and_cleanup);

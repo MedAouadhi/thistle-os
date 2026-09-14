@@ -46,6 +46,14 @@ static int _tests_failed = 0;
     } \
 } while(0)
 
+#define ASSERT_STR_EQ(a, b) do { \
+    if (strcmp((a), (b)) != 0) { \
+        printf("FAIL\n    %s:%d: \"%s\" != \"%s\"\n", __FILE__, __LINE__, (a), (b)); \
+        _tests_failed++; \
+        return; \
+    } \
+} while(0)
+
 #define ASSERT_STR_CONTAINS(haystack, needle) do { \
     if (strstr((haystack), (needle)) == NULL) { \
         printf("FAIL\n    %s:%d: \"%s\" not found in output\n", __FILE__, __LINE__, (needle)); \

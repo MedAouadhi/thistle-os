@@ -13,6 +13,12 @@ from pathlib import Path
 REQUIRED_BOARD_KEYS = {"name", "arch", "board_id", "version"}
 VALID_ARCHES = {"esp32", "esp32s2", "esp32s3", "esp32c3", "esp32c6"}
 
+# Where the embedded fallback profiles live. Each is a board profile duplicated
+# as a string literal, and is the only configuration a freshly flashed board
+# ever sees, so one that drifts from the board profile it duplicates is a
+# first-boot failure on hardware nobody is holding.
+EMBEDDED_PROFILE_SOURCE = "components/kernel/src/board_fingerprint.c"
+
 # Bounds mirroring the kernel's board profile parser (board_config.rs). A
 # profile the validator accepts but the kernel truncates is a board that comes
 # up short of its declaration with nothing reporting it.
@@ -155,6 +161,96 @@ def validate_board(path: Path, known_ids: set[str], known_entries: set[str]) -> 
     return errors
 
 
+# A `static const char NAME[] = "..." "...";` declaration, however many adjacent
+# string literals one profile is spread across.
+EMBEDDED_DECLARATION = re.compile(
+    r'static const char (\w+)\[\]\s*=\s*((?:\s*"(?:[^"\\]|\\.)*"\s*)+);'
+)
+STRING_LITERAL = re.compile(r'"((?:[^"\\]|\\.)*)"')
+# A `static const board_profile_t NAME = { "board-id", JSON_NAME };` entry,
+# which labels a profile so a match can be logged and asserted by name.
+PROFILE_LABEL = re.compile(
+    r'static const board_profile_t \w+\s*=\s*\{\s*"([^"]+)"\s*,\s*(\w+)\s*\}\s*;'
+)
+C_ESCAPES = {"n": "\n", "r": "\r", "t": "\t", '"': '"', "\\": "\\"}
+
+
+def unescape_c_string(text: str) -> str:
+    out: list[str] = []
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char == "\\" and index + 1 < len(text):
+            # An escape with no C meaning here is left as written rather than
+            # stripped of its backslash, so it fails JSON parsing loudly
+            # instead of parsing as something subtly different.
+            escaped = text[index + 1]
+            out.append(C_ESCAPES.get(escaped, char + escaped))
+            index += 2
+        else:
+            out.append(char)
+            index += 1
+    return "".join(out)
+
+
+def embedded_profiles(source: str) -> dict[str, str]:
+    """Read the embedded fallback profiles out of the kernel source."""
+    return {
+        match.group(1): "".join(
+            unescape_c_string(literal) for literal in STRING_LITERAL.findall(match.group(2))
+        )
+        for match in EMBEDDED_DECLARATION.finditer(source)
+    }
+
+
+def profile_labels(source: str) -> dict[str, str]:
+    """Read the board id each embedded fallback profile is labelled with."""
+    return {name: board_id for board_id, name in PROFILE_LABEL.findall(source)}
+
+
+def compare_embedded_profiles(
+    source_path: str,
+    profiles: dict[str, str],
+    labels: dict[str, str],
+    boards: dict[str, dict],
+) -> list[str]:
+    """Check each embedded fallback profile against the board profile it duplicates."""
+    if not profiles:
+        return [f"{source_path}: no embedded fallback profiles found"]
+
+    errors: list[str] = []
+    for name, text in sorted(profiles.items()):
+        where = f"{source_path}: {name}"
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as exc:
+            errors.append(f"{where} is not valid JSON: {exc}")
+            continue
+        board_id = data.get("board", {}).get("board_id")
+        if not board_id:
+            errors.append(f"{where} declares no board_id")
+            continue
+        if board_id not in boards:
+            errors.append(f"{where} is for board {board_id!r}, which has no board profile")
+        elif boards[board_id] != data:
+            errors.append(f"{where} has drifted from {board_id}.json")
+        if name not in labels:
+            errors.append(f"{where} is not labelled with a board id")
+        elif labels[name] != board_id:
+            errors.append(f"{where} is labelled {labels[name]!r} but declares {board_id!r}")
+    return errors
+
+
+def validate_embedded_profiles(repo: Path, boards: dict[str, dict]) -> list[str]:
+    source = repo / EMBEDDED_PROFILE_SOURCE
+    if not source.exists():
+        return [f"{EMBEDDED_PROFILE_SOURCE}: not found"]
+    text = source.read_text()
+    return compare_embedded_profiles(
+        EMBEDDED_PROFILE_SOURCE, embedded_profiles(text), profile_labels(text), boards
+    )
+
+
 def validate_catalog(path: Path, board_ids: set[str]) -> list[str]:
     errors: list[str] = []
     data = json.loads(path.read_text())
@@ -190,15 +286,17 @@ def main() -> int:
     boards = sorted((repo / "sdcard_layout/config/boards").glob("*.json"))
     known_ids, known_entries = driver_sources(repo)
     errors: list[str] = []
-    board_ids: set[str] = set()
+    profiles: dict[str, dict] = {}
 
     for path in boards:
         data = json.loads(path.read_text())
-        board_ids.add(data.get("board", {}).get("board_id", path.stem))
+        profiles[data.get("board", {}).get("board_id", path.stem)] = data
         errors.extend(validate_board(path, known_ids, known_entries))
 
+    errors.extend(validate_embedded_profiles(repo, profiles))
+
     if args.catalog:
-        errors.extend(validate_catalog(args.catalog, board_ids))
+        errors.extend(validate_catalog(args.catalog, set(profiles)))
 
     if errors:
         for error in errors:

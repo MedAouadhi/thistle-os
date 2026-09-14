@@ -23,6 +23,7 @@ set(THISTLE_SRCS
     ${THISTLE_DIR}/components/thistle_hal/src/stub.c
     # Typed HTTP boundary used by the Rust app-store client
     ${THISTLE_DIR}/components/kernel_rs/http_client_shim.c
+    ${THISTLE_DIR}/components/kernel/src/board_fingerprint.c
     # Widget API dispatch (Rust widget.rs → WM vtable bridge)
     ${THISTLE_DIR}/components/ui/src/widget_shims.c
     # thistle-tk WM C vtable + HAL bridge
@@ -212,12 +213,14 @@ add_executable(thistle_sim_tests
     tests/test_sim_assert.c
     tests/test_i2c_bus.c
     tests/test_xl9555.c
+    tests/test_board_fingerprint.c
     tests/test_http_client_shim.c
     sim_assert.c
     platform/sim_i2c_bus.c
     platform/sim_spi_bus.c
     platform/sim_http.c
     ${THISTLE_DIR}/components/kernel_rs/http_client_shim.c
+    ${THISTLE_DIR}/components/kernel/src/board_fingerprint.c
     platform/platform_stubs.c
     devices/dev_pcf8563.c
     devices/dev_qmi8658c.c
@@ -234,6 +237,7 @@ target_include_directories(thistle_sim_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/tests
     ${THISTLE_DIR}/components/thistle_hal/include
+    ${THISTLE_DIR}/components/kernel/include
     ${THISTLE_DIR}/components/kernel_rs/include
 )
 
