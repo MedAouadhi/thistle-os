@@ -52,9 +52,12 @@ const GPIO_NUM_NC: i32 = -1;
 
 // ── Key backlight (LEDC PWM) ─────────────────────────────────────────────────
 //
-// Timer and channel 1, leaving 0 to the display driver: on a board with both a
-// front-light and lit keys the two share the LEDC peripheral, and a second
-// driver claiming channel 0 would take the display's light with it.
+// Timer and channel 1, leaving 0 to the display drivers — the e-paper's
+// front-light (components/drv_epaper_gdeq031t10) and every LCD backlight in
+// the tree all take 0. On the T-Deck Max both lights are live at once, and a
+// second driver claiming channel 0 would take the display's with it. A third
+// lit peripheral needs a channel of its own; nothing enforces that but these
+// comments, which sit on either side of the C/Rust boundary.
 
 const BL_LEDC_MODE: i32 = 1; // LEDC_LOW_SPEED_MODE
 const BL_LEDC_TIMER: i32 = 1; // LEDC_TIMER_1

@@ -217,6 +217,7 @@ esp_err_t board_builtin_driver_init(const char *id, const char *hal_type,
         static sdcard_config_t cfg;
         static char mount_point[32];
         int spi_bus_idx  = json_int(config_json, "spi_bus", 0);
+        // hal_bus_get_spi stores the host ID as the pointer value
         cfg.spi_host     = (spi_host_device_t)(intptr_t)hal_bus_get_spi(spi_bus_idx);
         cfg.pin_cs       = (gpio_num_t)json_int(config_json, "pin_cs", -1);
         cfg.max_files    = json_int(config_json, "max_files", 5);

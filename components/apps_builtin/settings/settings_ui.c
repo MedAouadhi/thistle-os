@@ -1780,6 +1780,28 @@ static void open_detail_storage(lv_obj_t *content, int index)
 
 /* --- Input --- */
 
+static void input_backlight_cb(lv_event_t *e)
+{
+    uint8_t percent = (uint8_t)(uintptr_t)lv_event_get_user_data(e);
+    const hal_registry_t *reg = hal_get_registry();
+    if (!reg) return;
+    /* Whichever input driver has a backlight gets the level. Touch panels
+     * carry no setter at all, so they are skipped here rather than asked. */
+    bool lit = false;
+    for (int i = 0; i < (int)reg->input_count; i++) {
+        const hal_input_driver_t *inp = reg->inputs[i];
+        if (!inp || !inp->set_backlight) continue;
+        if (inp->set_backlight(percent) == ESP_OK) {
+            ESP_LOGI(TAG, "Input: %s backlight -> %u%%",
+                     inp->name ? inp->name : "?", (unsigned)percent);
+            lit = true;
+        }
+    }
+    /* A driver whose board left the backlight pin unwired reports
+     * NOT_SUPPORTED. Saying so beats a button that quietly does nothing. */
+    if (!lit) toast_warn("No key backlight on this board");
+}
+
 static void open_detail_input(lv_obj_t *content, int index)
 {
     const hal_registry_t *reg = hal_get_registry();
@@ -1799,7 +1821,77 @@ static void open_detail_input(lv_obj_t *content, int index)
     create_info_row(content, buf);
     create_separator(content);
 
-    create_info_row(content, "(Info only — no settings)");
+    /* A keyboard whose keys can be lit offers a level to set them to. The
+     * vtable entry is the only thing to go on here: asking the driver whether
+     * a backlight is wired means calling the setter, which would change the
+     * level just to find out. A board that left the pin unwired returns
+     * NOT_SUPPORTED from the buttons below — the same contract the display's
+     * brightness has. */
+    if (!inp->set_backlight) {
+        create_info_row(content, "(Info only — no settings)");
+        return;
+    }
+
+    create_info_row(content, "Key backlight:");
+    create_separator(content);
+
+    const theme_colors_t *tc_inp = theme_get_colors();
+    lv_obj_t *btn_row = lv_obj_create(content);
+    lv_obj_set_size(btn_row, LV_PCT(100), ITEM_H + 4);
+    lv_obj_set_style_bg_color(btn_row, tc_inp->bg, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(btn_row, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_radius(btn_row, 0, LV_PART_MAIN);
+    lv_obj_set_style_border_width(btn_row, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_left(btn_row, ITEM_PAD_LEFT, LV_PART_MAIN);
+    lv_obj_set_style_pad_right(btn_row, ITEM_PAD_RIGHT, LV_PART_MAIN);
+    lv_obj_set_style_pad_top(btn_row, 2, LV_PART_MAIN);
+    lv_obj_set_style_pad_bottom(btn_row, 2, LV_PART_MAIN);
+    lv_obj_clear_flag(btn_row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(btn_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(btn_row,
+                          LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(btn_row, 6, LV_PART_MAIN);
+
+    static const struct {
+        const char *label;
+        uint8_t     percent;
+    } levels[4] = {
+        { "Off",  0   },
+        { "Low",  25  },
+        { "Med",  60  },
+        { "Full", 100 },
+    };
+
+    for (int i = 0; i < 4; i++) {
+        lv_obj_t *b = lv_obj_create(btn_row);
+        lv_obj_set_size(b, LV_SIZE_CONTENT, ITEM_H - 4);
+        lv_obj_set_style_bg_color(b, tc_inp->bg, LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(b, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_set_style_border_color(b, tc_inp->text, LV_PART_MAIN);
+        lv_obj_set_style_border_width(b, 1, LV_PART_MAIN);
+        lv_obj_set_style_border_side(b, LV_BORDER_SIDE_FULL, LV_PART_MAIN);
+        lv_obj_set_style_radius(b, 0, LV_PART_MAIN);
+        lv_obj_set_style_pad_left(b, 6, LV_PART_MAIN);
+        lv_obj_set_style_pad_right(b, 6, LV_PART_MAIN);
+        lv_obj_set_style_pad_top(b, 0, LV_PART_MAIN);
+        lv_obj_set_style_pad_bottom(b, 0, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(b, tc_inp->primary, LV_STATE_PRESSED);
+        lv_obj_set_style_bg_opa(b, LV_OPA_COVER, LV_STATE_PRESSED);
+        lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_clear_flag(b, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_event_cb(b, input_backlight_cb, LV_EVENT_CLICKED,
+                            (void *)(uintptr_t)levels[i].percent);
+
+        lv_obj_t *bl = lv_label_create(b);
+        lv_label_set_text(bl, levels[i].label);
+        lv_obj_set_style_text_font(bl, &lv_font_montserrat_14, LV_PART_MAIN);
+        lv_obj_set_style_text_color(bl, tc_inp->text, LV_PART_MAIN);
+        lv_obj_set_style_text_color(bl, tc_inp->bg, LV_STATE_PRESSED);
+        lv_obj_align(bl, LV_ALIGN_CENTER, 0, 0);
+    }
+    create_separator(content);
 }
 
 /* --- IMU --- */

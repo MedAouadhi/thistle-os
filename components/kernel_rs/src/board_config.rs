@@ -1660,6 +1660,12 @@ mod tests {
     const TDECK_MAX_PROFILE: &str =
         include_str!("../../../sdcard_layout/config/boards/tdeck-max.json");
 
+    /// The expander pins the Max drives, as the vendor's board header names
+    /// them: `BOARD_XL9555_07_TOUCH_RST` and `BOARD_XL9555_11_KEY_RST`, whose
+    /// octal-looking suffixes are port/pin, not the pin index.
+    const TOUCH_RST_PIN: i32 = 7;
+    const KEY_RST_PIN: i32 = 9;
+
     /// Every expander level the boot sequence drove, in order.
     fn expander_levels(rec: &Recorder) -> Vec<(usize, i32, i32)> {
         rec.steps
@@ -1702,12 +1708,17 @@ mod tests {
         let mut rec = Recorder::default();
         run_boot_sequence(TDECK_MAX_PROFILE, &mut rec);
 
-        // T_RST is expander pin 7 and KEY_RST is pin 9, both active low, so
-        // each is held down and then released — leaving them high would start
-        // the parts from whatever state an unclean shutdown left behind.
+        // Both resets are active low, so each is held down and then released.
+        // Leaving them high would start the parts from whatever state an
+        // unclean shutdown left behind.
         assert_eq!(
             expander_levels(&rec),
-            vec![(0, 7, 0), (0, 9, 0), (0, 7, 1), (0, 9, 1)]
+            vec![
+                (0, TOUCH_RST_PIN, 0),
+                (0, KEY_RST_PIN, 0),
+                (0, TOUCH_RST_PIN, 1),
+                (0, KEY_RST_PIN, 1),
+            ]
         );
     }
 
@@ -1737,8 +1748,8 @@ mod tests {
             .expect("the Max declares the e-paper display");
         // The Pro leaves this at -1: the panel there has no reset line at all,
         // so a panel in a bad state needs a power cycle.
-        assert!(config.contains(r#""rst": 9"#), "{config}");
-        assert!(config.contains(r#""bl": 41"#), "{config}");
+        assert_eq!(json_get_int(config, "rst"), Some(9), "{config}");
+        assert_eq!(json_get_int(config, "bl"), Some(41), "{config}");
     }
 
     #[test]
@@ -1752,7 +1763,7 @@ mod tests {
         // T_RST is an expander pin, not a GPIO. Handing the driver the pin
         // number would have it drive GPIO 7, which on this board is the
         // modem's ring indicator.
-        assert!(config.contains(r#""pin_rst": -1"#), "{config}");
+        assert_eq!(json_get_int(config, "pin_rst"), Some(-1), "{config}");
     }
 
     #[test]

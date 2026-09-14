@@ -54,7 +54,12 @@ static const char *TAG = "epaper";
 #define CMD_TSSET           0xE5  /* Force Temperature */
 
 /* ── Driver state ──────────────────────────────────────────────────── */
-/* ── Front-light (LEDC) ─────────────────────────────────────────────── */
+/* ── Front-light (LEDC) ───────────────────────────────────────────────
+ * Timer and channel 0. The TCA8418 keyboard driver
+ * (components/kernel_rs/src/drv_kbd_tca8418.rs) takes 1 for the key
+ * backlight, because on the T-Deck Max both lights are live at once. A
+ * third lit peripheral needs a channel of its own; nothing enforces that
+ * but these two comments. */
 #define BL_LEDC_TIMER      LEDC_TIMER_0
 #define BL_LEDC_MODE       LEDC_LOW_SPEED_MODE
 #define BL_LEDC_CHANNEL    LEDC_CHANNEL_0

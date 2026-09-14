@@ -28,7 +28,7 @@ Requires SDL2 (`brew install sdl2` / `apt install libsdl2-dev`) and a prior ESP-
 
 | Device | Resolution | Keyboard | Touch | Radio | GPS | E-Paper |
 |--------|-----------|----------|-------|-------|-----|---------|
-| `tdeck-pro` | 320x240 | yes | yes | yes | yes | yes |
+| `tdeck-pro` | 240x320 | yes | yes | yes | yes | yes |
 | `tdeck` | 320x240 | yes | yes | yes | yes | -- |
 | `tdeck-plus` | 320x240 | yes | yes | yes | yes | -- |
 | `tdeck-max` | 240x320 | yes | yes | yes | yes | yes |

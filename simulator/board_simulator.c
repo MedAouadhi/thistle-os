@@ -38,25 +38,44 @@ typedef struct {
     bool        has_gps;
     bool        is_epaper;
     /* An XL9555 on the I²C bus, carrying the peripheral rails and the
-     * keyboard and touch resets. Only the T-Deck Max has one. */
+     * keyboard and touch resets. */
     bool        has_io_expander;
-    /* The T-Deck Max carries neither part. Leaving them off here keeps the
-     * simulator honest about what an app can detect on that board. */
+    /* A board that carries neither part leaves both off, which keeps the
+     * simulator honest about what an app can detect there. */
     bool        has_rtc;
     bool        has_light_sensor;
 } sim_device_t;
 
+/* Every device has an RTC and a light sensor unless it says otherwise, which
+ * is why those two are named here and the rest of the capabilities are not. */
+#define SIM_DEVICE_DEFAULTS  .has_rtc = true, .has_light_sensor = true
+
 static const sim_device_t DEVICES[] = {
-    { "tdeck-pro",  "T-Deck Pro (Simulator)",     240, 320, true,  true,  true,  true,  true,  false, true,  true  },
-    { "tdeck",      "T-Deck (Simulator)",          320, 240, true,  true,  true,  true,  false, false, true,  true  },
-    { "tdeck-plus", "T-Deck Plus (Simulator)",     320, 240, true,  true,  true,  true,  false, false, true,  true  },
-    { "tdeck-max",  "T-Deck Pro Max (Simulator)",  240, 320, true,  true,  true,  true,  true,  true,  false, false },
-    { "tdisplay",   "T-Display-S3 (Simulator)",    320, 170, false, true,  false, false, false, false, true,  true  },
-    { "heltec-v3",  "Heltec V3 (Simulator)",       128, 64,  false, false, true,  false, false, false, true,  true  },
-    { "cardputer",  "Cardputer (Simulator)",        240, 135, true,  false, false, false, false, false, true,  true  },
-    { "t3-s3",      "T3-S3 (Simulator)",            128, 64,  false, false, true,  false, false, false, true,  true  },
-    { "rak3312",    "RAK3312 (Simulator)",           128, 64,  false, false, true,  false, false, false, true,  true  },
-    { NULL, NULL, 0, 0, false, false, false, false, false, false, false, false },
+    { .name = "tdeck-pro",  .board_name = "T-Deck Pro (Simulator)",    .width = 240, .height = 320,
+      .has_keyboard = true, .has_touch = true, .has_radio = true, .has_gps = true,
+      .is_epaper = true,  SIM_DEVICE_DEFAULTS },
+    { .name = "tdeck",      .board_name = "T-Deck (Simulator)",        .width = 320, .height = 240,
+      .has_keyboard = true, .has_touch = true, .has_radio = true, .has_gps = true,
+      SIM_DEVICE_DEFAULTS },
+    { .name = "tdeck-plus", .board_name = "T-Deck Plus (Simulator)",   .width = 320, .height = 240,
+      .has_keyboard = true, .has_touch = true, .has_radio = true, .has_gps = true,
+      SIM_DEVICE_DEFAULTS },
+    /* The Max is the only device with an IO expander, and the only one with
+     * neither an RTC nor a light sensor — it carries neither part. */
+    { .name = "tdeck-max",  .board_name = "T-Deck Pro Max (Simulator)", .width = 240, .height = 320,
+      .has_keyboard = true, .has_touch = true, .has_radio = true, .has_gps = true,
+      .is_epaper = true, .has_io_expander = true },
+    { .name = "tdisplay",   .board_name = "T-Display-S3 (Simulator)",  .width = 320, .height = 170,
+      .has_touch = true,  SIM_DEVICE_DEFAULTS },
+    { .name = "heltec-v3",  .board_name = "Heltec V3 (Simulator)",     .width = 128, .height = 64,
+      .has_radio = true,  SIM_DEVICE_DEFAULTS },
+    { .name = "cardputer",  .board_name = "Cardputer (Simulator)",     .width = 240, .height = 135,
+      .has_keyboard = true,  SIM_DEVICE_DEFAULTS },
+    { .name = "t3-s3",      .board_name = "T3-S3 (Simulator)",         .width = 128, .height = 64,
+      .has_radio = true,  SIM_DEVICE_DEFAULTS },
+    { .name = "rak3312",    .board_name = "RAK3312 (Simulator)",       .width = 128, .height = 64,
+      .has_radio = true,  SIM_DEVICE_DEFAULTS },
+    { .name = NULL },
 };
 
 static const sim_device_t *find_device(const char *name)
