@@ -196,10 +196,9 @@ static void epaper_hw_reset(void)
 
 /* PSR (R00H) first data byte. Bit 3 is UD, the gate scan direction, and bit 2
  * is SHL, the source shift direction; both default to 1 (scan up, shift
- * right). Clearing the pair reverses both axes, which is a 180-degree turn of
- * the image done by the panel rather than by the CPU. See UC8253 datasheet,
- * PANEL SETTING (PSR). Bit 4 selects KW (black/white) mode; bit 0 is RST_N,
- * held low for the soft reset this sequence opens with.
+ * right). See UC8253 datasheet, PANEL SETTING (PSR). Bit 4 selects KW
+ * (black/white) mode; bit 0 is RST_N, held low for the soft reset this
+ * sequence opens with.
  *
  * The base deliberately carries no orientation bits — the orientation is OR'd
  * in, and OR cannot clear what the base already set. */
@@ -207,13 +206,26 @@ static void epaper_hw_reset(void)
 #define PSR_RUN             0x01  /* release the soft reset            */
 #define PSR_UD_SCAN_UP      0x08
 #define PSR_SHL_SHIFT_RIGHT 0x04
-/* So the bytes sent are, for rotation 0: 0x1E then 0x1F — what this driver
- * always sent — and for 180: 0x12 then 0x13. */
 
+/* Only the gate axis is turned here, and only the gate axis needs turning.
+ *
+ * gdeq031t10_flush() already mirrors rows in software, so the vertical axis a
+ * viewer sees is the software flip and UD combined: with UD set they cancel,
+ * which is the T-Deck Pro's way up. Clearing UD leaves one flip standing, and
+ * that is what turns the image over on a T-Deck Max, whose panel is mounted
+ * the other way round.
+ *
+ * SHL stays set at both rotations. On this module it appears to do nothing —
+ * a T-Deck Max showed the same horizontal mirror at SHL=0 and at SHL=1 — so
+ * clearing it buys no mirror and only costs the setting that is known to work
+ * on the Pro. The horizontal mirror is handled where it can be: in the blit.
+ *
+ * So the bytes sent are, for rotation 0: 0x1E then 0x1F — what this driver has
+ * always sent — and for 180: 0x16 then 0x17. */
 static uint8_t epaper_psr_orientation(void)
 {
     /* 180 turns the panel around; anything else is the panel's own way up. */
-    if (s_epd.cfg.rotation == 180) return 0;
+    if (s_epd.cfg.rotation == 180) return PSR_SHL_SHIFT_RIGHT;
     return PSR_UD_SCAN_UP | PSR_SHL_SHIFT_RIGHT;
 }
 
@@ -378,11 +390,18 @@ static esp_err_t gdeq031t10_flush(const hal_area_t *area, const uint8_t *color_d
     if (y2 >= EPD_HEIGHT) y2 = EPD_HEIGHT - 1;
     if (x1 > x2 || y1 > y2) return ESP_ERR_INVALID_ARG;
 
-    /* The panel's row scan is vertically reversed, but its columns are not.
-     * Flip rows here so the WM and input stack retain ordinary portrait
-     * coordinates without horizontally mirroring text. */
-    epaper_blit_packed_rect_flip_y(s_epd.fb, EPD_WIDTH, EPD_HEIGHT,
-                                  x1, y1, x2, y2, color_data);
+    /* The panel's row scan is vertically reversed, so rows are always flipped
+     * here, at the panel boundary, leaving the WM and input stack in ordinary
+     * portrait coordinates.
+     *
+     * Columns are flipped as well on a board that mounts the panel the other
+     * way round. That belongs here rather than in the PSR because SHL, the
+     * panel's own source shift direction, does not appear to do anything on
+     * this module — a T-Deck Max showed the same horizontal mirror whether SHL
+     * was set or clear. */
+    epaper_blit_packed_rect_flipped(s_epd.fb, EPD_WIDTH, EPD_HEIGHT,
+                                    x1, y1, x2, y2, color_data,
+                                    s_epd.cfg.rotation == 180, true);
     return ESP_OK;
 }
 
