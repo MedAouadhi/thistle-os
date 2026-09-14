@@ -78,17 +78,28 @@ const BL_LEDC_MAX_DUTY: u32 = 255;
 
 #[cfg(target_os = "espidf")]
 mod ledc_ffi {
-    /// `ledc_timer_config_t` layout (matches ESP-IDF).
+    // These mirror C structs by hand, so their field order is load-bearing and
+    // silent when wrong: a mismatch is not a compile error, it is a field
+    // reading a neighbour's value. Both are transcribed from
+    // esp_driver_ledc/include/driver/ledc.h and must be checked against it
+    // when ESP-IDF is upgraded.
+
+    /// `ledc_timer_config_t`. Note that `duty_resolution` comes *before*
+    /// `timer_num` — swapping them hands the duty resolution to the timer
+    /// selector, which ESP-IDF rejects with "timer_num argument is invalid".
     #[repr(C)]
     pub struct LedcTimerConfig {
         pub speed_mode: i32,
-        pub timer_num: i32,
         pub duty_resolution: u32,
+        pub timer_num: i32,
         pub freq_hz: u32,
         pub clk_cfg: u32, // LEDC_AUTO_CLK = 0
+        pub deconfigure: bool,
     }
 
-    /// `ledc_channel_config_t` layout (matches ESP-IDF).
+    /// `ledc_channel_config_t`. `sleep_mode` sits between `hpoint` and the
+    /// flags word; leaving it out makes the driver read `flags` from past the
+    /// end of the struct.
     #[repr(C)]
     pub struct LedcChannelConfig {
         pub gpio_num: i32,
@@ -98,6 +109,7 @@ mod ledc_ffi {
         pub timer_sel: i32,
         pub duty: u32,
         pub hpoint: i32,
+        pub sleep_mode: u32, // LEDC_SLEEP_MODE_NO_ALIVE_NO_PD = 0
         pub flags: u32,
     }
 
@@ -120,10 +132,11 @@ unsafe fn backlight_init(pin: i32) -> i32 {
     {
         let timer_cfg = ledc_ffi::LedcTimerConfig {
             speed_mode: BL_LEDC_MODE,
-            timer_num: BL_LEDC_TIMER,
             duty_resolution: BL_LEDC_DUTY_RES,
+            timer_num: BL_LEDC_TIMER,
             freq_hz: BL_LEDC_FREQ_HZ,
             clk_cfg: 0, // LEDC_AUTO_CLK
+            deconfigure: false,
         };
         let ret = ledc_ffi::ledc_timer_config(&timer_cfg);
         if ret != ESP_OK {
@@ -138,6 +151,7 @@ unsafe fn backlight_init(pin: i32) -> i32 {
             timer_sel: BL_LEDC_TIMER,
             duty: 0,
             hpoint: 0,
+            sleep_mode: 0,
             flags: 0,
         };
         let ret = ledc_ffi::ledc_channel_config(&ch_cfg);
