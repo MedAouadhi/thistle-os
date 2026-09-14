@@ -159,6 +159,14 @@ int main(void)
         }
     }
 
+    /* Tell the shell which window manager won, so it offers only the apps
+     * that one can host. An LVGL app takes its parent from
+     * ui_manager_get_app_area(), which is NULL unless an LVGL window manager
+     * initialised the UI manager, so launching one under thistle-tk
+     * dereferences NULL and takes the whole page with it. */
+    EM_ASM({ if (typeof window.onWindowManagerChosen === 'function')
+                 window.onWindowManagerChosen($0); }, s_use_tk_wm ? 1 : 0);
+
     /* Register built-in apps — same order as simulator/main.c */
 #if THISTLE_HAVE_LAUNCHER
     launcher_app_register();

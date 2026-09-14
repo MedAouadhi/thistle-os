@@ -188,9 +188,32 @@ var APPS = [
   {id:'com.thistle.weather',    name:'Weather',      desc:'Forecast'},
   {id:'com.thistle.flashlight', name:'Flashlight',   desc:'Screen light'},
 ];
-function initApps() {
+/* thistle-tk draws its own widgets and hosts none of the LVGL apps above —
+ * it has one app of its own, and the rest of its UI is on the device screen.
+ * Offering the LVGL list on an e-paper board crashes the page, because those
+ * apps take their parent from the UI manager that only an LVGL window
+ * manager sets up. */
+var TK_APPS = [
+  {id:'com.thistle.tk_launcher', name:'Launcher', desc:'Home screen — tap the screen to navigate'},
+];
+
+/* Called from wasm/main.c once the window manager is chosen. */
+window.onWindowManagerChosen = function(isTk) {
+  if (!isTk) return;
   var grid = document.getElementById('apps-grid');
-  APPS.forEach(function(app) {
+  grid.innerHTML = '';
+  initApps(TK_APPS);
+  var note = document.createElement('div');
+  note.className = 'app-desc';
+  note.style.cssText = 'grid-column:1/-1;margin-top:8px;line-height:1.4';
+  note.textContent = 'This board runs the thistle-tk window manager. '
+                   + 'Its apps live on the device screen — tap the icons there.';
+  grid.appendChild(note);
+};
+
+function initApps(apps) {
+  var grid = document.getElementById('apps-grid');
+  (apps || APPS).forEach(function(app) {
     var card = document.createElement('div');
     card.className = 'app-card';
     card.addEventListener('click', function() { launchApp(app.id); });
