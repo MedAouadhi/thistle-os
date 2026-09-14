@@ -59,7 +59,17 @@ const GPIO_NUM_NC: i32 = -1;
 // lit peripheral needs a channel of its own; nothing enforces that but these
 // comments, which sit on either side of the C/Rust boundary.
 
-const BL_LEDC_MODE: i32 = 1; // LEDC_LOW_SPEED_MODE
+/// `LEDC_LOW_SPEED_MODE`, whose value is not the same on every part. The
+/// original ESP32 has a high-speed mode sitting ahead of it in `ledc_mode_t`;
+/// no later part has one, so there the enum starts at low speed. Hardcoding
+/// the ESP32's value gives `LEDC_SPEED_MODE_MAX` on an ESP32-S3, which
+/// `ledc_timer_config` rejects with ESP_ERR_INVALID_ARG — and an input
+/// driver that fails to initialise stops the whole driver start sequence.
+#[cfg(feature = "esp32")]
+const BL_LEDC_MODE: i32 = 1;
+#[cfg(not(feature = "esp32"))]
+const BL_LEDC_MODE: i32 = 0;
+
 const BL_LEDC_TIMER: i32 = 1; // LEDC_TIMER_1
 const BL_LEDC_CHANNEL: i32 = 1; // LEDC_CHANNEL_1
 const BL_LEDC_FREQ_HZ: u32 = 5000;
