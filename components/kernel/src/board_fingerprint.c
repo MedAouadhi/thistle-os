@@ -54,7 +54,7 @@ static const char JSON_TDECK_PRO[] =
 "        {\"id\": \"com.thistle.drv.gps-mia-m10q\", \"hal\": \"gps\", \"entry\": \"gps-mia-m10q.drv.elf\", \"config\": {\"uart_num\": 2, \"tx\": 43, \"rx\": 44, \"baud_rate\": 9600}},\n"
 "        {\"id\": \"com.thistle.drv.audio-pcm5102a\", \"hal\": \"audio\", \"entry\": \"audio-pcm5102a.drv.elf\", \"config\": {\"i2s_bck\": 7, \"i2s_ws\": 9, \"i2s_data\": 8}},\n"
 "        {\"id\": \"com.thistle.drv.imu-bhi260ap\", \"hal\": \"imu\", \"entry\": \"imu-bhi260ap.drv.elf\", \"config\": {\"i2c_bus\": 0, \"i2c_addr\": \"0x28\", \"pin_int\": 21}},\n"
-"        {\"id\": \"com.thistle.drv.power-tp4065b\", \"hal\": \"power\", \"entry\": \"power-tp4065b.drv.elf\", \"config\": {\"adc_pin\": 4, \"charge_pin\": 10}},\n"
+"        {\"id\": \"com.thistle.drv.power-sy6970\", \"hal\": \"power\", \"entry\": \"power-sy6970.drv.elf\", \"config\": {\"i2c_bus\": 0, \"gauge_i2c_addr\": \"0x55\"}},\n"
 "        {\"id\": \"com.thistle.drv.sdcard\", \"hal\": \"storage\", \"entry\": \"sdcard.drv.elf\", \"config\": {\"spi_bus\": 0, \"pin_cs\": 48, \"mount_point\": \"/sdcard\"}}\n"
 "    ]\n"
 "}\n";
@@ -79,6 +79,7 @@ static const char JSON_TDECK_MAX[] =
 "        {\"id\": \"com.thistle.drv.epaper-gdeq031t10\", \"hal\": \"display\", \"entry\": \"epaper-gdeq031t10.drv.elf\", \"config\": {\"spi_bus\": 0, \"cs\": 34, \"dc\": 35, \"rst\": 9, \"busy\": 37, \"bl\": 41, \"spi_clock_hz\": 2000000}},\n"
 "        {\"id\": \"com.thistle.drv.kbd-tca8418\", \"hal\": \"input\", \"entry\": \"kbd-tca8418.drv.elf\", \"config\": {\"i2c_bus\": 0, \"i2c_addr\": \"0x34\", \"pin_int\": 15, \"pin_backlight\": 42}},\n"
 "        {\"id\": \"com.thistle.drv.touch-cst328\", \"hal\": \"input\", \"entry\": \"touch-cst328.drv.elf\", \"config\": {\"i2c_bus\": 0, \"i2c_addr\": \"0x1A\", \"pin_int\": 12, \"pin_rst\": -1, \"max_x\": 240, \"max_y\": 320}},\n"
+"        {\"id\": \"com.thistle.drv.power-sy6970\", \"hal\": \"power\", \"entry\": \"power-sy6970.drv.elf\", \"config\": {\"i2c_bus\": 0, \"gauge_i2c_addr\": \"0x55\"}},\n"
 "        {\"id\": \"com.thistle.drv.sdcard\", \"hal\": \"storage\", \"entry\": \"sdcard.drv.elf\", \"config\": {\"spi_bus\": 0, \"pin_cs\": 48, \"mount_point\": \"/sdcard\"}}\n"
 "    ]\n"
 "}\n";

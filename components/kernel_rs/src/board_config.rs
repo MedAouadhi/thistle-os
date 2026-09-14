@@ -1785,6 +1785,44 @@ mod tests {
     }
 
     #[test]
+    fn the_tdeck_max_reads_its_battery_off_the_bus_its_charger_sits_on() {
+        let mut rec = Recorder::default();
+        run_boot_sequence(TDECK_MAX_PROFILE, &mut rec);
+
+        let config = rec
+            .loaded_config("com.thistle.drv.power-sy6970")
+            .expect("the Max declares a power driver");
+        // Which of the two chargers this unit carries depends on its hardware
+        // revision, so the entry says only where to look, not what to find.
+        assert_eq!(json_get_int(config, "i2c_bus"), Some(0), "{config}");
+    }
+
+    // ── The T-Deck Pro ────────────────────────────────────────────────────────
+
+    const TDECK_PRO_PROFILE: &str =
+        include_str!("../../../sdcard_layout/config/boards/tdeck-pro.json");
+
+    #[test]
+    fn the_tdeck_pro_no_longer_reads_its_battery_from_the_lora_reset_line() {
+        let mut rec = Recorder::default();
+        run_boot_sequence(TDECK_PRO_PROFILE, &mut rec);
+
+        let ids = rec.driver_ids();
+        assert!(
+            !ids.iter().any(|id| id.contains("power-tp4065b")),
+            "the Pro carries no TP4065B: {ids:?}"
+        );
+
+        let config = rec
+            .loaded_config("com.thistle.drv.power-sy6970")
+            .expect("the Pro declares a power driver");
+        // The entry it replaces read battery voltage off GPIO 4, which on this
+        // board is the LoRa reset line rather than a battery divider.
+        assert_eq!(json_get_int(config, "adc_pin"), None, "{config}");
+        assert_eq!(json_get_int(config, "i2c_bus"), Some(0), "{config}");
+    }
+
+    #[test]
     fn expander_outputs_are_ignored_when_no_expander_is_declared() {
         let json = r#"{
             "expander_outputs": [{"expander": 0, "pin": 1, "direction": "output", "level": 1}],

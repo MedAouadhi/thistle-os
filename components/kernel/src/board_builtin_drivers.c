@@ -22,6 +22,7 @@
 #include "drv_kbd_tca8418.h"
 #include "drv_touch_cst328.h"
 #include "drv_sdcard.h"
+#include "drv_power_sy6970.h"
 #endif
 
 #ifndef THISTLE_BUS_INIT_HOST_TEST
@@ -227,6 +228,14 @@ esp_err_t board_builtin_driver_init(const char *id, const char *hal_type,
         ESP_LOGI(TAG, "sdcard: host=%d cs=%d mount=%s",
                  cfg.spi_host, cfg.pin_cs, cfg.mount_point);
         return hal_storage_register(drv_sdcard_get(), &cfg);
+    }
+
+    // ── Power: SY6970 / BQ25896 charger + BQ27220 fuel gauge ────────────────
+    // The driver finds its charger by probing, so the entry says only which
+    // bus the two chips sit on.
+    if (strcmp(id, "com.thistle.drv.power-sy6970") == 0) {
+        ESP_LOGI(TAG, "power-sy6970: %s", config_json);
+        return drv_power_sy6970_register(config_json);
     }
 
     ESP_LOGW(TAG, "no builtin for driver id=%s — skipping", id);

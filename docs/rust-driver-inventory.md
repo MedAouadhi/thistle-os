@@ -67,7 +67,8 @@ hardware verification.
 | `drv_lcd_st7789.rs` | ST7789 SPI LCD | Local substantial | 20 | Use as first migration board; upstream `display-driver-st7789` is the preferred panel layer |
 | `drv_light_ltr553.rs` | LTR-553ALS light/proximity | Local substantial | 13 | No external candidate confirmed; extract local protocol logic from ESP-IDF FFI |
 | `drv_oled_ssd1306.rs` | SSD1306 monochrome OLED | Local substantial | 22 | Evaluate the mature `ssd1306` crate; keep monochrome ABI separate initially |
-| `drv_power_tp4065b.rs` | TP4065B charger/battery sensing | Local substantial | 27 | Generic ADC/GPIO implementation is adequate; no complex controller crate needed |
+| `drv_power_sy6970.rs` | SY6970/BQ25896 charger + BQ27220 fuel gauge | Local substantial | 47 | One driver for a register-compatible charger pair, identified by part number; no external candidate covers the pair |
+| `drv_power_tp4065b.rs` | TP4065B charger/battery sensing | Local substantial | 17 | Generic ADC/GPIO implementation is adequate; no complex controller crate needed. The LiPo discharge curve it used to own now lives in `battery_curve.rs`, with its 10 tests |
 | `drv_rtc_pcf8563.rs` | PCF8563 RTC | Local substantial | 25 | Evaluate `pcf8563`; do not confuse it with T-Watch Ultra's PCF85063A |
 | `drv_sdcard.rs` | SPI MicroSD and FAT mount | Local substantial | 21 | Decide whether ESP-IDF VFS or `embedded-sdmmc` owns filesystem duties |
 | `drv_touch_cst328.rs` | CST328 capacitive touch | Local substantial | 10 | Evaluate `cst328`; retain board calibration and event mapping |

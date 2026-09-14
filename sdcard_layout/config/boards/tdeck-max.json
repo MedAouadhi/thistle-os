@@ -77,6 +77,15 @@
             }
         },
         {
+            "id": "com.thistle.drv.power-sy6970",
+            "hal": "power",
+            "entry": "power-sy6970.drv.elf",
+            "config": {
+                "i2c_bus": 0,
+                "gauge_i2c_addr": "0x55"
+            }
+        },
+        {
             "id": "com.thistle.drv.sdcard",
             "hal": "storage",
             "entry": "sdcard.drv.elf",

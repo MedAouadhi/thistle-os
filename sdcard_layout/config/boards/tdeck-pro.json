@@ -112,12 +112,12 @@
             }
         },
         {
-            "id": "com.thistle.drv.power-tp4065b",
+            "id": "com.thistle.drv.power-sy6970",
             "hal": "power",
-            "entry": "power-tp4065b.drv.elf",
+            "entry": "power-sy6970.drv.elf",
             "config": {
-                "adc_pin": 4,
-                "charge_pin": 10
+                "i2c_bus": 0,
+                "gauge_i2c_addr": "0x55"
             }
         },
         {

@@ -7,8 +7,8 @@
 #include "drv_gps_mia_m10q.h"
 #include "drv_audio_pcm5102a.h"
 #include "drv_imu_bhi260ap.h"
-#include "drv_power_tp4065b.h"
 #include "drv_sdcard.h"
+#include "drv_power_sy6970.h"
 #include "esp_log.h"
 
 static const char *TAG = "board";
@@ -118,6 +118,16 @@ esp_err_t board_init(void) {
         ESP_LOGE(TAG, "I2C bus init failed: %s", esp_err_to_name(ret));
         return ret;
     }
+    /* Drivers that ask the HAL for a bus by index, rather than being handed a
+     * handle in their config, need the bus to be registered. The board profile
+     * path does this for itself; this one did not do it at all. Registration
+     * appends, so this bus — the only one here — takes index 0, which is what
+     * the power driver's entry below asks for. */
+    ret = hal_bus_register_i2c(BOARD_I2C_PORT, i2c_bus);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "I2C bus registration failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
 
     // 3. Initialise I2C-dependent driver configs now that the bus handle is available
     kbd_config = (kbd_tca8418_config_t){
@@ -157,12 +167,19 @@ esp_err_t board_init(void) {
     // 9. Register audio (stub)
     hal_audio_register(drv_audio_pcm5102a_get(), NULL);
 
-    // 10. Register power management (battery ADC + charge status)
-    static const struct { int adc_channel; int pin_charge_status; } power_config = {
-        .adc_channel = 3,            /* ADC1 channel 3 = GPIO4 (BOARD_BAT_ADC) */
-        .pin_charge_status = 10,     /* GPIO10 (BOARD_CHARGE_STATUS) */
-    };
-    hal_power_register(drv_power_tp4065b_get(), &power_config);
+    // 10. Register power management (charger + fuel gauge, both on I2C)
+    //
+    // What stood here read battery voltage from ADC1 channel 3 — GPIO 4, which
+    // on this board is the LoRa reset line, not a battery divider. The board
+    // has a register-compatible charger and the same fuel gauge as the T-Deck
+    // Max, so it uses the same driver, which finds its charger by probing.
+    //
+    // Not fatal: a board that cannot report its battery is still a usable
+    // board, which is how the HAL registry treats a power driver too.
+    ret = drv_power_sy6970_register("{\"i2c_bus\": 0}");
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "power registration failed: %s", esp_err_to_name(ret));
+    }
 
     // 11. Register IMU (stub)
     hal_imu_register(drv_imu_bhi260ap_get(), NULL);
