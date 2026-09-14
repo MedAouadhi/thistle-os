@@ -21,20 +21,7 @@
 #include "ui/manager.h"
 #include "ui/lvgl_wm.h"
 #include "ui/toast.h"
-#include "launcher/launcher_app.h"
-#include "settings/settings_app.h"
-#include "file_manager/filemgr_app.h"
-#include "reader/reader_app.h"
-#include "messenger/messenger_app.h"
-#include "navigator/navigator_app.h"
-#include "notes/notes_app.h"
-#include "appstore/appstore_app.h"
-#include "assistant/assistant_app.h"
-#include "wifiscanner/wifiscanner_app.h"
-#include "flashlight/flashlight_app.h"
-#include "weather/weather_app.h"
-#include "terminal/terminal_app.h"
-#include "vault/vault_app.h"
+#include "lvgl_apps.h"
 #endif
 
 extern const display_server_wm_t *thistle_tk_wm_get(void);
@@ -248,22 +235,14 @@ void app_main(void)
 
 #ifdef THISTLE_LEGACY_C_APPS
     if (!use_tk_wm) {
-        /* Register LVGL-based built-in apps (they depend on LVGL and would
-         * crash under the thistle-tk WM) */
-        launcher_app_register();
-        settings_app_register();
-        filemgr_app_register();
-        reader_app_register();
-        messenger_app_register();
-        navigator_app_register();
-        notes_app_register();
-        appstore_app_register();
-        assistant_app_register();
-        wifiscanner_app_register();
-        flashlight_app_register();
-        weather_app_register();
-        terminal_app_register();
-        vault_app_register();
+        /* LVGL-based built-in apps; they would crash under the thistle-tk WM.
+         * The firmware builds every app and offers all of them whatever the
+         * board carries, which is what passing both capabilities preserves. */
+        esp_err_t app_err = lvgl_apps_register_builtin(true, true);
+        if (app_err != ESP_OK) {
+            ESP_LOGW(TAG, "Some built-in apps failed to register: %s",
+                     esp_err_to_name(app_err));
+        }
     }
 #endif
 

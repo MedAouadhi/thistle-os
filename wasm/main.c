@@ -20,49 +20,7 @@
 #include "sim_input.h"
 #include "sim_vfs.h"
 
-/* App registration headers — must match simulator/main.c */
-#if THISTLE_HAVE_LAUNCHER
-#include "launcher/launcher_app.h"
-#endif
-#if THISTLE_HAVE_SETTINGS
-#include "settings/settings_app.h"
-#endif
-#if THISTLE_HAVE_FILEMGR
-#include "file_manager/filemgr_app.h"
-#endif
-#if THISTLE_HAVE_READER
-#include "reader/reader_app.h"
-#endif
-#if THISTLE_HAVE_MESSENGER
-#include "messenger/messenger_app.h"
-#endif
-#if THISTLE_HAVE_NAVIGATOR
-#include "navigator/navigator_app.h"
-#endif
-#if THISTLE_HAVE_NOTES
-#include "notes/notes_app.h"
-#endif
-#if THISTLE_HAVE_APPSTORE
-#include "appstore/appstore_app.h"
-#endif
-#if THISTLE_HAVE_ASSISTANT
-#include "assistant/assistant_app.h"
-#endif
-#if THISTLE_HAVE_WIFISCANNER
-#include "wifiscanner/wifiscanner_app.h"
-#endif
-#if THISTLE_HAVE_FLASHLIGHT
-#include "flashlight/flashlight_app.h"
-#endif
-#if THISTLE_HAVE_WEATHER
-#include "weather/weather_app.h"
-#endif
-#if THISTLE_HAVE_TERMINAL
-#include "terminal/terminal_app.h"
-#endif
-#if THISTLE_HAVE_VAULT
-#include "vault/vault_app.h"
-#endif
+#include "lvgl_apps.h"
 
 /* Defined in board_simulator.c (shared with SDL sim) */
 extern void sim_board_set_device(const char *device);
@@ -159,61 +117,13 @@ int main(void)
         }
     }
 
-    /* Register built-in apps — same order as simulator/main.c.
-     *
-     * Only under an LVGL window manager: each of these parents its widgets to
-     * ui_manager_get_app_area(), which is NULL until an LVGL window manager
-     * runs ui_manager_init(). Launching one under thistle-tk dereferences that
-     * NULL. main/main.c guards the same list the same way, so registering them
-     * here unconditionally showed a launcher the device never shows. */
+    /* LVGL built-in apps; see lvgl_apps.h for why they need an LVGL window
+     * manager. The same list and the same guard serve the firmware. */
     if (!s_use_tk_wm) {
-#if THISTLE_HAVE_LAUNCHER
-        launcher_app_register();
-#endif
-#if THISTLE_HAVE_SETTINGS
-        settings_app_register();
-#endif
-#if THISTLE_HAVE_FILEMGR
-        filemgr_app_register();
-#endif
-#if THISTLE_HAVE_READER
-        reader_app_register();
-#endif
-#if THISTLE_HAVE_NOTES
-        notes_app_register();
-#endif
-#if THISTLE_HAVE_FLASHLIGHT
-        flashlight_app_register();
-#endif
-#if THISTLE_HAVE_VAULT
-        vault_app_register();
-#endif
-#if THISTLE_HAVE_APPSTORE
-        appstore_app_register();
-#endif
-#if THISTLE_HAVE_TERMINAL
-        terminal_app_register();
-#endif
-#if THISTLE_HAVE_ASSISTANT
-        assistant_app_register();
-#endif
-#if THISTLE_HAVE_WEATHER
-        weather_app_register();
-#endif
-
-        /* Conditional apps based on device capabilities */
-        if (sim_board_has_radio()) {
-#if THISTLE_HAVE_MESSENGER
-            messenger_app_register();
-#endif
-#if THISTLE_HAVE_WIFISCANNER
-            wifiscanner_app_register();
-#endif
-        }
-        if (sim_board_has_gps()) {
-#if THISTLE_HAVE_NAVIGATOR
-            navigator_app_register();
-#endif
+        ret = lvgl_apps_register_builtin(sim_board_has_radio(),
+                                         sim_board_has_gps());
+        if (ret != 0) {
+            printf("Some built-in apps failed to register: %d\n", ret);
         }
     }
 

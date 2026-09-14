@@ -8,10 +8,9 @@ endif()
 # images. Other targets boot the small launcher and discover signed ELF apps
 # from SPIFFS/SD, keeping generic non-PSRAM firmware within internal DRAM.
 if(IDF_TARGET STREQUAL "esp32s3")
-    list(APPEND thistle_main_requires
-        ui apps_builtin notes reader vault file_manager wifiscanner navigator
-        flashlight weather appstore
-    )
+    # apps_builtin pulls in the apps/ components itself; main only calls
+    # lvgl_apps_register_builtin().
+    list(APPEND thistle_main_requires ui apps_builtin)
 endif()
 
 idf_component_register(

@@ -54,6 +54,9 @@ CASES = (
         "8815a8bc57f7aa32c68db8b2ee0a85ea779a355e981dd8e90a5f425d01b9018e",
         True,
     ),
+    # The grid holds the same apps as before lvgl_apps_register_builtin(), in
+    # the firmware's registration order rather than the simulator's own:
+    # Terminal and Messenger swap places.
     Case(
         "lcd-apps",
         "tdeck",
@@ -61,7 +64,7 @@ CASES = (
         "159,215",
         320,
         240,
-        "44662c390dd0816c0b473a049c58d3d3bb984d0ad6d8b27969dee259741b6317",
+        "1e788863d95cbbc606abef16d8e47a1b182e24f95d00ea6834ec1241bc32ff8e",
     ),
 )
 
@@ -146,25 +149,44 @@ def run_case(simulator: Path, output_dir: Path, case: Case) -> None:
 
 # thistle-tk cannot host an LVGL app: those parent their widgets to
 # ui_manager_get_app_area(), which is NULL unless an LVGL window manager ran
-# ui_manager_init(). main.c therefore registers none of them on an e-paper
-# board, matching main/main.c. Launching one used to segfault, so pin the
-# refusal: a clean non-zero exit rather than a signal.
-LVGL_ONLY_APPS = ("com.thistle.settings", "com.thistle.notes",
-                  "com.thistle.terminal")
+# ui_manager_init(). lvgl_apps_register_builtin() is therefore called only
+# under LVGL, in the firmware and in both simulators. Launching one of these
+# on an e-paper board used to segfault; pin the refusal.
+#
+# These three live in components/apps_builtin and are always compiled, so the
+# check cannot go hollow. An app under apps/ would not be: those are absent
+# from the simulator builds, and asserting it "does not launch" would pass for
+# the wrong reason. run_lvgl_app_case() proves the point by requiring the app
+# to launch on the LCD board first.
+LVGL_ONLY_APPS = ("com.thistle.settings", "com.thistle.terminal",
+                  "com.thistle.assistant")
 
 
-def assert_lvgl_app_unavailable(simulator: Path, app_id: str) -> None:
-    completed = subprocess.run(
+def launch_app(simulator: Path, device: str, app_id: str):
+    return subprocess.run(
         [str(simulator), "--headless", "--timeout", "1500",
-         "--device", "tdeck-pro", "--launch-app", app_id],
+         "--device", device, "--launch-app", app_id],
         text=True, capture_output=True, check=False,
     )
-    if completed.returncode < 0:
+
+
+def run_lvgl_app_case(simulator: Path, app_id: str) -> None:
+    # It must be built, or the e-paper half proves nothing.
+    lcd = launch_app(simulator, "tdeck", app_id)
+    if lcd.returncode != 0:
         raise AssertionError(
-            f"simulator died on signal {-completed.returncode} launching "
-            f"{app_id} under thistle-tk; it should refuse to launch it"
+            f"{app_id} does not launch on the LCD board either "
+            f"(exit {lcd.returncode}) — it is compiled out, so this case "
+            f"would pass for the wrong reason"
         )
-    if completed.returncode == 0:
+
+    eink = launch_app(simulator, "tdeck-pro", app_id)
+    if eink.returncode < 0:
+        raise AssertionError(
+            f"simulator died on signal {-eink.returncode} launching {app_id} "
+            f"under thistle-tk; it should refuse to launch it"
+        )
+    if eink.returncode == 0:
         raise AssertionError(
             f"{app_id} launched under thistle-tk; it is LVGL-only and the "
             f"device never registers it there"
@@ -172,10 +194,10 @@ def assert_lvgl_app_unavailable(simulator: Path, app_id: str) -> None:
     # Any non-zero exit would otherwise pass — a bad argument, an unknown
     # device. Pin the refusal itself.
     expected = f"Failed to launch app {app_id}"
-    if expected not in completed.stderr:
+    if expected not in eink.stderr:
         raise AssertionError(
             f"expected {expected!r} on stderr, got: "
-            f"{completed.stderr.strip()[:200]!r}"
+            f"{eink.stderr.strip()[:200]!r}"
         )
 
 
@@ -206,7 +228,7 @@ def main() -> int:
     total = len(CASES) + len(LVGL_ONLY_APPS)
     for app_id in LVGL_ONLY_APPS:
         try:
-            assert_lvgl_app_unavailable(simulator, app_id)
+            run_lvgl_app_case(simulator, app_id)
         except AssertionError as exc:
             failures += 1
             print(f"FAIL  lvgl-unavailable/{app_id}: {exc}")

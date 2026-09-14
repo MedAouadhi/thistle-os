@@ -31,38 +31,7 @@ void sim_lvgl_unlock(void) { pthread_mutex_unlock(&s_lvgl_mutex); }
 #include "sim_assert.h"
 #include "sim_scenario.h"
 #include "sim_app_loader.h"
-#include "launcher/launcher_app.h"
-#include "settings/settings_app.h"
-#if THISTLE_HAVE_FILEMGR
-#include "file_manager/filemgr_app.h"
-#endif
-#if THISTLE_HAVE_READER
-#include "reader/reader_app.h"
-#endif
-#include "messenger/messenger_app.h"
-#if THISTLE_HAVE_NAVIGATOR
-#include "navigator/navigator_app.h"
-#endif
-#if THISTLE_HAVE_NOTES
-#include "notes/notes_app.h"
-#endif
-#if THISTLE_HAVE_APPSTORE
-#include "appstore/appstore_app.h"
-#endif
-#include "assistant/assistant_app.h"
-#if THISTLE_HAVE_WIFISCANNER
-#include "wifiscanner/wifiscanner_app.h"
-#endif
-#if THISTLE_HAVE_FLASHLIGHT
-#include "flashlight/flashlight_app.h"
-#endif
-#if THISTLE_HAVE_WEATHER
-#include "weather/weather_app.h"
-#endif
-#include "terminal/terminal_app.h"
-#if THISTLE_HAVE_VAULT
-#include "vault/vault_app.h"
-#endif
+#include "lvgl_apps.h"
 
 static bool s_headless = false;
 static int  s_timeout_ms = 0;
@@ -190,55 +159,18 @@ int main(int argc, char **argv)
      * an installed app wins the idempotent duplicate-ID registration rule. */
     sim_app_loader_scan_and_register();
 
-    /* Register built-in apps, but only under an LVGL window manager: each of
-     * these parents its widgets to ui_manager_get_app_area(), which is NULL
-     * until an LVGL window manager runs ui_manager_init(). Launching one under
-     * thistle-tk dereferences that NULL. main/main.c guards the same list the
-     * same way, so registering them here unconditionally showed a launcher the
-     * device never shows. sim_app_loader_scan_and_register() runs above this
-     * and is unaffected, so a signed .tap app still registers under
-     * thistle-tk — which is what test_tap_notes.py installs and taps. */
+    /* LVGL built-in apps; see lvgl_apps.h for why they need an LVGL window
+     * manager. sim_app_loader_scan_and_register() runs above this and is
+     * unaffected, so a signed .tap app still registers under thistle-tk —
+     * which is what test_tap_notes.py installs and taps. */
     extern bool sim_board_has_radio(void);
     extern bool sim_board_has_gps(void);
     if (!use_tk_wm) {
-        launcher_app_register();
-        settings_app_register();
-#if THISTLE_HAVE_FILEMGR
-        filemgr_app_register();
-#endif
-#if THISTLE_HAVE_READER
-        reader_app_register();
-#endif
-#if THISTLE_HAVE_NOTES
-        notes_app_register();
-#endif
-#if THISTLE_HAVE_FLASHLIGHT
-        flashlight_app_register();
-#endif
-#if THISTLE_HAVE_VAULT
-        vault_app_register();
-#endif
-#if THISTLE_HAVE_APPSTORE
-        appstore_app_register();
-#endif
-        terminal_app_register();
-        assistant_app_register();
-#if THISTLE_HAVE_WEATHER
-        weather_app_register();
-#endif
-
-        /* Conditional apps based on device capabilities */
-        if (sim_board_has_radio()) {
-            messenger_app_register();
-#if THISTLE_HAVE_WIFISCANNER
-            wifiscanner_app_register();
-#endif
+        err = lvgl_apps_register_builtin(sim_board_has_radio(),
+                                         sim_board_has_gps());
+        if (err != ESP_OK) {
+            fprintf(stderr, "Some built-in apps failed to register: %d\n", err);
         }
-#if THISTLE_HAVE_NAVIGATOR
-        if (sim_board_has_gps()) {
-            navigator_app_register();
-        }
-#endif
     }
 
     const char *initial_app = s_launch_app
