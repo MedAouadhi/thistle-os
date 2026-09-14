@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Simulator implementations for host TAP app imports not exported by Rust.
 
+// dladdr() and Dl_info are GNU extensions. glibc hides them behind this,
+// which must be defined before any header is included; macOS declares them
+// in dlfcn.h unconditionally, which is why this went unnoticed.
+#define _GNU_SOURCE
+
 #include "sim_vfs.h"
 #include "thistle_app.h"
 
