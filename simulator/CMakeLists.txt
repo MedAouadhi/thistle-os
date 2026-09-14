@@ -43,76 +43,26 @@ set(THISTLE_SRCS
     ${THISTLE_DIR}/components/apps_builtin/launcher/launcher_ui.c
     ${THISTLE_DIR}/components/apps_builtin/settings/settings_app.c
     ${THISTLE_DIR}/components/apps_builtin/settings/settings_ui.c
-    ${THISTLE_DIR}/components/apps_builtin/reader/reader_app.c
-    ${THISTLE_DIR}/components/apps_builtin/reader/reader_ui.c
     ${THISTLE_DIR}/components/apps_builtin/messenger/messenger_app.c
     ${THISTLE_DIR}/components/apps_builtin/messenger/messenger_ui.c
     ${THISTLE_DIR}/components/apps_builtin/messenger/messenger_transport.c
-    ${THISTLE_DIR}/components/apps_builtin/navigator/navigator_app.c
-    ${THISTLE_DIR}/components/apps_builtin/navigator/navigator_ui.c
-    ${THISTLE_DIR}/components/apps_builtin/notes/notes_app.c
-    ${THISTLE_DIR}/components/apps_builtin/notes/notes_ui.c
-    ${THISTLE_DIR}/components/apps_builtin/appstore/appstore_app.c
-    ${THISTLE_DIR}/components/apps_builtin/appstore/appstore_ui.c
     ${THISTLE_DIR}/components/apps_builtin/assistant/assistant_app.c
     ${THISTLE_DIR}/components/apps_builtin/assistant/assistant_request.c
     ${THISTLE_DIR}/components/apps_builtin/assistant/assistant_ui.c
-    ${THISTLE_DIR}/components/apps_builtin/wifiscanner/wifiscanner_app.c
-    ${THISTLE_DIR}/components/apps_builtin/wifiscanner/wifiscanner_ui.c
-    ${THISTLE_DIR}/components/apps_builtin/flashlight/flashlight_app.c
-    ${THISTLE_DIR}/components/apps_builtin/flashlight/flashlight_ui.c
-    ${THISTLE_DIR}/components/apps_builtin/weather/weather_app.c
-    ${THISTLE_DIR}/components/apps_builtin/weather/weather_ui.c
     ${THISTLE_DIR}/components/apps_builtin/terminal/terminal_app.c
     ${THISTLE_DIR}/components/apps_builtin/terminal/terminal_ui.c
-    ${THISTLE_DIR}/components/apps_builtin/vault/vault_app.c
-    ${THISTLE_DIR}/components/apps_builtin/vault/vault_ui.c
 )
 
-# The simulator unit-test target is independent from optional built-in apps.
-# Keep CMake configuration valid when an app source is not present so CI can
-# still build and execute thistle_sim_tests.
-if(EXISTS "${THISTLE_DIR}/components/apps_builtin/file_manager/filemgr_app.c")
-    set(THISTLE_HAVE_FILEMGR 1)
-    list(APPEND THISTLE_SRCS
-        ${THISTLE_DIR}/components/apps_builtin/file_manager/filemgr_app.c
-        ${THISTLE_DIR}/components/apps_builtin/file_manager/filemgr_ui.c
-    )
-else()
-    set(THISTLE_HAVE_FILEMGR 0)
-endif()
-
-function(thistle_set_optional_app_flag flag source)
-    if(EXISTS "${THISTLE_DIR}/${source}")
-        set(${flag} 1 PARENT_SCOPE)
-    else()
-        set(${flag} 0 PARENT_SCOPE)
-    endif()
-endfunction()
-
-thistle_set_optional_app_flag(THISTLE_HAVE_READER
-    "components/apps_builtin/reader/reader_app.c")
-thistle_set_optional_app_flag(THISTLE_HAVE_NAVIGATOR
-    "components/apps_builtin/navigator/navigator_app.c")
-thistle_set_optional_app_flag(THISTLE_HAVE_NOTES
-    "components/apps_builtin/notes/notes_app.c")
-thistle_set_optional_app_flag(THISTLE_HAVE_APPSTORE
-    "components/apps_builtin/appstore/appstore_app.c")
-thistle_set_optional_app_flag(THISTLE_HAVE_WIFISCANNER
-    "components/apps_builtin/wifiscanner/wifiscanner_app.c")
-thistle_set_optional_app_flag(THISTLE_HAVE_FLASHLIGHT
-    "components/apps_builtin/flashlight/flashlight_app.c")
-thistle_set_optional_app_flag(THISTLE_HAVE_WEATHER
-    "components/apps_builtin/weather/weather_app.c")
-thistle_set_optional_app_flag(THISTLE_HAVE_VAULT
-    "components/apps_builtin/vault/vault_app.c")
+include(${THISTLE_DIR}/cmake/thistle_apps.cmake)
+set(THISTLE_APP_INCLUDE_DIRS)
+thistle_collect_optional_apps()
 
 set(THISTLE_SIM_SRCS)
 foreach(source IN LISTS THISTLE_SRCS)
     if(EXISTS "${source}")
         list(APPEND THISTLE_SIM_SRCS "${source}")
     else()
-        message(STATUS "Skipping unavailable simulator app source: ${source}")
+        message(FATAL_ERROR "Missing source: ${source}")
     endif()
 endforeach()
 
@@ -166,6 +116,7 @@ target_include_directories(thistle_sim PRIVATE
     ${THISTLE_DIR}/components/kernel/include
     ${THISTLE_DIR}/components/ui/include
     ${THISTLE_DIR}/components/apps_builtin
+    ${THISTLE_APP_INCLUDE_DIRS}
     ${THISTLE_DIR}/app_sdk/include
     # SDL2
     ${SDL2_INCLUDE_DIRS}

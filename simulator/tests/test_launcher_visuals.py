@@ -51,12 +51,13 @@ CASES = (
         None,
         320,
         240,
-        "8815a8bc57f7aa32c68db8b2ee0a85ea779a355e981dd8e90a5f425d01b9018e",
+        "6252a062110e486fccf484112b1163290d1f6a6529d1a3b56acc719dc6c0c87d",
         True,
     ),
-    # The grid holds the same apps as before lvgl_apps_register_builtin(), in
-    # the firmware's registration order rather than the simulator's own:
-    # Terminal and Messenger swap places.
+    # The LCD hashes cover all fourteen apps. The nine that live under apps/
+    # were absent from the simulator until its CMakeLists stopped looking for
+    # them under components/apps_builtin, so both the dock's favourites and
+    # this grid changed when they came back.
     Case(
         "lcd-apps",
         "tdeck",
@@ -64,7 +65,7 @@ CASES = (
         "159,215",
         320,
         240,
-        "1e788863d95cbbc606abef16d8e47a1b182e24f95d00ea6834ec1241bc32ff8e",
+        "a95dce155dae029151baf608fecb0f7c2b71ff6d802d210febb83663aa4826f1",
     ),
 )
 
@@ -153,13 +154,15 @@ def run_case(simulator: Path, output_dir: Path, case: Case) -> None:
 # under LVGL, in the firmware and in both simulators. Launching one of these
 # on an e-paper board used to segfault; pin the refusal.
 #
-# These three live in components/apps_builtin and are always compiled, so the
-# check cannot go hollow. An app under apps/ would not be: those are absent
-# from the simulator builds, and asserting it "does not launch" would pass for
-# the wrong reason. run_lvgl_app_case() proves the point by requiring the app
-# to launch on the LCD board first.
+# Asserting that an app "does not launch" passes for free if the app is not
+# built at all, so run_lvgl_app_case() requires it to launch on the LCD board
+# before it believes the e-paper refusal. That precondition is why an app from
+# apps/ can be listed here: those were compiled out of both simulators until
+# cmake/thistle_apps.cmake, and without the check notes would pass for being
+# absent rather than for being refused. The list covers both homes — settings,
+# terminal and assistant from components/apps_builtin, notes from apps/.
 LVGL_ONLY_APPS = ("com.thistle.settings", "com.thistle.terminal",
-                  "com.thistle.assistant")
+                  "com.thistle.assistant", "com.thistle.notes")
 
 
 def launch_app(simulator: Path, device: str, app_id: str):

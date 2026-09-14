@@ -36,32 +36,14 @@ set(THISTLE_SRCS
     ${THISTLE_DIR}/components/apps_builtin/launcher/launcher_ui.c
     ${THISTLE_DIR}/components/apps_builtin/settings/settings_app.c
     ${THISTLE_DIR}/components/apps_builtin/settings/settings_ui.c
-    ${THISTLE_DIR}/components/apps_builtin/file_manager/filemgr_app.c
-    ${THISTLE_DIR}/components/apps_builtin/file_manager/filemgr_ui.c
-    ${THISTLE_DIR}/components/apps_builtin/reader/reader_app.c
-    ${THISTLE_DIR}/components/apps_builtin/reader/reader_ui.c
     ${THISTLE_DIR}/components/apps_builtin/messenger/messenger_app.c
     ${THISTLE_DIR}/components/apps_builtin/messenger/messenger_ui.c
     ${THISTLE_DIR}/components/apps_builtin/messenger/messenger_transport.c
-    ${THISTLE_DIR}/components/apps_builtin/navigator/navigator_app.c
-    ${THISTLE_DIR}/components/apps_builtin/navigator/navigator_ui.c
-    ${THISTLE_DIR}/components/apps_builtin/notes/notes_app.c
-    ${THISTLE_DIR}/components/apps_builtin/notes/notes_ui.c
-    ${THISTLE_DIR}/components/apps_builtin/appstore/appstore_app.c
-    ${THISTLE_DIR}/components/apps_builtin/appstore/appstore_ui.c
     ${THISTLE_DIR}/components/apps_builtin/assistant/assistant_app.c
     ${THISTLE_DIR}/components/apps_builtin/assistant/assistant_request.c
     ${THISTLE_DIR}/components/apps_builtin/assistant/assistant_ui.c
-    ${THISTLE_DIR}/components/apps_builtin/wifiscanner/wifiscanner_app.c
-    ${THISTLE_DIR}/components/apps_builtin/wifiscanner/wifiscanner_ui.c
-    ${THISTLE_DIR}/components/apps_builtin/flashlight/flashlight_app.c
-    ${THISTLE_DIR}/components/apps_builtin/flashlight/flashlight_ui.c
-    ${THISTLE_DIR}/components/apps_builtin/weather/weather_app.c
-    ${THISTLE_DIR}/components/apps_builtin/weather/weather_ui.c
     ${THISTLE_DIR}/components/apps_builtin/terminal/terminal_app.c
     ${THISTLE_DIR}/components/apps_builtin/terminal/terminal_ui.c
-    ${THISTLE_DIR}/components/apps_builtin/vault/vault_app.c
-    ${THISTLE_DIR}/components/apps_builtin/vault/vault_ui.c
 )
 
 # Built-in apps are being migrated from compiled-in C to signed Rust ELFs.
@@ -77,25 +59,20 @@ endfunction()
 
 thistle_set_optional_app_flag(THISTLE_HAVE_LAUNCHER "components/apps_builtin/launcher/launcher_app.c")
 thistle_set_optional_app_flag(THISTLE_HAVE_SETTINGS "components/apps_builtin/settings/settings_app.c")
-thistle_set_optional_app_flag(THISTLE_HAVE_FILEMGR "components/apps_builtin/file_manager/filemgr_app.c")
-thistle_set_optional_app_flag(THISTLE_HAVE_READER "components/apps_builtin/reader/reader_app.c")
 thistle_set_optional_app_flag(THISTLE_HAVE_MESSENGER "components/apps_builtin/messenger/messenger_app.c")
-thistle_set_optional_app_flag(THISTLE_HAVE_NAVIGATOR "components/apps_builtin/navigator/navigator_app.c")
-thistle_set_optional_app_flag(THISTLE_HAVE_NOTES "components/apps_builtin/notes/notes_app.c")
-thistle_set_optional_app_flag(THISTLE_HAVE_APPSTORE "components/apps_builtin/appstore/appstore_app.c")
 thistle_set_optional_app_flag(THISTLE_HAVE_ASSISTANT "components/apps_builtin/assistant/assistant_app.c")
-thistle_set_optional_app_flag(THISTLE_HAVE_WIFISCANNER "components/apps_builtin/wifiscanner/wifiscanner_app.c")
-thistle_set_optional_app_flag(THISTLE_HAVE_FLASHLIGHT "components/apps_builtin/flashlight/flashlight_app.c")
-thistle_set_optional_app_flag(THISTLE_HAVE_WEATHER "components/apps_builtin/weather/weather_app.c")
 thistle_set_optional_app_flag(THISTLE_HAVE_TERMINAL "components/apps_builtin/terminal/terminal_app.c")
-thistle_set_optional_app_flag(THISTLE_HAVE_VAULT "components/apps_builtin/vault/vault_app.c")
+
+include(${THISTLE_DIR}/cmake/thistle_apps.cmake)
+set(THISTLE_APP_INCLUDE_DIRS)
+thistle_collect_optional_apps()
 
 set(THISTLE_WASM_SRCS)
 foreach(source IN LISTS THISTLE_SRCS)
     if(EXISTS "${source}")
         list(APPEND THISTLE_WASM_SRCS "${source}")
     else()
-        message(STATUS "Skipping migrated WASM app source: ${source}")
+        message(FATAL_ERROR "Missing source: ${source}")
     endif()
 endforeach()
 
@@ -151,6 +128,7 @@ target_include_directories(thistle_wasm PRIVATE
     ${THISTLE_DIR}/components/kernel_rs/include
     ${THISTLE_DIR}/components/ui/include
     ${THISTLE_DIR}/components/apps_builtin
+    ${THISTLE_APP_INCLUDE_DIRS}
 )
 
 target_compile_definitions(thistle_wasm PRIVATE
