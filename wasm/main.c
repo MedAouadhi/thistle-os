@@ -8,6 +8,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <stdbool.h>
 #include <emscripten.h>
 
 #include "lvgl.h"
@@ -72,6 +73,20 @@ extern bool sim_board_has_gps(void);
 /* Device selection — JS calls _wasm_set_device(idx) before main      */
 /* ------------------------------------------------------------------ */
 
+/* Defined in simulator/board_simulator.c */
+extern bool sim_board_is_epaper(void);
+
+/* thistle-tk draws its own widgets and hands the display server a packed
+ * 1-bit framebuffer, which is what sim_display unpacks for an e-paper
+ * device. It does not use LVGL's input device layer, so input is forwarded
+ * to it by hand. Mirrors simulator/main.c. */
+static void wasm_tk_input_cb(const hal_input_event_t *event, void *user_data)
+{
+    (void)user_data;
+    const display_server_wm_t *wm = thistle_tk_wm_get();
+    if (wm && wm->on_input) wm->on_input(event);
+}
+
 /* Order must match the devs array in wasm/shell.html — JS sends the index. */
 static const char *DEVICE_NAMES[] = {
     "tdeck", "tdeck-pro", "tdeck-plus", "tdeck-max", "tdisplay",
@@ -88,17 +103,25 @@ void wasm_set_device(int idx) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Main loop callback — drives LVGL at ~60 FPS                        */
+/* Main loop callback — drives the window manager at ~60 FPS          */
 /* ------------------------------------------------------------------ */
+
+/* Set once the window manager is chosen; thistle-tk and LVGL are driven by
+ * different calls and only one of them is running. */
+static bool s_use_tk_wm = false;
 
 static void main_loop(void)
 {
     /* Poll HAL input drivers (SDL mouse/keyboard → HAL events) */
     sim_input_poll_sdl();
 
-    /* LVGL tick + render */
     lv_tick_inc(16);  /* ~60 FPS */
-    lv_timer_handler();
+    if (s_use_tk_wm) {
+        /* thistle-tk composites and flushes itself; it has no LVGL timers. */
+        display_server_tick();
+    } else {
+        lv_timer_handler();
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -121,8 +144,20 @@ int main(void)
     ret = display_server_init();
     printf("display_server_init: %d\n", ret);
 
-    ret = display_server_register_wm(lvgl_lcd_wm_get());
+    /* An e-paper device needs thistle-tk: sim_display unpacks its flushes as
+     * a packed 1-bit framebuffer, and the LCD window manager emits RGB565,
+     * which renders as noise. */
+    s_use_tk_wm = sim_board_is_epaper();
+    ret = display_server_register_wm(s_use_tk_wm ? thistle_tk_wm_get()
+                                                 : lvgl_lcd_wm_get());
     printf("display_server_register_wm: %d\n", ret);
+
+    if (s_use_tk_wm) {
+        const hal_input_driver_t *input = sim_input_get();
+        if (input && input->register_callback) {
+            input->register_callback(wasm_tk_input_cb, NULL);
+        }
+    }
 
     /* Register built-in apps — same order as simulator/main.c */
 #if THISTLE_HAVE_LAUNCHER
@@ -174,8 +209,10 @@ int main(void)
 #endif
     }
 
-    /* Launch launcher */
-    app_manager_launch("com.thistle.launcher");
+    /* Each window manager has its own launcher: the LVGL one builds LVGL
+     * widgets, which thistle-tk never renders. */
+    app_manager_launch(s_use_tk_wm ? "com.thistle.tk_launcher"
+                                   : "com.thistle.launcher");
 
     printf("ThistleOS WASM ready. Running main loop.\n");
 
