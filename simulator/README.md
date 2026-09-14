@@ -31,6 +31,7 @@ Requires SDL2 (`brew install sdl2` / `apt install libsdl2-dev`) and a prior ESP-
 | `tdeck-pro` | 320x240 | yes | yes | yes | yes | yes |
 | `tdeck` | 320x240 | yes | yes | yes | yes | -- |
 | `tdeck-plus` | 320x240 | yes | yes | yes | yes | -- |
+| `tdeck-max` | 240x320 | yes | yes | yes | yes | yes |
 | `tdisplay` | 320x170 | -- | yes | -- | -- | -- |
 | `heltec-v3` | 128x64 | -- | -- | yes | -- | -- |
 | `cardputer` | 240x135 | yes | -- | -- | -- | -- |
@@ -57,6 +58,11 @@ Requires SDL2 (`brew install sdl2` / `apt install libsdl2-dev`) and a prior ESP-
 | TCA8418 | `0x34` | Keyboard controller -- SDL key events injected as I2C scan codes |
 | CST328 | `0x1A` | Touch controller -- SDL mouse events injected as touch coordinates |
 | LTR-553 | `0x23` | Light/proximity sensor -- injectable lux and proximity values |
+| XL9555 | `0x20` | IO expander -- records every register write in order, for inspecting the expander phase of a boot sequence |
+
+Which models a device registers follows its hardware: `tdeck-max` is the only
+device with an XL9555, and the only one with neither an RTC nor a light sensor,
+so its RTC interface stays unregistered and falls back to the system tick.
 
 All models registered on bus 0. Drivers read/write registers through the same `i2c_master_transmit`/`i2c_master_transmit_receive` API as on real hardware.
 

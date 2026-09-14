@@ -1617,7 +1617,7 @@ mod tests {
     }
 
     #[test]
-    fn every_board_in_the_catalogue_boots_without_an_expander_phase() {
+    fn a_board_in_the_catalogue_runs_an_expander_phase_only_if_it_declares_one() {
         let catalogue =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../sdcard_layout/config/boards");
         let profiles: Vec<_> = fs::read_dir(&catalogue)
@@ -1636,16 +1636,141 @@ mod tests {
             let mut rec = Recorder::default();
 
             assert_eq!(run_boot_sequence(profile, &mut rec), ESP_OK);
-            assert!(
-                !rec.phases()
-                    .iter()
-                    .any(|phase| phase.starts_with("expander")),
-                "a shipped board profile gained an expander phase: {:?}",
+            let declares_expander = find_array(profile, "io_expanders").is_some();
+            let ran_expander_phase = rec
+                .phases()
+                .iter()
+                .any(|phase| phase.starts_with("expander"));
+            assert_eq!(
+                ran_expander_phase,
+                declares_expander,
+                "a shipped board profile's expander phase does not match its \
+                 declaration: {:?}",
                 rec.phases()
             );
             // The boards still load every driver they declare, unchanged.
             assert!(!rec.driver_ids().is_empty());
         }
+    }
+
+    // ── The T-Deck Max ────────────────────────────────────────────────────────
+    //
+    // The board profile as it ships, so that what these tests assert is the
+    // sequence the hardware runs rather than a fixture free to drift from it.
+    const TDECK_MAX_PROFILE: &str =
+        include_str!("../../../sdcard_layout/config/boards/tdeck-max.json");
+
+    /// Every expander level the boot sequence drove, in order.
+    fn expander_levels(rec: &Recorder) -> Vec<(usize, i32, i32)> {
+        rec.steps
+            .iter()
+            .filter_map(|step| match step {
+                BootStep::ExpanderLevel {
+                    expander,
+                    pin,
+                    level,
+                } => Some((*expander, *pin, *level)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_tdeck_max_raises_its_expander_between_the_buses_and_its_drivers() {
+        let mut rec = Recorder::default();
+
+        assert_eq!(run_boot_sequence(TDECK_MAX_PROFILE, &mut rec), ESP_OK);
+
+        let phases = rec.phases();
+        let position = |want: &str| phases.iter().position(|phase| *phase == want);
+        let last = |want: &str| phases.iter().rposition(|phase| *phase == want);
+
+        let i2c = last("i2c").expect("the Max declares an I²C bus");
+        let expander = position("expander-init").expect("the Max declares an expander");
+        let last_pin = last("expander-level").expect("the Max drives expander pins");
+        let drivers = position("driver-loader-init").expect("the Max declares drivers");
+
+        // The expander sits on the I²C bus, and the pins behind it carry
+        // peripheral rails and resets the drivers depend on.
+        assert!(i2c < expander, "{phases:?}");
+        assert!(expander < last_pin, "{phases:?}");
+        assert!(last_pin < drivers, "{phases:?}");
+    }
+
+    #[test]
+    fn the_tdeck_max_pulses_its_keyboard_and_touch_resets_low_then_high() {
+        let mut rec = Recorder::default();
+        run_boot_sequence(TDECK_MAX_PROFILE, &mut rec);
+
+        // T_RST is expander pin 7 and KEY_RST is pin 9, both active low, so
+        // each is held down and then released — leaving them high would start
+        // the parts from whatever state an unclean shutdown left behind.
+        assert_eq!(
+            expander_levels(&rec),
+            vec![(0, 7, 0), (0, 9, 0), (0, 7, 1), (0, 9, 1)]
+        );
+    }
+
+    #[test]
+    fn the_tdeck_max_holds_each_reset_down_long_enough_to_take() {
+        let mut rec = Recorder::default();
+        run_boot_sequence(TDECK_MAX_PROFILE, &mut rec);
+
+        // A pulse with no delay between its edges is not a reset. Every pin
+        // the Max drives declares a settling delay, so each edge is followed
+        // by a wait.
+        let delays = rec
+            .steps
+            .iter()
+            .filter(|step| matches!(step, BootStep::Delay { .. }))
+            .count();
+        assert_eq!(delays, expander_levels(&rec).len());
+    }
+
+    #[test]
+    fn the_tdeck_max_display_drives_the_reset_line_the_pro_lacks() {
+        let mut rec = Recorder::default();
+        run_boot_sequence(TDECK_MAX_PROFILE, &mut rec);
+
+        let config = rec
+            .loaded_config("com.thistle.drv.epaper-gdeq031t10")
+            .expect("the Max declares the e-paper display");
+        // The Pro leaves this at -1: the panel there has no reset line at all,
+        // so a panel in a bad state needs a power cycle.
+        assert!(config.contains(r#""rst": 9"#), "{config}");
+        assert!(config.contains(r#""bl": 41"#), "{config}");
+    }
+
+    #[test]
+    fn the_tdeck_max_leaves_the_touch_reset_to_the_expander_phase() {
+        let mut rec = Recorder::default();
+        run_boot_sequence(TDECK_MAX_PROFILE, &mut rec);
+
+        let config = rec
+            .loaded_config("com.thistle.drv.touch-cst328")
+            .expect("the Max declares the touch panel");
+        // T_RST is an expander pin, not a GPIO. Handing the driver the pin
+        // number would have it drive GPIO 7, which on this board is the
+        // modem's ring indicator.
+        assert!(config.contains(r#""pin_rst": -1"#), "{config}");
+    }
+
+    #[test]
+    fn the_tdeck_max_declares_no_rtc_and_no_light_sensor() {
+        let mut rec = Recorder::default();
+        run_boot_sequence(TDECK_MAX_PROFILE, &mut rec);
+
+        // Neither part is on this board. Leaving the interfaces unregistered
+        // lets an app detect that, where a stub would have it read fiction.
+        let ids = rec.driver_ids();
+        assert!(
+            !ids.iter().any(|id| id.contains("rtc")),
+            "the Max has no RTC: {ids:?}"
+        );
+        assert!(
+            !ids.iter().any(|id| id.contains("light")),
+            "the Max has no light sensor: {ids:?}"
+        );
     }
 
     #[test]

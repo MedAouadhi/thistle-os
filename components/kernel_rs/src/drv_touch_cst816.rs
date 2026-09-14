@@ -550,6 +550,7 @@ static TOUCH_DRIVER: HalInputDriver = HalInputDriver {
     poll: Some(cst816_poll),
     name: b"CST816S\0".as_ptr() as *const c_char,
     is_touch: true,
+    set_backlight: None,
 };
 
 /// Return a pointer to the CST816S HAL input driver vtable.

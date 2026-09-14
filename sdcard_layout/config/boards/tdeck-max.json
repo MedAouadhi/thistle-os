@@ -1,0 +1,90 @@
+{
+    "board": {
+        "name": "LilyGo T-Deck Pro Max",
+        "arch": "esp32s3",
+        "board_id": "tdeck-max",
+        "version": "1.0"
+    },
+    "buses": {
+        "spi": [
+            {
+                "host": 2,
+                "mosi": 33,
+                "miso": 47,
+                "sclk": 36,
+                "max_transfer_bytes": 9600
+            }
+        ],
+        "i2c": [
+            {
+                "port": 0,
+                "sda": 13,
+                "scl": 14,
+                "freq_hz": 400000
+            }
+        ]
+    },
+    "io_expanders": [
+        {
+            "id": "com.thistle.drv.ioexp-xl9555",
+            "i2c_bus": 0,
+            "i2c_addr": "0x20"
+        }
+    ],
+    "expander_outputs": [
+        {"expander": 0, "pin": 7, "direction": "output", "level": 0, "delay_ms": 10},
+        {"expander": 0, "pin": 9, "direction": "output", "level": 0, "delay_ms": 10},
+        {"expander": 0, "pin": 7, "direction": "output", "level": 1, "delay_ms": 50},
+        {"expander": 0, "pin": 9, "direction": "output", "level": 1, "delay_ms": 50}
+    ],
+    "drivers": [
+        {
+            "id": "com.thistle.drv.epaper-gdeq031t10",
+            "hal": "display",
+            "entry": "epaper-gdeq031t10.drv.elf",
+            "config": {
+                "spi_bus": 0,
+                "cs": 34,
+                "dc": 35,
+                "rst": 9,
+                "busy": 37,
+                "bl": 41,
+                "spi_clock_hz": 2000000
+            }
+        },
+        {
+            "id": "com.thistle.drv.kbd-tca8418",
+            "hal": "input",
+            "entry": "kbd-tca8418.drv.elf",
+            "config": {
+                "i2c_bus": 0,
+                "i2c_addr": "0x34",
+                "pin_int": 15,
+                "pin_backlight": 42
+            }
+        },
+        {
+            "id": "com.thistle.drv.touch-cst328",
+            "hal": "input",
+            "entry": "touch-cst328.drv.elf",
+            "config": {
+                "i2c_bus": 0,
+                "i2c_addr": "0x1A",
+                "pin_int": 12,
+                "pin_rst": -1,
+                "max_x": 240,
+                "max_y": 320
+            }
+        },
+        {
+            "id": "com.thistle.drv.sdcard",
+            "hal": "storage",
+            "entry": "sdcard.drv.elf",
+            "config": {
+                "spi_bus": 0,
+                "pin_cs": 48,
+                "mount_point": "/sdcard"
+            }
+        }
+    ]
+}

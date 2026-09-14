@@ -16,6 +16,9 @@ typedef struct {
     gpio_num_t        pin_dc;
     gpio_num_t        pin_rst;
     gpio_num_t        pin_busy;
+    /* Front-light PWM. GPIO_NUM_NC on panels lit only by ambient light —
+     * the T-Deck Pro has no front-light, the T-Deck Max does. */
+    gpio_num_t        pin_bl;
     int               spi_clock_hz;
 } epaper_gdeq031t10_config_t;
 

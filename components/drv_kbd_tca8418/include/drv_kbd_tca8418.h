@@ -14,6 +14,8 @@ typedef struct {
     i2c_master_bus_handle_t i2c_bus;
     uint8_t                 i2c_addr;   /* Default 0x34 */
     gpio_num_t              pin_int;    /* Interrupt pin, active low. GPIO_NUM_NC to disable. */
+    /* Key backlight PWM. GPIO_NUM_NC on a board that leaves the line unwired. */
+    gpio_num_t              pin_backlight;
 } kbd_tca8418_config_t;
 
 /* Return the driver vtable instance. */

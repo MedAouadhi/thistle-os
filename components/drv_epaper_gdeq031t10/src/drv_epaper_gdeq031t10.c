@@ -16,6 +16,7 @@
 #include "freertos/task.h"
 #include "driver/spi_master.h"
 #include "driver/gpio.h"
+#include "driver/ledc.h"
 #include "packed_blit.h"
 
 #include <string.h>
@@ -53,6 +54,14 @@ static const char *TAG = "epaper";
 #define CMD_TSSET           0xE5  /* Force Temperature */
 
 /* ── Driver state ──────────────────────────────────────────────────── */
+/* ── Front-light (LEDC) ─────────────────────────────────────────────── */
+#define BL_LEDC_TIMER      LEDC_TIMER_0
+#define BL_LEDC_MODE       LEDC_LOW_SPEED_MODE
+#define BL_LEDC_CHANNEL    LEDC_CHANNEL_0
+#define BL_LEDC_FREQ_HZ    5000
+#define BL_LEDC_DUTY_RES   LEDC_TIMER_8_BIT   /* 0–255 duty range */
+#define BL_LEDC_MAX_DUTY   255
+
 static struct {
     spi_device_handle_t        spi;
     epaper_gdeq031t10_config_t cfg;
@@ -63,7 +72,53 @@ static struct {
     bool                       init_seq_done;     /* PSR sent since last refresh */
     bool                       power_on;
     bool                       first_refresh_done;
+    uint8_t                    brightness;  /* last non-zero front-light percent */
 } s_epd;
+
+/* ── Front-light ────────────────────────────────────────────────────── */
+
+static esp_err_t bl_init(gpio_num_t pin)
+{
+    if (pin == GPIO_NUM_NC) return ESP_OK;
+
+    ledc_timer_config_t timer_cfg = {
+        .speed_mode      = BL_LEDC_MODE,
+        .timer_num       = BL_LEDC_TIMER,
+        .duty_resolution = BL_LEDC_DUTY_RES,
+        .freq_hz         = BL_LEDC_FREQ_HZ,
+        .clk_cfg         = LEDC_AUTO_CLK,
+    };
+    esp_err_t ret = ledc_timer_config(&timer_cfg);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "front-light timer config failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    ledc_channel_config_t ch_cfg = {
+        .speed_mode = BL_LEDC_MODE,
+        .channel    = BL_LEDC_CHANNEL,
+        .timer_sel  = BL_LEDC_TIMER,
+        .intr_type  = LEDC_INTR_DISABLE,
+        .gpio_num   = pin,
+        .duty       = 0,
+        .hpoint     = 0,
+    };
+    ret = ledc_channel_config(&ch_cfg);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "front-light channel config failed: %s", esp_err_to_name(ret));
+    }
+    return ret;
+}
+
+static esp_err_t bl_set_duty(uint8_t percent)
+{
+    if (s_epd.cfg.pin_bl == GPIO_NUM_NC) return ESP_OK;
+
+    uint32_t duty = (uint32_t)percent * BL_LEDC_MAX_DUTY / 100;
+    esp_err_t ret = ledc_set_duty(BL_LEDC_MODE, BL_LEDC_CHANNEL, duty);
+    if (ret != ESP_OK) return ret;
+    return ledc_update_duty(BL_LEDC_MODE, BL_LEDC_CHANNEL);
+}
 
 /* ── Low-level helpers ──────────────────────────────────────────────── */
 
@@ -224,6 +279,12 @@ static esp_err_t gdeq031t10_init(const void *config)
 
     gpio_set_level(s_epd.cfg.pin_cs, 1);
 
+    /* Front-light starts dark. The panel is reflective, so light is something
+     * the user asks for rather than something boot spends battery on. */
+    ret = bl_init(s_epd.cfg.pin_bl);
+    if (ret != ESP_OK) goto fail;
+    s_epd.brightness = 0;
+
     /* SPI device — manual CS so we can frame each command/data segment */
     spi_device_interface_config_t dev_cfg = {
         .clock_source   = SPI_CLK_SRC_DEFAULT,
@@ -377,14 +438,22 @@ static esp_err_t gdeq031t10_refresh(void)
 
 static esp_err_t gdeq031t10_set_brightness(uint8_t percent)
 {
-    (void)percent;
-    return ESP_ERR_NOT_SUPPORTED;   /* e-paper has no backlight */
+    if (!s_epd.initialised) return ESP_ERR_INVALID_STATE;
+    /* A panel with no front-light wired has no brightness to set — the
+     * T-Deck Pro's. Saying so lets the UI hide a control that does nothing. */
+    if (s_epd.cfg.pin_bl == GPIO_NUM_NC) return ESP_ERR_NOT_SUPPORTED;
+
+    uint8_t clamped = percent > 100 ? 100 : percent;
+    esp_err_t ret = bl_set_duty(clamped);
+    if (ret == ESP_OK && clamped > 0) s_epd.brightness = clamped;
+    return ret;
 }
 
 static esp_err_t gdeq031t10_sleep(bool enter)
 {
     if (!s_epd.initialised) return ESP_ERR_INVALID_STATE;
     if (enter) {
+        bl_set_duty(0);
         epaper_power_off();
         epaper_send_cmd(CMD_DEEP_SLEEP);
         epaper_send_data_byte(0xA5);
@@ -392,6 +461,7 @@ static esp_err_t gdeq031t10_sleep(bool enter)
     } else {
         epaper_hw_reset();
         epaper_init_display();
+        bl_set_duty(s_epd.brightness);
     }
     return ESP_OK;
 }

@@ -9,6 +9,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <stdbool.h>
 #include "esp_log.h"
 #include "esp_err.h"
 #include "driver/spi_master.h"
@@ -20,6 +21,7 @@
 #include "drv_epaper_gdeq031t10.h"
 #include "drv_kbd_tca8418.h"
 #include "drv_touch_cst328.h"
+#include "drv_sdcard.h"
 #endif
 
 #ifndef THISTLE_BUS_INIT_HOST_TEST
@@ -49,6 +51,28 @@ static int json_int(const char *json, const char *key, int default_val)
     }
     // Bare integer (possibly negative)
     return (int)strtol(p, NULL, 0);
+}
+
+// Copy a quoted JSON string value into `out`. Returns false and leaves `out`
+// untouched when the key is missing or its value is not a string.
+static bool json_str(const char *json, const char *key, char *out, size_t out_size)
+{
+    if (!json || !key || !out || out_size == 0) return false;
+    char pattern[80];
+    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
+    const char *p = strstr(json, pattern);
+    if (!p) return false;
+    p += strlen(pattern);
+    while (*p == ' ' || *p == '\t' || *p == ':') p++;
+    if (*p != '"') return false;
+    p++;
+    const char *end = strchr(p, '"');
+    if (!end) return false;
+    size_t len = (size_t)(end - p);
+    if (len >= out_size) return false;
+    memcpy(out, p, len);
+    out[len] = '\0';
+    return true;
 }
 #endif
 
@@ -148,10 +172,11 @@ esp_err_t board_builtin_driver_init(const char *id, const char *hal_type,
         cfg.pin_dc      = (gpio_num_t)json_int(config_json, "dc",           -1);
         cfg.pin_rst     = (gpio_num_t)json_int(config_json, "rst",          -1);
         cfg.pin_busy    = (gpio_num_t)json_int(config_json, "busy",         -1);
+        cfg.pin_bl      = (gpio_num_t)json_int(config_json, "bl",           -1);
         cfg.spi_clock_hz =            json_int(config_json, "spi_clock_hz", 2000000);
-        ESP_LOGI(TAG, "epaper: host=%d cs=%d dc=%d rst=%d busy=%d clk=%d",
+        ESP_LOGI(TAG, "epaper: host=%d cs=%d dc=%d rst=%d busy=%d bl=%d clk=%d",
                  cfg.spi_host, cfg.pin_cs, cfg.pin_dc, cfg.pin_rst,
-                 cfg.pin_busy, cfg.spi_clock_hz);
+                 cfg.pin_busy, cfg.pin_bl, cfg.spi_clock_hz);
         return hal_display_register(drv_epaper_gdeq031t10_get(), &cfg);
     }
 
@@ -162,8 +187,9 @@ esp_err_t board_builtin_driver_init(const char *id, const char *hal_type,
         cfg.i2c_bus  = (i2c_master_bus_handle_t)hal_bus_get_i2c(i2c_bus_idx);
         cfg.i2c_addr = (uint8_t)json_int(config_json, "i2c_addr", 0x34);
         cfg.pin_int  = (gpio_num_t)json_int(config_json, "pin_int", -1);
-        ESP_LOGI(TAG, "kbd-tca8418: i2c_bus=%p addr=0x%02x int=%d",
-                 (void *)cfg.i2c_bus, cfg.i2c_addr, cfg.pin_int);
+        cfg.pin_backlight = (gpio_num_t)json_int(config_json, "pin_backlight", -1);
+        ESP_LOGI(TAG, "kbd-tca8418: i2c_bus=%p addr=0x%02x int=%d backlight=%d",
+                 (void *)cfg.i2c_bus, cfg.i2c_addr, cfg.pin_int, cfg.pin_backlight);
         return hal_input_register(drv_kbd_tca8418_get(), &cfg);
     }
 
@@ -180,6 +206,26 @@ esp_err_t board_builtin_driver_init(const char *id, const char *hal_type,
         ESP_LOGI(TAG, "touch-cst328: i2c_bus=%p addr=0x%02x int=%d rst=%d",
                  (void *)cfg.i2c_bus, cfg.i2c_addr, cfg.pin_int, cfg.pin_rst);
         return hal_input_register(drv_touch_cst328_get(), &cfg);
+    }
+
+    // ── SD card ──────────────────────────────────────────────────────────────
+    // Without this a board that boots from a board profile never registers
+    // storage at all: the compiled-in board initialisers are the only other
+    // place the SD card is registered, and they do not run once a profile
+    // exists.
+    if (strcmp(id, "com.thistle.drv.sdcard") == 0) {
+        static sdcard_config_t cfg;
+        static char mount_point[32];
+        int spi_bus_idx  = json_int(config_json, "spi_bus", 0);
+        cfg.spi_host     = (spi_host_device_t)(intptr_t)hal_bus_get_spi(spi_bus_idx);
+        cfg.pin_cs       = (gpio_num_t)json_int(config_json, "pin_cs", -1);
+        cfg.max_files    = json_int(config_json, "max_files", 5);
+        cfg.mount_point  = json_str(config_json, "mount_point", mount_point, sizeof(mount_point))
+                               ? mount_point
+                               : "/sdcard";
+        ESP_LOGI(TAG, "sdcard: host=%d cs=%d mount=%s",
+                 cfg.spi_host, cfg.pin_cs, cfg.mount_point);
+        return hal_storage_register(drv_sdcard_get(), &cfg);
     }
 
     ESP_LOGW(TAG, "no builtin for driver id=%s — skipping", id);

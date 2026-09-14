@@ -24,6 +24,7 @@ static const epaper_gdeq031t10_config_t epaper_config = {
     .pin_dc      = BOARD_EPAPER_DC,
     .pin_rst     = BOARD_EPAPER_RST,
     .pin_busy    = BOARD_EPAPER_BUSY,
+    .pin_bl      = GPIO_NUM_NC,     /* the Pro's panel has no front-light */
     .spi_clock_hz = 2000000,
 };
 
@@ -123,6 +124,9 @@ esp_err_t board_init(void) {
         .i2c_bus  = i2c_bus,
         .i2c_addr = BOARD_KBD_ADDR,
         .pin_int  = BOARD_KBD_INT,
+        /* The Pro wires a key backlight on BOARD_KBD_LED, but has never driven
+         * it. Left unclaimed here so this stays a T-Deck Max change. */
+        .pin_backlight = GPIO_NUM_NC,
     };
 
     touch_config = (touch_cst328_config_t){

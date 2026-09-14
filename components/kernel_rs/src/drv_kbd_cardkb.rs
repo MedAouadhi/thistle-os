@@ -498,6 +498,7 @@ static KEYBOARD_DRIVER: HalInputDriver = HalInputDriver {
     poll: Some(cardkb_poll),
     name: b"CardKB\0".as_ptr() as *const c_char,
     is_touch: false,
+    set_backlight: None,
 };
 
 /// Return the CardKB driver vtable.

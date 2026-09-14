@@ -119,6 +119,9 @@ pub struct HalInputDriver {
     pub poll: Option<unsafe extern "C" fn() -> i32>,
     pub name: *const c_char,
     pub is_touch: bool,
+    /// Set the key backlight, 0-100 percent. `None` on a device whose keys are
+    /// not lit. Mirrors `set_brightness` on the display.
+    pub set_backlight: Option<unsafe extern "C" fn(percent: u8) -> i32>,
 }
 
 unsafe impl Send for HalInputDriver {}
@@ -1517,6 +1520,7 @@ mod tests {
             poll: None,
             name: b"kbd\0".as_ptr() as *const c_char,
             is_touch: false,
+            set_backlight: None,
         };
         let drv1 = HalInputDriver {
             init: None,
@@ -1525,6 +1529,7 @@ mod tests {
             poll: None,
             name: b"touch\0".as_ptr() as *const c_char,
             is_touch: true,
+            set_backlight: None,
         };
 
         assert_eq!(

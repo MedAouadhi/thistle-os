@@ -30,4 +30,8 @@ typedef struct {
     esp_err_t (*poll)(void);
     const char *name;
     bool is_touch;
+    /* Set the key backlight, 0-100 percent. NULL on a device whose keys are
+     * not lit, and ESP_ERR_NOT_SUPPORTED on one where the board left the
+     * backlight pin unwired. Mirrors set_brightness on the display. */
+    esp_err_t (*set_backlight)(uint8_t percent);
 } hal_input_driver_t;

@@ -37,18 +37,26 @@ typedef struct {
     bool        has_radio;
     bool        has_gps;
     bool        is_epaper;
+    /* An XL9555 on the I²C bus, carrying the peripheral rails and the
+     * keyboard and touch resets. Only the T-Deck Max has one. */
+    bool        has_io_expander;
+    /* The T-Deck Max carries neither part. Leaving them off here keeps the
+     * simulator honest about what an app can detect on that board. */
+    bool        has_rtc;
+    bool        has_light_sensor;
 } sim_device_t;
 
 static const sim_device_t DEVICES[] = {
-    { "tdeck-pro",  "T-Deck Pro (Simulator)",     240, 320, true,  true,  true,  true,  true  },
-    { "tdeck",      "T-Deck (Simulator)",          320, 240, true,  true,  true,  true,  false },
-    { "tdeck-plus", "T-Deck Plus (Simulator)",     320, 240, true,  true,  true,  true,  false },
-    { "tdisplay",   "T-Display-S3 (Simulator)",    320, 170, false, true,  false, false, false },
-    { "heltec-v3",  "Heltec V3 (Simulator)",       128, 64,  false, false, true,  false, false },
-    { "cardputer",  "Cardputer (Simulator)",        240, 135, true,  false, false, false, false },
-    { "t3-s3",      "T3-S3 (Simulator)",            128, 64,  false, false, true,  false, false },
-    { "rak3312",    "RAK3312 (Simulator)",           128, 64,  false, false, true,  false, false },
-    { NULL, NULL, 0, 0, false, false, false, false, false },
+    { "tdeck-pro",  "T-Deck Pro (Simulator)",     240, 320, true,  true,  true,  true,  true,  false, true,  true  },
+    { "tdeck",      "T-Deck (Simulator)",          320, 240, true,  true,  true,  true,  false, false, true,  true  },
+    { "tdeck-plus", "T-Deck Plus (Simulator)",     320, 240, true,  true,  true,  true,  false, false, true,  true  },
+    { "tdeck-max",  "T-Deck Pro Max (Simulator)",  240, 320, true,  true,  true,  true,  true,  true,  false, false },
+    { "tdisplay",   "T-Display-S3 (Simulator)",    320, 170, false, true,  false, false, false, false, true,  true  },
+    { "heltec-v3",  "Heltec V3 (Simulator)",       128, 64,  false, false, true,  false, false, false, true,  true  },
+    { "cardputer",  "Cardputer (Simulator)",        240, 135, true,  false, false, false, false, false, true,  true  },
+    { "t3-s3",      "T3-S3 (Simulator)",            128, 64,  false, false, true,  false, false, false, true,  true  },
+    { "rak3312",    "RAK3312 (Simulator)",           128, 64,  false, false, true,  false, false, false, true,  true  },
+    { NULL, NULL, 0, 0, false, false, false, false, false, false, false, false },
 };
 
 static const sim_device_t *find_device(const char *name)
@@ -81,7 +89,9 @@ esp_err_t board_init(void)
 
     /* Register fake HAL drivers so apps never see NULL vtables */
     hal_power_register(sim_power_get(), NULL);
-    hal_rtc_register(sim_rtc_get());
+    /* A board with no RTC part leaves the interface unregistered and falls
+     * back to the system tick, exactly as it does on hardware. */
+    if (dev->has_rtc) hal_rtc_register(sim_rtc_get());
     hal_imu_register(sim_imu_get(), NULL);
     hal_audio_register(sim_audio_get(), NULL);
     if (dev->has_radio) hal_radio_register(sim_radio_get(), NULL);
@@ -94,11 +104,12 @@ esp_err_t board_init(void)
     hal_bus_register_spi(2, sim_spi_bus_get(0));
 
     /* Register I2C device models based on device capabilities */
-    dev_pcf8563_register(0, 0x51);     /* RTC — all devices */
-    if (dev->has_keyboard) dev_tca8418_register(0, 0x34);
-    if (dev->has_touch)    dev_cst328_register(0, 0x1A);
+    if (dev->has_rtc)          dev_pcf8563_register(0, 0x51);
+    if (dev->has_keyboard)     dev_tca8418_register(0, 0x34);
+    if (dev->has_touch)        dev_cst328_register(0, 0x1A);
+    if (dev->has_io_expander)  dev_xl9555_register(0, 0x20);
     dev_qmi8658c_register(0, 0x6A);    /* IMU — all devices with accel */
-    dev_ltr553_register(0, 0x23);      /* Light sensor */
+    if (dev->has_light_sensor) dev_ltr553_register(0, 0x23);
 
     /* Apply scenario state to fake drivers */
     {

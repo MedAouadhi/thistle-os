@@ -24,6 +24,7 @@ use crate::hal_registry::{
 const ESP_OK: i32 = 0;
 const ESP_ERR_INVALID_ARG: i32 = 0x102;
 const ESP_ERR_INVALID_STATE: i32 = 0x103;
+const ESP_ERR_NOT_SUPPORTED: i32 = 0x106;
 
 // ── TCA8418 register map ─────────────────────────────────────────────────────
 
@@ -49,6 +50,110 @@ const KEY_EVENT_KEY_MSK: u8 = 0x7F;
 // GPIO_NUM_NC sentinel (matches ESP-IDF GPIO_NUM_NC = -1)
 const GPIO_NUM_NC: i32 = -1;
 
+// ── Key backlight (LEDC PWM) ─────────────────────────────────────────────────
+//
+// Timer and channel 1, leaving 0 to the display driver: on a board with both a
+// front-light and lit keys the two share the LEDC peripheral, and a second
+// driver claiming channel 0 would take the display's light with it.
+
+const BL_LEDC_MODE: i32 = 1; // LEDC_LOW_SPEED_MODE
+const BL_LEDC_TIMER: i32 = 1; // LEDC_TIMER_1
+const BL_LEDC_CHANNEL: i32 = 1; // LEDC_CHANNEL_1
+const BL_LEDC_FREQ_HZ: u32 = 5000;
+const BL_LEDC_DUTY_RES: u32 = 8; // LEDC_TIMER_8_BIT
+const BL_LEDC_MAX_DUTY: u32 = 255;
+
+#[cfg(target_os = "espidf")]
+mod ledc_ffi {
+    /// `ledc_timer_config_t` layout (matches ESP-IDF).
+    #[repr(C)]
+    pub struct LedcTimerConfig {
+        pub speed_mode: i32,
+        pub timer_num: i32,
+        pub duty_resolution: u32,
+        pub freq_hz: u32,
+        pub clk_cfg: u32, // LEDC_AUTO_CLK = 0
+    }
+
+    /// `ledc_channel_config_t` layout (matches ESP-IDF).
+    #[repr(C)]
+    pub struct LedcChannelConfig {
+        pub gpio_num: i32,
+        pub speed_mode: i32,
+        pub channel: i32,
+        pub intr_type: u32, // LEDC_INTR_DISABLE = 0
+        pub timer_sel: i32,
+        pub duty: u32,
+        pub hpoint: i32,
+        pub flags: u32,
+    }
+
+    extern "C" {
+        pub fn ledc_timer_config(cfg: *const LedcTimerConfig) -> i32;
+        pub fn ledc_channel_config(cfg: *const LedcChannelConfig) -> i32;
+        pub fn ledc_set_duty(mode: i32, channel: i32, duty: u32) -> i32;
+        pub fn ledc_update_duty(mode: i32, channel: i32) -> i32;
+    }
+}
+
+/// Claim the LEDC timer and channel driving the key backlight.
+/// A board that leaves the line unwired has nothing to claim.
+unsafe fn backlight_init(pin: i32) -> i32 {
+    if pin == GPIO_NUM_NC {
+        return ESP_OK;
+    }
+
+    #[cfg(target_os = "espidf")]
+    {
+        let timer_cfg = ledc_ffi::LedcTimerConfig {
+            speed_mode: BL_LEDC_MODE,
+            timer_num: BL_LEDC_TIMER,
+            duty_resolution: BL_LEDC_DUTY_RES,
+            freq_hz: BL_LEDC_FREQ_HZ,
+            clk_cfg: 0, // LEDC_AUTO_CLK
+        };
+        let ret = ledc_ffi::ledc_timer_config(&timer_cfg);
+        if ret != ESP_OK {
+            return ret;
+        }
+
+        let ch_cfg = ledc_ffi::LedcChannelConfig {
+            gpio_num: pin,
+            speed_mode: BL_LEDC_MODE,
+            channel: BL_LEDC_CHANNEL,
+            intr_type: 0, // LEDC_INTR_DISABLE
+            timer_sel: BL_LEDC_TIMER,
+            duty: 0,
+            hpoint: 0,
+            flags: 0,
+        };
+        let ret = ledc_ffi::ledc_channel_config(&ch_cfg);
+        if ret != ESP_OK {
+            return ret;
+        }
+    }
+
+    ESP_OK
+}
+
+/// Drive the key backlight at `percent` of full.
+unsafe fn backlight_set_duty(percent: u8) -> i32 {
+    #[cfg(target_os = "espidf")]
+    {
+        let duty = (percent as u32) * BL_LEDC_MAX_DUTY / 100;
+        let ret = ledc_ffi::ledc_set_duty(BL_LEDC_MODE, BL_LEDC_CHANNEL, duty);
+        if ret != ESP_OK {
+            return ret;
+        }
+        return ledc_ffi::ledc_update_duty(BL_LEDC_MODE, BL_LEDC_CHANNEL);
+    }
+    #[cfg(not(target_os = "espidf"))]
+    {
+        let _ = percent;
+        ESP_OK
+    }
+}
+
 // ── Keymap ───────────────────────────────────────────────────────────────────
 //
 // TCA8418 encodes key position as: key_code = row*10 + col + 1  (1-based).
@@ -57,20 +162,29 @@ const GPIO_NUM_NC: i32 = -1;
 // `col = 9 - col_raw` before this lookup. With that mirror in place, KEY_MAP
 // can be written in physical (left-to-right) layout order.
 //
-// Row 2 layout has been updated to match the actual T-Deck Pro keyboard:
-//   physical: Alt Z X C V B N M . Enter   (Alt at col 0 sends 0/unmapped)
-// The previous "z x c v b n m , . \n" layout was wrong (no Alt slot, an
-// extra ',' that doesn't exist on this hardware).
+// Rows 0-3 are the 4×10 matrix the T-Deck Pro and Max share: three full rows
+// of ten, then five keys on the bottom row. Every one of those 35 positions
+// carries a code, including the two that carry no character — Alt and the
+// microphone key — because a key that decodes to nothing is a key the user
+// sees as broken.
+
+/// Keys that carry no character of their own. The window manager receives
+/// these codes verbatim, so they sit below printable ASCII where they cannot
+/// be mistaken for text.
+const KEY_ALT: u16 = 0x01;
+const KEY_SYM: u16 = 0x02;
+const KEY_SHIFT: u16 = 0x03;
+const KEY_MIC: u16 = 0x04;
 
 #[rustfmt::skip]
 static KEY_MAP: [[u16; 10]; 8] = [
     // C0     C1     C2     C3     C4     C5     C6     C7     C8     C9
     [  b'q' as u16, b'w' as u16, b'e' as u16, b'r' as u16, b't' as u16, b'y' as u16, b'u' as u16, b'i' as u16, b'o' as u16, b'p' as u16  ],
     [  b'a' as u16, b's' as u16, b'd' as u16, b'f' as u16, b'g' as u16, b'h' as u16, b'j' as u16, b'k' as u16, b'l' as u16, 0x08u16      ],  // 0x08 = backspace
-    [  0,           b'z' as u16, b'x' as u16, b'c' as u16, b'v' as u16, b'b' as u16, b'n' as u16, b'm' as u16, b'.' as u16, b'\n' as u16 ],  // Alt Z X C V B N M . Enter
+    [  KEY_ALT,     b'z' as u16, b'x' as u16, b'c' as u16, b'v' as u16, b'b' as u16, b'n' as u16, b'm' as u16, b'.' as u16, b'\n' as u16 ],  // Alt Z X C V B N M . Enter
     // Row 3: only 5 physical keys at TCA cols 0..4 (after mirror, c 5..9):
-    //   c=5 shift(L)  c=6 mic(unmapped)  c=7 space  c=8 sym  c=9 shift(R)
-    [  0,           0,           0,           0,           0,           0x03u16,     0,           b' ' as u16, 0x02u16,     0x03u16     ],
+    //   c=5 shift(L)  c=6 mic  c=7 space  c=8 sym  c=9 shift(R)
+    [  0,           0,           0,           0,           0,           KEY_SHIFT,   KEY_MIC,     b' ' as u16, KEY_SYM,     KEY_SHIFT   ],
     [  b'7' as u16, b'8' as u16, b'9' as u16, b'0' as u16, b'-' as u16, b'=' as u16, b'[' as u16, b']' as u16, b'\\' as u16, b'\'' as u16 ],
     [  b';' as u16, b'/' as u16, b'`' as u16, 0x1Bu16,     0,          0,           0,           0,           0,           0            ],  // 0x1B = Esc
     [  0,           0,           0,           0,           0,           0,           0,           0,           0,           0            ],
@@ -88,6 +202,9 @@ pub struct KbdTca8418Config {
     pub i2c_addr: u8,
     /// Interrupt GPIO pin, active-low.  Use -1 (GPIO_NUM_NC) to disable.
     pub pin_int: i32,
+    /// Key backlight PWM pin.  Use -1 (GPIO_NUM_NC) on a board that leaves
+    /// the keyboard's LED line unwired.
+    pub pin_backlight: i32,
 }
 
 // SAFETY: Config holds opaque C pointers; we never share them across threads
@@ -296,6 +413,8 @@ struct KbdState {
     cb_data: *mut c_void,
     irq_pending: AtomicBool,
     initialized: bool,
+    /// Last non-zero backlight percent, to come back to after going dark.
+    backlight: u8,
 }
 
 // SAFETY: The driver state is accessed only from the HAL init/poll/deinit
@@ -312,11 +431,13 @@ impl KbdState {
                 i2c_bus: std::ptr::null_mut(),
                 i2c_addr: 0x34,
                 pin_int: GPIO_NUM_NC,
+                pin_backlight: GPIO_NUM_NC,
             },
             cb: None,
             cb_data: std::ptr::null_mut(),
             irq_pending: AtomicBool::new(false),
             initialized: false,
+            backlight: 0,
         }
     }
 }
@@ -382,6 +503,7 @@ unsafe extern "C" fn tca8418_init(config: *const c_void) -> i32 {
     kbd.cfg.i2c_bus = src.i2c_bus;
     kbd.cfg.i2c_addr = src.i2c_addr;
     kbd.cfg.pin_int = src.pin_int;
+    kbd.cfg.pin_backlight = src.pin_backlight;
     kbd.irq_pending.store(false, Ordering::Relaxed);
 
     // Add the I2C device at 400 kHz
@@ -466,8 +588,36 @@ unsafe extern "C" fn tca8418_init(config: *const c_void) -> i32 {
         kbd.irq_pending.store(true, Ordering::Release);
     }
 
+    // The keys start dark: lighting them is something the user asks for, not
+    // something boot spends battery on.
+    let ret = backlight_init(kbd.cfg.pin_backlight);
+    if ret != ESP_OK {
+        return ret;
+    }
+    kbd.backlight = 0;
+
     kbd.initialized = true;
     ESP_OK
+}
+
+/// Set the key backlight, 0-100 percent.
+unsafe extern "C" fn tca8418_set_backlight(percent: u8) -> i32 {
+    let kbd = &mut *(&raw mut S_KBD);
+    if !kbd.initialized {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if kbd.cfg.pin_backlight == GPIO_NUM_NC {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+
+    let clamped = if percent > 100 { 100 } else { percent };
+    let ret = backlight_set_duty(clamped);
+    // Zero is the keys going dark, not a new brightness — it is the level
+    // before it that they come back to.
+    if ret == ESP_OK && clamped > 0 {
+        kbd.backlight = clamped;
+    }
+    ret
 }
 
 /// De-initialise the TCA8418 driver.
@@ -615,6 +765,7 @@ static KEYBOARD_DRIVER: HalInputDriver = HalInputDriver {
     poll: Some(tca8418_poll),
     name: b"TCA8418\0".as_ptr() as *const c_char,
     is_touch: false,
+    set_backlight: Some(tca8418_set_backlight),
 };
 
 /// Return the TCA8418 driver vtable.
@@ -682,6 +833,7 @@ mod tests {
                 i2c_bus: 1usize as *mut c_void, // non-null sentinel
                 i2c_addr: 0x34,
                 pin_int: GPIO_NUM_NC,
+                pin_backlight: GPIO_NUM_NC,
             };
             let ret = tca8418_init(&cfg as *const KbdTca8418Config as *const c_void);
             assert_eq!(ret, ESP_OK);
@@ -700,6 +852,7 @@ mod tests {
                 i2c_bus: 1usize as *mut c_void,
                 i2c_addr: 0x34,
                 pin_int: GPIO_NUM_NC,
+                pin_backlight: GPIO_NUM_NC,
             };
             let p = &cfg as *const KbdTca8418Config as *const c_void;
             assert_eq!(tca8418_init(p), ESP_OK);
@@ -715,6 +868,7 @@ mod tests {
                 i2c_bus: 1usize as *mut c_void,
                 i2c_addr: 0x34,
                 pin_int: GPIO_NUM_NC,
+                pin_backlight: GPIO_NUM_NC,
             };
             tca8418_init(&cfg as *const KbdTca8418Config as *const c_void);
 
@@ -737,6 +891,7 @@ mod tests {
                 i2c_bus: 1usize as *mut c_void,
                 i2c_addr: 0x34,
                 pin_int: GPIO_NUM_NC, // polling mode — always check
+                pin_backlight: GPIO_NUM_NC,
             };
             tca8418_init(&cfg as *const KbdTca8418Config as *const c_void);
             // Stub returns 0 for INT_STAT (no K_INT set), so poll is a no-op.
@@ -760,6 +915,99 @@ mod tests {
         assert_eq!(KEY_MAP[3][8], 0x02); // Sym
         assert_eq!(KEY_MAP[3][9], 0x03); // right shift
         assert_eq!(KEY_MAP[5][3], 0x1B); // Esc
+    }
+
+    /// A keyboard brought up with the given backlight pin.
+    unsafe fn init_with_backlight(pin_backlight: i32) {
+        reset_state();
+        let cfg = KbdTca8418Config {
+            i2c_bus: 1usize as *mut c_void, // non-null sentinel
+            i2c_addr: 0x34,
+            pin_int: GPIO_NUM_NC,
+            pin_backlight,
+        };
+        assert_eq!(
+            tca8418_init(&cfg as *const KbdTca8418Config as *const c_void),
+            ESP_OK
+        );
+    }
+
+    #[test]
+    fn the_key_backlight_cannot_be_set_before_the_keyboard_is_up() {
+        unsafe {
+            reset_state();
+            assert_eq!(tca8418_set_backlight(50), ESP_ERR_INVALID_STATE);
+        }
+    }
+
+    #[test]
+    fn a_keyboard_whose_backlight_is_not_wired_says_so() {
+        unsafe {
+            init_with_backlight(GPIO_NUM_NC);
+            // Reporting success here would leave a caller believing it had lit
+            // keys that stayed dark.
+            assert_eq!(tca8418_set_backlight(50), ESP_ERR_NOT_SUPPORTED);
+        }
+    }
+
+    #[test]
+    fn the_key_backlight_remembers_the_level_it_was_last_lit_at() {
+        unsafe {
+            init_with_backlight(42);
+            assert_eq!(tca8418_set_backlight(75), ESP_OK);
+            assert_eq!((*(&raw const S_KBD)).backlight, 75);
+
+            // Going dark is not a new brightness — it is the level to come
+            // back to when the keys are lit again.
+            assert_eq!(tca8418_set_backlight(0), ESP_OK);
+            assert_eq!((*(&raw const S_KBD)).backlight, 75);
+        }
+    }
+
+    #[test]
+    fn the_key_backlight_clamps_a_level_past_full() {
+        unsafe {
+            init_with_backlight(42);
+            assert_eq!(tca8418_set_backlight(200), ESP_OK);
+            assert_eq!((*(&raw const S_KBD)).backlight, 100);
+        }
+    }
+
+    #[test]
+    fn the_keyboard_offers_a_backlight_through_its_vtable() {
+        // Without this the level is unreachable: the registry is how anything
+        // outside the driver gets at it.
+        assert!(KEYBOARD_DRIVER.set_backlight.is_some());
+    }
+
+    #[test]
+    fn all_thirty_five_keys_of_the_matrix_register() {
+        // The 4x10 matrix carries 35 keys: three full rows of ten, then five
+        // on the bottom row. A zero at a position that carries a physical key
+        // is a key that registers nothing at all — dead, with nothing saying so.
+        let live = KEY_MAP[..4]
+            .iter()
+            .flat_map(|row| row.iter())
+            .filter(|code| **code != 0)
+            .count();
+        assert_eq!(live, 35);
+    }
+
+    #[test]
+    fn the_modifier_keys_decode_to_codes_of_their_own() {
+        // Alt and the microphone key carry no character, but they are keys the
+        // user can press, so they have to reach the window manager — and they
+        // must not reach it as each other.
+        assert_eq!(KEY_MAP[2][0], KEY_ALT);
+        assert_eq!(KEY_MAP[3][6], KEY_MIC);
+
+        let modifiers = [KEY_ALT, KEY_SYM, KEY_SHIFT, KEY_MIC];
+        for (i, code) in modifiers.iter().enumerate() {
+            assert!(
+                !modifiers[i + 1..].contains(code),
+                "two modifiers share code {code:#04x}"
+            );
+        }
     }
 
     #[test]

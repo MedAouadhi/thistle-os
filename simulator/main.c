@@ -138,8 +138,8 @@ int main(int argc, char **argv)
             printf("  --tap X,Y           Inject one native-coordinate tap after startup\n");
             printf("  --launch-app ID     Launch a registered app instead of the launcher\n");
             printf("  -h, --help          Show this help\n");
-            printf("Devices: tdeck-pro, tdeck, tdeck-plus, tdisplay, heltec-v3,\n");
-            printf("         cardputer, t3-s3, rak3312\n");
+            printf("Devices: tdeck-pro, tdeck, tdeck-plus, tdeck-max, tdisplay,\n");
+            printf("         heltec-v3, cardputer, t3-s3, rak3312\n");
             return 0;
         }
     }

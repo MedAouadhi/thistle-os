@@ -78,6 +78,8 @@ esp_err_t board_init(void) {
         .i2c_bus  = i2c_bus,
         .i2c_addr = BOARD_KBD_ADDR,
         .pin_int  = BOARD_KBD_INT,
+        /* The T-Deck's keys are lit by its own keyboard MCU, not by us. */
+        .pin_backlight = GPIO_NUM_NC,
     };
 
     touch_config = (touch_cst328_config_t){

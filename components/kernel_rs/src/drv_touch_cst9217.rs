@@ -405,6 +405,7 @@ static CST9217_DRIVER: HalInputDriver = HalInputDriver {
     poll: Some(cst9217_poll),
     name: b"CST9217 Touch\0".as_ptr() as *const c_char,
     is_touch: true,
+    set_backlight: None,
 };
 
 #[no_mangle]

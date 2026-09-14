@@ -51,7 +51,7 @@ if [ ! -x "$SIM" ]; then
 fi
 
 echo "[Boot Tests — All Devices]"
-for device in tdeck-pro tdeck tdeck-plus tdisplay heltec-v3 cardputer t3-s3 rak3312; do
+for device in tdeck-pro tdeck tdeck-plus tdeck-max tdisplay heltec-v3 cardputer t3-s3 rak3312; do
     run_test "boot/$device" "$device" "$TESTS_DIR/boot_assertions.txt"
 done
 
