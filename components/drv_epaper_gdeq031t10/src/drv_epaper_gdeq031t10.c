@@ -194,20 +194,38 @@ static void epaper_hw_reset(void)
 
 /* ── UC8253 init sequence (matches GxEPD2 _InitDisplay) ────────────── */
 
+/* PSR (R00H) first data byte. Bit 3 is UD, the gate scan direction, and bit 2
+ * is SHL, the source shift direction; both default to 1 (scan up, shift
+ * right). Clearing the pair reverses both axes, which is a 180-degree turn of
+ * the image done by the panel rather than by the CPU. See UC8253 datasheet,
+ * PANEL SETTING (PSR). Bit 4 selects KW (black/white) mode; bit 0 is RST_N,
+ * held low for the soft reset this sequence opens with. */
+#define PSR_BASE           0x1E   /* KW mode, booster on, RST_N low  */
+#define PSR_RUN            0x01   /* release the soft reset          */
+#define PSR_UD_SCAN_UP     0x08
+#define PSR_SHL_SHIFT_RIGHT 0x04
+
+static uint8_t epaper_psr_orientation(void)
+{
+    /* 180 turns the panel around; anything else is the panel's own way up. */
+    if (s_epd.cfg.rotation == 180) return 0;
+    return PSR_UD_SCAN_UP | PSR_SHL_SHIFT_RIGHT;
+}
+
 static esp_err_t epaper_init_display(void)
 {
     esp_err_t ret;
 
     /* Soft reset via PSR (used because RST is not wired on T-Deck Pro) */
     ret  = epaper_send_cmd(CMD_PSR);
-    ret |= epaper_send_data_byte(0x1E);   /* soft reset */
+    ret |= epaper_send_data_byte(PSR_BASE | epaper_psr_orientation());
     ret |= epaper_send_data_byte(0x0D);
     if (ret != ESP_OK) return ret;
     vTaskDelay(pdMS_TO_TICKS(2));
 
     /* Panel setting: BWOTP / KW mode */
     ret  = epaper_send_cmd(CMD_PSR);
-    ret |= epaper_send_data_byte(0x1F);
+    ret |= epaper_send_data_byte(PSR_BASE | PSR_RUN | epaper_psr_orientation());
     ret |= epaper_send_data_byte(0x0D);
     if (ret != ESP_OK) return ret;
 

@@ -49,7 +49,8 @@
                 "rst": 9,
                 "busy": 37,
                 "bl": 41,
-                "spi_clock_hz": 2000000
+                "spi_clock_hz": 2000000,
+                "rotation": 180
             }
         },
         {

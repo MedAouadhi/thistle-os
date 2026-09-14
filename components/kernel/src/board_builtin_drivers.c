@@ -175,9 +175,10 @@ esp_err_t board_builtin_driver_init(const char *id, const char *hal_type,
         cfg.pin_busy    = (gpio_num_t)json_int(config_json, "busy",         -1);
         cfg.pin_bl      = (gpio_num_t)json_int(config_json, "bl",           -1);
         cfg.spi_clock_hz =            json_int(config_json, "spi_clock_hz", 2000000);
-        ESP_LOGI(TAG, "epaper: host=%d cs=%d dc=%d rst=%d busy=%d bl=%d clk=%d",
+        cfg.rotation     =            json_int(config_json, "rotation",     0);
+        ESP_LOGI(TAG, "epaper: host=%d cs=%d dc=%d rst=%d busy=%d bl=%d clk=%d rot=%d",
                  cfg.spi_host, cfg.pin_cs, cfg.pin_dc, cfg.pin_rst,
-                 cfg.pin_busy, cfg.pin_bl, cfg.spi_clock_hz);
+                 cfg.pin_busy, cfg.pin_bl, cfg.spi_clock_hz, cfg.rotation);
         return hal_display_register(drv_epaper_gdeq031t10_get(), &cfg);
     }
 

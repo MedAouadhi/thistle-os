@@ -20,6 +20,11 @@ typedef struct {
      * the T-Deck Pro has no front-light, the T-Deck Max does. */
     gpio_num_t        pin_bl;
     int               spi_clock_hz;
+    /* How the panel is mounted, in degrees: 0 or 180. Boards carrying the same
+     * panel do not orient it the same way — the T-Deck Max mounts it turned
+     * around from the T-Deck Pro — and the controller can scan either way, so
+     * this costs nothing at run time. Anything but 180 is treated as 0. */
+    int               rotation;
 } epaper_gdeq031t10_config_t;
 
 /* Return the driver vtable instance. */

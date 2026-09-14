@@ -1753,6 +1753,19 @@ mod tests {
     }
 
     #[test]
+    fn the_tdeck_max_mounts_its_panel_the_other_way_up_from_the_pro() {
+        let mut rec = Recorder::default();
+        run_boot_sequence(TDECK_MAX_PROFILE, &mut rec);
+
+        let config = rec
+            .loaded_config("com.thistle.drv.epaper-gdeq031t10")
+            .expect("the Max declares the e-paper display");
+        // Same panel as the Pro, turned around. The controller scans either
+        // way, so this is a panel setting rather than work for the CPU.
+        assert_eq!(json_get_int(config, "rotation"), Some(180), "{config}");
+    }
+
+    #[test]
     fn the_tdeck_max_leaves_the_touch_reset_to_the_expander_phase() {
         let mut rec = Recorder::default();
         run_boot_sequence(TDECK_MAX_PROFILE, &mut rec);
