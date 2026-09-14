@@ -199,11 +199,16 @@ static void epaper_hw_reset(void)
  * right). Clearing the pair reverses both axes, which is a 180-degree turn of
  * the image done by the panel rather than by the CPU. See UC8253 datasheet,
  * PANEL SETTING (PSR). Bit 4 selects KW (black/white) mode; bit 0 is RST_N,
- * held low for the soft reset this sequence opens with. */
-#define PSR_BASE           0x1E   /* KW mode, booster on, RST_N low  */
-#define PSR_RUN            0x01   /* release the soft reset          */
-#define PSR_UD_SCAN_UP     0x08
+ * held low for the soft reset this sequence opens with.
+ *
+ * The base deliberately carries no orientation bits — the orientation is OR'd
+ * in, and OR cannot clear what the base already set. */
+#define PSR_BASE            0x12  /* KW mode + booster on, RST_N low   */
+#define PSR_RUN             0x01  /* release the soft reset            */
+#define PSR_UD_SCAN_UP      0x08
 #define PSR_SHL_SHIFT_RIGHT 0x04
+/* So the bytes sent are, for rotation 0: 0x1E then 0x1F — what this driver
+ * always sent — and for 180: 0x12 then 0x13. */
 
 static uint8_t epaper_psr_orientation(void)
 {
