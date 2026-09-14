@@ -353,6 +353,49 @@ void app_main(void)
                  esp_err_to_name(ret));
     }
 
+    /* Report the battery once the system is up, through whatever power driver
+     * this board registered. It belongs here rather than in a driver's init:
+     * bring-up logging happens in a burst the console drops lines from, and
+     * this milestone is the first quiet moment after it. A board with no power
+     * interface simply says nothing. */
+    const hal_registry_t *registry = hal_get_registry();
+    if (registry && registry->power && registry->power->get_info) {
+        hal_power_info_t battery;
+        esp_err_t battery_ret = registry->power->get_info(&battery);
+        if (battery_ret == ESP_OK) {
+            static const char *const STATE_NAMES[] = {
+                "discharging", "charging", "charged", "no battery",
+            };
+            const char *state =
+                battery.state < (sizeof(STATE_NAMES) / sizeof(STATE_NAMES[0]))
+                    ? STATE_NAMES[battery.state]
+                    : "unknown";
+            ESP_LOGI(TAG, "Battery: %u mV, %u%%, %s (%s)",
+                     battery.voltage_mv, battery.percent, state,
+                     registry->power->name ? registry->power->name : "unnamed");
+        } else if (battery_ret == ESP_ERR_INVALID_STATE && registry->power->init) {
+            /* The driver is registered but not up. Its one chance to initialise
+             * was inside the boot burst, when peripheral rails behind an IO
+             * expander may still have been settling. Give it one more, now that
+             * the board is quiet, and say what happened either way — this is
+             * the only report a board with no console attached ever gives. */
+            esp_err_t retry = registry->power->init(registry->power_config);
+            if (retry == ESP_OK && registry->power->get_info(&battery) == ESP_OK) {
+                ESP_LOGI(TAG, "Battery: %u mV, %u%% (%s, up on retry)",
+                         battery.voltage_mv, battery.percent,
+                         registry->power->name ? registry->power->name : "unnamed");
+            } else {
+                ESP_LOGW(TAG, "Battery: %s did not come up: %s",
+                         registry->power->name ? registry->power->name : "unnamed",
+                         esp_err_to_name(retry));
+            }
+        } else {
+            ESP_LOGW(TAG, "Battery: %s could not be read: %s",
+                     registry->power->name ? registry->power->name : "unnamed",
+                     esp_err_to_name(battery_ret));
+        }
+    }
+
     ESP_LOGI(TAG, "ThistleOS ready");
 
     /* Enter the kernel main loop — does not return */
