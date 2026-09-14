@@ -10,7 +10,7 @@
 
 use std::ops::{Deref, DerefMut};
 use std::os::raw::{c_char, c_void};
-use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 // ── ESP error codes ──────────────────────────────────────────────────
@@ -925,6 +925,51 @@ pub extern "C" fn hal_bus_get_i2c(index: i32) -> *mut c_void {
     reg.i2c_bus[index as usize]
 }
 
+// ── What the start sequence did ──────────────────────────────────────────────
+//
+// Driver initialisation happens in a burst during boot, and on a board whose
+// only console is USB-Serial-JTAG that burst is exactly where log lines are
+// dropped. So the sequence also records its last failure, for whoever can ask
+// once the system is quiet.
+
+pub const STAGE_DISPLAY: i32 = 0;
+pub const STAGE_INPUT: i32 = 1;
+
+static STAGE_NAMES: [&[u8]; 2] = [b"display\0", b"input\0"];
+
+static START_FAILED_STAGE: AtomicI32 = AtomicI32::new(-1);
+static START_FAILED_CODE: AtomicI32 = AtomicI32::new(0);
+
+fn record_start_failure(stage: i32, code: i32) {
+    START_FAILED_STAGE.store(stage, Ordering::Relaxed);
+    START_FAILED_CODE.store(code, Ordering::Relaxed);
+}
+
+/// The last driver start failure, or ESP_OK if every driver started.
+///
+/// `stage_out`, when not null, receives a static name for the stage that
+/// failed.
+///
+/// # Safety
+/// `stage_out` must be null or a valid pointer to write one pointer to.
+#[no_mangle]
+pub unsafe extern "C" fn hal_registry_last_start_failure(
+    stage_out: *mut *const c_char,
+) -> i32 {
+    let stage = START_FAILED_STAGE.load(Ordering::Relaxed);
+    if stage < 0 {
+        return ESP_OK;
+    }
+    if !stage_out.is_null() {
+        let name = STAGE_NAMES
+            .get(stage as usize)
+            .copied()
+            .unwrap_or(b"unknown\0");
+        unsafe { *stage_out = name.as_ptr() as *const c_char };
+    }
+    START_FAILED_CODE.load(Ordering::Relaxed)
+}
+
 /// Initialise all registered drivers.
 ///
 /// Display and input initialisation is fatal — a failure stops boot.
@@ -934,28 +979,49 @@ pub extern "C" fn hal_bus_get_i2c(index: i32) -> *mut c_void {
 pub extern "C" fn hal_registry_start_all() -> i32 {
     let reg = registry();
 
-    // Display — fatal
+    // Display — fatal. A board that cannot draw has nothing to report with.
     if !reg.display.is_null() {
         let drv = unsafe { &*reg.display };
         if let Some(init_fn) = drv.init {
             let ret = unsafe { init_fn(reg.display_config) };
             if ret != ESP_OK {
+                let name = unsafe { driver_name(drv.name) };
+                hal_loge!(b"display %s init failed: %d\0", name.as_ptr(), ret);
+                record_start_failure(STAGE_DISPLAY, ret);
                 return ret;
             }
         }
     }
 
-    // Inputs — fatal
+    // Inputs — one failing does not take the others, or the rest of the board,
+    // with it. A board whose touch panel will not start still has a keyboard,
+    // and it still has a battery, an IMU and an SD card — all of which used to
+    // be lost to an early return here, silently, because this stage was fatal
+    // and logged nothing on the way out.
+    let mut inputs_up = 0;
     for i in 0..(reg.input_count as usize) {
         if !reg.inputs[i].is_null() {
             let drv = unsafe { &*reg.inputs[i] };
             if let Some(init_fn) = drv.init {
                 let ret = unsafe { init_fn(reg.input_configs[i]) };
                 if ret != ESP_OK {
-                    return ret;
+                    let name = unsafe { driver_name(drv.name) };
+                    hal_logw!(
+                        b"input %s init failed: %d\0",
+                        name.as_ptr(),
+                        ret
+                    );
+                    record_start_failure(STAGE_INPUT, ret);
+                    continue;
                 }
             }
+            inputs_up += 1;
         }
+    }
+    if reg.input_count > 0 && inputs_up == 0 {
+        // Not fatal — a board can be driven over the network — but it is the
+        // difference between a device someone can use and one they cannot.
+        hal_logw!(b"no input driver started; the device cannot be typed on\0");
     }
 
     // Radio — non-fatal
@@ -1502,6 +1568,79 @@ mod tests {
         let rc = unsafe { hal_power_register(&drv as *const HalPowerDriver, std::ptr::null()) };
         assert_eq!(rc, ESP_OK, "power registration must succeed");
         assert!(!registry().power.is_null(), "power pointer must be stored");
+    }
+
+    // -----------------------------------------------------------------------
+    // A failing input driver must not take the rest of the board with it.
+    // -----------------------------------------------------------------------
+
+    static POWER_STARTED: AtomicI32 = AtomicI32::new(0);
+
+    unsafe extern "C" fn failing_input_init(_config: *const c_void) -> i32 {
+        ESP_ERR_INVALID_ARG
+    }
+
+    unsafe extern "C" fn counting_power_init(_config: *const c_void) -> i32 {
+        POWER_STARTED.fetch_add(1, Ordering::Relaxed);
+        ESP_OK
+    }
+
+    #[test]
+    fn an_input_that_will_not_start_leaves_the_rest_of_the_board_running() {
+        reset_registry();
+        POWER_STARTED.store(0, Ordering::Relaxed);
+        record_start_failure(-1, ESP_OK);
+
+        let bad_input = HalInputDriver {
+            init: Some(failing_input_init),
+            deinit: None,
+            register_callback: None,
+            poll: None,
+            name: b"wedged-touch\0".as_ptr() as *const c_char,
+            is_touch: true,
+            set_backlight: None,
+        };
+        let power = HalPowerDriver {
+            init: Some(counting_power_init),
+            deinit: None,
+            get_info: None,
+            get_battery_mv: None,
+            get_battery_percent: None,
+            is_charging: None,
+            sleep: None,
+            name: b"test-power\0".as_ptr() as *const c_char,
+        };
+
+        unsafe {
+            hal_input_register(&bad_input as *const HalInputDriver, std::ptr::null());
+            hal_power_register(&power as *const HalPowerDriver, std::ptr::null());
+        }
+
+        assert_eq!(hal_registry_start_all(), ESP_OK);
+        assert_eq!(
+            POWER_STARTED.load(Ordering::Relaxed),
+            1,
+            "power must still be started when an input driver fails"
+        );
+
+        // And the failure is not swallowed: it is there to be asked about once
+        // the boot burst, which eats log lines, is over.
+        let mut stage: *const c_char = std::ptr::null();
+        let code = unsafe { hal_registry_last_start_failure(&mut stage) };
+        assert_eq!(code, ESP_ERR_INVALID_ARG);
+        let stage = unsafe { std::ffi::CStr::from_ptr(stage) };
+        assert_eq!(stage.to_str().unwrap(), "input");
+    }
+
+    #[test]
+    fn a_board_where_every_driver_starts_reports_no_failure() {
+        reset_registry();
+        record_start_failure(-1, ESP_OK);
+
+        assert_eq!(hal_registry_start_all(), ESP_OK);
+        let mut stage: *const c_char = std::ptr::null();
+        assert_eq!(unsafe { hal_registry_last_start_failure(&mut stage) }, ESP_OK);
+        assert!(stage.is_null(), "nothing failed, so no stage is named");
     }
 
     // -----------------------------------------------------------------------

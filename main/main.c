@@ -353,6 +353,18 @@ void app_main(void)
                  esp_err_to_name(ret));
     }
 
+    /* Say whether every driver started. The start sequence runs inside the
+     * boot burst, where this board's only console drops lines, so a failure
+     * there is otherwise invisible — and a driver that did not start is the
+     * first thing to suspect when a peripheral is dead. */
+    const char *failed_stage = NULL;
+    esp_err_t start_failure = hal_registry_last_start_failure(&failed_stage);
+    if (start_failure != ESP_OK) {
+        ESP_LOGW(TAG, "Driver start: %s failed: %s",
+                 failed_stage ? failed_stage : "unknown",
+                 esp_err_to_name(start_failure));
+    }
+
     /* Report the battery once the system is up, through whatever power driver
      * this board registered. It belongs here rather than in a driver's init:
      * bring-up logging happens in a burst the console drops lines from, and

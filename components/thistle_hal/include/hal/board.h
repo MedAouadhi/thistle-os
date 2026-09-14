@@ -63,6 +63,13 @@ esp_err_t hal_crypto_register(const hal_crypto_driver_t *driver);
 esp_err_t hal_rtc_register(const hal_rtc_driver_t *driver);
 esp_err_t hal_set_board_name(const char *name);
 
+/* The last driver start failure, or ESP_OK if every registered driver started.
+ * `stage_out`, when not NULL, receives a static name for the stage that failed
+ * ("display", "input"). Driver initialisation happens during boot, when a
+ * board whose only console is USB-Serial-JTAG drops log lines, so this lets
+ * the failure be reported once the system is quiet. */
+esp_err_t hal_registry_last_start_failure(const char **stage_out);
+
 /* Register a shared SPI bus handle (called by kernel at boot) */
 esp_err_t hal_bus_register_spi(int host_id, void *bus_handle);
 
