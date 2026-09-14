@@ -128,6 +128,7 @@ set(SIM_SRCS
     devices/dev_tca8418.c
     devices/dev_cst328.c
     devices/dev_ltr553.c
+    devices/dev_xl9555.c
     drivers/sim_display.c
     drivers/sim_input.c
     drivers/sim_storage.c
