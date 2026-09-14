@@ -82,6 +82,14 @@ extern void tk_launcher_tick(void);
 static void tk_input_hal_cb(const hal_input_event_t *event, void *user_data)
 {
     (void)user_data;
+    /* Trace the press, not the release or the drag: enough to tell a dead
+     * panel from a live one that the WM ignores, without a line every 50ms
+     * poll while a finger is down. */
+    if (event->type == HAL_INPUT_EVENT_KEY_DOWN) {
+        ESP_LOGI(TAG, "input: key 0x%02x", event->key.keycode);
+    } else if (event->type == HAL_INPUT_EVENT_TOUCH_DOWN) {
+        ESP_LOGI(TAG, "input: touch %u,%u", event->touch.x, event->touch.y);
+    }
     tk_wm_on_input(event);
 }
 
