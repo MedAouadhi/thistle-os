@@ -661,6 +661,10 @@ unsafe extern "C" fn power_init(_config: *const c_void) -> i32 {
     // brought up on a board nobody can step through: which part, where it
     // actually answered, and two independent readings of the same cell — the
     // charger's converter and the gauge's — which should agree.
+    //
+    // It carries its own tag and newline. esp_log_write does not add either,
+    // and an unterminated line is the one the console drops first when the
+    // boot burst overruns it — which is exactly when this line is read.
     let millivolts = battery_millivolts(&power) as i32;
     let percent = battery_percent(&power) as i32;
     let charge_current = charger_status(&power)
@@ -676,7 +680,7 @@ unsafe extern "C" fn power_init(_config: *const c_void) -> i32 {
         .map(gauge_current_ma)
         .unwrap_or(0) as i32;
     power_logi!(
-        b"%s at 0x%02x: %d mV, %d %%, charging at %d mA, gauge %d mV / %d mA\0",
+        b"power: %s at 0x%02x: %d mV, %d %%, charging at %d mA, gauge %d mV / %d mA\n\0",
         charger.variant.name().as_ptr(),
         charger.address as i32,
         millivolts,
