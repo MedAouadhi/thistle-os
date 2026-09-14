@@ -32,17 +32,17 @@ CASES = (
         None,
         240,
         320,
-        "6ac5f8a1336cb356f90fd29634c2f85994e5d4f60a2582ecf16eb64d5c4fad2e",
+        "fedb795da29d8824bcd6fe1fbab1356ed42ef8924760248160951d53fe13c2b3",
         True,
     ),
     Case(
         "eink-apps",
         "tdeck-pro",
         2500,
-        "120,295",
+        "167,294",
         240,
         320,
-        "524fffb0106a76c1570d65d75bb1f620a601d2e0e2d7ef8231ccc9a02c0db6cc",
+        "bb9c21d8d8ddf28b4c911c0d1eb8d38501267995c96eac0a9697b2c62bc1d8a1",
     ),
     Case(
         "lcd-home",
@@ -144,6 +144,41 @@ def run_case(simulator: Path, output_dir: Path, case: Case) -> None:
         )
 
 
+# thistle-tk cannot host an LVGL app: those parent their widgets to
+# ui_manager_get_app_area(), which is NULL unless an LVGL window manager ran
+# ui_manager_init(). main.c therefore registers none of them on an e-paper
+# board, matching main/main.c. Launching one used to segfault, so pin the
+# refusal: a clean non-zero exit rather than a signal.
+LVGL_ONLY_APPS = ("com.thistle.settings", "com.thistle.notes",
+                  "com.thistle.terminal")
+
+
+def assert_lvgl_app_unavailable(simulator: Path, app_id: str) -> None:
+    completed = subprocess.run(
+        [str(simulator), "--headless", "--timeout", "1500",
+         "--device", "tdeck-pro", "--launch-app", app_id],
+        text=True, capture_output=True, check=False,
+    )
+    if completed.returncode < 0:
+        raise AssertionError(
+            f"simulator died on signal {-completed.returncode} launching "
+            f"{app_id} under thistle-tk; it should refuse to launch it"
+        )
+    if completed.returncode == 0:
+        raise AssertionError(
+            f"{app_id} launched under thistle-tk; it is LVGL-only and the "
+            f"device never registers it there"
+        )
+    # Any non-zero exit would otherwise pass — a bad argument, an unknown
+    # device. Pin the refusal itself.
+    expected = f"Failed to launch app {app_id}"
+    if expected not in completed.stderr:
+        raise AssertionError(
+            f"expected {expected!r} on stderr, got: "
+            f"{completed.stderr.strip()[:200]!r}"
+        )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--sim", type=Path, default=Path("build/thistle_sim"))
@@ -168,10 +203,20 @@ def main() -> int:
         else:
             print(f"PASS  {case.name}")
 
+    total = len(CASES) + len(LVGL_ONLY_APPS)
+    for app_id in LVGL_ONLY_APPS:
+        try:
+            assert_lvgl_app_unavailable(simulator, app_id)
+        except AssertionError as exc:
+            failures += 1
+            print(f"FAIL  lvgl-unavailable/{app_id}: {exc}")
+        else:
+            print(f"PASS  lvgl-unavailable/{app_id}")
+
     if failures:
-        print(f"{failures}/{len(CASES)} launcher visual tests failed")
+        print(f"{failures}/{total} launcher visual tests failed")
         return 1
-    print(f"All {len(CASES)} launcher visual tests passed")
+    print(f"All {total} launcher visual tests passed")
     return 0
 
 

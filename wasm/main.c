@@ -159,62 +159,62 @@ int main(void)
         }
     }
 
-    /* Tell the shell which window manager won, so it offers only the apps
-     * that one can host. An LVGL app takes its parent from
-     * ui_manager_get_app_area(), which is NULL unless an LVGL window manager
-     * initialised the UI manager, so launching one under thistle-tk
-     * dereferences NULL and takes the whole page with it. */
-    EM_ASM({ if (typeof window.onWindowManagerChosen === 'function')
-                 window.onWindowManagerChosen($0); }, s_use_tk_wm ? 1 : 0);
-
-    /* Register built-in apps — same order as simulator/main.c */
+    /* Register built-in apps — same order as simulator/main.c.
+     *
+     * Only under an LVGL window manager: each of these parents its widgets to
+     * ui_manager_get_app_area(), which is NULL until an LVGL window manager
+     * runs ui_manager_init(). Launching one under thistle-tk dereferences that
+     * NULL. main/main.c guards the same list the same way, so registering them
+     * here unconditionally showed a launcher the device never shows. */
+    if (!s_use_tk_wm) {
 #if THISTLE_HAVE_LAUNCHER
-    launcher_app_register();
+        launcher_app_register();
 #endif
 #if THISTLE_HAVE_SETTINGS
-    settings_app_register();
+        settings_app_register();
 #endif
 #if THISTLE_HAVE_FILEMGR
-    filemgr_app_register();
+        filemgr_app_register();
 #endif
 #if THISTLE_HAVE_READER
-    reader_app_register();
+        reader_app_register();
 #endif
 #if THISTLE_HAVE_NOTES
-    notes_app_register();
+        notes_app_register();
 #endif
 #if THISTLE_HAVE_FLASHLIGHT
-    flashlight_app_register();
+        flashlight_app_register();
 #endif
 #if THISTLE_HAVE_VAULT
-    vault_app_register();
+        vault_app_register();
 #endif
 #if THISTLE_HAVE_APPSTORE
-    appstore_app_register();
+        appstore_app_register();
 #endif
 #if THISTLE_HAVE_TERMINAL
-    terminal_app_register();
+        terminal_app_register();
 #endif
 #if THISTLE_HAVE_ASSISTANT
-    assistant_app_register();
+        assistant_app_register();
 #endif
 #if THISTLE_HAVE_WEATHER
-    weather_app_register();
+        weather_app_register();
 #endif
 
-    /* Conditional apps based on device capabilities */
-    if (sim_board_has_radio()) {
+        /* Conditional apps based on device capabilities */
+        if (sim_board_has_radio()) {
 #if THISTLE_HAVE_MESSENGER
-        messenger_app_register();
+            messenger_app_register();
 #endif
 #if THISTLE_HAVE_WIFISCANNER
-        wifiscanner_app_register();
+            wifiscanner_app_register();
 #endif
-    }
-    if (sim_board_has_gps()) {
+        }
+        if (sim_board_has_gps()) {
 #if THISTLE_HAVE_NAVIGATOR
-        navigator_app_register();
+            navigator_app_register();
 #endif
+        }
     }
 
     /* Each window manager has its own launcher: the LVGL one builds LVGL

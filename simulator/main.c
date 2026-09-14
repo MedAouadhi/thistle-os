@@ -190,47 +190,57 @@ int main(int argc, char **argv)
      * an installed app wins the idempotent duplicate-ID registration rule. */
     sim_app_loader_scan_and_register();
 
-    /* Register built-in apps (always available) */
-    launcher_app_register();
-    settings_app_register();
-#if THISTLE_HAVE_FILEMGR
-    filemgr_app_register();
-#endif
-#if THISTLE_HAVE_READER
-    reader_app_register();
-#endif
-#if THISTLE_HAVE_NOTES
-    notes_app_register();
-#endif
-#if THISTLE_HAVE_FLASHLIGHT
-    flashlight_app_register();
-#endif
-#if THISTLE_HAVE_VAULT
-    vault_app_register();
-#endif
-#if THISTLE_HAVE_APPSTORE
-    appstore_app_register();
-#endif
-    terminal_app_register();
-    assistant_app_register();
-#if THISTLE_HAVE_WEATHER
-    weather_app_register();
-#endif
-
-    /* Conditional apps based on device capabilities */
+    /* Register built-in apps, but only under an LVGL window manager: each of
+     * these parents its widgets to ui_manager_get_app_area(), which is NULL
+     * until an LVGL window manager runs ui_manager_init(). Launching one under
+     * thistle-tk dereferences that NULL. main/main.c guards the same list the
+     * same way, so registering them here unconditionally showed a launcher the
+     * device never shows. sim_app_loader_scan_and_register() runs above this
+     * and is unaffected, so a signed .tap app still registers under
+     * thistle-tk — which is what test_tap_notes.py installs and taps. */
     extern bool sim_board_has_radio(void);
     extern bool sim_board_has_gps(void);
-    if (sim_board_has_radio()) {
-        messenger_app_register();
+    if (!use_tk_wm) {
+        launcher_app_register();
+        settings_app_register();
+#if THISTLE_HAVE_FILEMGR
+        filemgr_app_register();
+#endif
+#if THISTLE_HAVE_READER
+        reader_app_register();
+#endif
+#if THISTLE_HAVE_NOTES
+        notes_app_register();
+#endif
+#if THISTLE_HAVE_FLASHLIGHT
+        flashlight_app_register();
+#endif
+#if THISTLE_HAVE_VAULT
+        vault_app_register();
+#endif
+#if THISTLE_HAVE_APPSTORE
+        appstore_app_register();
+#endif
+        terminal_app_register();
+        assistant_app_register();
+#if THISTLE_HAVE_WEATHER
+        weather_app_register();
+#endif
+
+        /* Conditional apps based on device capabilities */
+        if (sim_board_has_radio()) {
+            messenger_app_register();
 #if THISTLE_HAVE_WIFISCANNER
-        wifiscanner_app_register();
+            wifiscanner_app_register();
 #endif
-    }
+        }
 #if THISTLE_HAVE_NAVIGATOR
-    if (sim_board_has_gps()) {
-        navigator_app_register();
-    }
+        if (sim_board_has_gps()) {
+            navigator_app_register();
+        }
 #endif
+    }
+
     const char *initial_app = s_launch_app
         ? s_launch_app
         : (use_tk_wm ? "com.thistle.tk_launcher" : "com.thistle.launcher");
