@@ -185,6 +185,35 @@ unsafe fn backlight_set_duty(percent: u8) -> i32 {
     }
 }
 
+// ── Logging ──────────────────────────────────────────────────────────────────
+
+#[cfg(all(not(test), target_os = "espidf"))]
+extern "C" {
+    fn esp_log_write(level: u32, tag: *const u8, format: *const u8, ...);
+}
+
+#[cfg(not(test))]
+static TAG: &[u8] = b"kbd\0";
+
+/// Carries its own tag and newline: esp_log_write adds neither, and an
+/// unterminated line is the first thing the console drops.
+#[cfg(all(not(test), target_os = "espidf"))]
+macro_rules! kbd_logw {
+    ($fmt:expr $(, $arg:expr)*) => {
+        unsafe { esp_log_write(2, TAG.as_ptr(), $fmt.as_ptr() $(, $arg)*); }
+    };
+}
+
+#[cfg(all(not(test), not(target_os = "espidf")))]
+macro_rules! kbd_logw {
+    ($fmt:expr $(, $arg:expr)*) => { let _ = ($($arg,)*); };
+}
+
+#[cfg(test)]
+macro_rules! kbd_logw {
+    ($fmt:expr $(, $arg:expr)*) => { let _ = ($($arg,)*); };
+}
+
 // ── Keymap ───────────────────────────────────────────────────────────────────
 //
 // TCA8418 encodes key position as: key_code = row*10 + col + 1  (1-based).
@@ -497,6 +526,10 @@ struct KbdState {
     initialized: bool,
     /// Last non-zero backlight percent, to come back to after going dark.
     backlight: u8,
+    /// Whether the key backlight is under this driver's control. False on a
+    /// board that leaves the line unwired, and on one where claiming the LEDC
+    /// timer failed — in which case the keys still work, unlit.
+    backlight_ready: bool,
 }
 
 // SAFETY: The driver state is accessed only from the HAL init/poll/deinit
@@ -520,6 +553,7 @@ impl KbdState {
             irq_pending: AtomicBool::new(false),
             initialized: false,
             backlight: 0,
+            backlight_ready: false,
         }
     }
 }
@@ -672,9 +706,17 @@ unsafe extern "C" fn tca8418_init(config: *const c_void) -> i32 {
 
     // The keys start dark: lighting them is something the user asks for, not
     // something boot spends battery on.
+    //
+    // A backlight that will not configure leaves a keyboard that is dark, not
+    // one that is broken. This used to return here, before `initialized` was
+    // set, so every key on the board went with the light — and on a T-Deck Max
+    // that is exactly what happened: one wrong field order in the LEDC config
+    // made ESP-IDF reject the timer, and the device came up unable to type.
+    // The keys are the point; the light is a convenience.
     let ret = backlight_init(kbd.cfg.pin_backlight);
-    if ret != ESP_OK {
-        return ret;
+    kbd.backlight_ready = ret == ESP_OK;
+    if !kbd.backlight_ready {
+        kbd_logw!(b"key backlight unavailable (%d); keys still work\0", ret);
     }
     kbd.backlight = 0;
 
@@ -688,7 +730,10 @@ unsafe extern "C" fn tca8418_set_backlight(percent: u8) -> i32 {
     if !kbd.initialized {
         return ESP_ERR_INVALID_STATE;
     }
-    if kbd.cfg.pin_backlight == GPIO_NUM_NC {
+    // Unwired and failed-to-configure answer the same way. Either way there is
+    // no light to set, and the caller should hear so rather than be told the
+    // brightness took.
+    if kbd.cfg.pin_backlight == GPIO_NUM_NC || !kbd.backlight_ready {
         return ESP_ERR_NOT_SUPPORTED;
     }
 
@@ -1095,6 +1140,45 @@ mod tests {
         for col in 0..10 {
             assert_eq!(KEY_MAP[6][col], 0);
             assert_eq!(KEY_MAP[7][col], 0);
+        }
+    }
+
+    /// A keyboard whose backlight will not configure must still type.
+    ///
+    /// `backlight_init` used to be the last thing in init, and its failure
+    /// returned before `initialized` was set — so the keys went dark *and*
+    /// silent. On a T-Deck Max that is what happened: one wrong field order in
+    /// the LEDC config had ESP-IDF reject the timer, and the board came up
+    /// unable to type at all. The light is a convenience; the keys are not.
+    #[test]
+    fn a_keyboard_whose_backlight_fails_still_reports_keys() {
+        unsafe {
+            let kbd = &mut *(&raw mut S_KBD);
+            *kbd = KbdState::new();
+
+            // What init leaves behind when the backlight could not be claimed.
+            kbd.backlight_ready = false;
+            kbd.cfg.pin_backlight = 42;
+            kbd.initialized = true;
+
+            assert!(
+                kbd.initialized,
+                "a dark backlight must not leave the keyboard uninitialised"
+            );
+
+            // poll() refuses only on an uninitialised driver, so an initialised
+            // one with no light still scans.
+            assert_ne!(
+                tca8418_poll(),
+                ESP_ERR_INVALID_STATE,
+                "an initialised keyboard must scan whether or not it is lit"
+            );
+
+            // And the missing light is reported honestly rather than silently
+            // accepted.
+            assert_eq!(tca8418_set_backlight(50), ESP_ERR_NOT_SUPPORTED);
+
+            *kbd = KbdState::new();
         }
     }
 
