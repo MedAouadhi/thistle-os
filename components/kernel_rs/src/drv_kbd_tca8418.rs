@@ -426,6 +426,16 @@ mod esp_ffi {
 
     pub static SCRIPT: Mutex<Option<ChipScript>> = Mutex::new(None);
 
+    /// Every register touch in order, so a test can assert not just what the
+    /// driver did but when it did it relative to everything else.
+    pub static TRACE: Mutex<Vec<RegOp>> = Mutex::new(Vec::new());
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum RegOp {
+        Read(u8),
+        Write(u8),
+    }
+
     #[derive(Default)]
     pub struct ChipScript {
         /// Value each register answers with, by register address.
@@ -439,6 +449,7 @@ mod esp_ffi {
         REG_READS.store(0, AtomicOrdering::Relaxed);
         FIRE_ISR_ON_READ.store(usize::MAX, AtomicOrdering::Relaxed);
         *SCRIPT.lock().unwrap() = None;
+        TRACE.lock().unwrap().clear();
     }
 
     pub unsafe fn i2c_master_transmit_receive(
@@ -468,6 +479,8 @@ mod esp_ffi {
             }
         }
 
+        TRACE.lock().unwrap().push(RegOp::Read(reg));
+
         // Counted and fired after the answer, so the interrupt lands in the
         // middle of the poll rather than before it has read anything.
         let n = REG_READS.fetch_add(1, AtomicOrdering::Relaxed) + 1;
@@ -478,10 +491,14 @@ mod esp_ffi {
     }
     pub unsafe fn i2c_master_transmit(
         _handle: *mut c_void,
-        _data: *const u8,
-        _len: usize,
+        data: *const u8,
+        len: usize,
         _timeout: i32,
     ) -> i32 {
+        // A register write is the register address followed by the value.
+        if len >= 1 && !data.is_null() {
+            TRACE.lock().unwrap().push(RegOp::Write(unsafe { *data }));
+        }
         0
     }
     pub unsafe fn gpio_set_direction(_pin: u32, _mode: u32) -> i32 {
@@ -808,12 +825,6 @@ unsafe extern "C" fn tca8418_poll() -> i32 {
         return ESP_OK;
     }
 
-    // Acknowledge before draining, for the same reason. Acknowledging
-    // afterwards clears the interrupt belonging to whatever arrived while the
-    // FIFO was being read, and the INT line is edge-triggered, so nothing
-    // would announce that event again.
-    tca8418_write_reg(TCA8418_REG_INT_STAT, TCA8418_INT_STAT_K_INT);
-
     let mut last_ret = ESP_OK;
 
     // Drain until the FIFO says it is empty. The event count in KEY_LCK_EC is
@@ -874,6 +885,23 @@ unsafe extern "C" fn tca8418_poll() -> i32 {
             cb(&event as *const HalInputEvent, kbd.cb_data);
         }
     }
+
+    // Acknowledge last, once the FIFO is empty — never before the drain.
+    //
+    // The chip holds INT low for as long as K_INT is set. Clearing K_INT up
+    // front looks tidy, but a key pressed during the drain sets it again, and
+    // then nothing clears it: the FIFO ends up empty with K_INT still set and
+    // INT still low. The ISR is edge-triggered, so no later keypress can
+    // produce another falling edge, and the keyboard is deaf for good. That is
+    // not theoretical — it shipped, and a T-Deck Max answered two keystrokes
+    // out of sixteen before going silent.
+    //
+    // Acknowledging here leaves one narrow window, between the loop ending and
+    // this write, where an event can be left in the FIFO with K_INT cleared.
+    // That one heals itself: the event stays queued, INT returns high, and the
+    // next keypress sets K_INT again and produces the edge that collects both.
+    // A keystroke of latency, not a dead keyboard.
+    tca8418_write_reg(TCA8418_REG_INT_STAT, TCA8418_INT_STAT_K_INT);
 
     last_ret
 }
@@ -1179,6 +1207,63 @@ mod tests {
             assert_eq!(tca8418_set_backlight(50), ESP_ERR_NOT_SUPPORTED);
 
             *kbd = KbdState::new();
+        }
+    }
+
+    /// The interrupt must be acknowledged after the FIFO is drained, never
+    /// before it.
+    ///
+    /// The chip holds INT low while K_INT is set. Acknowledging up front lets
+    /// a key pressed during the drain set K_INT again with nothing left to
+    /// clear it, so the FIFO ends up empty, K_INT set and INT stuck low. The
+    /// ISR is edge-triggered, so no later keypress can raise another edge and
+    /// the keyboard is deaf permanently. This shipped: a T-Deck Max answered
+    /// two keystrokes out of sixteen and then went silent.
+    #[test]
+    fn the_interrupt_is_acknowledged_after_the_fifo_is_drained() {
+        use esp_ffi::{ChipScript, RegOp, SCRIPT, TRACE};
+
+        unsafe {
+            esp_ffi::reset_chip();
+
+            let mut script = ChipScript::default();
+            script
+                .registers
+                .insert(TCA8418_REG_INT_STAT, TCA8418_INT_STAT_K_INT);
+            script.events.push_back(KEY_EVENT_PRESS | 8);
+            *SCRIPT.lock().unwrap() = Some(script);
+
+            let kbd = &mut *(&raw mut S_KBD);
+            *kbd = KbdState::new();
+            kbd.initialized = true;
+            kbd.cfg.pin_int = 15;
+            kbd.dev = 1usize as *mut c_void;
+            kbd.irq_pending.store(true, Ordering::Release);
+
+            assert_eq!(tca8418_poll(), ESP_OK);
+
+            let trace = TRACE.lock().unwrap().clone();
+            let ack = trace
+                .iter()
+                .position(|op| *op == RegOp::Write(TCA8418_REG_INT_STAT))
+                .expect("the poll must acknowledge the key interrupt");
+
+            // Nothing may be read from the FIFO after the acknowledgement:
+            // every read belongs before it, so the drain is complete when the
+            // chip is told the interrupt is handled.
+            let reads_after_ack = trace[ack + 1..]
+                .iter()
+                .filter(|op| **op == RegOp::Read(TCA8418_REG_KEY_EVENT_A))
+                .count();
+            assert_eq!(
+                reads_after_ack, 0,
+                "the FIFO was still being drained after the interrupt was \
+                 acknowledged; acknowledging first strands any key pressed \
+                 during the drain and wedges INT low for good"
+            );
+
+            *kbd = KbdState::new();
+            esp_ffi::reset_chip();
         }
     }
 
