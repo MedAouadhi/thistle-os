@@ -32,6 +32,7 @@
         }
     ],
     "expander_outputs": [
+        {"expander": 0, "pin": 2, "direction": "output", "level": 1, "delay_ms": 10},
         {"expander": 0, "pin": 7, "direction": "output", "level": 0, "delay_ms": 10},
         {"expander": 0, "pin": 9, "direction": "output", "level": 0, "delay_ms": 10},
         {"expander": 0, "pin": 7, "direction": "output", "level": 1, "delay_ms": 50},
@@ -75,6 +76,17 @@
                 "pin_rst": -1,
                 "max_x": 240,
                 "max_y": 320
+            }
+        },
+        {
+            "id": "com.thistle.drv.gps-mia-m10q",
+            "hal": "gps",
+            "entry": "gps-mia-m10q.drv.elf",
+            "config": {
+                "uart_num": 2,
+                "tx": 16,
+                "rx": 2,
+                "baud_rate": 38400
             }
         },
         {

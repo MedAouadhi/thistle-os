@@ -68,6 +68,7 @@ echo ""
 echo "[Radio + GPS Devices]"
 run_test "radio_gps/tdeck" "tdeck" "$TESTS_DIR/radio_gps_assertions.txt"
 run_test "radio_gps/tdeck-pro" "tdeck-pro" "$TESTS_DIR/radio_gps_assertions.txt"
+run_test "radio_gps/tdeck-max" "tdeck-max" "$TESTS_DIR/radio_gps_assertions.txt"
 
 echo ""
 echo "[Scenario Engine]"

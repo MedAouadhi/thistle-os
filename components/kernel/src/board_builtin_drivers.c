@@ -23,6 +23,7 @@
 #include "drv_touch_cst328.h"
 #include "drv_sdcard.h"
 #include "drv_power_sy6970.h"
+#include "drv_gps_mia_m10q.h"
 #endif
 
 #ifndef THISTLE_BUS_INIT_HOST_TEST
@@ -229,6 +230,21 @@ esp_err_t board_builtin_driver_init(const char *id, const char *hal_type,
         ESP_LOGI(TAG, "sdcard: host=%d cs=%d mount=%s",
                  cfg.spi_host, cfg.pin_cs, cfg.mount_point);
         return hal_storage_register(drv_sdcard_get(), &cfg);
+    }
+
+    // ── GNSS: U-blox MIA-M10Q ────────────────────────────────────────────────
+    // `tx` and `rx` are the SoC's pins, not the module's: the schematics on
+    // these boards name their nets from the module's side, so the two are
+    // crossed over relative to each other.
+    if (strcmp(id, "com.thistle.drv.gps-mia-m10q") == 0) {
+        static gps_mia_m10q_config_t cfg;
+        cfg.uart_num  = (uart_port_t)json_int(config_json, "uart_num", 1);
+        cfg.pin_tx    = (gpio_num_t)json_int(config_json, "tx", -1);
+        cfg.pin_rx    = (gpio_num_t)json_int(config_json, "rx", -1);
+        cfg.baud_rate = (uint32_t)json_int(config_json, "baud_rate", 9600);
+        ESP_LOGI(TAG, "gps-mia-m10q: uart=%d tx=%d rx=%d baud=%u",
+                 cfg.uart_num, cfg.pin_tx, cfg.pin_rx, (unsigned)cfg.baud_rate);
+        return hal_gps_register(drv_gps_mia_m10q_get(), &cfg);
     }
 
     // ── Power: SY6970 / BQ25896 charger + BQ27220 fuel gauge ────────────────

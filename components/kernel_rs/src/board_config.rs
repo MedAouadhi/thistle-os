@@ -1666,6 +1666,11 @@ mod tests {
     const TOUCH_RST_PIN: i32 = 7;
     const KEY_RST_PIN: i32 = 9;
 
+    /// `BOARD_XL9555_02_GPS_EN`, the rail the MIA-M10Q sits behind. On the Pro
+    /// the same module is powered from a native GPIO; here it is reachable
+    /// only once the expander is up.
+    const GPS_EN_PIN: i32 = 2;
+
     /// Every expander level the boot sequence drove, in order.
     fn expander_levels(rec: &Recorder) -> Vec<(usize, i32, i32)> {
         rec.steps
@@ -1704,22 +1709,73 @@ mod tests {
     }
 
     #[test]
-    fn the_tdeck_max_pulses_its_keyboard_and_touch_resets_low_then_high() {
+    fn the_tdeck_max_raises_its_gnss_rail_then_pulses_its_two_resets() {
         let mut rec = Recorder::default();
         run_boot_sequence(TDECK_MAX_PROFILE, &mut rec);
 
         // Both resets are active low, so each is held down and then released.
         // Leaving them high would start the parts from whatever state an
-        // unclean shutdown left behind.
+        // unclean shutdown left behind. The GNSS rail goes up first and stays
+        // up — a rail, not a pulse.
         assert_eq!(
             expander_levels(&rec),
             vec![
+                (0, GPS_EN_PIN, 1),
                 (0, TOUCH_RST_PIN, 0),
                 (0, KEY_RST_PIN, 0),
                 (0, TOUCH_RST_PIN, 1),
                 (0, KEY_RST_PIN, 1),
             ]
         );
+    }
+
+    #[test]
+    fn the_tdeck_max_powers_its_gnss_module_before_the_driver_probes_for_it() {
+        let mut rec = Recorder::default();
+        run_boot_sequence(TDECK_MAX_PROFILE, &mut rec);
+
+        // The module answers nothing until its rail is up, so a driver that
+        // opens the UART first would find an idle line and conclude there is
+        // no receiver fitted.
+        let raised = rec
+            .steps
+            .iter()
+            .position(|step| {
+                matches!(
+                    step,
+                    BootStep::ExpanderLevel { pin, level, .. }
+                        if *pin == GPS_EN_PIN && *level == 1
+                )
+            })
+            .expect("the Max raises its GNSS rail");
+        let drivers = rec
+            .steps
+            .iter()
+            .position(|step| matches!(step, BootStep::DriverLoaderInit))
+            .expect("the Max loads drivers");
+
+        assert!(raised < drivers, "{:?}", rec.phases());
+    }
+
+    #[test]
+    fn the_tdeck_max_moves_its_gnss_off_the_pins_that_carry_its_console() {
+        let mut rec = Recorder::default();
+        run_boot_sequence(TDECK_MAX_PROFILE, &mut rec);
+
+        let config = rec
+            .loaded_config("com.thistle.drv.gps-mia-m10q")
+            .expect("the Max declares the GNSS module");
+        // Same part as the Pro on different pins. The Pro runs its GNSS on
+        // 43/44, which on this board is where the console comes out, so
+        // inheriting the Pro's numbers would have the driver talk over the log.
+        assert_eq!(json_get_int(config, "uart_num"), Some(2), "{config}");
+        assert_eq!(json_get_int(config, "tx"), Some(16), "{config}");
+        assert_eq!(json_get_int(config, "rx"), Some(2), "{config}");
+        // The M10 leaves the factory at 38400, where the M8 on the older
+        // boards sat at 9600. The driver opens at whatever the profile says
+        // and does not go looking, so a module someone has moved to the other
+        // rate reads as an empty line rather than as a wrong setting.
+        assert_eq!(json_get_int(config, "baud_rate"), Some(38400), "{config}");
     }
 
     #[test]
