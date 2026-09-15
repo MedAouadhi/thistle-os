@@ -7,92 +7,95 @@ ESP-IDF v5.5.1 and esptool v4.12.dev2.
 
 The board has no UART header in use: its only console and its only flashing
 path are the ESP32-S3's built-in USB-Serial-JTAG peripheral, on
-`/dev/ttyACM0`. Both are unreliable, in two separate ways, and each has cost
-a debugging session. **The flashing problem is unsolved and is the work this
-document is handing over.** The console problem is solved; it is written up
-because getting it wrong wastes hours and looks like a hardware fault.
+`/dev/ttyACM0`. Both looked unreliable, in two separate ways, and each cost
+a debugging session. **Both are now solved, and neither was the board.** The
+flashing failure was a second process holding the tty (§1). The console
+resets were our own tooling (§2). This document stays because the symptoms
+look exactly like a hardware fault and will be misread again.
+
+The one-line rule: **before flashing, monitoring, or capturing, run
+`tools/check_serial_port.sh /dev/ttyACM0` and stop whatever it lists.**
 
 ---
 
-## 1. The unsolved problem: full-speed flashing dies
+## 1. Solved: flashing died because another process held the port
 
-`esptool write_flash` does not survive a normal flash of this board. It fails
-a few KB in:
+`esptool write_flash` failed a few KB into a normal flash of this board with
 
 ```
 A fatal error occurred: The chip stopped responding.
 ```
 
-with a `StopIteration` out of `esptool/loader.py:421` in `slip_reader`,
-meaning the SLIP stream went silent mid-transfer.
+(a `StopIteration` out of `esptool/loader.py:421` in `slip_reader`, i.e. the
+SLIP stream went silent). A chunked 16KB workaround with retries took six
+minutes per image and was the only way to flash. The failure was attributed
+to the USB-Serial-JTAG link, and cable, flash health, silicon errata, power and
+host USB were all on the suspect list.
 
-Reproduced at 460800 baud with the stub, `--before default_reset --after
-hard_reset`, writing a 2.5MB merged image to `0x0`. The shape of the failure
-is consistent: any single flash operation lasting more than roughly 1–3
-seconds kills the link.
+### Root cause
 
-### What is known to work
+A capture loop from **another agent session, in a different project**
+(`hermes_esp32/.scratch/serial_capture.py`), had `/dev/ttyACM0` open the
+whole time. It believed it was reading its own board; the only USB serial
+device on this host was the T-Deck Max. A Linux tty hands each byte to exactly
+one reader, so that process consumed a random share of the ROM's replies to
+esptool. Longer operations gave it more chances to eat a frame, which is where
+"any operation over 1–3 seconds dies" came from.
 
-`../T-Deck-MAX/tools/flash-usb.sh` (outside this repo, in the vendor
-checkout). It writes the image in 16KB chunks, batching as many as the chip
-accepts per connection and advancing by however many actually verified:
+Evidence, all from 2026-09-15:
 
-```sh
-esptool.py --no-stub --chip esp32s3 --port /dev/ttyACM0 --baud 115200 \
-  --after no_reset \
-  write_flash --flash_mode keep --flash_freq keep --flash_size keep \
-  --no-compress 0x0 chunk0 0x4000 chunk1 0x8000 chunk2 0xc000 chunk3
-```
+- `ls -l /proc/*/fd | grep ttyACM0` showed exactly one holder: the capture
+  loop, parented to a `claude` process whose cwd was `hermes_esp32`.
+- Its 13MB log contained 575 `thistle:` lines, 760 ROM `waiting for download`
+  banners, and, immediately after those banners, raw esptool SYNC reply
+  frames: `c0 01 08 04 00 07 07 12 20 00 00 00 00 c0`, repeated. Those bytes
+  were the replies esptool never received.
+- With that process stopped and no other holder, everything worked at default
+  settings on the first try:
 
-Each chunk is verified on-chip by the ROM's flash-MD5 command (esptool prints
-`Hash of data verified`). A full image is 158 chunks and takes about six
-minutes. The board is left in download mode and needs a physical USB replug
-to boot.
+  | operation | result |
+  |---|---|
+  | `read_flash 0x20000 0x200000` (stub, 460800) | 2MB in 47.9 s |
+  | `write_flash` bootloader + table + otadata + 2.45MB app (stub, compressed, 460800) | 26.6 s total, app in 21.2 s |
+  | read-back of all four regions vs. the images | byte-identical |
+  | `idf.py -p /dev/ttyACM0 flash monitor` | flashes, resets, shows the boot |
 
-### What has been ruled out
+- Positive control: starting a reader of the same shape on purpose (pyserial,
+  DTR/RTS low, 1 s timeout, 4KB reads) made esptool fail at `Connecting...`
+  twice in a row with pyserial's own diagnosis, *"device reports readiness to
+  read but returned no data (device disconnected or multiple access on
+  port?)"*. The reader had captured 26 SLIP frames. Killing it and repeating
+  the same 2MB read succeeded again.
 
-- **The cable.** Replacing it changed nothing: full-speed flashing failed
-  identically afterwards. (It was a reasonable suspicion and is now closed.)
-- **Flash health.** Writes persist reliably. Test patterns written at
-  `0x700000` and `0x20000` survived disconnect and reconnect and read back
-  byte-for-byte.
-- **Chunk verification being a lie.** The per-chunk MD5 is genuine; when a
-  whole image later failed to match, the cause was an unrelated third party
-  (see §4), not a false verify.
+### What this retires
 
-### What has not been tried
+- The chunked flasher in `../T-Deck-MAX/tools/flash-usb.sh` is not needed. It
+  "worked" because it retried each 16KB piece up to ten times and reconnected
+  constantly, so it ground through the byte loss. Its "roughly two operations
+  per connection" was the loss rate, not a property of the chip.
+- `--no-stub`, 115200 baud, `--no-compress` and small chunks were never the
+  variable. The stub, compression and the default baud are fine.
+- The board does **not** need a physical USB replug after flashing. That came
+  from the workaround's `--after no_reset`. `--after hard_reset` boots the
+  app: bootloader output follows it, and a subsequent `--before no_reset`
+  connect gets a pyserial *Write timeout* because the app, not the ROM, owns
+  the USB peripheral.
+- The USB link itself never re-enumerated during any of today's flashing,
+  reading or resetting: `journalctl -k` shows the device number unchanged
+  across all of it. The link is not flaky.
+- Cable and flash health were already ruled out; silicon revision, power and
+  host USB never needed testing.
 
-These are the obvious next experiments, roughly in order of expected value:
+Not retested: `erase_region` with `--no-stub` failing to enter download mode.
+With the stub, `write_flash` erases what it writes, which is all that was
+ever needed.
 
-1. **`--no-stub` versus the stub.** The workaround uses `--no-stub` *and*
-   small chunks *and* 115200 baud *and* `--no-compress`. Nobody has taken
-   those apart. Find the single variable that matters — try the stub with
-   16KB chunks, and `--no-stub` with a full-size write, and so on.
-2. **`idf.py monitor` / `esp-idf-monitor`.** Espressif's own tooling knows
-   about USB-Serial-JTAG and may already handle whatever this is. Untested
-   here.
-3. **Host-side USB.** A different port, a powered hub, or a different host
-   controller (xHCI vs. others). USB-Serial-JTAG is sensitive to host timing
-   and this has not been varied at all.
-4. **Power.** Whether the board is running from USB alone or with a charged
-   battery, and whether the failure correlates. The charger (SY6970) is live
-   during flashing and was observed drawing 250 mA.
-5. **ESP32-S3 errata.** Check Espressif's USB-Serial-JTAG errata and issue
-   tracker for this silicon revision (v0.2) before assuming the board is at
-   fault.
-6. **`esptool --after no_reset` accumulation.** The workaround notes the chip
-   "completes roughly two such operations per connection before it needs a
-   reset". Understanding *why* would likely explain the whole failure.
+### The guard
 
-### Related: `erase_region` does not work with `--no-stub`
-
-```
-A fatal error occurred: Failed to enter Flash download mode
-```
-
-Workaround: `write_flash` erases the sectors it writes, so writing a block of
-`0xFF` over the region has the same effect. This was used to blank 16KB at
-`0xBA0000` to force a SPIFFS reformat.
+`tools/check_serial_port.sh [/dev/ttyACM0]` lists every process with the port
+open (PID, cwd, command) and exits non-zero if there is one. Run it before
+`idf.py flash`, `idf.py monitor`, or any capture. It is the first thing to run
+when esptool says the chip stopped responding or a capture comes back empty.
 
 ---
 
@@ -144,14 +147,21 @@ its own is your own tooling.
 
 ### The part that is still lossy
 
-Everything between `cpu_start: Multicore app` and the host re-attaching is
-lost, because that is where the application takes the USB peripheral over from
-the ROM and the host briefly sees a disconnect. Every boot capture in this
-session stopped at exactly that line.
+With the `stty`/`cat` recipe, a boot capture stops at or before
+`cpu_start: Multicore app`, where the application takes the USB peripheral
+over from the ROM. The host does **not** see a USB disconnect there
+(`journalctl -k` shows no re-enumeration); what differs is how the reader holds
+the port. A reader that opens with DTR and RTS low receives the entire boot,
+from `rst:0x15` through `cpu_start` to `ThistleOS ready`: `idf.py monitor`
+(esp-idf-monitor 1.9.0) does, and so does `tools/serial_capture.py`. The
+price is that such an open resets the board every time (three attaches, three
+`rst:0x15` boots, 7821 bytes each). So:
 
-To capture a full boot you must attach first, never reopen, and power-cycle by
-**physically replugging**. `esptool --after hard_reset` will not serve, because
-esptool's own connection resets the chip again on the way out.
+- **Watch a running board without disturbing it**: `stty -F /dev/ttyACM0
+  -hupcl clocal` then `cat`. No reset; runtime logging arrives; a boot would
+  be truncated.
+- **Capture a boot**: `tools/serial_capture.py boot.log --seconds 30`, or
+  `idf.py monitor`. Attaching is the reset; the capture is complete.
 
 Consequence: the boot burst is where log lines go missing on this board. Do not
 put anything you need to read into it. This is why `main.c` reports the battery
@@ -179,6 +189,7 @@ for p in $(ls /proc | grep -E '^[0-9]+$'); do
 done
 ```
 
+`tools/check_serial_port.sh` does the same and exits non-zero on a holder;
 `fuser` and `lsof` also work when installed. Check this **first** whenever a
 capture comes back empty — before theorising about DTR, cables or firmware. An
 empty capture from this board is far more often a tooling problem than a device
@@ -249,27 +260,30 @@ library file — is still open.
 
 ## 6. Working recipes
 
-### Flash and verify, end to end
+### Flash and monitor
 
 ```sh
 source ~/esp/v5.5.1/esp-idf/export.sh
+tools/check_serial_port.sh /dev/ttyACM0      # must say "is free"
 touch components/kernel_rs/stub.c && idf.py build
-
-cd build && esptool.py --chip esp32s3 merge_bin -o /tmp/merged.bin \
-  --flash_mode dio --flash_freq 80m --flash_size 16MB \
-  0x0 bootloader/bootloader.bin \
-  0x8000 partition_table/partition-table.bin \
-  0xf000 ota_data_initial.bin \
-  0x20000 thistle_os.bin
-
-bash ../T-Deck-MAX/tools/flash-usb.sh /tmp/merged.bin /dev/ttyACM0
-# then verify by read-back (§4), then physically replug to boot
+idf.py -p /dev/ttyACM0 flash monitor
 ```
 
-Do **not** pass `ESPTOOL="python -m esptool"` to that script: it invokes
-`"$ESPTOOL"` as a single command name, so a multi-word value fails with
-`command not found` and the script reports `stalled at chunk 0`, which looks
-like a hardware stall. Let it use `esptool.py` from the IDF environment.
+That is the whole recipe; it is the same as on every other board. If
+`check_serial_port` lists a holder, stop it and re-run the check. Do not
+proceed with a second reader on the port, and do not fall back to the chunked
+flasher.
+
+To verify what is in flash independently of the flasher's report, read back
+and diff (a full 2.4MB read takes about a minute):
+
+```sh
+cd build
+esptool.py --chip esp32s3 -p /dev/ttyACM0 --after no_reset \
+  read_flash 0x20000 $(stat -c%s thistle_os.bin) /tmp/rb.bin
+cmp /tmp/rb.bin thistle_os.bin && echo MATCH
+esptool.py --chip esp32s3 -p /dev/ttyACM0 --before no_reset --after hard_reset run
+```
 
 ### Watch a running board
 
@@ -280,22 +294,32 @@ timeout 300 cat /dev/ttyACM0 > run.log
 
 ### Capture a boot
 
-Attach as above **first**, then physically replug the USB cable. Accept that
-the window around `cpu_start` will be missing.
+```sh
+tools/check_serial_port.sh /dev/ttyACM0
+tools/serial_capture.py boot.log --seconds 30     # attaching resets the board
+grep -c '2nd stage bootloader' boot.log             # expect exactly 1
+```
+
+Or `idf.py -p /dev/ttyACM0 monitor`. Both reset the board on attach and show
+the complete boot. The passive `stty`/`cat` recipe is for watching a board you
+must not disturb; it truncates a boot at `cpu_start` (§2).
 
 ---
 
 ## 7. What this cost, so the next person can skip it
 
-The flashing workaround is tolerable at six minutes a cycle. The console
-problem was not: most of a long session went into captures that were resetting
-the board, then into captures that were silently losing to another process.
+The flashing "workaround" cost six minutes a cycle for two days and a
+long list of hardware theories, for a problem that was one `ls -l /proc/*/fd`
+away. The console problem cost more: most of a long session went into captures
+that were resetting the board, then into captures that were silently losing to
+another process.
 Several wrong conclusions were published along the way and later retracted —
 "SHL does nothing on this panel", "the charger needs a settling rail", "column
 0 of the keyboard is dead". Every one of them came from reasoning on a log that
 the tooling had corrupted.
 
-If you take one thing from this document: **when a capture from this board is
-empty or strange, suspect the tooling before the device.** Check for other
-holders of the port, check the boot-cycle count, and only then start forming a
-theory about the hardware.
+If you take one thing from this document: **when this board misbehaves over
+USB, suspect the tooling before the device.** Run `tools/check_serial_port.sh`,
+check the boot-cycle count, and only then start forming a theory about the
+hardware. Both of the "hardware" problems in this document were two agents
+pointed at one board.

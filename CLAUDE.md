@@ -10,6 +10,29 @@ ThistleOS is a portable ESP32 family operating system with an immutable kernel, 
 - **Recovery OS**: `cd recovery && cargo +esp build --release`
 - **CI**: GitHub Actions — firmware build (espressif/idf:v5.5), Semgrep SAST, Trivy security scan
 
+### Sharing one USB-Serial-JTAG board between sessions
+
+A `/dev/ttyACM*` port hands each byte to exactly one reader. If another
+process (typically a capture loop left running by another agent session) has
+the port open, `idf.py flash` dies with `The chip stopped responding` or
+`device reports readiness to read but returned no data (... multiple access on
+port?)`, and console captures come back empty or partial. This has cost days
+on the T-Deck Max and was misdiagnosed as a hardware fault. Before `idf.py
+flash`, `idf.py monitor`, or any capture, run:
+
+```sh
+tools/check_serial_port.sh /dev/ttyACM0
+```
+
+It exits non-zero and lists the holders (PID, cwd, command) if the port is
+taken. Stop them first; never start a second reader on the same port.
+
+With the port to yourself, `idf.py -p /dev/ttyACM0 flash monitor` works on the
+T-Deck Max exactly as on any other board: a full 2.4MB app flashes in about
+21 seconds at the default settings, and `idf.py monitor` shows the whole boot
+including the `cpu_start` region. The chunked flasher in the T-Deck-MAX
+vendor checkout is not needed. See `docs/tdeck-max-usb-serial-jtag.md`.
+
 ### Reading the console on a USB-Serial-JTAG board
 
 Run this **before** attaching to any board whose only console is USB-Serial-JTAG
@@ -39,11 +62,12 @@ at runtime — driver traces, input events — arrives normally. Note that a sil
 log is then the expected result when nothing is happening, rather than evidence
 that the console is broken.
 
-Everything between `cpu_start` and the host re-attaching is still lost on a
-boot capture, because the app takes the USB peripheral over from the ROM there
-and the host briefly sees a disconnect. To catch a full boot, attach first and
-power-cycle by physically replugging; `esptool --after hard_reset` will not do,
-because esptool's own connection resets the chip again.
+A `cat` reader still loses everything after `cpu_start`, where the app takes
+the USB peripheral over from the ROM (the host sees no USB disconnect; it is
+the reader's line state that matters). To capture a complete boot use
+`tools/serial_capture.py boot.log --seconds 30` or `idf.py monitor`: both open
+the port with DTR/RTS low, which resets the board on attach and then receives
+the whole boot through `ThistleOS ready`. Physical replugging is not needed.
 
 ### Rust toolchains
 
