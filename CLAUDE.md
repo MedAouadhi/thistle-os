@@ -33,42 +33,6 @@ T-Deck Max exactly as on any other board: a full 2.4MB app flashes in about
 including the `cpu_start` region. The chunked flasher in the T-Deck-MAX
 vendor checkout is not needed. See `docs/tdeck-max-usb-serial-jtag.md`.
 
-### Reading the console on a USB-Serial-JTAG board
-
-Run this **before** attaching to any board whose only console is USB-Serial-JTAG
-(the ESP32-S3 boards: T-Deck Pro, T-Deck Max, T-Display-S3, T3-S3):
-
-```sh
-stty -F /dev/ttyACM0 -hupcl clocal
-timeout 120 cat /dev/ttyACM0 > boot.log
-```
-
-Without `-hupcl` the tty layer drops the modem control lines when the port is
-opened or closed, and the USB-Serial-JTAG peripheral turns that into a chip
-reset. So every attach reboots the board, and every reconnect reboots it again.
-A capture loop that reconnects on silence will sit there resetting the device
-several times a minute while producing a log that looks plausible — it is full
-of boot output, because that is all the board ever gets to emit.
-
-Two ways to recognise you have hit this:
-
-- `grep -c '2nd stage bootloader'` on the log is greater than 1.
-- `grep -o 'rst:0x[0-9a-f]* ([A-Z_]*)'` reports `rst:0x15 (USB_UART_CHIP_RESET)`.
-  That is the port being opened, not the board misbehaving. A genuine crash
-  says so with a panic and a backtrace.
-
-With `-hupcl` set, attaching leaves a running board alone, and anything logged
-at runtime — driver traces, input events — arrives normally. Note that a silent
-log is then the expected result when nothing is happening, rather than evidence
-that the console is broken.
-
-A `cat` reader still loses everything after `cpu_start`, where the app takes
-the USB peripheral over from the ROM (the host sees no USB disconnect; it is
-the reader's line state that matters). To capture a complete boot use
-`tools/serial_capture.py boot.log --seconds 30` or `idf.py monitor`: both open
-the port with DTR/RTS low, which resets the board on attach and then receives
-the whole boot through `ThistleOS ready`. Physical replugging is not needed.
-
 ### Rust toolchains
 
 Two toolchains, for two different jobs:
