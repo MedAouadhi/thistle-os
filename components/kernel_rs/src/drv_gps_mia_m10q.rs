@@ -142,7 +142,21 @@ struct UartConfig {
     flow_ctrl: u32, // UART_HW_FLOWCTRL_DISABLE = 0
     rx_flow_ctrl_thresh: u8,
     source_clk: u32, // UART_SCLK_DEFAULT = 0
+    /// The `flags` bitfield ESP-IDF reads for `allow_pd` / `backup_before_sleep`.
+    ///
+    /// Leaving it off the end did not make it go unread: `uart_param_config`
+    /// reads it either way, so it took whatever the stack happened to hold
+    /// past the struct. On a chip without sleep retention — the ESP32-S3 —
+    /// a non-zero read is rejected outright, and the whole driver failed to
+    /// start with "not able to power down in light sleep".
+    flags: u32,
 }
+
+/// The struct above is copied out of a C header by hand, so nothing but this
+/// stops it drifting when that header gains a field, which is exactly how the
+/// missing `flags` word got in.
+#[cfg(target_os = "espidf")]
+const _: () = assert!(core::mem::size_of::<UartConfig>() == 32);
 
 // ── Configuration struct ─────────────────────────────────────────────────────
 
@@ -560,6 +574,10 @@ unsafe extern "C" fn mia_m10q_init(config: *const c_void) -> i32 {
             flow_ctrl: 0, // UART_HW_FLOWCTRL_DISABLE
             rx_flow_ctrl_thresh: 0,
             source_clk: 0, // UART_SCLK_DEFAULT
+            // No sleep retention asked for: this receiver is powered from a
+            // rail the board profile raises, not from a domain kept alive
+            // across light sleep.
+            flags: 0,
         };
         let ret = uart_param_config(
             gps.cfg.uart_num,
