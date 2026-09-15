@@ -5,6 +5,7 @@
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/queue.h"
 #include "esp_heap_caps.h"
 
 #include "thistle/kernel.h"
@@ -76,21 +77,72 @@ extern void tk_wm_do_refresh(void);
 extern bool tk_wm_on_input(const hal_input_event_t *event);
 extern void tk_launcher_tick(void);
 
-/* HAL → WM input dispatcher. The thistle-tk path doesn't have an equivalent
- * to the LVGL ui_input_hal_cb wiring (components/ui/src/manager.c); without
- * this, key/touch events sit in driver FIFOs forever. */
+/* HAL → WM input path. The thistle-tk side has no equivalent of the LVGL
+ * ui_input_hal_cb wiring (components/ui/src/manager.c); without this, key and
+ * touch events sit in driver FIFOs forever.
+ *
+ * Events the hardware has given up but the window manager has not seen yet.
+ *
+ * Reading the keyboard and drawing the screen used to share one task, and an
+ * e-paper refresh blocks it for about 650ms. The keyboard chip's own FIFO is
+ * ten events deep and a keystroke costs two of them, so five keystrokes typed
+ * during one refresh filled it and everything after was lost in the chip. It
+ * was a feedback loop, too: each key that did arrive started the next refresh.
+ * Typing "keyboard testing" on a T-Deck Max delivered the "k" and nothing else.
+ *
+ * So the hardware is drained by its own task, promptly, into this queue, and
+ * the render task takes events off it when it is ready. Only the render task
+ * ever calls into the WM, so the WM keeps its single-threaded contract and
+ * needs no locking.
+ *
+ * Depth covers a burst at typing speed across one refresh with room to spare;
+ * the chip's ten-deep FIFO is the part that could not be made bigger. */
+#define TK_INPUT_QUEUE_LEN   64
+#define TK_INPUT_STACK_SIZE  3072
+#define TK_INPUT_POLL_MS     20
+
+static QueueHandle_t s_tk_input_queue;
+static uint32_t s_tk_input_dropped;
+
+/* Runs on the input task. Puts the event on the queue and returns — it must
+ * not touch the WM, which belongs to the render task. */
 static void tk_input_hal_cb(const hal_input_event_t *event, void *user_data)
 {
     (void)user_data;
-    /* Trace the press, not the release or the drag: enough to tell a dead
-     * panel from a live one that the WM ignores, without a line every 50ms
-     * poll while a finger is down. */
-    if (event->type == HAL_INPUT_EVENT_KEY_DOWN) {
-        ESP_LOGI(TAG, "input: key 0x%02x", event->key.keycode);
-    } else if (event->type == HAL_INPUT_EVENT_TOUCH_DOWN) {
-        ESP_LOGI(TAG, "input: touch %u,%u", event->touch.x, event->touch.y);
+    if (!s_tk_input_queue) return;
+
+    if (xQueueSend(s_tk_input_queue, event, 0) != pdTRUE) {
+        /* The render task is further behind than a full refresh. Count it
+         * rather than block the drain: blocking here would stall the very
+         * poll loop that keeps the chip's FIFO from overflowing, which is
+         * the failure this queue exists to prevent. */
+        s_tk_input_dropped++;
     }
-    tk_wm_on_input(event);
+}
+
+/* Runs on the render task. Hands the WM what the input task collected, and
+ * traces presses — not releases or drags, so a held finger does not produce a
+ * line every poll. */
+static void tk_drain_input_queue(void)
+{
+    hal_input_event_t event;
+
+    if (!s_tk_input_queue) return;
+
+    while (xQueueReceive(s_tk_input_queue, &event, 0) == pdTRUE) {
+        if (event.type == HAL_INPUT_EVENT_KEY_DOWN) {
+            ESP_LOGI(TAG, "input: key 0x%02x", event.key.keycode);
+        } else if (event.type == HAL_INPUT_EVENT_TOUCH_DOWN) {
+            ESP_LOGI(TAG, "input: touch %u,%u", event.touch.x, event.touch.y);
+        }
+        tk_wm_on_input(&event);
+    }
+
+    if (s_tk_input_dropped) {
+        ESP_LOGW(TAG, "input: dropped %u event(s); the queue filled",
+                 (unsigned)s_tk_input_dropped);
+        s_tk_input_dropped = 0;
+    }
 }
 
 static void tk_register_input_callbacks(void)
@@ -115,23 +167,40 @@ static void tk_poll_inputs(void)
     }
 }
 
+/* Reads the hardware and nothing else, so that how long the screen takes to
+ * draw cannot decide whether a keystroke is seen. */
+static void tk_input_task(void *arg)
+{
+    (void)arg;
+    ESP_LOGI(TAG, "tk_input_task: started");
+    for (;;) {
+        tk_poll_inputs();
+        vTaskDelay(pdMS_TO_TICKS(TK_INPUT_POLL_MS));
+    }
+}
+
 static void tk_render_task(void *arg)
 {
     (void)arg;
     ESP_LOGI(TAG, "tk_render_task: started");
     /* Wait a bit to let the system settle before first render */
     vTaskDelay(pdMS_TO_TICKS(500));
-    /* Polling loop: poll inputs first so any keypresses mark widgets dirty
-     * before we render. tk_wm_render() and tk_wm_do_refresh() both internally
-     * gate on dirty / REFRESH_NEEDED flags, so they're cheap no-ops when
-     * nothing has changed. Hardware refresh only fires after a render
-     * actually touched the framebuffer — keeping the e-paper static.
+    /* Render loop: hand the WM whatever the input task has collected, so any
+     * keypresses mark widgets dirty before we render. tk_wm_render() and
+     * tk_wm_do_refresh() both internally gate on dirty / REFRESH_NEEDED flags,
+     * so they're cheap no-ops when nothing has changed. Hardware refresh only
+     * fires after a render actually touched the framebuffer — keeping the
+     * e-paper static.
+     *
+     * Reading the hardware is deliberately not done here: a refresh blocks
+     * this task for about 650ms, which is long enough to overflow the
+     * keyboard's FIFO. See the input queue above.
      *
      * Refresh is invoked at this shallow call depth (not from inside the
      * deep render chain) to avoid Xtensa CALL8 register-window overflow. */
     bool watermark_logged = false;
     for (;;) {
-        tk_poll_inputs();
+        tk_drain_input_queue();
         tk_launcher_tick();
         display_server_tick();
         tk_wm_do_refresh();
@@ -278,10 +347,27 @@ void app_main(void)
 #endif
 
     if (use_tk_wm) {
+        /* The queue must exist before any driver can call back into it. */
+        s_tk_input_queue = xQueueCreate(TK_INPUT_QUEUE_LEN,
+                                        sizeof(hal_input_event_t));
+        if (!s_tk_input_queue) {
+            ESP_LOGE(TAG, "tk_input: queue allocation failed");
+            return;
+        }
+
         /* Wire HAL input drivers (keyboard, touch) to the thistle-tk WM.
          * Must happen after the WM is registered but before the render task
          * starts polling. The LVGL path does the equivalent inside ui_init. */
         tk_register_input_callbacks();
+
+        /* Higher priority than the render task: draining the keyboard is
+         * quick and must not wait behind a screen refresh, which is the whole
+         * reason these are two tasks. */
+        if (xTaskCreate(tk_input_task, "tk_input", TK_INPUT_STACK_SIZE,
+                        NULL, 6, NULL) != pdPASS) {
+            ESP_LOGE(TAG, "tk_input: xTaskCreate failed");
+            return;
+        }
 
         /* Launch the thistle-tk native launcher */
         ret = app_manager_launch("com.thistle.tk_launcher");
