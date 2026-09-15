@@ -31,6 +31,10 @@ const ESP_ERR_NOT_SUPPORTED: i32 = 0x106;
 const TCA8418_REG_CFG: u8 = 0x01; // Configuration
 const TCA8418_REG_INT_STAT: u8 = 0x02; // Interrupt status
 const TCA8418_REG_KEY_LCK_EC: u8 = 0x03; // Key-lock + event count
+
+/// Depth of the chip's key-event FIFO, and so the most events one poll can
+/// find waiting in it.
+const TCA8418_FIFO_DEPTH: usize = 10;
 const TCA8418_REG_KEY_EVENT_A: u8 = 0x04; // Key event FIFO (read repeatedly)
 const TCA8418_REG_KP_GPIO1: u8 = 0x1D; // rows R0-R7 / cols C0-C7
 const TCA8418_REG_KP_GPIO2: u8 = 0x1E; // cols C8-C9
@@ -380,16 +384,67 @@ mod esp_ffi {
     pub unsafe fn i2c_master_bus_rm_device(_handle: *mut c_void) -> i32 {
         0
     }
+    // A scriptable chip, so a test can put the driver in front of a keyboard
+    // that answers. Every register reads 0 unless a test says otherwise, which
+    // is what the driver saw before this existed.
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::Mutex;
+
+    pub static REG_READS: AtomicUsize = AtomicUsize::new(0);
+    /// Read number on which to fire the keyboard's ISR, imitating a key
+    /// pressed while a poll is in progress. `usize::MAX` never fires.
+    pub static FIRE_ISR_ON_READ: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+    pub static SCRIPT: Mutex<Option<ChipScript>> = Mutex::new(None);
+
+    #[derive(Default)]
+    pub struct ChipScript {
+        /// Value each register answers with, by register address.
+        pub registers: std::collections::HashMap<u8, u8>,
+        /// Successive answers for the key-event FIFO, consumed front to back.
+        /// An exhausted queue reads 0, the chip's "FIFO empty" sentinel.
+        pub events: std::collections::VecDeque<u8>,
+    }
+
+    pub fn reset_chip() {
+        REG_READS.store(0, AtomicOrdering::Relaxed);
+        FIRE_ISR_ON_READ.store(usize::MAX, AtomicOrdering::Relaxed);
+        *SCRIPT.lock().unwrap() = None;
+    }
+
     pub unsafe fn i2c_master_transmit_receive(
         _handle: *mut c_void,
-        _write: *const u8,
-        _wsz: usize,
+        write: *const u8,
+        wsz: usize,
         read: *mut u8,
         rsz: usize,
         _timeout: i32,
     ) -> i32 {
-        // Fill read buffer with 0 (no events)
         unsafe { std::ptr::write_bytes(read, 0, rsz) };
+
+        let reg = if wsz >= 1 && !write.is_null() {
+            unsafe { *write }
+        } else {
+            return 0;
+        };
+
+        if let Some(script) = SCRIPT.lock().unwrap().as_mut() {
+            let value = if reg == super::TCA8418_REG_KEY_EVENT_A {
+                script.events.pop_front().unwrap_or(0)
+            } else {
+                script.registers.get(&reg).copied().unwrap_or(0)
+            };
+            if rsz >= 1 && !read.is_null() {
+                unsafe { *read = value };
+            }
+        }
+
+        // Counted and fired after the answer, so the interrupt lands in the
+        // middle of the poll rather than before it has read anything.
+        let n = REG_READS.fetch_add(1, AtomicOrdering::Relaxed) + 1;
+        if n == FIRE_ISR_ON_READ.load(AtomicOrdering::Relaxed) {
+            unsafe { super::tca8418_isr_handler(std::ptr::null_mut()) };
+        }
         0
     }
     pub unsafe fn i2c_master_transmit(
@@ -689,6 +744,14 @@ unsafe extern "C" fn tca8418_poll() -> i32 {
         return ESP_OK;
     }
 
+    // Give the flag up before doing any I2C work, not after. A key pressed
+    // while this poll is draining sets it again from the ISR, and clearing it
+    // at the end of the poll would throw that away — the next poll would take
+    // the early return above and the keypress would sit in the FIFO unread.
+    // That lost wakeup dropped most of a fast typist's keys: the first press
+    // arrived and the ones chasing it did not.
+    kbd.irq_pending.store(false, Ordering::Release);
+
     // Read interrupt status register
     let mut int_stat: u8 = 0;
     let ret = tca8418_read_reg(TCA8418_REG_INT_STAT, &mut int_stat);
@@ -697,27 +760,21 @@ unsafe extern "C" fn tca8418_poll() -> i32 {
     }
 
     if (int_stat & TCA8418_INT_STAT_K_INT) == 0 {
-        // No key event — clear the pending flag and return
-        kbd.irq_pending.store(false, Ordering::Release);
         return ESP_OK;
     }
 
-    // Read event count from KEY_LCK_EC (lower nibble)
-    let mut ec_reg: u8 = 0;
-    let ret = tca8418_read_reg(TCA8418_REG_KEY_LCK_EC, &mut ec_reg);
-    if ret != ESP_OK {
-        return ret;
-    }
-
-    let mut event_count = ec_reg & 0x0F;
-    if event_count == 0 {
-        // Overflow — drain all 10 FIFO slots
-        event_count = 10;
-    }
+    // Acknowledge before draining, for the same reason. Acknowledging
+    // afterwards clears the interrupt belonging to whatever arrived while the
+    // FIFO was being read, and the INT line is edge-triggered, so nothing
+    // would announce that event again.
+    tca8418_write_reg(TCA8418_REG_INT_STAT, TCA8418_INT_STAT_K_INT);
 
     let mut last_ret = ESP_OK;
 
-    for _ in 0..event_count {
+    // Drain until the FIFO says it is empty. The event count in KEY_LCK_EC is
+    // not consulted: it is a snapshot, and an event landing mid-drain makes it
+    // an undercount. The FIFO's own empty sentinel cannot go stale that way.
+    for _ in 0..TCA8418_FIFO_DEPTH {
         let mut ev: u8 = 0;
         let ret = tca8418_read_reg(TCA8418_REG_KEY_EVENT_A, &mut ev);
         if ret != ESP_OK {
@@ -772,10 +829,6 @@ unsafe extern "C" fn tca8418_poll() -> i32 {
             cb(&event as *const HalInputEvent, kbd.cb_data);
         }
     }
-
-    // Clear the key-event interrupt bit by writing 1 to it (W1C)
-    tca8418_write_reg(TCA8418_REG_INT_STAT, TCA8418_INT_STAT_K_INT);
-    kbd.irq_pending.store(false, Ordering::Release);
 
     last_ret
 }
@@ -1042,6 +1095,53 @@ mod tests {
         for col in 0..10 {
             assert_eq!(KEY_MAP[6][col], 0);
             assert_eq!(KEY_MAP[7][col], 0);
+        }
+    }
+
+    /// A key pressed while a poll is reading the FIFO must still be announced.
+    ///
+    /// The driver used to clear `irq_pending` at the end of the poll, which
+    /// threw away the interrupt belonging to anything that arrived while it
+    /// was working. The next poll then took its early return and the keypress
+    /// sat in the FIFO unread. On the device that dropped most of a fast
+    /// typist's keys — the first press arrived, the ones chasing it did not.
+    #[test]
+    fn a_key_pressed_during_a_poll_is_not_forgotten() {
+        use esp_ffi::{ChipScript, FIRE_ISR_ON_READ, SCRIPT};
+        use std::sync::atomic::Ordering as AtomicOrdering;
+
+        unsafe {
+            esp_ffi::reset_chip();
+
+            let mut script = ChipScript::default();
+            // A key event waiting, and an interrupt asserted to announce it.
+            script
+                .registers
+                .insert(TCA8418_REG_INT_STAT, TCA8418_INT_STAT_K_INT);
+            script.events.push_back(KEY_EVENT_PRESS | 8); // 'e' on this matrix
+            *SCRIPT.lock().unwrap() = Some(script);
+
+            // The second register read is inside the drain, after the poll has
+            // given up the flag — exactly where the lost wakeup used to happen.
+            FIRE_ISR_ON_READ.store(2, AtomicOrdering::Relaxed);
+
+            let kbd = &mut *(&raw mut S_KBD);
+            kbd.initialized = true;
+            kbd.cfg.pin_int = 15;
+            kbd.dev = 1usize as *mut c_void;
+            kbd.irq_pending.store(true, Ordering::Release);
+
+            assert_eq!(tca8418_poll(), ESP_OK);
+
+            assert!(
+                kbd.irq_pending.load(Ordering::Acquire),
+                "the interrupt that arrived mid-poll must survive the poll, \
+                 or the key it belongs to is never read"
+            );
+
+            kbd.initialized = false;
+            kbd.dev = std::ptr::null_mut();
+            esp_ffi::reset_chip();
         }
     }
 
