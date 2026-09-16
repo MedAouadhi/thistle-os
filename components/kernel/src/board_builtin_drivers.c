@@ -21,6 +21,7 @@
 #include "drv_epaper_gdeq031t10.h"
 #include "drv_kbd_tca8418.h"
 #include "drv_touch_cst328.h"
+#include "drv_touch_cst66xx.h"
 #include "drv_sdcard.h"
 #include "drv_power_sy6970.h"
 #include "drv_gps_mia_m10q.h"
@@ -209,6 +210,29 @@ esp_err_t board_builtin_driver_init(const char *id, const char *hal_type,
         ESP_LOGI(TAG, "touch-cst328: i2c_bus=%p addr=0x%02x int=%d rst=%d",
                  (void *)cfg.i2c_bus, cfg.i2c_addr, cfg.pin_int, cfg.pin_rst);
         return hal_input_register(drv_touch_cst328_get(), &cfg);
+    }
+
+    // ── Touch: Hynitron CST66xx ──────────────────────────────────────────────
+    // The T-Deck Max's part, despite the vendor pinmap calling it a CST328 and
+    // the vendor README calling it a CST3530. Its own firmware identifies it
+    // as `ictype:caca220e`, which is the CST66xx probe signature.
+    if (strcmp(id, "com.thistle.drv.touch-cst66xx") == 0) {
+        static touch_cst66xx_config_t cfg;
+        int i2c_bus_idx = json_int(config_json, "i2c_bus", 0);
+        cfg.i2c_bus  = (i2c_master_bus_handle_t)hal_bus_get_i2c(i2c_bus_idx);
+        cfg.i2c_addr = (uint8_t)json_int(config_json, "i2c_addr", 0x1A);
+        cfg.pin_int  = (gpio_num_t)json_int(config_json, "pin_int", -1);
+        cfg.pin_rst  = (gpio_num_t)json_int(config_json, "pin_rst", -1);
+        // On this board the touch reset is an XL9555 output rather than a
+        // GPIO, and the driver has to pulse it itself before it probes.
+        cfg.rst_expander     = json_int(config_json, "rst_expander", -1);
+        cfg.rst_expander_pin = json_int(config_json, "rst_expander_pin", 0);
+        cfg.max_x    = (uint16_t)json_int(config_json, "max_x", 240);
+        cfg.max_y    = (uint16_t)json_int(config_json, "max_y", 320);
+        ESP_LOGI(TAG, "touch-cst66xx: i2c_bus=%p addr=0x%02x int=%d rst_exp=%d/%d",
+                 (void *)cfg.i2c_bus, cfg.i2c_addr, cfg.pin_int,
+                 (int)cfg.rst_expander, (int)cfg.rst_expander_pin);
+        return hal_input_register(drv_touch_cst66xx_get(), &cfg);
     }
 
     // ── SD card ──────────────────────────────────────────────────────────────

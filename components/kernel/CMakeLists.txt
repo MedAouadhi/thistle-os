@@ -19,6 +19,6 @@ idf_component_register(
     INCLUDE_DIRS "include"
     REQUIRES ${KERNEL_REQUIRES}
     PRIV_REQUIRES drv_crypto_mbedtls esp_driver_i2c esp_driver_uart esp_driver_spi esp_driver_gpio
-                  drv_epaper_gdeq031t10 drv_kbd_tca8418 drv_touch_cst328 drv_sdcard
+                  drv_epaper_gdeq031t10 drv_kbd_tca8418 drv_touch_cst328 drv_touch_cst66xx drv_sdcard
                   drv_gps_mia_m10q
 )

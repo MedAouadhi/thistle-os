@@ -50,6 +50,7 @@ pub mod drv_power_tp4065b;
 pub mod drv_rtc_pcf8563;
 pub mod drv_sdcard;
 pub mod drv_touch_cst328;
+pub mod drv_touch_cst66xx;
 pub mod drv_touch_cst816;
 pub mod drv_touch_cst9217;
 pub mod drv_touch_ft3x68;

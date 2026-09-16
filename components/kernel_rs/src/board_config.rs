@@ -1822,17 +1822,43 @@ mod tests {
     }
 
     #[test]
-    fn the_tdeck_max_leaves_the_touch_reset_to_the_expander_phase() {
+    fn the_tdeck_max_reaches_its_touch_reset_through_the_expander() {
         let mut rec = Recorder::default();
         run_boot_sequence(TDECK_MAX_PROFILE, &mut rec);
 
         let config = rec
-            .loaded_config("com.thistle.drv.touch-cst328")
+            .loaded_config("com.thistle.drv.touch-cst66xx")
             .expect("the Max declares the touch panel");
         // T_RST is an expander pin, not a GPIO. Handing the driver the pin
         // number would have it drive GPIO 7, which on this board is the
         // modem's ring indicator.
         assert_eq!(json_get_int(config, "pin_rst"), Some(-1), "{config}");
+        // The expander phase sets the idle level, but the driver still has to
+        // pulse the line itself right before it probes — the part needs a
+        // reset it has not had for half a second by the time drivers load.
+        assert_eq!(json_get_int(config, "rst_expander"), Some(0), "{config}");
+        assert_eq!(json_get_int(config, "rst_expander_pin"), Some(7), "{config}");
+    }
+
+    #[test]
+    fn the_tdeck_max_drives_its_touch_panel_as_the_cst66xx_it_is() {
+        let mut rec = Recorder::default();
+        run_boot_sequence(TDECK_MAX_PROFILE, &mut rec);
+
+        // The vendor pinmap calls this part a CST328 and the vendor README
+        // calls it a CST3530. Both are wrong, and neither shares a register
+        // map with what is actually fitted: running LilyGo's own firmware on
+        // the board reports `ictype:caca220e`, the CST66xx signature. The Pro
+        // keeps the CST328 driver, so the two must stay separate.
+        let ids = rec.driver_ids();
+        assert!(
+            ids.iter().any(|id| *id == "com.thistle.drv.touch-cst66xx"),
+            "the Max drives a CST66xx: {ids:?}"
+        );
+        assert!(
+            !ids.iter().any(|id| id.contains("cst328")),
+            "the CST328 driver belongs to the Pro, not the Max: {ids:?}"
+        );
     }
 
     #[test]
