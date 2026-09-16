@@ -3,6 +3,47 @@
 ## Project Overview
 ThistleOS is a portable ESP32 family operating system with an immutable kernel, loadable drivers and apps, swappable window managers, and Ed25519 signing at every level. Supports multiple boards across ESP32, S2, S3, C3, and C6 architectures. Targets LilyGo T-Deck Pro (e-paper), T-Deck (LCD), T-Display-S3, T3-S3, CYD, and C3-Mini.
 
+## Hardware authority: the LilyGo vendor repo
+
+`~/personal/T-Deck-MAX/` is a checkout of
+`github.com:Xinyuan-LilyGO/T-Deck-MAX` — the board manufacturer's own
+firmware. **It is the authority on T-Deck (Pro / Max) hardware.** When a pin,
+an I2C address, a part number, a reset line, or a register map is in question,
+answer it from there before writing driver code, and cite what you used.
+
+Do not arbitrate between unrelated vendor libraries found elsewhere on disk or
+online. Reasoning from a plausible-looking driver for a *different* part has
+repeatedly produced wrong register maps, and once hung the I2C bus hard enough
+at init to trip the interrupt watchdog and boot-loop the board.
+
+What is in there, in descending order of authority:
+
+- `hardware/` — the **schematics and the chip datasheets**, as PDFs. The board
+  schematic is `hardware/T-Deck Pro Max V0.1 25-09-11/*.pdf`; alongside it sit
+  the datasheets for the parts actually fitted (`touch-CST328_V2.2.pdf`,
+  `MIA-M10Q_DataSheet_*.pdf`, `GDEQ031T10.pdf`, `UC8253.pdf`, `tca8418.pdf`,
+  `XL9535_*.pdf`, `ES8311.*`, `drv2605.pdf`, `S62F_Lora.pdf`, the A7682E
+  manuals). Read these with the `pages` argument of the Read tool.
+- `docs/pinmap.md` (English; `pinmap_cn.md` is the same in Chinese) — the
+  schematic transcribed per module, each row citing its schematic page and
+  cross-checked against the repo's macros. This is the fastest correct answer
+  for "which pin is X on". It is what establishes, for example, that touch is a
+  **CST328 at 0x1A**, INT on GPIO12, with reset on **XL9555 P07** rather than a
+  direct GPIO, and that `GPS_EN` is **XL9555 P02**.
+- `lib/TDeckMaxBoard/src/TDeckMaxBoard.h` — the pin macros the vendor firmware
+  compiles against.
+- `lib/` — the vendor's driver libraries for the fitted parts, notably
+  `HynTouch/` (`hyn_cst3xx.c` covers the CST328), `SensorLib/`, `XPowersLib/`,
+  `GxEPD2/`, `RadioLib/`, `Adafruit TCA8418/`, `TinyGPSPlus/`.
+- `examples/` — working per-peripheral sketches, including `touch_hyn_core/`,
+  `test_GPS/`, `XL9555/`, `keypad/`, `Elink_paper/`, and the `factory/` image.
+- `firmware/*.bin` — a prebuilt factory image, if a board ever needs to be
+  proven good against known-working vendor firmware.
+
+Note the naming trap the vendor doc calls out: schematic net names are written
+from the *peripheral's* point of view (`GPS_TX`, `7682_RXD`, `I2S_DSDIN`), so
+TX/RX are crossed relative to the SoC pin that drives them.
+
 ## Build System
 - **Firmware**: ESP-IDF v5.5 with CMake. `idf.py build`, `idf.py flash monitor`
 - **Simulator**: SDL2 desktop build. `cd simulator/build && cmake .. && make -j8 && ./thistle_sim`
