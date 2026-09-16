@@ -8,18 +8,32 @@
 #include <stdbool.h>
 #include <math.h>
 
-static int _tests_run = 0;
-static int _tests_passed = 0;
-static int _tests_failed = 0;
+/* One set of counters for the whole binary, not one per translation unit.
+ *
+ * These were `static`, which gave every test file its own private copies: an
+ * assertion incremented the count in the file that failed, while RUN_TEST and
+ * the exit code in test_sim_main.c read a set that nothing ever touched. Every
+ * failing test printed FAIL and was then counted as a pass, and the process
+ * still exited 0 — so the suite could not go red. Defined in test_sim_main.c. */
+extern int _tests_run;
+extern int _tests_passed;
+extern int _tests_failed;
 
 #define TEST(name) void test_##name(void)
 
+/* A failing assertion prints its own FAIL and returns from the test body, so
+ * whether the test passed is only knowable by watching the failure count. The
+ * unconditional PASS this replaced printed "PASS" directly under a "FAIL" and
+ * counted it in the summary, which made a red suite read as green. */
 #define RUN_TEST(name) do { \
+    int _failed_before = _tests_failed; \
     _tests_run++; \
     printf("  TEST %-50s ", #name); \
     test_##name(); \
-    printf("PASS\n"); \
-    _tests_passed++; \
+    if (_tests_failed == _failed_before) { \
+        printf("PASS\n"); \
+        _tests_passed++; \
+    } \
 } while(0)
 
 #define ASSERT_EQ(a, b) do { \
