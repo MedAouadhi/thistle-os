@@ -34,6 +34,9 @@ typedef struct {
     int         height;
     bool        has_keyboard;
     bool        has_touch;
+    /* The Max's touch part is a CST66xx; the Pro and the rest are CST328.
+     * They share neither register map nor address width. */
+    bool        touch_is_cst66xx;
     bool        has_radio;
     bool        has_gps;
     bool        is_epaper;
@@ -63,7 +66,8 @@ static const sim_device_t DEVICES[] = {
     /* The Max is the only device with an IO expander, and the only one with
      * neither an RTC nor a light sensor — it carries neither part. */
     { .name = "tdeck-max",  .board_name = "T-Deck Pro Max (Simulator)", .width = 240, .height = 320,
-      .has_keyboard = true, .has_touch = true, .has_radio = true, .has_gps = true,
+      .has_keyboard = true, .has_touch = true, .touch_is_cst66xx = true,
+      .has_radio = true, .has_gps = true,
       .is_epaper = true, .has_io_expander = true },
     { .name = "tdisplay",   .board_name = "T-Display-S3 (Simulator)",  .width = 320, .height = 170,
       .has_touch = true,  SIM_DEVICE_DEFAULTS },
@@ -125,7 +129,10 @@ esp_err_t board_init(void)
     /* Register I2C device models based on device capabilities */
     if (dev->has_rtc)          dev_pcf8563_register(0, 0x51);
     if (dev->has_keyboard)     dev_tca8418_register(0, 0x34);
-    if (dev->has_touch)        dev_cst328_register(0, 0x1A);
+    if (dev->has_touch) {
+        if (dev->touch_is_cst66xx) dev_cst66xx_register(0, 0x1A);
+        else                       dev_cst328_register(0, 0x1A);
+    }
     if (dev->has_io_expander)  dev_xl9555_register(0, 0x20);
     dev_qmi8658c_register(0, 0x6A);    /* IMU — all devices with accel */
     if (dev->has_light_sensor) dev_ltr553_register(0, 0x23);

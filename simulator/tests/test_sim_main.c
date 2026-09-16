@@ -4,6 +4,10 @@
  */
 #include "test_runner.h"
 
+int _tests_run = 0;
+int _tests_passed = 0;
+int _tests_failed = 0;
+
 /* Forward declarations from test files */
 /* test_sim_assert.c */
 extern void test_assert_uninitialized_returns_zero(void);
@@ -24,6 +28,15 @@ extern void test_tca8418_empty_fifo(void);
 extern void test_tca8418_key_injection(void);
 extern void test_cst328_no_touch(void);
 extern void test_cst328_touch_injection(void);
+
+/* test_cst66xx.c */
+extern void test_cst66xx_says_nothing_until_normal_mode_is_selected(void);
+extern void test_cst66xx_reports_a_touch_in_the_documented_frame(void);
+extern void test_cst66xx_checksum_covers_the_point_data_seeded_with_0x55(void);
+extern void test_cst66xx_reports_a_lift_with_no_fingers(void);
+extern void test_cst66xx_holds_its_report_until_the_host_releases_it(void);
+extern void test_cst66xx_ignores_two_byte_addresses_a_cst328_driver_would_send(void);
+extern void test_cst66xx_identifies_itself_the_way_the_real_part_did(void);
 
 /* test_wm_select.c */
 extern void test_wm_select_defaults_an_epaper_board_to_thistle_tk(void);
@@ -91,6 +104,15 @@ int main(void)
     printf("\n[cst328]\n");
     RUN_TEST(cst328_no_touch);
     RUN_TEST(cst328_touch_injection);
+
+    printf("\n[cst66xx]\n");
+    RUN_TEST(cst66xx_says_nothing_until_normal_mode_is_selected);
+    RUN_TEST(cst66xx_reports_a_touch_in_the_documented_frame);
+    RUN_TEST(cst66xx_checksum_covers_the_point_data_seeded_with_0x55);
+    RUN_TEST(cst66xx_reports_a_lift_with_no_fingers);
+    RUN_TEST(cst66xx_holds_its_report_until_the_host_releases_it);
+    RUN_TEST(cst66xx_ignores_two_byte_addresses_a_cst328_driver_would_send);
+    RUN_TEST(cst66xx_identifies_itself_the_way_the_real_part_did);
 
     printf("\n[wm_select]\n");
     RUN_TEST(wm_select_defaults_an_epaper_board_to_thistle_tk);

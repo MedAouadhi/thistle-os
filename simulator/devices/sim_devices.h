@@ -12,6 +12,7 @@ void dev_pcf8563_register(int bus_index, uint16_t addr);
 void dev_qmi8658c_register(int bus_index, uint16_t addr);
 void dev_tca8418_register(int bus_index, uint16_t addr);
 void dev_cst328_register(int bus_index, uint16_t addr);
+void dev_cst66xx_register(int bus_index, uint16_t addr);
 void dev_ltr553_register(int bus_index, uint16_t addr);
 void dev_xl9555_register(int bus_index, uint16_t addr);
 
@@ -39,6 +40,14 @@ uint16_t dev_xl9555_directions(void);
 /* Input injection (called from SDL event handler) */
 void dev_tca8418_inject_key(uint8_t keycode, bool press);
 void dev_cst328_inject_touch(uint16_t x, uint16_t y, bool down);
+void dev_cst66xx_inject_touch(uint16_t x, uint16_t y, bool down);
+
+/* CST66xx protocol state, for tests. The part holds a report until the host
+ * writes the release command, and says nothing at all until the normal-mode
+ * sequence has been sent; both are easy for a driver to skip and neither is
+ * visible in the data it reads back. */
+bool dev_cst66xx_report_pending(void);
+bool dev_cst66xx_in_normal_mode(void);
 
 /* Sensor value injection */
 void dev_qmi8658c_set_accel(float x, float y, float z);

@@ -80,6 +80,7 @@ set(SIM_SRCS
     devices/dev_qmi8658c.c
     devices/dev_tca8418.c
     devices/dev_cst328.c
+    devices/dev_cst66xx.c
     devices/dev_ltr553.c
     devices/dev_xl9555.c
     drivers/sim_display.c
@@ -213,6 +214,7 @@ add_executable(thistle_sim_tests
     tests/test_sim_main.c
     tests/test_sim_assert.c
     tests/test_i2c_bus.c
+    tests/test_cst66xx.c
     tests/test_wm_select.c
     tests/stub_wm_vtables.c
     ${THISTLE_DIR}/components/ui/src/wm_select.c
@@ -230,6 +232,7 @@ add_executable(thistle_sim_tests
     devices/dev_qmi8658c.c
     devices/dev_tca8418.c
     devices/dev_cst328.c
+    devices/dev_cst66xx.c
     devices/dev_ltr553.c
     devices/dev_xl9555.c
 )
