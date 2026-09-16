@@ -117,6 +117,48 @@ esp_err_t i2c_master_transmit_receive(i2c_master_dev_handle_t dev,
     return ESP_OK;
 }
 
+/* A read with no register address of its own, continuing whatever the last
+ * transmit set up. Models see it as a read with an empty address, which is
+ * what it is on the wire. */
+esp_err_t i2c_master_receive(i2c_master_dev_handle_t dev,
+                              uint8_t *rx, size_t rx_len,
+                              int timeout)
+{
+    (void)timeout;
+    if (!rx || rx_len == 0) return ESP_OK;
+
+    if (dev == (void *)(uintptr_t)1) {
+        memset(rx, 0, rx_len);
+        return ESP_OK;
+    }
+
+    sim_i2c_device_t *d = (sim_i2c_device_t *)dev;
+    if (d->ops && d->ops->on_read) {
+        return d->ops->on_read(d, NULL, 0, rx, rx_len);
+    }
+    memset(rx, 0, rx_len);
+    return ESP_OK;
+}
+
+/* Does anything answer at this address? Drivers probe before sending a
+ * write-only command, because on real hardware such a write to a silent
+ * device does not fail — it hangs until the watchdog fires. */
+esp_err_t i2c_master_probe(i2c_master_bus_handle_t bus, uint16_t address, int timeout)
+{
+    (void)timeout;
+    if (!bus || !s_initialized) return ESP_ERR_NOT_FOUND;
+
+    sim_i2c_bus_t *b = (sim_i2c_bus_t *)bus;
+    for (int bi = 0; bi < SIM_I2C_MAX_BUSES; bi++) {
+        if (b != &s_buses[bi]) continue;
+        for (int i = 0; i < b->device_count; i++) {
+            if (b->devices[i].address == address) return ESP_OK;
+        }
+        return ESP_ERR_NOT_FOUND;
+    }
+    return ESP_ERR_NOT_FOUND;
+}
+
 esp_err_t i2c_master_transmit(i2c_master_dev_handle_t dev,
                                const uint8_t *data, size_t len,
                                int timeout)
