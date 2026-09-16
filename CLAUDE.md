@@ -178,6 +178,27 @@ The kernel is **100% Rust and hardware-independent**. It never calls ESP-IDF har
 3. Set `"window_manager"` in `system.json`
 4. Or: register compiled-in via `display_server_register_wm()`
 
+### Choosing among the compiled-in managers
+
+`"window_manager"` in `system.json` takes a manager's own `name`:
+
+- `"thistle-tk"` — the Rust WM. Works on e-paper and LCD, and is the default
+  on e-paper because a refresh there is expensive.
+- `"lvgl-epaper-wm"` — LVGL with deferred refresh, for e-paper.
+- `"lvgl-lcd-wm"` — LVGL with direct flush. The default on LCD.
+- `"auto"`, empty or absent — pick from the display type, as above.
+
+`thistle_wm_select()` (`components/ui/src/wm_select.c`) resolves this for the
+firmware and both simulators; a name it does not recognise logs a warning and
+falls back rather than failing the boot.
+
+The choice decides more than how things are drawn. The twelve LVGL built-in
+apps parent their widgets to `ui_manager_get_app_area()`, which is NULL unless
+an LVGL manager ran `ui_manager_init()`, so they are registered only under one
+— launching them under thistle-tk segfaults. An e-paper board therefore sees
+two apps under `thistle-tk` and all fourteen under `lvgl-epaper-wm`. That is
+the trade to weigh when changing this setting, not a bug in either manager.
+
 ## Agent skills
 
 ### Issue tracker

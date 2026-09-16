@@ -33,6 +33,7 @@ set(THISTLE_SRCS
     ${THISTLE_DIR}/components/ui/src/lvgl_wm.c
     ${THISTLE_DIR}/components/ui/src/lvgl_wm_epaper.c
     ${THISTLE_DIR}/components/ui/src/lvgl_wm_lcd.c
+    ${THISTLE_DIR}/components/ui/src/wm_select.c
     ${THISTLE_DIR}/components/ui/src/theme.c
     ${THISTLE_DIR}/components/ui/src/statusbar.c
     ${THISTLE_DIR}/components/ui/src/app_switcher.c
@@ -212,6 +213,9 @@ add_executable(thistle_sim_tests
     tests/test_sim_main.c
     tests/test_sim_assert.c
     tests/test_i2c_bus.c
+    tests/test_wm_select.c
+    tests/stub_wm_vtables.c
+    ${THISTLE_DIR}/components/ui/src/wm_select.c
     tests/test_xl9555.c
     tests/test_board_fingerprint.c
     tests/test_http_client_shim.c
@@ -231,6 +235,7 @@ add_executable(thistle_sim_tests
 )
 
 target_include_directories(thistle_sim_tests PRIVATE
+    ${THISTLE_DIR}/components/ui/include
     ${CMAKE_CURRENT_SOURCE_DIR}/platform
     ${CMAKE_CURRENT_SOURCE_DIR}/drivers
     ${CMAKE_CURRENT_SOURCE_DIR}/devices

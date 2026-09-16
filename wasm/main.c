@@ -16,6 +16,7 @@
 #include "thistle/kernel.h"
 #include "thistle/app_manager.h"
 #include "thistle/display_server.h"
+#include "thistle/board_config.h"
 #include "ui/lvgl_wm.h"
 #include "sim_input.h"
 #include "sim_vfs.h"
@@ -105,9 +106,11 @@ int main(void)
     /* An e-paper device needs thistle-tk: sim_display unpacks its flushes as
      * a packed 1-bit framebuffer, and the LCD window manager emits RGB565,
      * which renders as noise. */
-    s_use_tk_wm = sim_board_is_epaper();
-    ret = display_server_register_wm(s_use_tk_wm ? thistle_tk_wm_get()
-                                                 : lvgl_lcd_wm_get());
+    /* Same selection as the firmware, from the same system.json key. */
+    thistle_wm_choice_t choice =
+        thistle_wm_select(board_config_get_wm_name(), sim_board_is_epaper());
+    s_use_tk_wm = !choice.hosts_lvgl_apps;
+    ret = display_server_register_wm(choice.wm);
     printf("display_server_register_wm: %d\n", ret);
 
     if (s_use_tk_wm) {

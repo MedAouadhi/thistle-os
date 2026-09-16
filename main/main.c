@@ -15,7 +15,7 @@
 #include "thistle/ota.h"
 #include "thistle/display_server.h"
 #include "thistle/elf_loader.h"
-/* board_config.h not needed — WM selected by display capability */
+#include "thistle/board_config.h"
 #include "hal/board.h"
 #include "hal/input.h"
 #ifdef THISTLE_LEGACY_C_APPS
@@ -275,16 +275,20 @@ void app_main(void)
      * S3 keeps the LVGL/C app bridge while that final migration is completed. */
     bool use_tk_wm = true;
 #ifdef THISTLE_LEGACY_C_APPS
-    use_tk_wm = false;
     {
+        /* A display that can refresh is e-paper; that is what chose the
+         * manager outright before system.json got a say. It still decides
+         * when nothing is configured, so a board that says nothing boots
+         * exactly as it did. */
         const hal_registry_t *reg = hal_get_registry();
-        if (reg && reg->display && reg->display->refresh) {
-            ESP_LOGI(TAG, "E-paper display: using thistle-tk WM");
-            ret = display_server_register_wm(thistle_tk_wm_get());
-            use_tk_wm = true;
-        } else {
-            ret = display_server_register_wm(lvgl_lcd_wm_get());
-        }
+        bool is_epaper = reg && reg->display && reg->display->refresh;
+        thistle_wm_choice_t choice =
+            thistle_wm_select(board_config_get_wm_name(), is_epaper);
+
+        ESP_LOGI(TAG, "Window manager: %s (%s built-in LVGL apps)",
+                 choice.wm->name, choice.hosts_lvgl_apps ? "with" : "without");
+        ret = display_server_register_wm(choice.wm);
+        use_tk_wm = !choice.hosts_lvgl_apps;
     }
 #else
     ret = display_server_register_wm(thistle_tk_wm_get());

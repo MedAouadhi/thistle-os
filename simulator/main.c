@@ -24,6 +24,7 @@ void sim_lvgl_unlock(void) { pthread_mutex_unlock(&s_lvgl_mutex); }
 #include "thistle/app_manager.h"
 #include "thistle/display_server.h"
 #include "ui/manager.h"
+#include "thistle/board_config.h"
 #include "ui/lvgl_wm.h"
 #include "sim_input.h"
 #include "sim_display.h"
@@ -141,9 +142,12 @@ int main(int argc, char **argv)
     fflush(stdout);
 
     extern bool sim_board_is_epaper(void);
-    bool use_tk_wm = sim_board_is_epaper();
-    err = display_server_register_wm(use_tk_wm ? thistle_tk_wm_get()
-                                               : lvgl_lcd_wm_get());
+    /* Same selection as the firmware, from the same system.json key, so a
+     * board configured here behaves the way it will on hardware. */
+    thistle_wm_choice_t choice =
+        thistle_wm_select(board_config_get_wm_name(), sim_board_is_epaper());
+    bool use_tk_wm = !choice.hosts_lvgl_apps;
+    err = display_server_register_wm(choice.wm);
     { char _msg[64]; snprintf(_msg, sizeof(_msg), "display_server_register_wm: %d", err);
       printf("%s\n", _msg); sim_assert_check_line(_msg); }
     fflush(stdout);
