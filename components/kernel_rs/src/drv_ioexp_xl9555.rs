@@ -161,12 +161,26 @@ mod esp_ffi {
         unsafe { std::ptr::write_bytes(read, 0xFF, rsz) };
         0
     }
+    /// Every register write the driver has made, as `(register, value)`, so a
+    /// test can assert the order in which a pin was driven.
+    pub static WRITES: std::sync::Mutex<Vec<(u8, u8)>> = std::sync::Mutex::new(Vec::new());
+    /// Make every register write fail, as a part that stopped answering would.
+    pub static FAIL_WRITES: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
     pub unsafe fn i2c_master_transmit(
         _handle: *mut c_void,
-        _data: *const u8,
-        _len: usize,
+        data: *const u8,
+        len: usize,
         _timeout: i32,
     ) -> i32 {
+        if FAIL_WRITES.load(std::sync::atomic::Ordering::SeqCst) {
+            return -1;
+        }
+        if len == 2 {
+            let bytes = unsafe { std::slice::from_raw_parts(data, len) };
+            WRITES.lock().unwrap().push((bytes[0], bytes[1]));
+        }
         0
     }
 }
@@ -188,6 +202,34 @@ struct Xl9555 {
 // I²C driver, which is itself thread-safe. The expanders are guarded by the
 // mutex below.
 unsafe impl Send for Xl9555 {}
+
+impl Xl9555 {
+    /// Latch a pin's output level. The shadow follows only a write the part
+    /// took, since every later write to the port is built from it.
+    fn write_output(&mut self, port: usize, mask: u8, high: bool) -> i32 {
+        let value = with_bit(self.outputs[port], mask, high);
+        let ret = unsafe { write_reg(self.dev, XL9555_REG_OUTPUT_0 + port as u8, value) };
+        if ret == ESP_OK {
+            self.outputs[port] = value;
+        }
+        ret
+    }
+
+    /// Make a pin an output — `0 = output, 1 = input` in the part's
+    /// configuration semantics.
+    fn make_output(&mut self, port: usize, mask: u8) -> i32 {
+        let value = with_bit(self.config[port], mask, false);
+        let ret = unsafe { write_reg(self.dev, XL9555_REG_CONFIG_0 + port as u8, value) };
+        if ret == ESP_OK {
+            self.config[port] = value;
+        }
+        ret
+    }
+
+    fn is_output(&self, port: usize, mask: u8) -> bool {
+        self.config[port] & mask == 0
+    }
+}
 
 /// The expanders a board profile has brought up, in declaration order: the nth
 /// entry is the expander a board profile's `expander_outputs` address as `n`.
@@ -251,20 +293,13 @@ pub fn attach(i2c_bus: i32, i2c_addr: u8) -> i32 {
 /// Configure an expander pin as an output, so that it drives its rail rather
 /// than floating at the all-inputs state the part resets to.
 pub fn set_as_output(index: usize, pin: u8) -> i32 {
-    with_expander(index, pin, |expander, port, mask| {
-        // `0 = output, 1 = input` — the part's configuration semantics.
-        expander.config[port] = with_bit(expander.config[port], mask, false);
-        let value = expander.config[port];
-        unsafe { write_reg(expander.dev, XL9555_REG_CONFIG_0 + port as u8, value) }
-    })
+    with_expander(index, pin, |expander, port, mask| expander.make_output(port, mask))
 }
 
 /// Drive an expander pin high or low.
 pub fn set_level(index: usize, pin: u8, high: bool) -> i32 {
     with_expander(index, pin, |expander, port, mask| {
-        expander.outputs[port] = with_bit(expander.outputs[port], mask, high);
-        let value = expander.outputs[port];
-        unsafe { write_reg(expander.dev, XL9555_REG_OUTPUT_0 + port as u8, value) }
+        expander.write_output(port, mask, high)
     })
 }
 
@@ -276,6 +311,40 @@ pub fn detach_all() {
             unsafe { esp_ffi::i2c_master_bus_rm_device(expander.dev) };
         }
     }
+}
+
+// ── Driver-facing API ────────────────────────────────────────────────────────
+
+/// Drive an expander pin from a driver, at runtime, making it an output if the
+/// board profile did not.
+///
+/// This is the one call a driver has onto an expander — see ADR-0001. It
+/// exists for a driver that owns a line, such as an audio driver gating its
+/// own amplifier, and it must not depend on a board profile having configured
+/// that line at boot.
+///
+/// The level is latched before the pin becomes an output, the reverse of the
+/// boot phase's order. The latch resets high, so configuring direction first
+/// would pulse the line high on its way to low.
+///
+/// Called from a task, never an interrupt handler: every call is an I²C
+/// transaction.
+///
+/// Exported by name through the driver syscall table. Returns
+/// `ESP_ERR_INVALID_ARG` for a negative index or a pin the part does not have,
+/// and `ESP_ERR_NOT_FOUND` for an expander no board profile declared.
+#[no_mangle]
+pub extern "C" fn thistle_expander_set_level(expander: i32, pin: i32, level: i32) -> i32 {
+    let (Ok(index), Ok(pin)) = (usize::try_from(expander), u8::try_from(pin)) else {
+        return ESP_ERR_INVALID_ARG;
+    };
+    with_expander(index, pin, |expander, port, mask| {
+        let ret = expander.write_output(port, mask, level != 0);
+        if ret != ESP_OK || expander.is_output(port, mask) {
+            return ret;
+        }
+        expander.make_output(port, mask)
+    })
 }
 
 fn with_expander<F>(index: usize, pin: u8, apply: F) -> i32
@@ -356,6 +425,100 @@ mod tests {
     fn a_pin_beyond_the_parts_width_is_refused() {
         assert_eq!(set_as_output(0, XL9555_PINS), ESP_ERR_INVALID_ARG);
         assert_eq!(set_level(0, XL9555_PINS, true), ESP_ERR_INVALID_ARG);
+    }
+
+    /// Attach one expander on the host stub, which resets to the part's
+    /// power-on state, and forget the writes the attach itself made.
+    fn attach_one() {
+        detach_all();
+        // The board profile's bus, which the stub ignores but `attach` looks
+        // for before it opens anything.
+        if crate::hal_registry::hal_bus_get_i2c(0).is_null() {
+            unsafe { crate::hal_registry::hal_bus_register_i2c(0, 1usize as *mut c_void) };
+        }
+        assert_eq!(attach(0, 0x20), ESP_OK);
+        esp_ffi::WRITES.lock().unwrap().clear();
+    }
+
+    fn writes() -> Vec<(u8, u8)> {
+        esp_ffi::WRITES.lock().unwrap().clone()
+    }
+
+    #[test]
+    fn a_driver_claiming_a_line_latches_its_level_before_making_it_an_output() {
+        // The latch resets high, so a pin made an output first would pulse
+        // high before the level landed — an audible click on an amplifier.
+        attach_one();
+        assert_eq!(thistle_expander_set_level(0, 6, 0), ESP_OK);
+        assert_eq!(
+            writes(),
+            vec![
+                (XL9555_REG_OUTPUT_0, 0b1011_1111),
+                (XL9555_REG_CONFIG_0, 0b1011_1111),
+            ]
+        );
+        detach_all();
+    }
+
+    #[test]
+    fn a_line_already_driven_is_not_reconfigured() {
+        attach_one();
+        assert_eq!(thistle_expander_set_level(0, 6, 0), ESP_OK);
+        esp_ffi::WRITES.lock().unwrap().clear();
+
+        assert_eq!(thistle_expander_set_level(0, 6, 1), ESP_OK);
+        assert_eq!(writes(), vec![(XL9555_REG_OUTPUT_0, 0xFF)]);
+        detach_all();
+    }
+
+    #[test]
+    fn a_line_on_the_upper_port_is_driven_through_the_upper_registers() {
+        attach_one();
+        assert_eq!(thistle_expander_set_level(0, 10, 0), ESP_OK);
+        assert_eq!(
+            writes(),
+            vec![
+                (XL9555_REG_OUTPUT_0 + 1, 0b1111_1011),
+                (XL9555_REG_CONFIG_0 + 1, 0b1111_1011),
+            ]
+        );
+        detach_all();
+    }
+
+    #[test]
+    fn a_write_the_part_never_took_is_not_remembered_as_taken() {
+        // The shadow registers are what every later write is built from. One
+        // that recorded a failed write would carry the wrong level into the
+        // next write to any pin on that port.
+        attach_one();
+        esp_ffi::FAIL_WRITES.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(thistle_expander_set_level(0, 6, 0), ESP_FAIL);
+        assert_eq!(set_level(0, 5, false), ESP_FAIL);
+        esp_ffi::FAIL_WRITES.store(false, std::sync::atomic::Ordering::SeqCst);
+
+        assert_eq!(thistle_expander_set_level(0, 3, 0), ESP_OK);
+        assert_eq!(
+            writes(),
+            vec![
+                (XL9555_REG_OUTPUT_0, 0b1111_0111),
+                (XL9555_REG_CONFIG_0, 0b1111_0111),
+            ]
+        );
+        detach_all();
+    }
+
+    #[test]
+    fn the_runtime_setter_refuses_what_the_board_layer_refuses() {
+        attach_one();
+        assert_eq!(thistle_expander_set_level(-1, 6, 1), ESP_ERR_INVALID_ARG);
+        assert_eq!(thistle_expander_set_level(0, -1, 1), ESP_ERR_INVALID_ARG);
+        assert_eq!(
+            thistle_expander_set_level(0, XL9555_PINS as i32, 1),
+            ESP_ERR_INVALID_ARG
+        );
+        assert_eq!(thistle_expander_set_level(1, 6, 1), ESP_ERR_NOT_FOUND);
+        assert!(writes().is_empty());
+        detach_all();
     }
 
     #[test]

@@ -38,7 +38,9 @@
         {"expander": 0, "pin": 7, "direction": "output", "level": 0, "delay_ms": 10},
         {"expander": 0, "pin": 9, "direction": "output", "level": 0, "delay_ms": 10},
         {"expander": 0, "pin": 7, "direction": "output", "level": 1, "delay_ms": 50},
-        {"expander": 0, "pin": 9, "direction": "output", "level": 1, "delay_ms": 50}
+        {"expander": 0, "pin": 9, "direction": "output", "level": 1, "delay_ms": 50},
+        {"expander": 0, "pin": 6, "direction": "output", "level": 0, "delay_ms": 0},
+        {"expander": 0, "pin": 10, "direction": "output", "level": 0, "delay_ms": 0}
     ],
     "drivers": [
         {
@@ -115,6 +117,22 @@
             "config": {
                 "i2c_bus": 0,
                 "gauge_i2c_addr": "0x55"
+            }
+        },
+        {
+            "id": "com.thistle.drv.audio-es8311",
+            "hal": "audio",
+            "entry": "audio-es8311.drv.elf",
+            "config": {
+                "i2c_bus": 0,
+                "i2c_addr": "0x18",
+                "i2s_num": 0,
+                "i2s_mclk": 38,
+                "i2s_bck": 39,
+                "i2s_ws": 18,
+                "i2s_data": 40,
+                "amp_expander": 0,
+                "amp_expander_pin": 6
             }
         },
         {

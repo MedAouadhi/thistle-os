@@ -1745,6 +1745,11 @@ static SYSCALL_TABLE: &[SyscallEntry] = &[
         "thistle_event_subscribe",
         thistle_event_subscribe as unsafe extern "C" fn(u32, *const c_void, *mut c_void) -> i32
     ),
+    // Driver-only: the one runtime call onto an IO expander (ADR-0001).
+    entry!(
+        "thistle_expander_set_level",
+        crate::drv_ioexp_xl9555::thistle_expander_set_level as extern "C" fn(i32, i32, i32) -> i32
+    ),
     entry!(
         "thistle_free",
         thistle_free as unsafe extern "C" fn(*mut c_void)
@@ -2232,6 +2237,11 @@ static SYSCALL_TABLE: &[SyscallEntry] = &[
         "thistle_event_subscribe",
         thistle_event_subscribe as unsafe extern "C" fn(u32, *const c_void, *mut c_void) -> i32
     ),
+    // Driver-only: the one runtime call onto an IO expander (ADR-0001).
+    entry!(
+        "thistle_expander_set_level",
+        crate::drv_ioexp_xl9555::thistle_expander_set_level as extern "C" fn(i32, i32, i32) -> i32
+    ),
     entry!(
         "thistle_free",
         thistle_free as unsafe extern "C" fn(*mut c_void)
@@ -2615,11 +2625,24 @@ mod tests {
             "xQueueGenericSend",
             "xQueueReceive",
             "thistle_driver_get_config",
+            "thistle_expander_set_level",
         ] {
             let c_name = std::ffi::CString::new(name).unwrap();
             assert!(unsafe { syscall_resolve_signed_app(c_name.as_ptr()) }.is_null());
             assert!(unsafe { syscall_resolve_unsigned_app(c_name.as_ptr()) }.is_null());
         }
+    }
+
+    #[test]
+    fn test_a_driver_can_drive_an_expander_line_it_owns() {
+        let name = std::ffi::CString::new("thistle_expander_set_level").unwrap();
+        let address = unsafe { syscall_resolve(name.as_ptr()) };
+        assert!(!address.is_null(), "driver resolver lost the expander setter");
+        assert_eq!(
+            address,
+            crate::drv_ioexp_xl9555::thistle_expander_set_level
+                as extern "C" fn(i32, i32, i32) -> i32 as *mut c_void
+        );
     }
 
     #[test]

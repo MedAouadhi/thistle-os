@@ -1679,6 +1679,13 @@ mod tests {
     const LORA_SEL_PIN: i32 = 4;
     const LORA_ANTENNA_INTERNAL: i32 = 1;
 
+    /// `BOARD_XL9555_06_AMPLIFIER`, the NS4150B's enable, high = on, and
+    /// `BOARD_XL9555_12_AUDIO_SEL`, the speaker mux, low = ES8311. The vendor
+    /// names the second after its port and bit, P1.2, but numbers it 10.
+    const AMP_EN_PIN: i32 = 6;
+    const AUDIO_SEL_PIN: i32 = 10;
+    const AUDIO_ROUTE_CODEC: i32 = 0;
+
     /// Where in the sequence a pin was first driven to a level, if it was.
     fn level_step(rec: &Recorder, want_pin: i32, want_level: i32) -> Option<usize> {
         rec.steps.iter().position(|step| {
@@ -1753,8 +1760,41 @@ mod tests {
                 (0, KEY_RST_PIN, 0),
                 (0, TOUCH_RST_PIN, 1),
                 (0, KEY_RST_PIN, 1),
+                (0, AMP_EN_PIN, 0),
+                (0, AUDIO_SEL_PIN, AUDIO_ROUTE_CODEC),
             ]
         );
+    }
+
+    #[test]
+    fn the_tdeck_max_routes_its_speaker_to_the_codec_with_the_amplifier_off() {
+        let mut rec = Recorder::default();
+        run_boot_sequence(TDECK_MAX_PROFILE, &mut rec);
+
+        // The amplifier's enable has a pull-up behind it, so an expander pin
+        // left as the input it resets to leaves the speaker hissing from
+        // power-on until the audio driver loads. The mux defaults the other
+        // way, to the modem, which is out of scope and silent.
+        let levels = expander_levels(&rec);
+        assert_eq!(
+            levels.iter().filter(|(_, pin, _)| *pin == AMP_EN_PIN).collect::<Vec<_>>(),
+            vec![&(0, AMP_EN_PIN, 0)],
+            "the board profile only ever holds the amplifier off"
+        );
+        let routed = level_step(&rec, AUDIO_SEL_PIN, AUDIO_ROUTE_CODEC)
+            .expect("the Max routes its speaker to the codec");
+        let drivers = driver_loader_step(&rec).expect("the Max loads drivers");
+        assert!(routed < drivers, "{:?}", rec.phases());
+
+        // The driver gates the amplifier itself, so it must be told where.
+        let config = rec
+            .loaded_config("com.thistle.drv.audio-es8311")
+            .expect("the Max declares its codec");
+        assert_eq!(json_get_int(config, "amp_expander"), Some(0), "{config}");
+        assert_eq!(json_get_int(config, "amp_expander_pin"), Some(AMP_EN_PIN as i64), "{config}");
+        // The schematic's I2S_DSDIN, the SoC's data out. LilyGo's pinmap has
+        // this as GPIO17, which is the codec's ASDOUT and would play nothing.
+        assert_eq!(json_get_int(config, "i2s_data"), Some(40), "{config}");
     }
 
     #[test]

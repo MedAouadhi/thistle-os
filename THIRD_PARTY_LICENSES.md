@@ -156,6 +156,22 @@ Full text: https://github.com/espressif/esp-protocols/blob/master/LICENSE
 
 ---
 
+## esp_codec_dev
+
+**License:** Apache License 2.0
+**Source:** https://github.com/espressif/esp-adf/tree/master/components/esp_codec_dev
+**Used for:** ES8311 audio codec register initialisation and playback (`drv_audio_es8311`).
+
+```
+Copyright 2023 Espressif Systems (Shanghai) CO LTD
+
+Licensed under the Apache License, Version 2.0.
+```
+
+Full text: https://github.com/espressif/esp-adf/blob/master/components/esp_codec_dev/LICENSE
+
+---
+
 ## espressif__elf_loader
 
 **License:** Apache License 2.0
@@ -395,7 +411,7 @@ All dependencies are compatible with the ThistleOS BSD 3-Clause license:
 
 | License | Compatible with BSD 3-Clause | Components |
 |---------|------------------------------|------------|
-| Apache-2.0 | Yes | ESP-IDF, esp_lvgl_port, esp_modem, elf_loader, NimBLE, mbedTLS |
+| Apache-2.0 | Yes | ESP-IDF, esp_lvgl_port, esp_modem, esp_codec_dev, elf_loader, NimBLE, mbedTLS |
 | MIT | Yes | LVGL, FreeRTOS, RadioLib, libcurl, Unity, esp-rs crates |
 | BSD-2-Clause | Yes | Monocypher |
 | zlib | Yes | SDL2 |

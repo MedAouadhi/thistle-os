@@ -26,6 +26,7 @@
 #include "drv_power_sy6970.h"
 #include "drv_gps_mia_m10q.h"
 #include "drv_radio_sx1262.h"
+#include "drv_audio_es8311.h"
 #endif
 
 #ifndef THISTLE_BUS_INIT_HOST_TEST
@@ -317,6 +318,29 @@ esp_err_t board_builtin_driver_init(const char *id, const char *hal_type,
     if (strcmp(id, "com.thistle.drv.power-sy6970") == 0) {
         ESP_LOGI(TAG, "power-sy6970: %s", config_json);
         return drv_power_sy6970_register(config_json);
+    }
+
+    // ── Audio: ES8311 codec ─────────────────────────────────────────────────
+    // `i2s_data` is the SoC's data out, which lands on the codec's DSDIN. The
+    // amplifier enable is named separately because on the T-Deck Max it is an
+    // IO expander pin the driver gates around playback, not a static rail.
+    if (strcmp(id, "com.thistle.drv.audio-es8311") == 0) {
+        static audio_es8311_config_t cfg;
+        int i2c_bus_idx = json_int(config_json, "i2c_bus", 0);
+        cfg.i2c_bus          = hal_bus_get_i2c(i2c_bus_idx);
+        cfg.i2c_addr         = (uint8_t)json_int(config_json, "i2c_addr", 0x18);
+        cfg.i2s_num          = json_int(config_json, "i2s_num",  0);
+        cfg.pin_mclk         = json_int(config_json, "i2s_mclk", -1);
+        cfg.pin_bclk         = json_int(config_json, "i2s_bck",  -1);
+        cfg.pin_ws           = json_int(config_json, "i2s_ws",   -1);
+        cfg.pin_dout         = json_int(config_json, "i2s_data", -1);
+        cfg.amp_expander     = json_int(config_json, "amp_expander", -1);
+        cfg.amp_expander_pin = json_int(config_json, "amp_expander_pin", 0);
+        ESP_LOGI(TAG, "audio-es8311: i2c_bus=%p addr=0x%02x i2s=%d mclk=%d bck=%d ws=%d "
+                      "data=%d amp_exp=%d/%d",
+                 cfg.i2c_bus, cfg.i2c_addr, cfg.i2s_num, cfg.pin_mclk, cfg.pin_bclk,
+                 cfg.pin_ws, cfg.pin_dout, (int)cfg.amp_expander, (int)cfg.amp_expander_pin);
+        return hal_audio_register(drv_audio_es8311_get(), &cfg);
     }
 
     ESP_LOGW(TAG, "no builtin for driver id=%s — skipping", id);

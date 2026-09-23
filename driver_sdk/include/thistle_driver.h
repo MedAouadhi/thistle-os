@@ -54,6 +54,12 @@ extern void *hal_bus_get_spi(int index);
 extern void *hal_bus_get_i2c(int index);
 extern const void *hal_get_registry(void);
 
+/* ── IO expander (ADR-0001) ─────────────────────────────────────── */
+/* Drive a pin of an expander declared in board.json's `io_expanders`,
+ * making it an output first if need be. An I2C transaction: never call it
+ * from an interrupt handler. Returns 0, or an ESP error code. */
+extern int thistle_expander_set_level(int expander, int pin, int level);
+
 /* ── Kernel utilities ───────────────────────────────────────────── */
 extern void thistle_log(const char *tag, const char *fmt, ...);
 extern unsigned int thistle_millis(void);

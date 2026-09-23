@@ -104,6 +104,17 @@ jobs:
             -o /tmp/test_sx1262_lifecycle
           /tmp/test_sx1262_lifecycle
 
+      - name: Test ES8311 amplifier gating
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror \
+            -fsanitize=address,undefined -fno-omit-frame-pointer \
+            -Icomponents/drv_audio_es8311/tests \
+            -Icomponents/drv_audio_es8311/include \
+            -Icomponents/thistle_hal/include \
+            components/drv_audio_es8311/tests/test_es8311_amp.c \
+            -o /tmp/test_es8311_amp
+          /tmp/test_es8311_amp
+
       - name: Test e-paper packed-row blitting
         run: |
           cc -std=c11 -Wall -Wextra -Werror \
