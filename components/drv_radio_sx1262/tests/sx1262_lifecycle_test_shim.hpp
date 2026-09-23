@@ -41,6 +41,9 @@ struct radio_sx1262_config_t {
     gpio_num_t pin_busy;
     gpio_num_t pin_dio1;
     int spi_clock_hz;
+    uint32_t freq_hz;
+    uint16_t tcxo_mv;
+    bool dio2_rf_switch;
 };
 
 struct hal_radio_driver_t {
@@ -78,6 +81,10 @@ inline bool fail_task_create;
 inline bool fail_semaphore_create;
 inline bool interrupt_attached;
 inline int begin_result = RADIOLIB_ERR_NONE;
+inline float begin_frequency;
+inline float tcxo_voltage;
+inline int tcxo_calls;
+inline int dio2_rf_switch_calls;
 inline int read_calls;
 inline int rearm_calls;
 inline std::mutex read_mutex;
@@ -105,6 +112,10 @@ inline void reset()
     fail_semaphore_create = false;
     interrupt_attached = false;
     begin_result = RADIOLIB_ERR_NONE;
+    begin_frequency = 0.0f;
+    tcxo_voltage = 0.0f;
+    tcxo_calls = 0;
+    dio2_rf_switch_calls = 0;
     read_calls = 0;
     rearm_calls = 0;
     block_read = false;
@@ -250,7 +261,10 @@ public:
     explicit SX1262(Module *) {}
     ~SX1262() { sx1262_test::record(sx1262_test::Event::RadioDelete); }
 
-    int begin(float, float, int, int, int, int) { return sx1262_test::begin_result; }
+    int begin(float frequency, float, int, int, int, int) {
+        sx1262_test::begin_frequency = frequency;
+        return sx1262_test::begin_result;
+    }
     void setDio1Action(void (*)(void)) {
         sx1262_test::interrupt_attached = true;
         sx1262_test::record(sx1262_test::Event::Attach);
@@ -281,6 +295,15 @@ public:
         return RADIOLIB_ERR_NONE;
     }
     int setFrequency(float) { return RADIOLIB_ERR_NONE; }
+    int setTCXO(float voltage) {
+        sx1262_test::tcxo_voltage = voltage;
+        sx1262_test::tcxo_calls++;
+        return RADIOLIB_ERR_NONE;
+    }
+    int setDio2AsRfSwitch() {
+        sx1262_test::dio2_rf_switch_calls++;
+        return RADIOLIB_ERR_NONE;
+    }
     int setOutputPower(int8_t) { return RADIOLIB_ERR_NONE; }
     int setBandwidth(float) { return RADIOLIB_ERR_NONE; }
     int setSpreadingFactor(uint8_t) { return RADIOLIB_ERR_NONE; }

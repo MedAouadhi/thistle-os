@@ -99,7 +99,18 @@
     </div>
 
     <h2>Configuration</h2>
-    <p>Configured via <code>board.json</code>: SPI pins (MOSI, MISO, CLK, CS), <code>pin_dio1</code>, <code>pin_busy</code>, <code>pin_rst</code>, frequency, TX power.</p>
+    <p>A driver entry gives the bus and the four control lines: <code>spi_bus</code>,
+    <code>cs</code>, <code>rst</code>, <code>dio1</code>, <code>busy</code>, with
+    <code>spi_clock_hz</code> optional.</p>
+    <p>Three more keys describe the module rather than the transceiver, because only a
+    board profile knows which module is fitted. <code>freq_hz</code> is the band the
+    board is matched and licensed for &mdash; 868&nbsp;MHz in Europe, 915&nbsp;MHz in
+    North America &mdash; and defaults to 915&nbsp;MHz when absent.
+    <code>tcxo_mv</code> is the reference voltage DIO3 supplies to a module's on-board
+    TCXO; omit it for a module running a plain crystal, which must not be sent the
+    command at all. <code>dio2_rf_switch</code> says DIO2 drives the module's own
+    transmit/receive switch, which is separate from any antenna switch the board puts
+    in front of the module.</p>
 
     <h2>Known Issues</h2>
     <p>No known issues. C driver &mdash; RadioLib provides robust LoRa modem support.</p>

@@ -1671,6 +1671,32 @@ mod tests {
     /// only once the expander is up.
     const GPS_EN_PIN: i32 = 2;
 
+    /// `BOARD_XL9555_01_LORA_EN`, the rail the SX1262 sits behind, and
+    /// `BOARD_XL9555_04_LORA_SEL`, the RF switch between the module and the
+    /// two antenna paths. High selects the antenna fitted on the board; low
+    /// routes to the external connector.
+    const LORA_EN_PIN: i32 = 1;
+    const LORA_SEL_PIN: i32 = 4;
+    const LORA_ANTENNA_INTERNAL: i32 = 1;
+
+    /// Where in the sequence a pin was first driven to a level, if it was.
+    fn level_step(rec: &Recorder, want_pin: i32, want_level: i32) -> Option<usize> {
+        rec.steps.iter().position(|step| {
+            matches!(
+                step,
+                BootStep::ExpanderLevel { pin, level, .. }
+                    if *pin == want_pin && *level == want_level
+            )
+        })
+    }
+
+    /// Where in the sequence the drivers began to load.
+    fn driver_loader_step(rec: &Recorder) -> Option<usize> {
+        rec.steps
+            .iter()
+            .position(|step| matches!(step, BootStep::DriverLoaderInit))
+    }
+
     /// Every expander level the boot sequence drove, in order.
     fn expander_levels(rec: &Recorder) -> Vec<(usize, i32, i32)> {
         rec.steps
@@ -1709,18 +1735,20 @@ mod tests {
     }
 
     #[test]
-    fn the_tdeck_max_raises_its_gnss_rail_then_pulses_its_two_resets() {
+    fn the_tdeck_max_raises_its_rails_then_pulses_its_two_resets() {
         let mut rec = Recorder::default();
         run_boot_sequence(TDECK_MAX_PROFILE, &mut rec);
 
         // Both resets are active low, so each is held down and then released.
         // Leaving them high would start the parts from whatever state an
-        // unclean shutdown left behind. The GNSS rail goes up first and stays
-        // up — a rail, not a pulse.
+        // unclean shutdown left behind. The rails and the antenna switch go up
+        // first and stay up — a level each, not a pulse.
         assert_eq!(
             expander_levels(&rec),
             vec![
                 (0, GPS_EN_PIN, 1),
+                (0, LORA_EN_PIN, 1),
+                (0, LORA_SEL_PIN, LORA_ANTENNA_INTERNAL),
                 (0, TOUCH_RST_PIN, 0),
                 (0, KEY_RST_PIN, 0),
                 (0, TOUCH_RST_PIN, 1),
@@ -1737,24 +1765,82 @@ mod tests {
         // The module answers nothing until its rail is up, so a driver that
         // opens the UART first would find an idle line and conclude there is
         // no receiver fitted.
-        let raised = rec
-            .steps
-            .iter()
-            .position(|step| {
-                matches!(
-                    step,
-                    BootStep::ExpanderLevel { pin, level, .. }
-                        if *pin == GPS_EN_PIN && *level == 1
-                )
-            })
-            .expect("the Max raises its GNSS rail");
-        let drivers = rec
-            .steps
-            .iter()
-            .position(|step| matches!(step, BootStep::DriverLoaderInit))
-            .expect("the Max loads drivers");
+        let raised = level_step(&rec, GPS_EN_PIN, 1).expect("the Max raises its GNSS rail");
+        let drivers = driver_loader_step(&rec).expect("the Max loads drivers");
 
         assert!(raised < drivers, "{:?}", rec.phases());
+    }
+
+    #[test]
+    fn the_tdeck_max_powers_its_radio_before_the_driver_probes_for_it() {
+        let mut rec = Recorder::default();
+        run_boot_sequence(TDECK_MAX_PROFILE, &mut rec);
+
+        // Unlike the Pro, where the SX1262 is powered whenever the board is,
+        // here the module's rail is behind the expander. A driver that resets
+        // and probes an unpowered part reads back nothing and gives up, and
+        // the board comes up with no radio at all.
+        let raised = level_step(&rec, LORA_EN_PIN, 1).expect("the Max raises its LoRa rail");
+        let drivers = driver_loader_step(&rec).expect("the Max loads drivers");
+
+        assert!(raised < drivers, "{:?}", rec.phases());
+    }
+
+    #[test]
+    fn the_tdeck_max_points_its_radio_at_the_antenna_it_has() {
+        let mut rec = Recorder::default();
+        run_boot_sequence(TDECK_MAX_PROFILE, &mut rec);
+
+        // The RF switch powers up in whatever state it powers up in. Left
+        // alone it can route transmission to the external connector, which on
+        // a board with nothing screwed into it is an open port — the radio
+        // reports a clean transmission into a reflection.
+        let selected = level_step(&rec, LORA_SEL_PIN, LORA_ANTENNA_INTERNAL)
+            .expect("the Max selects an antenna path");
+        let drivers = driver_loader_step(&rec).expect("the Max loads drivers");
+
+        assert!(selected < drivers, "{:?}", rec.phases());
+        assert_eq!(
+            expander_levels(&rec)
+                .iter()
+                .filter(|(_, pin, _)| *pin == LORA_SEL_PIN)
+                .count(),
+            1,
+            "the switch is set once and left there"
+        );
+    }
+
+    #[test]
+    fn the_tdeck_max_tunes_its_radio_to_the_band_it_ships_in() {
+        let mut rec = Recorder::default();
+        run_boot_sequence(TDECK_MAX_PROFILE, &mut rec);
+
+        let config = rec
+            .loaded_config("com.thistle.drv.radio-sx1262")
+            .expect("the Max declares a radio");
+        // Same part on the same pins as the Pro: the module sits on the shared
+        // SPI bus, and only its four control lines are its own.
+        assert_eq!(json_get_int(config, "spi_bus"), Some(0), "{config}");
+        assert_eq!(json_get_int(config, "cs"), Some(3), "{config}");
+        assert_eq!(json_get_int(config, "rst"), Some(4), "{config}");
+        assert_eq!(json_get_int(config, "dio1"), Some(5), "{config}");
+        assert_eq!(json_get_int(config, "busy"), Some(6), "{config}");
+        // The band is the board's, not the part's. This one ships with the
+        // 868 MHz module, where the driver's own default is the 915 MHz the
+        // North American boards use — a default that here would transmit
+        // outside the band the hardware is matched and licensed for.
+        assert_eq!(
+            json_get_int(config, "freq_hz"),
+            Some(868_000_000),
+            "{config}"
+        );
+        // The S62F module runs a 32 MHz TCXO off the transceiver's DIO3, and
+        // DIO2 drives the module's own transmit/receive switch. Left
+        // undeclared the transceiver starts on a crystal that is not there:
+        // it answers over SPI and reports a clean start, then times out on
+        // every transmission waiting for its PLL to lock.
+        assert_eq!(json_get_int(config, "tcxo_mv"), Some(2400), "{config}");
+        assert!(config.contains("\"dio2_rf_switch\": true"), "{config}");
     }
 
     #[test]
@@ -1783,15 +1869,40 @@ mod tests {
         let mut rec = Recorder::default();
         run_boot_sequence(TDECK_MAX_PROFILE, &mut rec);
 
-        // A pulse with no delay between its edges is not a reset. Every pin
-        // the Max drives declares a settling delay, so each edge is followed
-        // by a wait.
+        // A pulse with no delay between its edges is not a reset, and a rail
+        // the next step reads from before it has come up is not a rail. Both
+        // resets and both power enables declare a settling delay, so each of
+        // their edges is followed by a wait. The antenna switch is neither: it
+        // is thrown once and nothing reads it until the drivers load.
+        let settles: Vec<i32> = [TOUCH_RST_PIN, KEY_RST_PIN, GPS_EN_PIN, LORA_EN_PIN].into();
+        for (index, step) in rec.steps.iter().enumerate() {
+            let BootStep::ExpanderLevel { pin, .. } = step else {
+                continue;
+            };
+            if !settles.contains(pin) {
+                continue;
+            }
+            assert!(
+                matches!(rec.steps.get(index + 1), Some(BootStep::Delay { ms }) if *ms > 0),
+                "pin {pin} is driven with nothing waiting on it: {:?}",
+                rec.phases()
+            );
+        }
+
+        // And nothing else waits: the boot spends time only where a pin asked
+        // it to. Counting pins the settling list names, rather than every pin
+        // driven, is what lets the antenna switch declare no delay and still
+        // hold this line.
         let delays = rec
             .steps
             .iter()
             .filter(|step| matches!(step, BootStep::Delay { .. }))
             .count();
-        assert_eq!(delays, expander_levels(&rec).len());
+        let settling_pins = expander_levels(&rec)
+            .iter()
+            .filter(|(_, pin, _)| settles.contains(pin))
+            .count();
+        assert_eq!(delays, settling_pins, "{:?}", rec.phases());
     }
 
     #[test]

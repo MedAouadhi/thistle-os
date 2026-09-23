@@ -24,6 +24,10 @@ extern "C" {
 #define SX1262_TEST_ISR_PAUSE() ((void)0)
 #endif
 
+/* What a board profile that names no band gets, unchanged from before board
+ * profiles could name one. */
+#define SX1262_DEFAULT_FREQ_MHZ 915.0f
+
 enum class RadioLifecycle : uint8_t {
     Stopped,
     Starting,
@@ -334,6 +338,14 @@ static void radio_irq_task(void *arg) {
 
         if (!radio_is_running()) break;
 
+        /* DIO1 carries TxDone as well as RxDone, and this task runs above the
+         * caller that is transmitting. Reading the FIFO on a TxDone hands the
+         * receive callback a packet nobody sent, and — worse — clears the
+         * interrupt the sender is waiting on, so every transmission times out.
+         * A send clears `receiving` before it starts, which is what tells the
+         * two apart. */
+        if (!receiving_get()) continue;
+
         /* Read received data */
         uint8_t buf[256];
         size_t len = s_radio.radio->getPacketLength();
@@ -362,6 +374,15 @@ static void radio_irq_task(void *arg) {
 
 /* ── HAL vtable implementations ──────────────────────────────────── */
 
+/* Give up on a half-built radio: tear down what was constructed and leave the
+ * lifecycle back at Stopped, so a later init starts clean rather than finding
+ * itself already Starting. */
+static esp_err_t abandon_init(void) {
+    destroy_radio_objects();
+    reset_runtime_state();
+    return ESP_FAIL;
+}
+
 static esp_err_t sx1262_init(const void *config) {
     if (!config) return ESP_ERR_INVALID_ARG;
 
@@ -384,13 +405,31 @@ static esp_err_t sx1262_init(const void *config) {
 
     s_radio.radio = new SX1262(s_radio.mod);
 
-    /* Initialize with defaults: 915MHz, 125kHz BW, SF7, CR4/5 */
-    int state = s_radio.radio->begin(915.0, 125.0, 7, 5, RADIOLIB_SX126X_SYNC_WORD_PRIVATE, 22);
+    /* Band from the board profile; the rest are defaults: 125kHz BW, SF7, CR4/5 */
+    const float mhz = s_radio.cfg.freq_hz ? s_radio.cfg.freq_hz / 1000000.0f
+                                          : SX1262_DEFAULT_FREQ_MHZ;
+    int state = s_radio.radio->begin(mhz, 125.0, 7, 5, RADIOLIB_SX126X_SYNC_WORD_PRIVATE, 22);
     if (state != RADIOLIB_ERR_NONE) {
         ESP_LOGE(TAG, "RadioLib begin() failed: %d", state);
-        destroy_radio_objects();
-        reset_runtime_state();
-        return ESP_FAIL;
+        return abandon_init();
+    }
+
+    /* Both are properties of the module the board carries, so both stay off
+     * until a board profile says otherwise. */
+    if (s_radio.cfg.tcxo_mv) {
+        state = s_radio.radio->setTCXO(s_radio.cfg.tcxo_mv / 1000.0f);
+        if (state != RADIOLIB_ERR_NONE) {
+            ESP_LOGE(TAG, "setTCXO(%umV) failed: %d",
+                     (unsigned)s_radio.cfg.tcxo_mv, state);
+            return abandon_init();
+        }
+    }
+    if (s_radio.cfg.dio2_rf_switch) {
+        state = s_radio.radio->setDio2AsRfSwitch();
+        if (state != RADIOLIB_ERR_NONE) {
+            ESP_LOGE(TAG, "setDio2AsRfSwitch() failed: %d", state);
+            return abandon_init();
+        }
     }
 
     s_radio.irq_stopped = xSemaphoreCreateBinary();
@@ -489,8 +528,18 @@ static esp_err_t sx1262_send(const uint8_t *data, size_t len) {
     if (!radio_is_running()) return ESP_ERR_INVALID_STATE;
     if (!data || len == 0 || len > 255) return ESP_ERR_INVALID_ARG;
 
+    /* Transmitting leaves the radio in standby, so a caller that was listening
+     * has to be put back on air afterwards — otherwise it hears the first
+     * message and nothing after its own first reply. Listening is suspended
+     * across the transmission because DIO1 carries TxDone as well as RxDone. */
+    const bool was_receiving = receiving_get();
     receiving_set(false);
     int state = s_radio.radio->transmit((uint8_t *)data, len);
+
+    if (was_receiving) {
+        receiving_set(true);
+        s_radio.radio->startReceive();
+    }
 
     if (state == RADIOLIB_ERR_NONE) {
         ESP_LOGD(TAG, "TX done (%zu bytes)", len);

@@ -25,6 +25,7 @@
 #include "drv_sdcard.h"
 #include "drv_power_sy6970.h"
 #include "drv_gps_mia_m10q.h"
+#include "drv_radio_sx1262.h"
 #endif
 
 #ifndef THISTLE_BUS_INIT_HOST_TEST
@@ -32,27 +33,32 @@ static const char *TAG = "board_builtin";
 #endif
 
 // ---------------------------------------------------------------------------
-// Minimal JSON int helper — handles bare integers and quoted hex ("0x34").
-// Searches for "key": <value> and parses the value.
+// Minimal JSON value readers, over a driver entry's config sub-object.
+// Each finds "key": and then reads the value in the shape it expects.
 // ---------------------------------------------------------------------------
 
 #ifndef THISTLE_BUS_INIT_HOST_TEST
-static int json_int(const char *json, const char *key, int default_val)
+// The cursor just past `"key":` and any whitespace, or NULL when the key is
+// absent. The readers below differ only in what they make of what follows.
+static const char *json_value(const char *json, const char *key)
 {
-    if (!json || !key) return default_val;
+    if (!json || !key) return NULL;
     char pattern[80];
     snprintf(pattern, sizeof(pattern), "\"%s\"", key);
     const char *p = strstr(json, pattern);
-    if (!p) return default_val;
+    if (!p) return NULL;
     p += strlen(pattern);
-    // Skip whitespace and colon
     while (*p == ' ' || *p == '\t' || *p == ':') p++;
-    if (*p == '"') {
-        // Quoted value — may be hex ("0x34") or decimal string
-        p++;
-        return (int)strtol(p, NULL, 0);
-    }
-    // Bare integer (possibly negative)
+    return p;
+}
+
+// Handles bare integers and quoted hex ("0x34").
+static int json_int(const char *json, const char *key, int default_val)
+{
+    const char *p = json_value(json, key);
+    if (!p) return default_val;
+    // Quoted value — may be hex ("0x34") or decimal string
+    if (*p == '"') p++;
     return (int)strtol(p, NULL, 0);
 }
 
@@ -60,14 +66,9 @@ static int json_int(const char *json, const char *key, int default_val)
 // untouched when the key is missing or its value is not a string.
 static bool json_str(const char *json, const char *key, char *out, size_t out_size)
 {
-    if (!json || !key || !out || out_size == 0) return false;
-    char pattern[80];
-    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
-    const char *p = strstr(json, pattern);
-    if (!p) return false;
-    p += strlen(pattern);
-    while (*p == ' ' || *p == '\t' || *p == ':') p++;
-    if (*p != '"') return false;
+    if (!out || out_size == 0) return false;
+    const char *p = json_value(json, key);
+    if (!p || *p != '"') return false;
     p++;
     const char *end = strchr(p, '"');
     if (!end) return false;
@@ -76,6 +77,17 @@ static bool json_str(const char *json, const char *key, char *out, size_t out_si
     memcpy(out, p, len);
     out[len] = '\0';
     return true;
+}
+
+// Board profiles write flags as `true`/`false`, which json_int reads as zero
+// either way — so a flag left to json_int is a flag that is always off.
+static bool json_bool(const char *json, const char *key, bool default_val)
+{
+    const char *p = json_value(json, key);
+    if (!p) return default_val;
+    if (strncmp(p, "true", 4) == 0) return true;
+    if (strncmp(p, "false", 5) == 0) return false;
+    return default_val;
 }
 #endif
 
@@ -269,6 +281,34 @@ esp_err_t board_builtin_driver_init(const char *id, const char *hal_type,
         ESP_LOGI(TAG, "gps-mia-m10q: uart=%d tx=%d rx=%d baud=%u",
                  cfg.uart_num, cfg.pin_tx, cfg.pin_rx, (unsigned)cfg.baud_rate);
         return hal_gps_register(drv_gps_mia_m10q_get(), &cfg);
+    }
+
+    // ── LoRa: SX1262 ─────────────────────────────────────────────────────────
+    // The module shares the board's SPI bus; only its four control lines and
+    // the band the board is matched for are its own. A profile that names no
+    // band leaves freq_hz zero, which the driver reads as its own 915 MHz
+    // default — the boards already in the catalogue are unmoved by this entry.
+    if (strcmp(id, "com.thistle.drv.radio-sx1262") == 0) {
+        static radio_sx1262_config_t cfg;
+        int spi_bus_idx = json_int(config_json, "spi_bus", 0);
+        // hal_bus_get_spi stores the host ID as the pointer value
+        cfg.spi_host     = (spi_host_device_t)(intptr_t)hal_bus_get_spi(spi_bus_idx);
+        cfg.pin_cs       = (gpio_num_t)json_int(config_json, "cs",    -1);
+        cfg.pin_reset    = (gpio_num_t)json_int(config_json, "rst",   -1);
+        cfg.pin_busy     = (gpio_num_t)json_int(config_json, "busy",  -1);
+        cfg.pin_dio1     = (gpio_num_t)json_int(config_json, "dio1",  -1);
+        cfg.spi_clock_hz =            json_int(config_json, "spi_clock_hz", 2000000);
+        cfg.freq_hz      = (uint32_t) json_int(config_json, "freq_hz", 0);
+        // Properties of the module, not the board, but only a board profile
+        // knows which module is soldered to it.
+        cfg.tcxo_mv        = (uint16_t)json_int(config_json, "tcxo_mv", 0);
+        cfg.dio2_rf_switch = json_bool(config_json, "dio2_rf_switch", false);
+        ESP_LOGI(TAG, "radio-sx1262: host=%d cs=%d rst=%d busy=%d dio1=%d freq=%uHz "
+                      "tcxo=%umV dio2_rf_switch=%d",
+                 cfg.spi_host, cfg.pin_cs, cfg.pin_reset, cfg.pin_busy,
+                 cfg.pin_dio1, (unsigned)cfg.freq_hz, (unsigned)cfg.tcxo_mv,
+                 (int)cfg.dio2_rf_switch);
+        return hal_radio_register(drv_radio_sx1262_get(), &cfg);
     }
 
     // ── Power: SY6970 / BQ25896 charger + BQ27220 fuel gauge ────────────────

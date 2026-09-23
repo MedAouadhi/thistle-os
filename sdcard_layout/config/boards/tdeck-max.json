@@ -33,6 +33,8 @@
     ],
     "expander_outputs": [
         {"expander": 0, "pin": 2, "direction": "output", "level": 1, "delay_ms": 10},
+        {"expander": 0, "pin": 1, "direction": "output", "level": 1, "delay_ms": 10},
+        {"expander": 0, "pin": 4, "direction": "output", "level": 1, "delay_ms": 0},
         {"expander": 0, "pin": 7, "direction": "output", "level": 0, "delay_ms": 10},
         {"expander": 0, "pin": 9, "direction": "output", "level": 0, "delay_ms": 10},
         {"expander": 0, "pin": 7, "direction": "output", "level": 1, "delay_ms": 50},
@@ -89,6 +91,21 @@
                 "tx": 16,
                 "rx": 2,
                 "baud_rate": 38400
+            }
+        },
+        {
+            "id": "com.thistle.drv.radio-sx1262",
+            "hal": "radio",
+            "entry": "radio-sx1262.drv.elf",
+            "config": {
+                "spi_bus": 0,
+                "cs": 3,
+                "dio1": 5,
+                "rst": 4,
+                "busy": 6,
+                "freq_hz": 868000000,
+                "tcxo_mv": 2400,
+                "dio2_rf_switch": true
             }
         },
         {
