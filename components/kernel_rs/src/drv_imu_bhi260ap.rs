@@ -14,8 +14,8 @@
 // driver in this tree used a register map for some other part and never
 // uploaded firmware; it could not have returned data.
 //
-// The interrupt line is not used: every reading is a poll of the non-wakeup
-// FIFO, taken when an app asks.
+// The interrupt line is not used: every reading is a poll of the FIFOs, taken
+// when an app asks.
 
 use std::os::raw::{c_char, c_void};
 use std::sync::Mutex;
@@ -186,6 +186,7 @@ mod esp_ffi {
     use std::sync::Mutex;
 
     const REG_CHAN_CMD: u8 = 0x00;
+    const REG_CHAN_FIFO_W: u8 = 0x01;
     const REG_CHAN_FIFO_NW: u8 = 0x02;
     const REG_RESET_REQ: u8 = 0x14;
     const REG_PRODUCT_ID: u8 = 0x1C;
@@ -213,6 +214,13 @@ mod esp_ffi {
         pub fifo: Vec<u8>,
         /// Bytes still owed on a FIFO transfer whose length has been read.
         fifo_owed: usize,
+        pub wake_fifo: Vec<u8>,
+        wake_owed: usize,
+        /// Hold the non-wakeup FIFO back while the wake-up FIFO has events
+        /// nobody has read. A T-Deck Max did exactly this: after boot its
+        /// wake-up FIFO held meta events, and until they were read off the
+        /// non-wakeup FIFO reported nothing, poll after poll.
+        wake_pending: bool,
         /// The largest single write the driver made, which the part does not
         /// limit but the ESP-IDF transfer buffer does.
         pub largest_write: usize,
@@ -233,6 +241,9 @@ mod esp_ffi {
                 configured: Vec::new(),
                 fifo: Vec::new(),
                 fifo_owed: 0,
+                wake_fifo: Vec::new(),
+                wake_owed: 0,
+                wake_pending: false,
                 largest_write: 0,
                 fail_next_fifo_data_read: false,
             }
@@ -241,16 +252,15 @@ mod esp_ffi {
         fn read(&mut self, register: u8, out: &mut [u8]) {
             match register {
                 REG_PRODUCT_ID => out[0] = self.product_id,
-                REG_CHAN_FIFO_NW if self.fifo_owed == 0 => {
-                    let owed = self.fifo.len();
-                    out[..2].copy_from_slice(&(owed as u16).to_le_bytes());
-                    self.fifo_owed = owed;
+                REG_CHAN_FIFO_NW if self.wake_pending && self.fifo_owed == 0 => {
+                    out[..2].copy_from_slice(&[0, 0]);
                 }
-                REG_CHAN_FIFO_NW => {
-                    let n = out.len().min(self.fifo_owed);
-                    out[..n].copy_from_slice(&self.fifo[..n]);
-                    self.fifo.drain(..n);
-                    self.fifo_owed -= n;
+                REG_CHAN_FIFO_NW => Self::stream(&mut self.fifo, &mut self.fifo_owed, out),
+                REG_CHAN_FIFO_W => {
+                    Self::stream(&mut self.wake_fifo, &mut self.wake_owed, out);
+                    if self.wake_fifo.is_empty() && self.wake_owed == 0 {
+                        self.wake_pending = false;
+                    }
                 }
                 _ => {
                     for (i, byte) in out.iter_mut().enumerate() {
@@ -258,6 +268,20 @@ mod esp_ffi {
                     }
                 }
             }
+        }
+
+        /// A FIFO read: the first read of a transfer answers with its length,
+        /// the reads after it with that many bytes.
+        fn stream(fifo: &mut Vec<u8>, owed: &mut usize, out: &mut [u8]) {
+            if *owed == 0 {
+                *owed = fifo.len();
+                out[..2].copy_from_slice(&(*owed as u16).to_le_bytes());
+                return;
+            }
+            let n = out.len().min(*owed);
+            out[..n].copy_from_slice(&fifo[..n]);
+            fifo.drain(..n);
+            *owed -= n;
         }
 
         fn write(&mut self, register: u8, data: &[u8]) {
@@ -308,6 +332,11 @@ mod esp_ffi {
                 }
                 0x0003 if !self.uploaded.is_empty() && !self.reject_firmware => {
                     self.booted = true;
+                    // What the board's wake-up FIFO held after boot: a small
+                    // timestamp delta, a wake-up meta event, a full timestamp.
+                    self.wake_fifo
+                        .extend([245, 0x00, 248, 0x14, 0x01, 0x00, 247, 0x52, 0x1E, 0, 0, 0]);
+                    self.wake_pending = true;
                     self.registers[REG_KERNEL_VERSION as usize] = 0x6C;
                     self.registers[REG_KERNEL_VERSION as usize + 1] = 0x19;
                 }
@@ -454,6 +483,7 @@ fn delay_ms(_ms: i32) {}
 // ── Registers and bring-up constants ─────────────────────────────────────────
 
 const REG_CHAN_CMD: u8 = 0x00;
+const REG_CHAN_FIFO_W: u8 = 0x01;
 const REG_CHAN_FIFO_NW: u8 = 0x02;
 const REG_RESET_REQ: u8 = 0x14;
 const REG_PRODUCT_ID: u8 = 0x1C;
@@ -520,8 +550,10 @@ struct Imu {
     dev: *mut c_void,
     /// The last non-zero rate, which waking from sleep returns to.
     rate_hz: f32,
-    /// Bytes of a FIFO transfer a failed read left unread.
+    /// Bytes of a FIFO transfer a failed read left unread, non-wakeup and
+    /// wake-up.
     fifo_owed: usize,
+    wake_owed: usize,
     reading: HalImuData,
     cb: HalImuCb,
     cb_data: *mut c_void,
@@ -554,6 +586,7 @@ impl Imu {
             dev: std::ptr::null_mut(),
             rate_hz: DEFAULT_RATE_HZ,
             fifo_owed: 0,
+            wake_owed: 0,
             reading: ZERO_READING,
             cb: None,
             cb_data: std::ptr::null_mut(),
@@ -638,30 +671,30 @@ fn send_command(dev: *mut c_void, command: u16, payload: &[u8]) -> bool {
     }
 }
 
-/// Read everything the non-wakeup FIFO holds. The hub answers the first read
-/// of a transfer with its length, then streams that many bytes across as many
-/// reads as it takes. A transfer left unfinished would have the next poll read
-/// event bytes as a length, so what a failed read leaves owing is counted in
-/// `owed`, and the next poll reads it off and discards it before asking for a
-/// new length.
-fn read_fifo(dev: *mut c_void, owed: &mut usize) -> Option<Vec<u8>> {
+/// Read everything one of the hub's FIFOs holds. The hub answers the first
+/// read of a transfer with its length, then streams that many bytes across as
+/// many reads as it takes. A transfer left unfinished would have the next poll
+/// read event bytes as a length, so what a failed read leaves owing is counted
+/// in `owed`, and the next poll reads it off and discards it before asking for
+/// a new length.
+fn read_fifo(dev: *mut c_void, channel: u8, owed: &mut usize) -> Option<Vec<u8>> {
     let mut scratch = [0u8; FIFO_CHUNK];
     while *owed > 0 {
         let n = (*owed).min(FIFO_CHUNK);
-        if !read(dev, REG_CHAN_FIFO_NW, &mut scratch[..n]) {
+        if !read(dev, channel, &mut scratch[..n]) {
             return None;
         }
         *owed -= n;
     }
 
     let mut length = [0u8; 2];
-    if !read(dev, REG_CHAN_FIFO_NW, &mut length) {
+    if !read(dev, channel, &mut length) {
         return None;
     }
     let mut fifo = vec![0u8; u16::from_le_bytes(length) as usize];
     *owed = fifo.len();
     for chunk in fifo.chunks_mut(FIFO_CHUNK) {
-        if !read(dev, REG_CHAN_FIFO_NW, chunk) {
+        if !read(dev, channel, chunk) {
             return None;
         }
         *owed -= chunk.len();
@@ -796,6 +829,7 @@ unsafe extern "C" fn bhi260ap_init(_config: *const c_void) -> i32 {
     imu.dev = dev;
     imu.rate_hz = DEFAULT_RATE_HZ;
     imu.fifo_owed = 0;
+    imu.wake_owed = 0;
     imu.reading = ZERO_READING;
     ESP_OK
 }
@@ -831,7 +865,15 @@ unsafe extern "C" fn bhi260ap_get_data(data: *mut HalImuData) -> i32 {
         return ESP_ERR_INVALID_STATE;
     }
     let dev = imu.dev;
-    let Some(fifo) = read_fifo(dev, &mut imu.fifo_owed) else {
+    // Nothing enabled here reports on the wake-up FIFO, but the hub puts its
+    // own meta events there, and a T-Deck Max withheld every non-wakeup event
+    // until they had been read off: its readings stayed zero, poll after poll.
+    // Bosch's own update loop drains every FIFO each time, so this does too,
+    // and discards what it finds.
+    if read_fifo(dev, REG_CHAN_FIFO_W, &mut imu.wake_owed).is_none() {
+        return ESP_FAIL;
+    }
+    let Some(fifo) = read_fifo(dev, REG_CHAN_FIFO_NW, &mut imu.fifo_owed) else {
         return ESP_FAIL;
     };
     apply_fifo(&fifo, &mut imu.reading);
@@ -1228,6 +1270,16 @@ mod tests {
         assert_eq!(ret, ESP_OK);
         assert_close(data.accel_z, 9.80665);
         assert_close(data.gyro_x, 1000.0);
+    }
+
+    #[test]
+    fn readings_arrive_although_the_hub_opens_with_events_on_its_wake_up_fifo() {
+        an_imu_that_is_up();
+        queue_fifo(&[1, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10]);
+
+        let (ret, data) = get_data();
+        assert_eq!(ret, ESP_OK);
+        assert_close(data.accel_z, 9.80665);
     }
 
     #[test]

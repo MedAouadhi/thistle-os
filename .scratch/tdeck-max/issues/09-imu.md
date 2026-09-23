@@ -80,3 +80,31 @@ kernel_rs. The C file is emptied like `drv_kbd_tca8418.c`.
   blocking anything.
 - The vtable stays registered when init fails, and `get_data` then answers
   `ESP_ERR_INVALID_STATE`. That is the same as sy6970.
+
+### On hardware
+
+Flashed to the T-Deck Max on /dev/ttyACM0. The board held a `board.json`
+from before this ticket, so the storage partition was erased first. This is
+the same trap tickets 03 and 06 recorded. Detection then wrote the new
+profile (`Detected: tdeck-max`, `BHI260=1`).
+
+- **The hub boots.** `bhi260ap: firmware 103676 bytes booted, kernel 5991,
+  accel+gyro at 100 Hz`. The 252-byte I2C transfers work.
+- **Upload plus boot takes about 2.6 s** of HAL init: `Starting IMU` at
+  ~57.06 s, the next driver at 59.70 s.
+- **The first build returned zeros on every poll.** A temporary probe (since
+  removed) showed why: the hub opens with meta events on its **wake-up**
+  FIFO (`int_status=0x03`, FIFO_W data ready), and it withheld every
+  non-wakeup event until those were read off. Bosch's update loop drains
+  every FIFO each time. The driver now does the same, discarding what the
+  wake-up FIFO holds. The fake chip models this behaviour, and the fix went
+  in test-first.
+- **Readings after the fix,** at 250 ms polls with the board lying still:
+  accel (0.00, -0.85, -9.40) m/s^2, |a| = 9.44, and gyro bias under 0.7 deg/s
+  on every axis. The first poll after boot still answers zeros, because it
+  is the one that clears the wake-up FIFO.
+- Not checked: axis signs against the board's orientation (it was not moved),
+  and the Pro and Watch profiles, which now bring the hub up too.
+- Build note: the kernel image is now 0x284870, which overflows `ota_0`
+  (0x280000, Recovery's slot) by 18 KB. `factory` and `ota_1` (4.5 MB) have
+  room. idf.py warns about it but builds.
