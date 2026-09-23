@@ -1,6 +1,6 @@
 # Third-Party Licenses
 
-ThistleOS is BSD 3-Clause licensed and depends exclusively on Apache-2.0, MIT, and zlib licensed components. No GPL or LGPL code is used.
+ThistleOS is BSD 3-Clause licensed and depends exclusively on Apache-2.0, MIT, BSD and zlib licensed components. No GPL or LGPL code is used.
 
 ---
 
@@ -169,6 +169,49 @@ Licensed under the Apache License, Version 2.0.
 ```
 
 Full text: https://github.com/espressif/esp-adf/blob/master/components/esp_codec_dev/LICENSE
+
+---
+
+## Bosch BHI260AP firmware
+
+**License:** BSD 3-Clause (Bosch Sensortec BHY2 SensorAPI), redistributed under MIT by SensorLib
+**Source:** https://github.com/boschsensortec/BHY2_SensorAPI, via the copy LilyGo ships in https://github.com/Xinyuan-LilyGO/T-Deck-MAX (`lib/SensorLib/src/bosch/firmware/BHI260AP.fw.h`)
+**Used for:** The firmware image the BHI260AP IMU driver (`kernel_rs/src/drv_imu_bhi260ap.rs`) uploads into the sensor hub at every init. Stored as `components/kernel_rs/firmware/bhi260ap.fw`, the header's byte array converted to binary unchanged (103 676 bytes, SHA-256 `318def511fd8eb762bf1e61cf02cfd6ecac70f8627d3bacfa7d24a1641f9e915`). The host-interface protocol the driver speaks was ported from the same SensorAPI sources.
+
+```
+Copyright (c) 2023 Bosch Sensortec GmbH. All rights reserved.
+
+BSD-3-Clause
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in the
+   documentation and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its
+   contributors may be used to endorse or promote products derived from
+   this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
+STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
+IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+POSSIBILITY OF SUCH DAMAGE.
+```
+
+The firmware header carries no notice of its own; the notice above is the one on the SensorAPI sources it ships alongside.
 
 ---
 
@@ -413,6 +456,7 @@ All dependencies are compatible with the ThistleOS BSD 3-Clause license:
 |---------|------------------------------|------------|
 | Apache-2.0 | Yes | ESP-IDF, esp_lvgl_port, esp_modem, esp_codec_dev, elf_loader, NimBLE, mbedTLS |
 | MIT | Yes | LVGL, FreeRTOS, RadioLib, libcurl, Unity, esp-rs crates |
+| BSD-3-Clause | Yes | Bosch BHI260AP firmware and BHY2 SensorAPI |
 | BSD-2-Clause | Yes | Monocypher |
 | zlib | Yes | SDL2 |
 | MIT OR Apache-2.0 | Yes | argon2, serde_json, esp-idf-hal, esp-idf-svc, esp-idf-sys |

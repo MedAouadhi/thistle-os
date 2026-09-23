@@ -181,7 +181,7 @@ esp_err_t board_init(void) {
         ESP_LOGW(TAG, "power registration failed: %s", esp_err_to_name(ret));
     }
 
-    // 11. Register IMU (stub)
+    // 11. Register IMU — bus 0, address 0x28, the driver's defaults
     hal_imu_register(drv_imu_bhi260ap_get(), NULL);
 
     // 12. Register SD card storage

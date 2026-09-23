@@ -27,6 +27,7 @@
 #include "drv_gps_mia_m10q.h"
 #include "drv_radio_sx1262.h"
 #include "drv_audio_es8311.h"
+#include "drv_imu_bhi260ap.h"
 #endif
 
 #ifndef THISTLE_BUS_INIT_HOST_TEST
@@ -341,6 +342,14 @@ esp_err_t board_builtin_driver_init(const char *id, const char *hal_type,
                  cfg.i2c_bus, cfg.i2c_addr, cfg.i2s_num, cfg.pin_mclk, cfg.pin_bclk,
                  cfg.pin_ws, cfg.pin_dout, (int)cfg.amp_expander, (int)cfg.amp_expander_pin);
         return hal_audio_register(drv_audio_es8311_get(), &cfg);
+    }
+
+    // ── IMU: Bosch BHI260AP ─────────────────────────────────────────────────
+    // A sensor hub that boots from firmware the driver uploads at init. The
+    // entry's `pin_int` is not read: the driver polls its FIFO instead.
+    if (strcmp(id, "com.thistle.drv.imu-bhi260ap") == 0) {
+        ESP_LOGI(TAG, "imu-bhi260ap: %s", config_json);
+        return drv_imu_bhi260ap_register(config_json);
     }
 
     ESP_LOGW(TAG, "no builtin for driver id=%s — skipping", id);

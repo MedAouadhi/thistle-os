@@ -1679,6 +1679,9 @@ mod tests {
     const LORA_SEL_PIN: i32 = 4;
     const LORA_ANTENNA_INTERNAL: i32 = 1;
 
+    /// `BOARD_XL9555_03_1V8_EN`, the BHI260AP's 1.8 V rail.
+    const IMU_EN_PIN: i32 = 3;
+
     /// `BOARD_XL9555_06_AMPLIFIER`, the NS4150B's enable, high = on, and
     /// `BOARD_XL9555_12_AUDIO_SEL`, the speaker mux, low = ES8311. The vendor
     /// names the second after its port and bit, P1.2, but numbers it 10.
@@ -1756,6 +1759,7 @@ mod tests {
                 (0, GPS_EN_PIN, 1),
                 (0, LORA_EN_PIN, 1),
                 (0, LORA_SEL_PIN, LORA_ANTENNA_INTERNAL),
+                (0, IMU_EN_PIN, 1),
                 (0, TOUCH_RST_PIN, 0),
                 (0, KEY_RST_PIN, 0),
                 (0, TOUCH_RST_PIN, 1),
@@ -1911,10 +1915,11 @@ mod tests {
 
         // A pulse with no delay between its edges is not a reset, and a rail
         // the next step reads from before it has come up is not a rail. Both
-        // resets and both power enables declare a settling delay, so each of
+        // resets and all three power enables declare a settling delay, so each of
         // their edges is followed by a wait. The antenna switch is neither: it
         // is thrown once and nothing reads it until the drivers load.
-        let settles: Vec<i32> = [TOUCH_RST_PIN, KEY_RST_PIN, GPS_EN_PIN, LORA_EN_PIN].into();
+        let settles: Vec<i32> =
+            [TOUCH_RST_PIN, KEY_RST_PIN, GPS_EN_PIN, LORA_EN_PIN, IMU_EN_PIN].into();
         for (index, step) in rec.steps.iter().enumerate() {
             let BootStep::ExpanderLevel { pin, .. } = step else {
                 continue;

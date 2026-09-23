@@ -32,6 +32,10 @@ typedef struct {
     const void                 *power_config;
     const hal_imu_driver_t     *imu;
     const void                 *imu_config;
+    /* TODO: haptics have no HAL interface. The T-Deck Max carries a DRV2605
+     * (0x5A, enable on XL9555 P05) and the T-Deck Pro V1.1 the same part, but
+     * adding an interface changes this struct, the syscall table and every
+     * consumer — a kernel ABI change that needs its own design. */
     const hal_storage_driver_t *storage[HAL_MAX_STORAGE_DRIVERS];
     const void                 *storage_configs[HAL_MAX_STORAGE_DRIVERS];
     uint8_t                     storage_count;
