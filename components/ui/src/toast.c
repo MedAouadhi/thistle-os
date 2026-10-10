@@ -6,6 +6,9 @@
 
 static const char *TAG = "toast";
 
+#define TOAST_MAX_W   280
+#define TOAST_MARGIN    8   /* screen edge to toast, each side */
+
 static lv_obj_t *s_toast_obj = NULL;
 static lv_timer_t *s_dismiss_timer = NULL;
 
@@ -38,9 +41,14 @@ esp_err_t toast_show(const char *message, toast_level_t level, uint32_t duration
     lv_obj_t *screen = ui_manager_get_screen();
     if (!screen) return ESP_ERR_INVALID_STATE;
 
-    /* Create toast container — positioned at bottom of screen, centered */
+    /* Create toast container — positioned at bottom of screen, centered, and
+     * no wider than the screen less a margin each side. A fixed 280 px hung
+     * off both edges of a 240 px screen, taking the start of the message
+     * with it. */
+    int32_t toast_w = lv_obj_get_width(screen) - 2 * TOAST_MARGIN;
+    if (toast_w > TOAST_MAX_W) toast_w = TOAST_MAX_W;
     s_toast_obj = lv_obj_create(screen);
-    lv_obj_set_size(s_toast_obj, 280, LV_SIZE_CONTENT);
+    lv_obj_set_size(s_toast_obj, toast_w, LV_SIZE_CONTENT);
     lv_obj_set_style_pad_all(s_toast_obj, 8, LV_PART_MAIN);
     lv_obj_set_style_pad_top(s_toast_obj, 6, LV_PART_MAIN);
     lv_obj_set_style_pad_bottom(s_toast_obj, 6, LV_PART_MAIN);
@@ -82,7 +90,7 @@ esp_err_t toast_show(const char *message, toast_level_t level, uint32_t duration
     lv_obj_t *label = lv_label_create(s_toast_obj);
     lv_label_set_text(label, display_msg);
     lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(label, 260);
+    lv_obj_set_width(label, LV_PCT(100));
     lv_obj_set_style_text_font(label, &lv_font_montserrat_14, LV_PART_MAIN);
 
     if (level == TOAST_WARNING || level == TOAST_ERROR) {
@@ -95,7 +103,7 @@ esp_err_t toast_show(const char *message, toast_level_t level, uint32_t duration
     s_dismiss_timer = lv_timer_create(toast_dismiss_timer_cb, duration_ms, NULL);
     lv_timer_set_repeat_count(s_dismiss_timer, 1);  /* fire once */
 
-    ESP_LOGD(TAG, "toast: %s", message);
+    ESP_LOGI(TAG, "toast: %s", message);
     return ESP_OK;
 }
 

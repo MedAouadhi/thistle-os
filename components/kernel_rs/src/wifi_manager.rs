@@ -421,10 +421,36 @@ pub unsafe extern "C" fn wifi_manager_scan(
             TAG.as_ptr(),
             b"WiFi scan: simulator stub\0".as_ptr(),
         );
+        let count = SIM_NETWORKS.len().min(max_results as usize);
+        for (i, &(ssid, rssi, channel, is_open)) in SIM_NETWORKS[..count].iter().enumerate() {
+            let mut r = WifiScanResult {
+                ssid: [0u8; WIFI_SSID_MAX_LEN + 1],
+                rssi,
+                channel,
+                is_open,
+            };
+            r.ssid[..ssid.len()].copy_from_slice(ssid);
+            *results.add(i) = r;
+        }
+        *out_count = count as u8;
     }
 
     ESP_OK
 }
+
+/// What a scan finds in the simulator: (SSID, RSSI, channel, open). Without
+/// networks to tap, the screens behind a scan — the password dialog among
+/// them — cannot be reached there. The first name is longer than a 240 px row
+/// and needs a password, so the first row a test taps is the hard case.
+#[cfg(not(target_os = "espidf"))]
+const SIM_NETWORKS: [(&[u8], i8, u8, bool); 6] = [
+    (b"DIRECT-7B-HP OfficeJet Pro 8020", -48, 6, false),
+    (b"HomeNetwork_5G", -42, 36, false),
+    (b"CoffeeShop_Free", -58, 6, true),
+    (b"OfficeWiFi", -65, 11, false),
+    (b"Neighbor_2.4G", -73, 1, false),
+    (b"IoT_Network", -80, 3, false),
+];
 
 /// Connect to a WiFi network.
 ///

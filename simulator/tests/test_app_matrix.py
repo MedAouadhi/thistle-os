@@ -9,6 +9,10 @@ of timers.
 It exists because e-paper boards used to default to thistle-tk, which hosts
 three of the fourteen apps, and nothing noticed that the T-Deck Pro and Max
 had lost the other eleven.
+
+Each LVGL app's first screen must also fit the display: nothing may reach past
+its left or right edge, where on a panel it is simply not there. The App
+Store's tabs and buttons, laid out for 320 px, ran off a 240 px T-Deck Max.
 """
 
 from __future__ import annotations
@@ -25,6 +29,8 @@ class Device:
     name: str
     has_radio: bool
     has_gps: bool
+    # Whether every app's first screen must fit the display's width.
+    fits_screen: bool = True
 
 
 # One device per distinct profile in simulator/board_simulator.c: tdeck-plus
@@ -36,7 +42,9 @@ DEVICES = (
     Device("tdeck-pro", True, True),    # e-paper 240x320
     Device("tdeck-max", True, True),    # e-paper, CST66xx touch, XL9555
     Device("tdisplay", False, False),   # LCD 320x170, touch only
-    Device("heltec-v3", True, False),   # OLED 128x64
+    # OLED 128x64. Not held to the width check: the status bar alone is
+    # wider than this screen, and so is nearly every app laid out for 240 px.
+    Device("heltec-v3", True, False, fits_screen=False),
     Device("cardputer", False, False),  # LCD 240x135, keyboard only
 )
 
@@ -56,14 +64,15 @@ def launch(simulator: Path, device: str, app_id: str, wm: str | None = None):
     extra = ["--wm", wm] if wm else []
     return subprocess.run(
         [str(simulator), "--headless", "--timeout", "2000",
-         "--device", device, "--launch-app", app_id, *extra],
+         "--device", device, "--launch-app", app_id, "--report-offscreen",
+         *extra],
         text=True, capture_output=True, check=False, timeout=60,
     )
 
 
-def check_launches(simulator: Path, device: str, app_id: str,
+def check_launches(simulator: Path, device: Device, app_id: str,
                    wm: str | None = None) -> None:
-    run = launch(simulator, device, app_id, wm)
+    run = launch(simulator, device.name, app_id, wm)
     if run.returncode < 0:
         raise AssertionError(f"simulator died on signal {-run.returncode}")
     if run.returncode != 0:
@@ -71,6 +80,19 @@ def check_launches(simulator: Path, device: str, app_id: str,
             f"exit {run.returncode}: {run.stderr.strip()[-300:]!r}")
     if f"App launched: {app_id}" not in run.stdout:
         raise AssertionError("exited 0 without reporting the launch")
+    # The report walks LVGL's object tree, so thistle-tk has none to give.
+    if device.fits_screen and wm is None:
+        check_fits(run.stdout)
+
+
+def check_fits(stdout: str) -> None:
+    """Fail on any object the simulator reports past the screen's edge."""
+    if "Off-screen objects: " not in stdout:
+        raise AssertionError("simulator did not report off-screen objects")
+    offscreen = [line for line in stdout.splitlines()
+                 if line.startswith("Off screen: ")]
+    if offscreen:
+        raise AssertionError("wider than the screen: " + "; ".join(offscreen))
 
 
 def check_refused(simulator: Path, device: str, app_id: str) -> None:
@@ -108,7 +130,7 @@ def main() -> int:
             total += 1
             try:
                 if expected:
-                    check_launches(simulator, device.name, app_id, wm)
+                    check_launches(simulator, device, app_id, wm)
                 else:
                     check_refused(simulator, device.name, app_id)
             except (AssertionError, subprocess.TimeoutExpired) as exc:

@@ -8,8 +8,8 @@
  *   Installed — manage apps already in /sdcard/apps/
  *
  * The catalog is loaded from the local cache at startup.
- * "Refresh from Server" fetches the live catalog, saves it as the cache,
- * and rebuilds both the Catalog and Firmware tab lists.
+ * "Refresh" (Catalog tab) and "Refresh from Server" (Firmware tab) fetch the
+ * live catalog, save it as the cache, and rebuild both tab lists.
  *
  * Install button calls appstore_install_entry() which downloads, verifies
  * SHA-256 hash, and verifies the Ed25519 signature.
@@ -52,6 +52,9 @@ static int s_app_h = 296;
 #define ITEM_PAD_LEFT     8
 #define ITEM_PAD_RIGHT    6
 #define STATUS_BAR_H     20
+#define TAB_W            74   /* fits "Firmware" in Montserrat 14 and the padding */
+#define TAB_GAP           2
+#define ACTION_GAP        8
 static int s_content_h = 246; /* s_app_h - TITLE_BAR_H - STATUS_BAR_H */
 
 /* ------------------------------------------------------------------ */
@@ -164,12 +167,13 @@ static lv_obj_t *create_separator(lv_obj_t *parent)
 }
 
 /* Small tab-like button */
-static lv_obj_t *create_tab_button(lv_obj_t *parent, const char *label, bool active)
+static lv_obj_t *create_tab_button(lv_obj_t *parent, const char *label, bool active,
+                                   int width)
 {
     const theme_colors_t *tc = theme_get_colors();
 
     lv_obj_t *btn = lv_button_create(parent);
-    lv_obj_set_size(btn, 80, 22);
+    lv_obj_set_size(btn, width, 22);
     lv_obj_set_style_bg_color(btn, active ? tc->primary : tc->surface, LV_PART_MAIN);
     lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_border_color(btn, tc->text, LV_PART_MAIN);
@@ -1318,25 +1322,36 @@ esp_err_t appstore_ui_create(lv_obj_t *parent)
     lv_obj_set_size(title_bar, s_app_w, TITLE_BAR_H);
     style_title_bar(title_bar);
 
+    /* Three tab buttons on the right, as wide as the bar allows. Three 80 px
+     * tabs were wider than a 240 px bar and pushed "Catalog" off its left
+     * edge. The title goes in whatever the tabs leave, and only if all of it
+     * fits: where it did not, it was drawn half under the first tab. */
+    int bar_w = s_app_w - ITEM_PAD_LEFT - ITEM_PAD_RIGHT;
+    int tab_w = LV_MIN(TAB_W, (bar_w - 2 * TAB_GAP) / 3);
+
+    const char *title = "App Store";
     lv_obj_t *title_lbl = lv_label_create(title_bar);
-    lv_label_set_text(title_lbl, "App Store");
+    lv_label_set_text(title_lbl, title);
     lv_obj_set_style_text_font(title_lbl, &lv_font_montserrat_14, LV_PART_MAIN);
     lv_obj_set_style_text_color(title_lbl, tc->text, LV_PART_MAIN);
     lv_obj_align(title_lbl, LV_ALIGN_LEFT_MID, 0, 0);
+    int title_room = bar_w - 3 * tab_w - 3 * TAB_GAP;
+    if (lv_text_get_width(title, strlen(title), &lv_font_montserrat_14, 0) > title_room) {
+        lv_obj_add_flag(title_lbl, LV_OBJ_FLAG_HIDDEN);
+    }
 
-    /* Three tab buttons on the right, 80px wide each with 2px gap */
-    lv_obj_t *inst_btn = create_tab_button(title_bar, "Installed", false);
+    lv_obj_t *inst_btn = create_tab_button(title_bar, "Installed", false, tab_w);
     lv_obj_align(inst_btn, LV_ALIGN_RIGHT_MID, 0, 0);
     lv_obj_add_event_cb(inst_btn, tab_installed_cb, LV_EVENT_CLICKED, NULL);
     s_store.inst_tab_btn = inst_btn;
 
-    lv_obj_t *fw_btn = create_tab_button(title_bar, "Firmware", false);
-    lv_obj_align(fw_btn, LV_ALIGN_RIGHT_MID, -82, 0);
+    lv_obj_t *fw_btn = create_tab_button(title_bar, "Firmware", false, tab_w);
+    lv_obj_align(fw_btn, LV_ALIGN_RIGHT_MID, -(tab_w + TAB_GAP), 0);
     lv_obj_add_event_cb(fw_btn, tab_firmware_cb, LV_EVENT_CLICKED, NULL);
     s_store.fw_tab_btn = fw_btn;
 
-    lv_obj_t *cat_btn = create_tab_button(title_bar, "Catalog", true);
-    lv_obj_align(cat_btn, LV_ALIGN_RIGHT_MID, -164, 0);
+    lv_obj_t *cat_btn = create_tab_button(title_bar, "Catalog", true, tab_w);
+    lv_obj_align(cat_btn, LV_ALIGN_RIGHT_MID, -2 * (tab_w + TAB_GAP), 0);
     lv_obj_add_event_cb(cat_btn, tab_catalog_cb, LV_EVENT_CLICKED, NULL);
     s_store.cat_tab_btn = cat_btn;
 
@@ -1357,7 +1372,10 @@ esp_err_t appstore_ui_create(lv_obj_t *parent)
 
     s_store.catalog_list = build_list_area(cat_screen, cat_list_h);
 
-    /* Button row: "Refresh Cache" + "Refresh from Server" */
+    /* Button row: "Reload Cache" + "Refresh", sharing the row between them.
+     * At 120 and 160 px they ran 56 px past a 240 px screen, and halved, a
+     * row has no room for "Refresh from Server". */
+    int action_w = (s_app_w - ITEM_PAD_LEFT - ITEM_PAD_RIGHT - ACTION_GAP) / 2;
     lv_obj_t *cat_btn_area = lv_obj_create(cat_screen);
     lv_obj_set_pos(cat_btn_area, 0, cat_btn_y);
     lv_obj_set_size(cat_btn_area, s_app_w, btn_row_h);
@@ -1368,12 +1386,12 @@ esp_err_t appstore_ui_create(lv_obj_t *parent)
     lv_obj_set_style_radius(cat_btn_area, 0, LV_PART_MAIN);
     lv_obj_clear_flag(cat_btn_area, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t *reload_local_btn = create_action_button(cat_btn_area, "Reload Cache", 120);
+    lv_obj_t *reload_local_btn = create_action_button(cat_btn_area, "Reload Cache", action_w);
     lv_obj_align(reload_local_btn, LV_ALIGN_LEFT_MID, ITEM_PAD_LEFT, 0);
     lv_obj_add_event_cb(reload_local_btn, refresh_local_cb, LV_EVENT_CLICKED, NULL);
 
-    lv_obj_t *refresh_srv_btn = create_action_button(cat_btn_area, "Refresh from Server", 160);
-    lv_obj_align(refresh_srv_btn, LV_ALIGN_LEFT_MID, ITEM_PAD_LEFT + 128, 0);
+    lv_obj_t *refresh_srv_btn = create_action_button(cat_btn_area, "Refresh", action_w);
+    lv_obj_align(refresh_srv_btn, LV_ALIGN_RIGHT_MID, -ITEM_PAD_RIGHT, 0);
     lv_obj_add_event_cb(refresh_srv_btn, refresh_server_cb, LV_EVENT_CLICKED, NULL);
 
     s_store.catalog_status_label = build_status_bar(cat_screen, cat_status_y, "Loading...");

@@ -538,9 +538,13 @@ esp_err_t filemgr_ui_create(lv_obj_t *parent)
         snprintf(init_title, sizeof(init_title), "< Files: %s", THISTLE_SDCARD);
         lv_label_set_text(s_fm.title_label, init_title);
     }
-    lv_label_set_long_mode(s_fm.title_label, LV_LABEL_LONG_CLIP);
+    /* One line across the bar, shortened with dots. Sized to its text, a deep
+     * path ran past the right edge of a 240 px screen. */
+    lv_label_set_long_mode(s_fm.title_label, LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_font(s_fm.title_label, &lv_font_montserrat_18, LV_PART_MAIN);
     lv_obj_set_style_text_color(s_fm.title_label, clr->text, LV_PART_MAIN);
+    lv_obj_set_size(s_fm.title_label, LV_PCT(100),
+                    lv_font_get_line_height(&lv_font_montserrat_18));
     lv_obj_align(s_fm.title_label, LV_ALIGN_LEFT_MID, 0, 0);
 
     /* ----------------------------------------------------------------

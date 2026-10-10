@@ -74,6 +74,42 @@ static bool add_tap(const char *spec)
 
 bool sim_is_headless(void) { return s_headless; }
 
+/* Report every visible object that reaches past the left or right edge of the
+ * display. On the panel that is text and borders nobody can see: a 280 px
+ * dialog centred on a 240 px screen lost the first letter of each line and the
+ * side borders of its buttons. Only the horizontal is checked, because a list
+ * that scrolls is meant to run off the bottom. */
+static bool s_report_offscreen = false;
+
+static const char *first_label_text(lv_obj_t *obj)
+{
+    if (lv_obj_check_type(obj, &lv_label_class)) return lv_label_get_text(obj);
+    for (uint32_t i = 0; i < lv_obj_get_child_count(obj); i++) {
+        const char *text = first_label_text(lv_obj_get_child(obj, (int32_t)i));
+        if (text) return text;
+    }
+    return NULL;
+}
+
+static int report_offscreen(lv_obj_t *obj, int32_t display_w)
+{
+    if (lv_obj_has_flag(obj, LV_OBJ_FLAG_HIDDEN)) return 0;
+
+    int count = 0;
+    lv_area_t a;
+    lv_obj_get_coords(obj, &a);
+    if (a.x1 < 0 || a.x2 >= display_w) {
+        const char *text = first_label_text(obj);
+        printf("Off screen: x %d..%d of %d, \"%s\"\n",
+               (int)a.x1, (int)a.x2, (int)display_w, text ? text : "");
+        count++;
+    }
+    for (uint32_t i = 0; i < lv_obj_get_child_count(obj); i++) {
+        count += report_offscreen(lv_obj_get_child(obj, (int32_t)i), display_w);
+    }
+    return count;
+}
+
 static void sim_tk_input_cb(const hal_input_event_t *event, void *user_data)
 {
     (void)user_data;
@@ -131,6 +167,8 @@ int main(int argc, char **argv)
             s_type_rollover = true;
         } else if (strcmp(argv[i], "--log-flushes") == 0) {
             sim_display_set_log_flushes(true);
+        } else if (strcmp(argv[i], "--report-offscreen") == 0) {
+            s_report_offscreen = true;
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             printf("Usage: %s [OPTIONS]\n", argv[0]);
             printf("Options:\n");
@@ -149,6 +187,8 @@ int main(int argc, char **argv)
             printf("                      prints the focused text field on exit\n");
             printf("  --type-rollover     Press each typed key before releasing the last\n");
             printf("  --log-flushes       Print every area flushed to the display\n");
+            printf("  --report-offscreen  On exit, list every visible LVGL object that\n");
+            printf("                      reaches past the left or right screen edge\n");
             printf("  --launch-app ID     Launch a registered app instead of the launcher\n");
             printf("  --wm NAME           Window manager, overriding system.json:\n");
             printf("                      thistle-tk, lvgl-epaper-wm or lvgl-lcd-wm\n");
@@ -328,6 +368,12 @@ int main(int argc, char **argv)
                 printf("Focused text: \"%s\"\n",
                        focused && lv_obj_check_type(focused, &lv_textarea_class)
                            ? lv_textarea_get_text(focused) : "");
+            }
+            if (s_report_offscreen && !use_tk_wm) {
+                int32_t display_w = lv_display_get_horizontal_resolution(NULL);
+                int count = report_offscreen(lv_screen_active(), display_w) +
+                            report_offscreen(lv_layer_top(), display_w);
+                printf("Off-screen objects: %d\n", count);
             }
             if (s_screenshot_file && !sim_display_save_ppm(s_screenshot_file)) {
                 fprintf(stderr, "Failed to save simulator screenshot\n");

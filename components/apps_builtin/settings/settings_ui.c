@@ -464,6 +464,12 @@ typedef struct {
 
 static wifi_pwd_ctx_t s_wifi_pwd_ctx; /* single-instance, screen lifetime */
 
+#define PWD_DIALOG_MAX_W   280
+#define PWD_DIALOG_MARGIN    8   /* screen edge to dialog, each side */
+#define PWD_DIALOG_BORDER    2
+#define PWD_DIALOG_PAD       6
+#define PWD_BTN_INSET        4   /* dialog content edge to button, and between */
+
 static void wifi_pwd_connect_cb(lv_event_t *e)
 {
     wifi_pwd_ctx_t *ctx = (wifi_pwd_ctx_t *)lv_event_get_user_data(e);
@@ -515,26 +521,37 @@ static void show_wifi_password_dialog(const char *ssid)
     strncpy(s_wifi_pwd_ctx.ssid, ssid, sizeof(s_wifi_pwd_ctx.ssid) - 1);
     s_wifi_pwd_ctx.ssid[sizeof(s_wifi_pwd_ctx.ssid) - 1] = '\0';
 
-    /* Overlay on sub_screen */
+    /* Overlay on sub_screen, as wide as the screen allows less a margin each
+     * side. A fixed 280 px hung 20 px off both edges of a 240 px panel: the
+     * first letter of every line and the outer borders of both buttons were
+     * off screen. Everything inside is sized from this width. */
+    int32_t dialog_w = s_app_w - 2 * PWD_DIALOG_MARGIN;
+    if (dialog_w > PWD_DIALOG_MAX_W) dialog_w = PWD_DIALOG_MAX_W;
+    int32_t content_w = dialog_w - 2 * (PWD_DIALOG_BORDER + PWD_DIALOG_PAD);
+    int32_t btn_w = (content_w - 3 * PWD_BTN_INSET) / 2;
+
     lv_obj_t *dialog = lv_obj_create(s_sub_screen);
-    lv_obj_set_size(dialog, 280, 140);
+    lv_obj_set_size(dialog, dialog_w, 140);
     lv_obj_align(dialog, LV_ALIGN_CENTER, 0, 0);
     lv_obj_set_style_bg_color(dialog, tc->bg, LV_PART_MAIN);
     lv_obj_set_style_bg_opa(dialog, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_border_width(dialog, 2, LV_PART_MAIN);
+    lv_obj_set_style_border_width(dialog, PWD_DIALOG_BORDER, LV_PART_MAIN);
     lv_obj_set_style_border_color(dialog, tc->text, LV_PART_MAIN);
     lv_obj_set_style_radius(dialog, 6, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(dialog, 6, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(dialog, PWD_DIALOG_PAD, LV_PART_MAIN);
     lv_obj_clear_flag(dialog, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_move_foreground(dialog);
 
     s_wifi_pwd_ctx.dialog = dialog;
 
-    /* SSID title */
+    /* SSID title — one line, shortened with dots if the name is too long */
     lv_obj_t *title = lv_label_create(dialog);
     lv_label_set_text_fmt(title, "Connect to: %s", ssid);
     lv_obj_set_style_text_font(title, &lv_font_montserrat_14, LV_PART_MAIN);
     lv_obj_set_style_text_color(title, tc->text, LV_PART_MAIN);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+    lv_obj_set_size(title, content_w, lv_font_get_line_height(&lv_font_montserrat_14));
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 2);
 
     /* Password textarea */
@@ -542,7 +559,7 @@ static void show_wifi_password_dialog(const char *ssid)
     lv_textarea_set_one_line(ta, true);
     lv_textarea_set_password_mode(ta, true);
     lv_textarea_set_placeholder_text(ta, "Password");
-    lv_obj_set_width(ta, 250);
+    lv_obj_set_width(ta, content_w);
     lv_obj_set_style_text_font(ta, &lv_font_montserrat_14, LV_PART_MAIN);
     lv_obj_set_style_text_color(ta, tc->text, LV_PART_MAIN);
     lv_obj_set_style_bg_color(ta, tc->surface, LV_PART_MAIN);
@@ -555,8 +572,8 @@ static void show_wifi_password_dialog(const char *ssid)
 
     /* Cancel button */
     lv_obj_t *btn_cancel = lv_obj_create(dialog);
-    lv_obj_set_size(btn_cancel, 100, 28);
-    lv_obj_align(btn_cancel, LV_ALIGN_BOTTOM_LEFT, 4, -4);
+    lv_obj_set_size(btn_cancel, btn_w, 28);
+    lv_obj_align(btn_cancel, LV_ALIGN_BOTTOM_LEFT, PWD_BTN_INSET, -4);
     lv_obj_set_style_bg_color(btn_cancel, tc->bg, LV_PART_MAIN);
     lv_obj_set_style_bg_opa(btn_cancel, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_border_color(btn_cancel, tc->text, LV_PART_MAIN);
@@ -578,8 +595,8 @@ static void show_wifi_password_dialog(const char *ssid)
 
     /* Connect button */
     lv_obj_t *btn_connect = lv_obj_create(dialog);
-    lv_obj_set_size(btn_connect, 100, 28);
-    lv_obj_align(btn_connect, LV_ALIGN_BOTTOM_RIGHT, -4, -4);
+    lv_obj_set_size(btn_connect, btn_w, 28);
+    lv_obj_align(btn_connect, LV_ALIGN_BOTTOM_RIGHT, -PWD_BTN_INSET, -4);
     lv_obj_set_style_bg_color(btn_connect, tc->bg, LV_PART_MAIN);
     lv_obj_set_style_bg_opa(btn_connect, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_border_color(btn_connect, tc->text, LV_PART_MAIN);
@@ -725,6 +742,10 @@ static void wifi_scan_clicked_cb(lv_event_t *e)
         lv_obj_set_style_text_color(lbl_ssid, tc_scan->text, LV_PART_MAIN);
         lv_obj_set_style_text_color(lbl_ssid, tc_scan->bg, LV_STATE_PRESSED);
         lv_obj_set_flex_grow(lbl_ssid, 1);
+        /* One line, shortened with dots: wrapped, a long name spilled out of
+         * the bottom of its row into the next. */
+        lv_label_set_long_mode(lbl_ssid, LV_LABEL_LONG_DOT);
+        lv_obj_set_height(lbl_ssid, lv_font_get_line_height(&lv_font_montserrat_14));
 
         /* RSSI label */
         lv_obj_t *lbl_rssi = lv_label_create(row);
