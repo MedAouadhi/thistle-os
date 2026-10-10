@@ -44,8 +44,27 @@ static const char *s_launch_app = NULL;
  * shares one sdcard directory between runs, so a test that needs a manager
  * other than the board's default cannot get it by editing that file. */
 static const char *s_wm_override = NULL;
-static int s_tap_x = -1;
-static int s_tap_y = -1;
+/* Taps to inject after startup, in order, SIM_TAP_GAP_MS apart. Each is
+ * held for s_tap_hold_ms; 0 delivers the press and the release before LVGL
+ * next reads the pointer, as a short tap does on hardware whose UI task is
+ * busy refreshing a panel. */
+#define SIM_MAX_TAPS   8
+#define SIM_TAP_GAP_MS 1500u
+static struct { int x, y; } s_taps[SIM_MAX_TAPS];
+static int s_tap_count = 0;
+static int s_tap_hold_ms = 100;
+
+static bool add_tap(const char *spec)
+{
+    if (s_tap_count >= SIM_MAX_TAPS ||
+        sscanf(spec, "%d,%d", &s_taps[s_tap_count].x, &s_taps[s_tap_count].y) != 2) {
+        fprintf(stderr, "Invalid --tap value; expected X,Y (at most %d taps)\n",
+                SIM_MAX_TAPS);
+        return false;
+    }
+    s_tap_count++;
+    return true;
+}
 
 bool sim_is_headless(void) { return s_headless; }
 
@@ -87,10 +106,9 @@ int main(int argc, char **argv)
         } else if (strncmp(argv[i], "--screenshot=", 13) == 0) {
             s_screenshot_file = argv[i] + 13;
         } else if (strcmp(argv[i], "--tap") == 0 && i + 1 < argc) {
-            if (sscanf(argv[++i], "%d,%d", &s_tap_x, &s_tap_y) != 2) {
-                fprintf(stderr, "Invalid --tap value; expected X,Y\n");
-                return 2;
-            }
+            if (!add_tap(argv[++i])) return 2;
+        } else if (strcmp(argv[i], "--tap-hold") == 0 && i + 1 < argc) {
+            s_tap_hold_ms = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--launch-app") == 0 && i + 1 < argc) {
             s_launch_app = argv[++i];
         } else if (strncmp(argv[i], "--launch-app=", 13) == 0) {
@@ -100,10 +118,7 @@ int main(int argc, char **argv)
         } else if (strncmp(argv[i], "--wm=", 5) == 0) {
             s_wm_override = argv[i] + 5;
         } else if (strncmp(argv[i], "--tap=", 6) == 0) {
-            if (sscanf(argv[i] + 6, "%d,%d", &s_tap_x, &s_tap_y) != 2) {
-                fprintf(stderr, "Invalid --tap value; expected X,Y\n");
-                return 2;
-            }
+            if (!add_tap(argv[i] + 6)) return 2;
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             printf("Usage: %s [OPTIONS]\n", argv[0]);
             printf("Options:\n");
@@ -113,7 +128,10 @@ int main(int argc, char **argv)
             printf("  --assert FILE       Evaluate assertions from FILE on exit\n");
             printf("  --scenario FILE     Replay input scenario from FILE (future)\n");
             printf("  --screenshot FILE   Save native-resolution framebuffer as PPM on exit\n");
-            printf("  --tap X,Y           Inject one native-coordinate tap after startup\n");
+            printf("  --tap X,Y           Inject a native-coordinate tap after startup;\n");
+            printf("                      repeat for more, %u ms apart\n", SIM_TAP_GAP_MS);
+            printf("  --tap-hold MS       How long each tap is held (default 100;\n");
+            printf("                      0 = press and release between two pointer reads)\n");
             printf("  --launch-app ID     Launch a registered app instead of the launcher\n");
             printf("  --wm NAME           Window manager, overriding system.json:\n");
             printf("                      thistle-tk, lvgl-epaper-wm or lvgl-lcd-wm\n");
@@ -218,7 +236,8 @@ int main(int argc, char **argv)
     /* Main loop — drive LVGL tick + timer handler + SDL event pump */
     uint32_t last_tick = 0;
     uint32_t start_ms = 0;
-    int tap_phase = 0;
+    int tap_index = 0;
+    int tap_phase = 0;   /* 0 = waiting to press, 1 = pressed */
     while (1) {
         /* Update LVGL tick */
         struct timeval tv;
@@ -244,16 +263,23 @@ int main(int argc, char **argv)
             pthread_mutex_unlock(&s_lvgl_mutex);
         }
 
-        uint32_t tap_down_ms = use_tk_wm ? 250u : 2250u;
-        uint32_t tap_up_ms = tap_down_ms + 100u;
-        if (tap_phase == 0 && s_tap_x >= 0 && s_tap_y >= 0 &&
-            (now_ms - start_ms) > tap_down_ms &&
-            sim_input_inject_touch((uint16_t)s_tap_x, (uint16_t)s_tap_y, true)) {
-            tap_phase = 1;
-        } else if (tap_phase == 1 && (now_ms - start_ms) > tap_up_ms &&
-                   sim_input_inject_touch((uint16_t)s_tap_x,
-                                          (uint16_t)s_tap_y, false)) {
-            tap_phase = 2;
+        if (tap_index < s_tap_count) {
+            uint16_t tx = (uint16_t)s_taps[tap_index].x;
+            uint16_t ty = (uint16_t)s_taps[tap_index].y;
+            uint32_t tap_down_ms = (use_tk_wm ? 250u : 2250u) +
+                                   (uint32_t)tap_index * SIM_TAP_GAP_MS;
+            uint32_t tap_up_ms = tap_down_ms + (uint32_t)s_tap_hold_ms;
+            uint32_t since_start = now_ms - start_ms;
+            if (tap_phase == 0 && since_start > tap_down_ms &&
+                sim_input_inject_touch(tx, ty, true)) {
+                tap_phase = 1;
+            }
+            /* Same iteration when the hold is 0: LVGL never runs in between. */
+            if (tap_phase == 1 && since_start >= tap_up_ms &&
+                sim_input_inject_touch(tx, ty, false)) {
+                tap_phase = 0;
+                tap_index++;
+            }
         }
 
         /* Headless timeout */

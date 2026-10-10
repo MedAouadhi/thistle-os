@@ -61,6 +61,14 @@ static struct {
     lv_indev_state_t state;
 } s_touch_state = { 0, 0, LV_INDEV_STATE_RELEASED };
 
+/* A press LVGL has not read yet. A short tap can press and release between
+ * two pointer reads, and LVGL reads the pointer only every refresh period, so
+ * the press is reported once before the release; otherwise LVGL never sees
+ * it. The state itself always follows the finger. It once stayed PRESSED
+ * after a release, so LVGL saw a press nobody made, blacked out the button
+ * under it, and dropped the next tap. */
+static bool s_touch_press_unread = false;
+
 static lv_indev_t *s_kbd_indev = NULL;
 static struct {
     uint32_t key;
@@ -71,9 +79,6 @@ static struct {
  * Touch events update s_touch_state; key events update s_kbd_state.
  * A single callback is registered on every driver so that combined drivers
  * (e.g. the SDL2 simulator driver) work correctly regardless of is_touch. */
-/* Deferred release: LVGL needs to see PRESSED for at least one poll cycle
- * before seeing RELEASED, otherwise quick taps are lost in the simulator. */
-static bool s_touch_release_pending = false;
 
 static void ui_input_hal_cb(const hal_input_event_t *event, void *user_data)
 {
@@ -84,10 +89,10 @@ static void ui_input_hal_cb(const hal_input_event_t *event, void *user_data)
             s_touch_state.x     = (int16_t)event->touch.x;
             s_touch_state.y     = (int16_t)event->touch.y;
             s_touch_state.state = LV_INDEV_STATE_PRESSED;
+            s_touch_press_unread = true;
             break;
         case HAL_INPUT_EVENT_TOUCH_UP:
-            /* Don't release immediately — let LVGL see PRESSED first */
-            s_touch_release_pending = true;
+            s_touch_state.state = LV_INDEV_STATE_RELEASED;
             break;
         case HAL_INPUT_EVENT_KEY_DOWN: {
             uint32_t lv_key = event->key.keycode;
@@ -120,10 +125,9 @@ static void ui_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
     data->point.x = s_touch_state.x;
     data->point.y = s_touch_state.y;
 
-    if (s_touch_release_pending) {
-        /* LVGL already saw PRESSED on the previous poll — now release */
-        data->state = LV_INDEV_STATE_RELEASED;
-        s_touch_release_pending = false;
+    if (s_touch_press_unread) {
+        data->state = LV_INDEV_STATE_PRESSED;
+        s_touch_press_unread = false;
     } else {
         data->state = s_touch_state.state;
     }

@@ -75,7 +75,8 @@ CASES = (
         "d62001f353a85176830bd4b00942b6b1617c9095a500813238105ab8fff585c1",
     ),
     # What an e-paper board boots by default: the LVGL grid, three columns
-    # wide on a 240 px screen.
+    # wide on a 240 px screen. Its first hash had the tile under the tap
+    # point drawn pressed: the pointer went back to PRESSED after the tap.
     Case(
         "eink-lvgl-apps",
         "tdeck-max",
@@ -83,7 +84,7 @@ CASES = (
         "120,294",
         240,
         320,
-        "f989966f5f2f0473db73a02bcfefdafeb536fc654e72c8e0f2bfa0676d482748",
+        "e0c57b1e323edd15e3e795581044875ffa2e867f25df9af91fc560ccd35d9a53",
     ),
 )
 
