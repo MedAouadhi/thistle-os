@@ -3,14 +3,22 @@
 #include "thistle/wifi_manager.h"
 #include "thistle/net_manager.h"
 #include "hal/board.h"
-#include "esp_timer.h"
 #include "esp_log.h"
 #include <stdio.h>
 #include <stdbool.h>
+#include <string.h>
 
 static const char *TAG = "statusbar";
 
 #define STATUSBAR_HEIGHT 24
+
+/* How often the clock, battery and network readings are refreshed. A label
+ * is only rewritten when its text changes, so on e-paper a tick that finds
+ * nothing new costs no refresh. */
+#define STATUSBAR_UPDATE_MS 10000
+
+static void statusbar_update_cb(lv_timer_t *timer);
+static lv_timer_t *s_update_timer = NULL;
 
 /* LVGL object handles */
 static lv_obj_t *s_container     = NULL;
@@ -73,17 +81,30 @@ esp_err_t statusbar_create(lv_obj_t *parent)
     lv_obj_set_style_text_color(s_time_label, colors->text, LV_PART_MAIN);
     lv_obj_set_flex_grow(s_time_label, 1);
     lv_obj_set_style_text_align(s_time_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    /* Never narrower than a time, so when the bar is crowded the title gives
+     * way rather than the clock wrapping onto a second line. */
+    lv_obj_set_style_min_width(s_time_label,
+                               lv_text_get_width("00:00", 5,
+                                                 lv_obj_get_style_text_font(s_time_label,
+                                                                            LV_PART_MAIN),
+                                                 0),
+                               LV_PART_MAIN);
 
     /* Right-side cluster: wifi + battery */
     lv_obj_t *right = lv_obj_create(s_container);
-    lv_obj_set_height(right, STATUSBAR_HEIGHT - 2);
+    /* As wide as its labels: at the default width a transport name such as
+     * "Host Network" is cut off at the left. Packed from the start, because
+     * LVGL sizes a container to its content from the right-most child edge:
+     * packed from the end, labels that outgrow it spill off its left side,
+     * which that measure never sees, and it never widens. */
+    lv_obj_set_size(right, LV_SIZE_CONTENT, STATUSBAR_HEIGHT - 2);
     lv_obj_set_style_bg_opa(right, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_border_width(right, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_all(right, 0, LV_PART_MAIN);
     lv_obj_set_style_radius(right, 0, LV_PART_MAIN);
     lv_obj_set_layout(right, LV_LAYOUT_FLEX);
     lv_obj_set_flex_flow(right, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(right, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_flex_align(right, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_column(right, 4, LV_PART_MAIN);
 
     s_wifi_label = lv_label_create(right);
@@ -94,8 +115,25 @@ esp_err_t statusbar_create(lv_obj_t *parent)
     lv_label_set_text(s_battery_label, "BAT:--%");
     lv_obj_set_style_text_color(s_battery_label, colors->text, LV_PART_MAIN);
 
+    /* An LVGL timer rather than an esp_timer, so the readings are written
+     * from inside lv_timer_handler() with the LVGL lock held. Ready at once,
+     * so the first readings replace the placeholders on the first pass. */
+    if (s_update_timer == NULL) {
+        s_update_timer = lv_timer_create(statusbar_update_cb, STATUSBAR_UPDATE_MS, NULL);
+        lv_timer_ready(s_update_timer);
+    }
+
     ESP_LOGI(TAG, "status bar created (%d px)", STATUSBAR_HEIGHT);
     return ESP_OK;
+}
+
+/* Rewrite a label only if its text changed: on e-paper every rewrite is a
+ * panel refresh. */
+static void set_text_if_changed(lv_obj_t *label, const char *text)
+{
+    if (strcmp(lv_label_get_text(label), text) != 0) {
+        lv_label_set_text(label, text);
+    }
 }
 
 void statusbar_set_battery(uint8_t percent, bool charging)
@@ -109,7 +147,7 @@ void statusbar_set_battery(uint8_t percent, bool charging)
     } else {
         snprintf(buf, sizeof(buf), "BAT:%d%%", percent);
     }
-    lv_label_set_text(s_battery_label, buf);
+    set_text_if_changed(s_battery_label, buf);
 }
 
 void statusbar_set_wifi(bool connected, int rssi)
@@ -154,7 +192,7 @@ void statusbar_set_time_str(const char *time_str)
     if (s_time_label == NULL || time_str == NULL) {
         return;
     }
-    lv_label_set_text(s_time_label, time_str);
+    set_text_if_changed(s_time_label, time_str);
 }
 
 void statusbar_refresh_theme(void)
@@ -171,52 +209,53 @@ void statusbar_refresh_theme(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* Periodic update timer (30 s, esp_timer)                             */
+/* Periodic update (LVGL timer, created by statusbar_create)           */
 /* ------------------------------------------------------------------ */
 
-static void statusbar_update_tick(void *arg)
+static void update_battery(void)
 {
-    (void)arg;
+    const hal_registry_t *reg = hal_get_registry();
+    if (!reg || !reg->power || !s_battery_label) {
+        return;
+    }
 
-    /* Update time */
+    /* get_info is the one call that says whether the driver is up at all.
+     * The single-value calls answer 0 from a driver that never found its
+     * chip, which would read as an empty battery rather than an unknown one. */
+    if (reg->power->get_info) {
+        hal_power_info_t info = {0};
+        if (reg->power->get_info(&info) != ESP_OK ||
+            info.state == HAL_POWER_STATE_NO_BATTERY) {
+            set_text_if_changed(s_battery_label, "BAT:--%");
+            return;
+        }
+        statusbar_set_battery(info.percent, info.state == HAL_POWER_STATE_CHARGING);
+        return;
+    }
+
+    uint8_t pct = reg->power->get_battery_percent ? reg->power->get_battery_percent() : 0;
+    bool charging = reg->power->is_charging ? reg->power->is_charging() : false;
+    statusbar_set_battery(pct, charging);
+}
+
+static void statusbar_update_cb(lv_timer_t *timer)
+{
+    (void)timer;
+
     char time_buf[8];
     wifi_manager_get_time_str(time_buf, sizeof(time_buf));
     statusbar_set_time_str(time_buf);
 
-    /* Update battery from HAL */
-    const hal_registry_t *reg = hal_get_registry();
-    if (reg && reg->power) {
-        uint8_t pct = reg->power->get_battery_percent ? reg->power->get_battery_percent() : 0;
-        bool charging = reg->power->is_charging ? reg->power->is_charging() : false;
-        statusbar_set_battery(pct, charging);
+    update_battery();
+
+    /* Network indicator — active transport name + RSSI */
+    if (s_wifi_label) {
+        if (net_is_connected()) {
+            char buf[24];
+            snprintf(buf, sizeof(buf), "%s:%d", net_get_transport_name(), (int)net_get_rssi());
+            set_text_if_changed(s_wifi_label, buf);
+        } else {
+            set_text_if_changed(s_wifi_label, "--");
+        }
     }
-
-    /* Update network indicator — shows active transport name + RSSI */
-    if (net_is_connected()) {
-        char buf[24];
-        snprintf(buf, sizeof(buf), "%s:%d", net_get_transport_name(), (int)net_get_rssi());
-        if (s_wifi_label) lv_label_set_text(s_wifi_label, buf);
-    } else {
-        if (s_wifi_label) lv_label_set_text(s_wifi_label, "--");
-    }
-}
-
-void statusbar_start_update_timer(void)
-{
-    const esp_timer_create_args_t timer_args = {
-        .callback = statusbar_update_tick,
-        .arg      = NULL,
-        .name     = "statusbar_tick",
-    };
-
-    esp_timer_handle_t timer;
-    esp_err_t ret = esp_timer_create(&timer_args, &timer);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to create statusbar update timer: %d", ret);
-        return;
-    }
-
-    /* Fire immediately, then every 30 seconds */
-    esp_timer_start_periodic(timer, 30ULL * 1000 * 1000);
-    ESP_LOGI(TAG, "Status bar update timer started (30 s interval)");
 }
