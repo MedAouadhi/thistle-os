@@ -177,8 +177,9 @@ mod esp_ffi {
 // Enough of the part to bring it up and read it: the handful of registers the
 // driver polls, a command channel that reassembles a command from however many
 // writes it arrives in, and a non-wakeup FIFO that hands out its length and
-// then its bytes across separate reads, as the hub does. What the driver
-// uploaded and which sensors it switched on stay recorded for a test to check.
+// then its bytes across separate reads, as the hub does, one frozen transfer
+// at a time. What the driver uploaded and which sensors it switched on stay
+// recorded for a test to check.
 
 #[cfg(all(not(target_os = "espidf"), not(feature = "sim-bus")))]
 mod esp_ffi {
@@ -212,6 +213,11 @@ mod esp_ffi {
         /// Every sensor configuration, in order, as `(sensor id, rate)`.
         pub configured: Vec<(u8, f32)>,
         pub fifo: Vec<u8>,
+        /// The non-wakeup transfer the hub has ready. It is frozen the moment
+        /// the transfer before it has been read off, from what the FIFO took
+        /// in meanwhile, and holds nothing that arrives after. The first one
+        /// after boot holds only the hub's boot events.
+        transfer: Vec<u8>,
         /// Bytes still owed on a FIFO transfer whose length has been read.
         fifo_owed: usize,
         pub wake_fifo: Vec<u8>,
@@ -240,6 +246,7 @@ mod esp_ffi {
                 booted: false,
                 configured: Vec::new(),
                 fifo: Vec::new(),
+                transfer: Vec::new(),
                 fifo_owed: 0,
                 wake_fifo: Vec::new(),
                 wake_owed: 0,
@@ -255,7 +262,12 @@ mod esp_ffi {
                 REG_CHAN_FIFO_NW if self.wake_pending && self.fifo_owed == 0 => {
                     out[..2].copy_from_slice(&[0, 0]);
                 }
-                REG_CHAN_FIFO_NW => Self::stream(&mut self.fifo, &mut self.fifo_owed, out),
+                REG_CHAN_FIFO_NW => {
+                    Self::stream(&mut self.transfer, &mut self.fifo_owed, out);
+                    if self.fifo_owed == 0 && self.transfer.is_empty() {
+                        self.transfer = std::mem::take(&mut self.fifo);
+                    }
+                }
                 REG_CHAN_FIFO_W => {
                     Self::stream(&mut self.wake_fifo, &mut self.wake_owed, out);
                     if self.wake_fifo.is_empty() && self.wake_owed == 0 {
@@ -337,6 +349,10 @@ mod esp_ffi {
                     self.wake_fifo
                         .extend([245, 0x00, 248, 0x14, 0x01, 0x00, 247, 0x52, 0x1E, 0, 0, 0]);
                     self.wake_pending = true;
+                    // And what its first non-wakeup transfer held: the same
+                    // events under their non-wakeup ids.
+                    self.transfer
+                        .extend([251, 0x00, 254, 0x14, 0x01, 0x00, 253, 0x52, 0x1E, 0, 0, 0]);
                     self.registers[REG_KERNEL_VERSION as usize] = 0x6C;
                     self.registers[REG_KERNEL_VERSION as usize + 1] = 0x19;
                 }
@@ -873,10 +889,18 @@ unsafe extern "C" fn bhi260ap_get_data(data: *mut HalImuData) -> i32 {
     if read_fifo(dev, REG_CHAN_FIFO_W, &mut imu.wake_owed).is_none() {
         return ESP_FAIL;
     }
-    let Some(fifo) = read_fifo(dev, REG_CHAN_FIFO_NW, &mut imu.fifo_owed) else {
-        return ESP_FAIL;
-    };
-    apply_fifo(&fifo, &mut imu.reading);
+    // The hub freezes each non-wakeup transfer the moment the one before it
+    // has been read off, so the transfer waiting now holds only what arrived
+    // by the previous poll. Read alone, it put a T-Deck Max's reading a whole
+    // poll interval behind the board, and answered the first poll after boot
+    // with the hub's boot events and zeros. Reading it off has the hub freeze
+    // the next one, at once, holding everything since: read both.
+    for _ in 0..2 {
+        let Some(fifo) = read_fifo(dev, REG_CHAN_FIFO_NW, &mut imu.fifo_owed) else {
+            return ESP_FAIL;
+        };
+        apply_fifo(&fifo, &mut imu.reading);
+    }
     unsafe { *data = imu.reading };
     ESP_OK
 }
@@ -1272,14 +1296,33 @@ mod tests {
         assert_close(data.gyro_x, 1000.0);
     }
 
+    /// The hub opens with its own events on both FIFOs. The Settings page reads
+    /// the IMU once, when it opens, so a first poll that answers with those
+    /// events showed zeros on every axis.
     #[test]
-    fn readings_arrive_although_the_hub_opens_with_events_on_its_wake_up_fifo() {
+    fn the_first_poll_answers_with_a_sample_and_not_the_events_the_hub_boots_with() {
         an_imu_that_is_up();
         queue_fifo(&[1, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10]);
 
         let (ret, data) = get_data();
         assert_eq!(ret, ESP_OK);
         assert_close(data.accel_z, 9.80665);
+    }
+
+    /// The hub freezes each transfer the moment the one before it has been
+    /// read off, so the transfer a poll finds waiting holds only what arrived
+    /// by the poll before. Read alone, it put the reading a whole poll
+    /// interval behind the board: twenty seconds, after a twenty-second gap.
+    #[test]
+    fn a_poll_answers_with_what_arrived_since_the_poll_before() {
+        an_imu_that_is_up();
+        queue_fifo(&[1, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10]);
+        get_data();
+
+        queue_fifo(&[1, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20]);
+        let (ret, data) = get_data();
+        assert_eq!(ret, ESP_OK);
+        assert_close(data.accel_z, 2.0 * 9.80665);
     }
 
     #[test]

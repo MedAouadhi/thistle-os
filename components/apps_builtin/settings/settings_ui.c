@@ -102,6 +102,11 @@ static lv_obj_t   *s_gps_lat_lbl    = NULL;
 static lv_obj_t   *s_gps_lon_lbl    = NULL;
 static lv_obj_t   *s_gps_sat_lbl    = NULL;
 
+/* IMU detail live-update timer: one label per axis, accelerometer then gyro */
+#define IMU_AXES 6
+static lv_timer_t *s_imu_timer = NULL;
+static lv_obj_t   *s_imu_lbl[IMU_AXES];
+
 /* GPS enabled state */
 static bool s_gps_enabled = false;
 
@@ -300,6 +305,11 @@ static void back_to_drivers(lv_event_t *e)
         s_gps_lat_lbl    = NULL;
         s_gps_lon_lbl    = NULL;
         s_gps_sat_lbl    = NULL;
+    }
+    if (s_imu_timer) {
+        lv_timer_delete(s_imu_timer);
+        s_imu_timer = NULL;
+        memset(s_imu_lbl, 0, sizeof(s_imu_lbl));
     }
 
     if (s_detail_screen) {
@@ -1935,7 +1945,36 @@ static void open_detail_input(lv_obj_t *content, int index)
     create_light_level_row(content, input_backlight_cb, true);
 }
 
-/* --- IMU --- */
+/* --- IMU (live timer, 2 s) --- */
+
+static const char *const IMU_AXIS_NAMES[IMU_AXES] = {
+    "Accel X", "Accel Y", "Accel Z", "Gyro X", "Gyro Y", "Gyro Z",
+};
+
+static void imu_timer_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    const hal_registry_t *reg = hal_get_registry();
+    if (!reg || !reg->imu || !reg->imu->get_data || !s_imu_lbl[0]) return;
+
+    hal_imu_data_t data = {0};
+    bool ok = reg->imu->get_data(&data) == ESP_OK;
+    const float values[IMU_AXES] = {
+        data.accel_x, data.accel_y, data.accel_z,
+        data.gyro_x,  data.gyro_y,  data.gyro_z,
+    };
+    char buf[48];
+
+    for (int i = 0; i < IMU_AXES; i++) {
+        if (ok) {
+            snprintf(buf, sizeof(buf), "%s: %.2f %s", IMU_AXIS_NAMES[i],
+                     (double)values[i], i < 3 ? "m/s2" : "deg/s");
+        } else {
+            snprintf(buf, sizeof(buf), "%s: Error", IMU_AXIS_NAMES[i]);
+        }
+        lv_label_set_text(s_imu_lbl[i], buf);
+    }
+}
 
 static void open_detail_imu(lv_obj_t *content)
 {
@@ -1951,32 +1990,21 @@ static void open_detail_imu(lv_obj_t *content)
     create_info_row(content, buf);
     create_separator(content);
 
-    if (imu->get_data) {
-        hal_imu_data_t data = {0};
-        if (imu->get_data(&data) == ESP_OK) {
-            snprintf(buf, sizeof(buf), "Accel X: %.2f m/s2", (double)data.accel_x);
-            create_info_row(content, buf);
-            create_separator(content);
-            snprintf(buf, sizeof(buf), "Accel Y: %.2f m/s2", (double)data.accel_y);
-            create_info_row(content, buf);
-            create_separator(content);
-            snprintf(buf, sizeof(buf), "Accel Z: %.2f m/s2", (double)data.accel_z);
-            create_info_row(content, buf);
-            create_separator(content);
-            snprintf(buf, sizeof(buf), "Gyro X: %.2f deg/s", (double)data.gyro_x);
-            create_info_row(content, buf);
-            create_separator(content);
-            snprintf(buf, sizeof(buf), "Gyro Y: %.2f deg/s", (double)data.gyro_y);
-            create_info_row(content, buf);
-            create_separator(content);
-            snprintf(buf, sizeof(buf), "Gyro Z: %.2f deg/s", (double)data.gyro_z);
-            create_info_row(content, buf);
-        } else {
-            create_info_row(content, "(Read error)");
-        }
-    } else {
+    if (!imu->get_data) {
         create_info_row(content, "(Info only - no settings)");
+        return;
     }
+
+    for (int i = 0; i < IMU_AXES; i++) {
+        snprintf(buf, sizeof(buf), "%s: --", IMU_AXIS_NAMES[i]);
+        s_imu_lbl[i] = create_live_row(content, buf);
+        if (i < IMU_AXES - 1) create_separator(content);
+    }
+
+    /* The readings move with the board, so keep reading while the page is
+     * open, as the GPS page does. Fire immediately. */
+    s_imu_timer = lv_timer_create(imu_timer_cb, 2000, NULL);
+    lv_timer_ready(s_imu_timer);
 }
 
 /* ------------------------------------------------------------------ */
@@ -2364,6 +2392,11 @@ void settings_ui_destroy(void)
         s_gps_lat_lbl    = NULL;
         s_gps_lon_lbl    = NULL;
         s_gps_sat_lbl    = NULL;
+    }
+    if (s_imu_timer) {
+        lv_timer_delete(s_imu_timer);
+        s_imu_timer = NULL;
+        memset(s_imu_lbl, 0, sizeof(s_imu_lbl));
     }
 
     /* Nullify label pointers — LVGL will clean up widgets when s_root is deleted */

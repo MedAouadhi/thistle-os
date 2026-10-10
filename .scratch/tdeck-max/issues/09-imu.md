@@ -108,3 +108,35 @@ profile (`Detected: tdeck-max`, `BHI260=1`).
 - Build note: the kernel image is now 0x284870, which overflows `ota_0`
   (0x280000, Recovery's slot) by 18 KB. `factory` and `ota_1` (4.5 MB) have
   room. idf.py warns about it but builds.
+
+### Every reading was one poll late
+
+Settings > Drivers > IMU showed zeros on every axis. The page read the IMU
+once, when it opened, and nothing else on the Max polls it, so that read was
+the first after boot. A temporary probe that logged the full timestamp at the
+head of each transfer showed why it was zeros, and that the zeros were only
+the most visible case:
+
+- The hub freezes each non-wakeup transfer the moment the one before it has
+  been read off, and holds nothing that arrives after. The transfer a poll
+  finds waiting holds what arrived by the *previous* poll.
+- The first one after boot holds only the hub's boot events (18 bytes), so
+  the first poll answered zeros.
+- After a 20 s gap, the poll returned samples from hub time 6.7–7.6 s, read
+  at about 27.8 s. Any reading was as stale as the gap before it.
+- Reading the waiting transfer off has the hub freeze the next one at once,
+  holding everything since. Over eleven polls the interrupt status flagged it
+  before the first register read after the drain. `get_data` now reads both,
+  and after 20 s and 30 s gaps the second transfer ended within one read's
+  duration (~0.3 s for 12 KB) of the hub's current time.
+
+The fake chip freezes transfers the same way. Four tests went red against the
+single read before the fix, among them a new one for a reading that moves
+between polls. LilyGo's `initImpl` reads the FIFOs once after boot too
+(`SensorBHI260AP.hpp:749`). That alone would have left the second problem.
+
+The IMU page now refreshes every 2 s while open, as the GPS page does,
+instead of keeping the one read it took on opening. Checked in the simulator:
+it shows the scenario's values, and opening and leaving it twice runs clean.
+On the board the clean build boots and brings the hub up. Nobody has opened
+the page on the board yet.
