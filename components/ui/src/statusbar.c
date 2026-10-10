@@ -56,6 +56,12 @@ esp_err_t statusbar_create(lv_obj_t *parent)
     lv_label_set_text(s_title_label, "ThistleOS");
     lv_obj_set_style_text_color(s_title_label, colors->text, LV_PART_MAIN);
     lv_obj_set_flex_grow(s_title_label, 1);
+    /* One line, shortened if it must be: on a 240 px screen a wrapped title
+     * spills out of the bar. */
+    lv_label_set_long_mode(s_title_label, LV_LABEL_LONG_DOT);
+    lv_obj_set_height(s_title_label,
+                      lv_font_get_line_height(lv_obj_get_style_text_font(s_title_label,
+                                                                         LV_PART_MAIN)));
 
     /* Time label — center */
     s_time_label = lv_label_create(s_container);
@@ -85,7 +91,7 @@ esp_err_t statusbar_create(lv_obj_t *parent)
     lv_obj_set_style_text_color(s_wifi_label, colors->text, LV_PART_MAIN);
 
     s_battery_label = lv_label_create(right);
-    lv_label_set_text(s_battery_label, "BAT:--%%");
+    lv_label_set_text(s_battery_label, "BAT:--%");
     lv_obj_set_style_text_color(s_battery_label, colors->text, LV_PART_MAIN);
 
     ESP_LOGI(TAG, "status bar created (%d px)", STATUSBAR_HEIGHT);

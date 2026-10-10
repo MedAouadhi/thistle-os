@@ -11,6 +11,11 @@
 /* Initialize kernel subsystems (event bus, IPC, app manager, driver manager) */
 esp_err_t kernel_init(void);
 
+/* Register the thistle-tk App Store and Flashlight. Call only when thistle-tk
+ * is the window manager: they share app IDs with the LVGL built-ins, and the
+ * first registration of an ID is the one that is kept. */
+esp_err_t tk_native_apps_register(void);
+
 /* Enter the kernel main loop (never returns). Runs LVGL tick, processes events. */
 void kernel_run(void);
 

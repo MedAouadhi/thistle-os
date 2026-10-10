@@ -854,7 +854,7 @@ static void populate_list(void)
 
         /* Username — right, secondary colour */
         lv_obj_t *user_lbl = lv_label_create(row);
-        const char *user_display = e->username[0] ? e->username : "—";
+        const char *user_display = e->username[0] ? e->username : "-";
         lv_label_set_text(user_lbl, user_display);
         lv_label_set_long_mode(user_lbl, LV_LABEL_LONG_CLIP);
         lv_obj_set_style_text_font(user_lbl, &lv_font_montserrat_14, LV_PART_MAIN);

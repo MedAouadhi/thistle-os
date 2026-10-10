@@ -40,6 +40,10 @@ static const char *s_assert_file = NULL;
 static const char *s_scenario_file = NULL;
 static const char *s_screenshot_file = NULL;
 static const char *s_launch_app = NULL;
+/* Overrides system.json's "window_manager" for this run only. The simulator
+ * shares one sdcard directory between runs, so a test that needs a manager
+ * other than the board's default cannot get it by editing that file. */
+static const char *s_wm_override = NULL;
 static int s_tap_x = -1;
 static int s_tap_y = -1;
 
@@ -91,6 +95,10 @@ int main(int argc, char **argv)
             s_launch_app = argv[++i];
         } else if (strncmp(argv[i], "--launch-app=", 13) == 0) {
             s_launch_app = argv[i] + 13;
+        } else if (strcmp(argv[i], "--wm") == 0 && i + 1 < argc) {
+            s_wm_override = argv[++i];
+        } else if (strncmp(argv[i], "--wm=", 5) == 0) {
+            s_wm_override = argv[i] + 5;
         } else if (strncmp(argv[i], "--tap=", 6) == 0) {
             if (sscanf(argv[i] + 6, "%d,%d", &s_tap_x, &s_tap_y) != 2) {
                 fprintf(stderr, "Invalid --tap value; expected X,Y\n");
@@ -107,6 +115,8 @@ int main(int argc, char **argv)
             printf("  --screenshot FILE   Save native-resolution framebuffer as PPM on exit\n");
             printf("  --tap X,Y           Inject one native-coordinate tap after startup\n");
             printf("  --launch-app ID     Launch a registered app instead of the launcher\n");
+            printf("  --wm NAME           Window manager, overriding system.json:\n");
+            printf("                      thistle-tk, lvgl-epaper-wm or lvgl-lcd-wm\n");
             printf("  -h, --help          Show this help\n");
             printf("Devices: tdeck-pro, tdeck, tdeck-plus, tdeck-max, tdisplay,\n");
             printf("         heltec-v3, cardputer, t3-s3, rak3312\n");
@@ -145,7 +155,8 @@ int main(int argc, char **argv)
     /* Same selection as the firmware, from the same system.json key, so a
      * board configured here behaves the way it will on hardware. */
     thistle_wm_choice_t choice =
-        thistle_wm_select(board_config_get_wm_name(), sim_board_is_epaper());
+        thistle_wm_select(s_wm_override ? s_wm_override : board_config_get_wm_name(),
+                          sim_board_is_epaper());
     bool use_tk_wm = !choice.hosts_lvgl_apps;
     err = display_server_register_wm(choice.wm);
     { char _msg[64]; snprintf(_msg, sizeof(_msg), "display_server_register_wm: %d", err);
@@ -174,6 +185,13 @@ int main(int argc, char **argv)
                                          sim_board_has_gps());
         if (err != ESP_OK) {
             fprintf(stderr, "Some built-in apps failed to register: %d\n", err);
+        }
+    } else {
+        /* thistle-tk's own App Store and Flashlight; they share IDs with the
+         * LVGL ones, so each manager registers only its own. */
+        err = tk_native_apps_register();
+        if (err != ESP_OK) {
+            fprintf(stderr, "thistle-tk apps failed to register: %d\n", err);
         }
     }
 

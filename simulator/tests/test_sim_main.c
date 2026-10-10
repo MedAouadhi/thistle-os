@@ -39,10 +39,11 @@ extern void test_cst66xx_ignores_two_byte_addresses_a_cst328_driver_would_send(v
 extern void test_cst66xx_identifies_itself_the_way_the_real_part_did(void);
 
 /* test_wm_select.c */
-extern void test_wm_select_defaults_an_epaper_board_to_thistle_tk(void);
+extern void test_wm_select_defaults_an_epaper_board_to_the_lvgl_epaper_manager(void);
 extern void test_wm_select_defaults_an_lcd_board_to_the_lvgl_lcd_manager(void);
 extern void test_wm_select_treats_empty_and_auto_as_no_preference(void);
 extern void test_wm_select_honours_the_lvgl_epaper_manager_when_asked_for_it(void);
+extern void test_wm_select_honours_thistle_tk_on_an_epaper_board(void);
 extern void test_wm_select_honours_thistle_tk_on_a_board_that_would_default_otherwise(void);
 extern void test_wm_select_falls_back_when_the_name_matches_no_manager(void);
 extern void test_wm_select_never_offers_lvgl_apps_to_thistle_tk(void);
@@ -115,10 +116,11 @@ int main(void)
     RUN_TEST(cst66xx_identifies_itself_the_way_the_real_part_did);
 
     printf("\n[wm_select]\n");
-    RUN_TEST(wm_select_defaults_an_epaper_board_to_thistle_tk);
+    RUN_TEST(wm_select_defaults_an_epaper_board_to_the_lvgl_epaper_manager);
     RUN_TEST(wm_select_defaults_an_lcd_board_to_the_lvgl_lcd_manager);
     RUN_TEST(wm_select_treats_empty_and_auto_as_no_preference);
     RUN_TEST(wm_select_honours_the_lvgl_epaper_manager_when_asked_for_it);
+    RUN_TEST(wm_select_honours_thistle_tk_on_an_epaper_board);
     RUN_TEST(wm_select_honours_thistle_tk_on_a_board_that_would_default_otherwise);
     RUN_TEST(wm_select_falls_back_when_the_name_matches_no_manager);
     RUN_TEST(wm_select_never_offers_lvgl_apps_to_thistle_tk);

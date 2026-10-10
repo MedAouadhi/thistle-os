@@ -80,8 +80,9 @@
           </tr>
         </thead>
         <tbody>
-          <tr><td>thistle-tk</td><td>Default WM with BlackBerry-style UI: status bar, app drawer, wallpaper</td><td>thistle-tk (Rust)</td><td><span class="badge badge-green">Default</span></td></tr>
-          <tr><td>LVGL WM</td><td>Alternative WM using LVGL widget toolkit</td><td>LVGL 9.2 (C)</td><td><span class="badge badge-blue">Available</span></td></tr>
+          <tr><td>lvgl-epaper-wm</td><td>LVGL with deferred, debounced refresh. Hosts all fourteen built-in apps</td><td>LVGL 9.2 (C)</td><td><span class="badge badge-green">Default on e-paper</span></td></tr>
+          <tr><td>lvgl-lcd-wm</td><td>LVGL with direct flush. Hosts all fourteen built-in apps</td><td>LVGL 9.2 (C)</td><td><span class="badge badge-green">Default on LCD</span></td></tr>
+          <tr><td>thistle-tk</td><td>BlackBerry-style UI with cheaper e-paper refreshes. Hosts only its launcher, App Store and Flashlight, plus packaged apps</td><td>thistle-tk (Rust)</td><td><span class="badge badge-blue">Available</span></td></tr>
         </tbody>
       </table>
     </div>
@@ -107,7 +108,7 @@
     <p>The active window manager is configured in <code>config/system.json</code> on the SD card or SPIFFS:</p>
 
     <pre><code>{
-  "window_manager": "thistle-tk",
+  "window_manager": "auto",
   "theme": "dark",
   "wifi_ssid": "...",
   "wifi_pass": "..."
@@ -126,7 +127,7 @@
 
     <div class="callout info">
       <div class="callout-title">Theming</div>
-      Window managers can read theme files from <code>themes/*.json</code> on storage. The default thistle-tk WM supports dark and light themes with customizable accent colours.
+      Window managers can read theme files from <code>themes/*.json</code> on storage. The thistle-tk WM supports dark and light themes with customizable accent colours.
     </div>
 
     <div class="page-footer">

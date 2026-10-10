@@ -183,13 +183,9 @@ pub extern "C" fn kernel_init() -> i32 {
     crate::app_manager::app_manager_init();
 
     // Register the thistle-tk launcher (always register — main.c decides
-    // whether to launch it based on the active WM)
+    // whether to launch it based on the active WM). The other thistle-tk
+    // apps wait for tk_native_apps_register(): see there.
     crate::tk_launcher::register();
-    crate::tk_appstore::tk_appstore_register();
-
-    // Register the thistle-tk flashlight (first LVGL-to-tk migration).
-    // The LVGL variant registers separately in main.c for the LVGL WM path.
-    crate::tk_flashlight::register();
 
     // Permissions (Rust)
     crate::permissions::init();
@@ -248,6 +244,24 @@ pub extern "C" fn kernel_init() -> i32 {
 #[cfg(not(test))]
 extern "C" {
     fn vTaskDelay(ticks: u32);
+}
+
+/// Register the thistle-tk App Store and Flashlight. Call this only when
+/// thistle-tk is the window manager.
+///
+/// Each shares its app ID with an LVGL counterpart, and the app manager keeps
+/// whichever registers first. Registering these from kernel_init() put them
+/// ahead of the LVGL built-ins on every board, so under an LVGL manager the
+/// LVGL App Store and Flashlight could never be launched.
+#[no_mangle]
+pub extern "C" fn tk_native_apps_register() -> i32 {
+    let rc = crate::tk_appstore::register();
+    let fl = crate::tk_flashlight::register();
+    if rc != ESP_OK {
+        rc
+    } else {
+        fl
+    }
 }
 
 #[no_mangle]

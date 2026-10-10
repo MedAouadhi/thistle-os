@@ -765,11 +765,18 @@ pub fn init() -> i32 {
 /// # Safety
 /// `entry` must point to a valid, static `CAppEntry`.
 pub unsafe fn register(entry: *const CAppEntry) -> i32 {
-    let rc = match APP_MANAGER.lock() {
-        Ok(mut mgr) => mgr.register(entry),
-        Err(_) => ESP_ERR_INVALID_STATE,
+    // A duplicate ID also returns ESP_OK, but the manager keeps the first
+    // entry. Mirroring the second manifest would list an app whose ID
+    // launches the first one, so mirror only what the manager added.
+    let (rc, added) = match APP_MANAGER.lock() {
+        Ok(mut mgr) => {
+            let before = mgr.slot_count;
+            let rc = mgr.register(entry);
+            (rc, mgr.slot_count > before)
+        }
+        Err(_) => (ESP_ERR_INVALID_STATE, false),
     };
-    if rc == ESP_OK && !entry.is_null() {
+    if added {
         let manifest = (*entry).manifest;
         if !manifest.is_null() {
             if let Ok(mut list) = REGISTERED_MANIFESTS.lock() {
@@ -1379,6 +1386,36 @@ mod tests {
         assert_eq!(
             count_after_first, count_after_second,
             "slot_count must not increase on duplicate registration"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // test_duplicate_id_is_not_listed
+    // Two manifests with one ID: the manager keeps the first, so the listing
+    // must not offer the second, whose entry would launch the first app.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_duplicate_id_is_not_listed() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_manager();
+
+        let id = std::ffi::CStr::from_bytes_with_nul(b"app.shadowed\0").unwrap();
+        let first = make_test_manifest(id);
+        let second = make_test_manifest(id);
+        let e1 = make_test_entry(&first as *const CAppManifest);
+        let e2 = make_test_entry(&second as *const CAppManifest);
+
+        assert_eq!(unsafe { register(&e1 as *const CAppEntry) }, ESP_OK);
+        assert_eq!(unsafe { register(&e2 as *const CAppEntry) }, ESP_OK);
+
+        let mut out = [std::ptr::null::<CAppManifest>(); 64];
+        let n = unsafe { app_manager_list_apps(out.as_mut_ptr(), out.len() as i32) } as usize;
+        let listed = &out[..n];
+        assert!(listed.contains(&(&first as *const CAppManifest)));
+        assert!(
+            !listed.contains(&(&second as *const CAppManifest)),
+            "a manifest the manager rejected as a duplicate must not be listed"
         );
     }
 

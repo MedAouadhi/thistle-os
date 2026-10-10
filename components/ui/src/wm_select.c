@@ -16,8 +16,10 @@
  * running — and on an e-paper board none ever was. Twelve of the fourteen
  * built-in apps were unreachable on the T-Deck Pro and Max as a result.
  *
- * The choice stays conservative: a board with no usable preference gets what
- * it got before, which on e-paper is thistle-tk. Naming a manager is opt-in.
+ * A board with no usable preference therefore gets an LVGL manager on either
+ * display, so every built-in app is reachable by default. thistle-tk hosts
+ * only its own launcher, App Store and Flashlight, and remains one name away
+ * for a board that prefers its cheaper e-paper refresh to the other eleven.
  */
 
 #include "ui/lvgl_wm.h"
@@ -52,9 +54,9 @@ thistle_wm_choice_t thistle_wm_select(const char *configured, bool display_is_ep
                       "using the default for this display", configured);
     }
 
-    /* The default this board booted with before any of this was wired up:
-     * e-paper refreshes are expensive and thistle-tk is built for them. */
+    /* Both defaults host the LVGL built-ins. e-paper gets the manager that
+     * defers and debounces its refreshes. */
     return display_is_epaper
-               ? (thistle_wm_choice_t){ thistle_tk_wm_get(), false }
+               ? (thistle_wm_choice_t){ lvgl_epaper_wm_get(), true }
                : (thistle_wm_choice_t){ lvgl_lcd_wm_get(), true };
 }

@@ -245,11 +245,11 @@ static void navigator_update_cb(lv_timer_t *timer)
     if (!s_ui.gps_available) {
         /* GPS driver not present — show static "No GPS" message */
         lv_label_set_text(s_ui.lbl_lat,   "No GPS available");
-        lv_label_set_text(s_ui.lbl_lon,   "—");
-        lv_label_set_text(s_ui.lbl_alt,   "—");
-        lv_label_set_text(s_ui.lbl_speed, "—");
-        lv_label_set_text(s_ui.lbl_head,  "—");
-        lv_label_set_text(s_ui.lbl_sat,   "—");
+        lv_label_set_text(s_ui.lbl_lon,   "-");
+        lv_label_set_text(s_ui.lbl_alt,   "-");
+        lv_label_set_text(s_ui.lbl_speed, "-");
+        lv_label_set_text(s_ui.lbl_head,  "-");
+        lv_label_set_text(s_ui.lbl_sat,   "-");
         lv_label_set_text(s_ui.lbl_fix,   "None");
         return;
     }
@@ -269,10 +269,10 @@ static void navigator_update_cb(lv_timer_t *timer)
 
     if (!pos.fix_valid) {
         lv_label_set_text(s_ui.lbl_lat,   "Waiting for fix...");
-        lv_label_set_text(s_ui.lbl_lon,   "—");
-        lv_label_set_text(s_ui.lbl_alt,   "—");
-        lv_label_set_text(s_ui.lbl_speed, "—");
-        lv_label_set_text(s_ui.lbl_head,  "—");
+        lv_label_set_text(s_ui.lbl_lon,   "-");
+        lv_label_set_text(s_ui.lbl_alt,   "-");
+        lv_label_set_text(s_ui.lbl_speed, "-");
+        lv_label_set_text(s_ui.lbl_head,  "-");
 
         char sat_buf[8];
         snprintf(sat_buf, sizeof(sat_buf), "%u", (unsigned)pos.satellites);
@@ -413,7 +413,7 @@ static lv_obj_t *create_data_row(lv_obj_t *parent, int y_pos,
 
     /* Value label — positioned after the key */
     lv_obj_t *lbl_val = lv_label_create(row);
-    lv_label_set_text(lbl_val, "—");
+    lv_label_set_text(lbl_val, "-");
     lv_obj_set_style_text_font(lbl_val, value_font, LV_PART_MAIN);
     lv_obj_set_style_text_color(lbl_val, colors->text, LV_PART_MAIN);
     lv_obj_set_pos(lbl_val, 68, 2);
@@ -525,7 +525,7 @@ esp_err_t navigator_ui_create(lv_obj_t *parent)
         lv_obj_set_pos(lbl_sat_key, 4, 4);
 
         s_ui.lbl_sat = lv_label_create(row);
-        lv_label_set_text(s_ui.lbl_sat, "—");
+        lv_label_set_text(s_ui.lbl_sat, "-");
         lv_obj_set_style_text_font(s_ui.lbl_sat, &lv_font_montserrat_14, LV_PART_MAIN);
         lv_obj_set_style_text_color(s_ui.lbl_sat, colors->text, LV_PART_MAIN);
         lv_obj_set_pos(s_ui.lbl_sat, 40, 4);

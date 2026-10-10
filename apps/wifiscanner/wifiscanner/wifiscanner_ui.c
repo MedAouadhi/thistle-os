@@ -262,7 +262,7 @@ static void populate_network_list(void)
 
     if (s_scanner.result_count == 0) {
         lv_obj_t *lbl = lv_label_create(s_scanner.network_list);
-        lv_label_set_text(lbl, "(no networks — press Scan)");
+        lv_label_set_text(lbl, "(no networks - press Scan)");
         lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, LV_PART_MAIN);
         lv_obj_set_style_text_color(lbl, clr->text_secondary, LV_PART_MAIN);
         lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
@@ -709,12 +709,12 @@ esp_err_t wifiscanner_ui_create(lv_obj_t *parent)
     lv_obj_add_event_cb(connect_btn, connect_btn_cb, LV_EVENT_CLICKED, NULL);
 
     /* Populate placeholder text */
-    lv_label_set_text(s_scanner.detail_ssid_lbl,       "SSID: —");
+    lv_label_set_text(s_scanner.detail_ssid_lbl,       "SSID: -");
     lv_label_set_text(s_scanner.detail_bssid_lbl,      "BSSID: N/A");
-    lv_label_set_text(s_scanner.detail_channel_lbl,    "Channel: —");
-    lv_label_set_text(s_scanner.detail_rssi_lbl,       "RSSI: —");
-    lv_label_set_text(s_scanner.detail_auth_lbl,       "Security: —");
-    lv_label_set_text(s_scanner.detail_signal_bar_lbl, "Signal: —");
+    lv_label_set_text(s_scanner.detail_channel_lbl,    "Channel: -");
+    lv_label_set_text(s_scanner.detail_rssi_lbl,       "RSSI: -");
+    lv_label_set_text(s_scanner.detail_auth_lbl,       "Security: -");
+    lv_label_set_text(s_scanner.detail_signal_bar_lbl, "Signal: -");
 
     return ESP_OK;
 }

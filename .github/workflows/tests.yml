@@ -290,6 +290,10 @@ jobs:
         working-directory: simulator
         run: python3 tests/test_launcher_visuals.py --sim build/thistle_sim
 
+      - name: Run built-in app launch matrix
+        working-directory: simulator
+        run: python3 tests/test_app_matrix.py --sim build/thistle_sim
+
       - name: Upload launcher framebuffer failures
         if: failure()
         uses: actions/upload-artifact@v4

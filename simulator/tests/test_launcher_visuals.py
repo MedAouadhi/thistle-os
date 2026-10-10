@@ -22,6 +22,9 @@ class Case:
     height: int
     expected_sha256: str
     empty_home: bool = False
+    # None boots the device's default manager; the e-paper cases name
+    # thistle-tk because that is no longer what an e-paper board defaults to.
+    wm: str | None = None
 
 
 CASES = (
@@ -34,6 +37,7 @@ CASES = (
         320,
         "fedb795da29d8824bcd6fe1fbab1356ed42ef8924760248160951d53fe13c2b3",
         True,
+        "thistle-tk",
     ),
     Case(
         "eink-apps",
@@ -43,6 +47,7 @@ CASES = (
         240,
         320,
         "bb9c21d8d8ddf28b4c911c0d1eb8d38501267995c96eac0a9697b2c62bc1d8a1",
+        wm="thistle-tk",
     ),
     Case(
         "lcd-home",
@@ -57,7 +62,9 @@ CASES = (
     # The LCD hashes cover all fourteen apps. The nine that live under apps/
     # were absent from the simulator until its CMakeLists stopped looking for
     # them under components/apps_builtin, so both the dock's favourites and
-    # this grid changed when they came back.
+    # this grid changed when they came back. It changed again when App Store
+    # and Flashlight stopped appearing twice: the thistle-tk versions had
+    # claimed both IDs, and the listing still showed the LVGL manifests.
     Case(
         "lcd-apps",
         "tdeck",
@@ -65,7 +72,18 @@ CASES = (
         "159,215",
         320,
         240,
-        "a95dce155dae029151baf608fecb0f7c2b71ff6d802d210febb83663aa4826f1",
+        "d62001f353a85176830bd4b00942b6b1617c9095a500813238105ab8fff585c1",
+    ),
+    # What an e-paper board boots by default: the LVGL grid, three columns
+    # wide on a 240 px screen.
+    Case(
+        "eink-lvgl-apps",
+        "tdeck-max",
+        2500,
+        "120,294",
+        240,
+        320,
+        "f989966f5f2f0473db73a02bcfefdafeb536fc654e72c8e0f2bfa0676d482748",
     ),
 )
 
@@ -123,6 +141,8 @@ def run_case(simulator: Path, output_dir: Path, case: Case) -> None:
     ]
     if case.tap:
         command.extend(("--tap", case.tap))
+    if case.wm:
+        command.extend(("--wm", case.wm))
 
     completed = subprocess.run(command, text=True, capture_output=True, check=False)
     if completed.returncode != 0:
@@ -152,7 +172,8 @@ def run_case(simulator: Path, output_dir: Path, case: Case) -> None:
 # ui_manager_get_app_area(), which is NULL unless an LVGL window manager ran
 # ui_manager_init(). lvgl_apps_register_builtin() is therefore called only
 # under LVGL, in the firmware and in both simulators. Launching one of these
-# on an e-paper board used to segfault; pin the refusal.
+# under thistle-tk used to segfault; pin the refusal. e-paper boards now
+# default to an LVGL manager, so the e-paper half names thistle-tk.
 #
 # Asserting that an app "does not launch" passes for free if the app is not
 # built at all, so run_lvgl_app_case() requires it to launch on the LCD board
@@ -165,10 +186,10 @@ LVGL_ONLY_APPS = ("com.thistle.settings", "com.thistle.terminal",
                   "com.thistle.assistant", "com.thistle.notes")
 
 
-def launch_app(simulator: Path, device: str, app_id: str):
+def launch_app(simulator: Path, device: str, app_id: str, *extra: str):
     return subprocess.run(
         [str(simulator), "--headless", "--timeout", "1500",
-         "--device", device, "--launch-app", app_id],
+         "--device", device, "--launch-app", app_id, *extra],
         text=True, capture_output=True, check=False,
     )
 
@@ -183,7 +204,7 @@ def run_lvgl_app_case(simulator: Path, app_id: str) -> None:
             f"would pass for the wrong reason"
         )
 
-    eink = launch_app(simulator, "tdeck-pro", app_id)
+    eink = launch_app(simulator, "tdeck-pro", app_id, "--wm", "thistle-tk")
     if eink.returncode < 0:
         raise AssertionError(
             f"simulator died on signal {-eink.returncode} launching {app_id} "

@@ -120,6 +120,8 @@ cmake .. &amp;&amp; make -j$(nproc)
           <tr><td><code>--timeout</code></td><td>MS</td><td>Exit after MS milliseconds. Used with <code>--headless</code> to bound test runtime. Typical value: 5000.</td></tr>
           <tr><td><code>--assert</code></td><td>FILE</td><td>On exit, evaluate assertions from FILE against captured log output. Exit code 0 = all pass, 1 = failure.</td></tr>
           <tr><td><code>--scenario</code></td><td>FILE</td><td>Load a JSON scenario file that injects sensor data, GPS coordinates, battery state, and IMU readings into the virtual hardware.</td></tr>
+          <tr><td><code>--launch-app</code></td><td>ID</td><td>Launch a registered app instead of the launcher. Exits 1 if no app has that ID.</td></tr>
+          <tr><td><code>--wm</code></td><td>NAME</td><td>Window manager for this run, overriding <code>system.json</code>: <code>thistle-tk</code>, <code>lvgl-epaper-wm</code> or <code>lvgl-lcd-wm</code>. By default e-paper boards get <code>lvgl-epaper-wm</code> and LCD boards <code>lvgl-lcd-wm</code>.</td></tr>
           <tr><td><code>-h</code>, <code>--help</code></td><td>&mdash;</td><td>Print usage and the list of supported device names.</td></tr>
         </tbody>
       </table>

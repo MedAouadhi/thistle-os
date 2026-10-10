@@ -182,22 +182,29 @@ The kernel is **100% Rust and hardware-independent**. It never calls ESP-IDF har
 
 `"window_manager"` in `system.json` takes a manager's own `name`:
 
-- `"thistle-tk"` — the Rust WM. Works on e-paper and LCD, and is the default
-  on e-paper because a refresh there is expensive.
-- `"lvgl-epaper-wm"` — LVGL with deferred refresh, for e-paper.
+- `"lvgl-epaper-wm"` — LVGL with deferred refresh. The default on e-paper.
 - `"lvgl-lcd-wm"` — LVGL with direct flush. The default on LCD.
+- `"thistle-tk"` — the Rust WM. Works on e-paper and LCD, with cheaper
+  e-paper refreshes, but hosts only its launcher, App Store and Flashlight.
 - `"auto"`, empty or absent — pick from the display type, as above.
 
 `thistle_wm_select()` (`components/ui/src/wm_select.c`) resolves this for the
 firmware and both simulators; a name it does not recognise logs a warning and
 falls back rather than failing the boot.
 
-The choice decides more than how things are drawn. The twelve LVGL built-in
-apps parent their widgets to `ui_manager_get_app_area()`, which is NULL unless
-an LVGL manager ran `ui_manager_init()`, so they are registered only under one
-— launching them under thistle-tk segfaults. An e-paper board therefore sees
-two apps under `thistle-tk` and all fourteen under `lvgl-epaper-wm`. That is
-the trade to weigh when changing this setting, not a bug in either manager.
+The choice decides more than how things are drawn. The LVGL built-in apps
+parent their widgets to `ui_manager_get_app_area()`, which is NULL unless an
+LVGL manager ran `ui_manager_init()`, so they are registered only under one —
+launching them under thistle-tk segfaults. App Store and Flashlight exist in
+both toolkits under the same IDs, and the app manager keeps the first
+registration of an ID, so each manager registers only its own:
+`lvgl_apps_register_builtin()` under LVGL, `tk_native_apps_register()` under
+thistle-tk. All fourteen apps are reachable by default on every S3 board;
+naming `thistle-tk` trades eleven of them for its refresh behaviour.
+
+`simulator/tests/test_app_matrix.py` launches every app on every simulated
+device profile, and the simulator's `--wm NAME` overrides `system.json` for a
+single run.
 
 ## Agent skills
 

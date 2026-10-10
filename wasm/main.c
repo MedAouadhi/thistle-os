@@ -103,10 +103,10 @@ int main(void)
     ret = display_server_init();
     printf("display_server_init: %d\n", ret);
 
-    /* An e-paper device needs thistle-tk: sim_display unpacks its flushes as
-     * a packed 1-bit framebuffer, and the LCD window manager emits RGB565,
-     * which renders as noise. */
-    /* Same selection as the firmware, from the same system.json key. */
+    /* Same selection as the firmware, from the same system.json key. On
+     * e-paper that is the LVGL e-paper manager, which flushes the packed
+     * 1-bit framebuffer sim_display expects; the LCD manager's RGB565 would
+     * render as noise there, so a board's display type must stay honest. */
     thistle_wm_choice_t choice =
         thistle_wm_select(board_config_get_wm_name(), sim_board_is_epaper());
     s_use_tk_wm = !choice.hosts_lvgl_apps;
@@ -127,6 +127,13 @@ int main(void)
                                          sim_board_has_gps());
         if (ret != 0) {
             printf("Some built-in apps failed to register: %d\n", ret);
+        }
+    } else {
+        /* thistle-tk's own App Store and Flashlight; they share IDs with the
+         * LVGL ones, so each manager registers only its own. */
+        ret = tk_native_apps_register();
+        if (ret != 0) {
+            printf("thistle-tk apps failed to register: %d\n", ret);
         }
     }
 

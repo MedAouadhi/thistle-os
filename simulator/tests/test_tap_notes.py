@@ -28,17 +28,25 @@ class Case:
     height: int
     status_height: int
     expected_sha256: str
+    # The e-paper hashes are thistle-tk's rendering, which an e-paper board
+    # now boots only when asked for it.
+    wm: str | None = None
+
+    def wm_args(self) -> list[str]:
+        return ["--wm", self.wm] if self.wm else []
 
 
 CASES = (
     Case("eink", "tdeck-pro", 240, 320, 0,
-         "0d6ae0a8dcc201df0d86aca3ef3fa2e7628136dbc659d9298897a5ad7144b978"),
+         "0d6ae0a8dcc201df0d86aca3ef3fa2e7628136dbc659d9298897a5ad7144b978",
+         "thistle-tk"),
     Case("lcd", "tdeck", 320, 240, 24,
          "628b93bd6bf814c788d3afbd7537cf81cff86ec5eb2412c792ddf00decdd76b2"),
 )
 EDITOR_CASE = Case(
     "eink-editor", "tdeck-pro", 240, 320, 0,
     "82e2659a64427f1ac02019e33e52b22ff57bccd4bfa43d75f0689324414929d4",
+    "thistle-tk",
 )
 
 
@@ -108,7 +116,7 @@ def main() -> int:
                 completed = run([
                     str(simulator), "--headless", "--device", case.device,
                     "--launch-app", "com.thistle.notes", "--timeout", "2500",
-                    "--screenshot", str(screenshot),
+                    "--screenshot", str(screenshot), *case.wm_args(),
                 ], env=environment)
                 output = completed.stdout + completed.stderr
                 for expected in (
@@ -134,6 +142,7 @@ def main() -> int:
                 str(simulator), "--headless", "--device", EDITOR_CASE.device,
                 "--launch-app", "com.thistle.notes", "--tap", "190,30",
                 "--timeout", "1000", "--screenshot", str(editor_screenshot),
+                *EDITOR_CASE.wm_args(),
             ], env=environment)
             if "[notes] new note" not in completed.stdout + completed.stderr:
                 raise AssertionError("packaged app button callback did not run")

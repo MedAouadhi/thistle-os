@@ -1209,7 +1209,7 @@ static void install_update_cb(lv_event_t *e)
     const char *update_path = THISTLE_SDCARD "/update/thistle_os.bin";
     esp_err_t sig_ret = signing_verify_file(update_path);
     if (sig_ret == ESP_ERR_INVALID_CRC) {
-        toast_warn("Update signature INVALID — rejected!");
+        toast_warn("Update signature INVALID - rejected!");
         return;
     }
     /* Missing signature is OK for dev builds */
@@ -1828,7 +1828,7 @@ static void open_detail_input(lv_obj_t *content, int index)
      * NOT_SUPPORTED from the buttons below — the same contract the display's
      * brightness has. */
     if (!inp->set_backlight) {
-        create_info_row(content, "(Info only — no settings)");
+        create_info_row(content, "(Info only - no settings)");
         return;
     }
 
@@ -1934,7 +1934,7 @@ static void open_detail_imu(lv_obj_t *content)
             create_info_row(content, "(Read error)");
         }
     } else {
-        create_info_row(content, "(Info only — no settings)");
+        create_info_row(content, "(Info only - no settings)");
     }
 }
 

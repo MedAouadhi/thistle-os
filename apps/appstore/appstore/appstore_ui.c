@@ -1070,10 +1070,10 @@ static void refresh_server_cb(lv_event_t *e)
 
         if (s_store.catalog_status_label) {
             lv_label_set_text(s_store.catalog_status_label,
-                              (load_err == ESP_OK) ? "Server failed — showing cache"
-                                                   : "Server failed — no cache");
+                              (load_err == ESP_OK) ? "Server failed - showing cache"
+                                                   : "Server failed - no cache");
         }
-        toast_warn("Server unavailable — showing cached catalog");
+        toast_warn("Server unavailable - showing cached catalog");
     }
 }
 

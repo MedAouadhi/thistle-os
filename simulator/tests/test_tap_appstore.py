@@ -63,8 +63,11 @@ def main() -> int:
         print("=== TAP App Store simulator regressions ===")
         for name, tap in cases:
             screenshot = args.output_dir / f"appstore-{name}.ppm"
+            # The hashes are thistle-tk's rendering, which an e-paper board
+            # now boots only when asked for it.
             command = [
                 str(simulator), "--headless", "--device", "tdeck-pro",
+                "--wm", "thistle-tk",
                 "--launch-app", "com.thistle.appstore", "--timeout", "1000",
                 "--screenshot", str(screenshot),
             ]

@@ -314,6 +314,16 @@ void app_main(void)
     event_subscribe(EVENT_BATTERY_LOW,       system_event_toast, NULL);
 #endif
 
+    if (use_tk_wm) {
+        /* thistle-tk's own App Store and Flashlight. Under an LVGL manager
+         * the LVGL ones take these IDs instead. */
+        esp_err_t tk_err = tk_native_apps_register();
+        if (tk_err != ESP_OK) {
+            ESP_LOGW(TAG, "thistle-tk apps failed to register: %s",
+                     esp_err_to_name(tk_err));
+        }
+    }
+
 #ifdef THISTLE_LEGACY_C_APPS
     if (!use_tk_wm) {
         /* LVGL-based built-in apps; they would crash under the thistle-tk WM.

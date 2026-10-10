@@ -60,7 +60,7 @@ esp_err_t app_switcher_show(void)
         /* TODO (Phase 2): enumerate all apps, create one lv_btn per app,
          * bind app_manager_switch_to(handle) as click callback. */
         lv_obj_t *placeholder = lv_label_create(s_overlay);
-        lv_label_set_text(placeholder, "[app list — Phase 2]");
+        lv_label_set_text(placeholder, "[app list - Phase 2]");
         lv_obj_set_style_text_color(placeholder, colors->text, LV_PART_MAIN);
     }
 

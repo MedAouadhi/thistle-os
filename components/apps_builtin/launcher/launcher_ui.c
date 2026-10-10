@@ -164,6 +164,7 @@ static lv_obj_t *create_icon_cell(lv_obj_t *parent, const char *symbol,
     lv_obj_set_style_border_width(cell, 1, LV_PART_MAIN);
     lv_obj_set_style_radius(cell, 8, LV_PART_MAIN);
     lv_obj_set_style_pad_all(cell, 4, LV_PART_MAIN);
+    lv_obj_set_style_pad_hor(cell, 2, LV_PART_MAIN);
     lv_obj_set_flex_flow(cell, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(cell,
                           LV_FLEX_ALIGN_CENTER,
@@ -189,6 +190,12 @@ static lv_obj_t *create_icon_cell(lv_obj_t *parent, const char *symbol,
     lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
     lv_obj_set_width(lbl, width - 6);
     lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    /* A name of several words wraps between them. One word too wide for the
+     * cell would break mid-word ("Flashlig/ht"), so it keeps to one line and
+     * is shortened instead. */
+    if (!strchr(name, ' ')) {
+        lv_obj_set_height(lbl, lv_font_get_line_height(&lv_font_montserrat_14));
+    }
 
     lv_obj_add_flag(cell, LV_OBJ_FLAG_CLICKABLE);
 
@@ -255,6 +262,14 @@ static void populate_app_drawer(void)
     const app_manifest_t *apps[20];
     int count = app_manager_list_apps(apps, 20);
 
+    /* As many CELL_SIZE columns as fit, then stretched to fill the row: the
+     * spare pixels are worth more to a label than to the right margin. */
+    const int gap = 6;
+    int inner_w = s_app_w - 2 * gap;
+    int cols = (inner_w + gap) / (CELL_SIZE + gap);
+    if (cols < 1) cols = 1;
+    int cell_w = (inner_w - (cols - 1) * gap) / cols;
+
     for (int i = 0; i < count; i++) {
         /* Skip the launcher itself */
         if (strcmp(apps[i]->id, "com.thistle.launcher") == 0) continue;
@@ -262,7 +277,7 @@ static void populate_app_drawer(void)
         if (is_launcher(apps[i]->id)) continue;
 
         create_app_cell(s_drawer_grid, app_icon_symbol(apps[i]->id),
-                        apps[i]->name, apps[i]->id, CELL_SIZE, CELL_SIZE);
+                        apps[i]->name, apps[i]->id, cell_w, CELL_SIZE);
     }
 }
 
