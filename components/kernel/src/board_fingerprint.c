@@ -88,7 +88,7 @@ static const char JSON_TDECK_MAX[] =
 "        {\"id\": \"com.thistle.drv.gps-mia-m10q\", \"hal\": \"gps\", \"entry\": \"gps-mia-m10q.drv.elf\", \"config\": {\"uart_num\": 2, \"tx\": 16, \"rx\": 2, \"baud_rate\": 38400}},\n"
 "        {\"id\": \"com.thistle.drv.radio-sx1262\", \"hal\": \"radio\", \"entry\": \"radio-sx1262.drv.elf\", \"config\": {\"spi_bus\": 0, \"cs\": 3, \"dio1\": 5, \"rst\": 4, \"busy\": 6, \"freq_hz\": 868000000, \"tcxo_mv\": 2400, \"dio2_rf_switch\": true}},\n"
 "        {\"id\": \"com.thistle.drv.imu-bhi260ap\", \"hal\": \"imu\", \"entry\": \"imu-bhi260ap.drv.elf\", \"config\": {\"i2c_bus\": 0, \"i2c_addr\": \"0x28\", \"pin_int\": 21}},\n"
-"        {\"id\": \"com.thistle.drv.power-sy6970\", \"hal\": \"power\", \"entry\": \"power-sy6970.drv.elf\", \"config\": {\"i2c_bus\": 0, \"gauge_i2c_addr\": \"0x55\"}},\n"
+"        {\"id\": \"com.thistle.drv.power-sy6970\", \"hal\": \"power\", \"entry\": \"power-sy6970.drv.elf\", \"config\": {\"i2c_bus\": 0, \"gauge_i2c_addr\": \"0x55\", \"battery_capacity_mah\": 1400}},\n"
 "        {\"id\": \"com.thistle.drv.audio-es8311\", \"hal\": \"audio\", \"entry\": \"audio-es8311.drv.elf\", \"config\": {\"i2c_bus\": 0, \"i2c_addr\": \"0x18\", \"i2s_num\": 0, \"i2s_mclk\": 38, \"i2s_bck\": 39, \"i2s_ws\": 18, \"i2s_data\": 40, \"amp_expander\": 0, \"amp_expander_pin\": 6}},\n"
 "        {\"id\": \"com.thistle.drv.sdcard\", \"hal\": \"storage\", \"entry\": \"sdcard.drv.elf\", \"config\": {\"spi_bus\": 0, \"pin_cs\": 48, \"mount_point\": \"/sdcard\"}}\n"
 "    ]\n"

@@ -19,10 +19,13 @@ extern "C" {
  * Unlike the drivers that take a config struct, this one reads its own driver
  * entry, given here as the JSON object a board profile declared:
  *
- *     {"i2c_bus": 0, "gauge_i2c_addr": "0x55"}
+ *     {"i2c_bus": 0, "gauge_i2c_addr": "0x55", "battery_capacity_mah": 1400}
  *
  * `i2c_bus` is a bus index and defaults to 0; `gauge_i2c_addr` defaults to
- * 0x55 and exists for a board that wires the gauge elsewhere. The charger's
+ * 0x55 and exists for a board that wires the gauge elsewhere.
+ * `battery_capacity_mah` is the fitted cell's capacity, written into the fuel
+ * gauge at bring-up; without it the gauge keeps the capacity it holds, which
+ * after any reset of its own is TI's default of 3000 mAh. The charger's
  * address is deliberately absent: a board cannot know which of the two
  * register-compatible parts its hardware revision shipped with, so the driver
  * probes both addresses and identifies the part it finds.

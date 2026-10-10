@@ -128,7 +128,8 @@
             "entry": "power-sy6970.drv.elf",
             "config": {
                 "i2c_bus": 0,
-                "gauge_i2c_addr": "0x55"
+                "gauge_i2c_addr": "0x55",
+                "battery_capacity_mah": 1400
             }
         },
         {
