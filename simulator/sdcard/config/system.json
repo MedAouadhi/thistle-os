@@ -3,8 +3,7 @@
         "version": "0.1.0",
         "theme": "default",
         "display": {
-            "refresh_mode": "partial",
-            "brightness": 100
+            "refresh_mode": "partial"
         },
         "wifi": {
             "enabled": false,

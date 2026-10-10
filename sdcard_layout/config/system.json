@@ -4,8 +4,7 @@
         "theme": "default",
         "window_manager": "auto",
         "display": {
-            "refresh_mode": "partial",
-            "brightness": 100
+            "refresh_mode": "partial"
         },
         "wifi": {
             "enabled": false,

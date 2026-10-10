@@ -803,7 +803,7 @@ fn is_leap(year: u64) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Resolve the path to system.json (SD card first, then SPIFFS, then simulator).
-fn system_json_path() -> &'static str {
+pub(crate) fn system_json_path() -> &'static str {
     #[cfg(target_os = "espidf")]
     {
         if std::path::Path::new("/sdcard/config/system.json").exists() {

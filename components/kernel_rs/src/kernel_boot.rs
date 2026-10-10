@@ -179,6 +179,10 @@ pub extern "C" fn kernel_init() -> i32 {
         }
     }
 
+    // The screen and key lights the user last chose. Here, once the drivers
+    // are up and the SD card that may hold system.json is mounted.
+    crate::light_prefs::light_prefs_restore();
+
     // App manager (Rust)
     crate::app_manager::app_manager_init();
 
