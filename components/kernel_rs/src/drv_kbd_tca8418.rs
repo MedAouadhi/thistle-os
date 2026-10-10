@@ -224,13 +224,16 @@ macro_rules! kbd_logw {
 //
 // Rows 0-3 are the 4×10 matrix the T-Deck Pro and Max share: three full rows
 // of ten, then five keys on the bottom row. Every one of those 35 positions
-// carries a code, including the two that carry no character — Alt and the
-// microphone key — because a key that decodes to nothing is a key the user
-// sees as broken.
+// carries a code, including the four that type nothing on their own — Shift,
+// Alt, Sym and the microphone key — because a key that decodes to nothing is
+// a key the driver cannot act on.
 
-/// Keys that carry no character of their own. The window manager receives
-/// these codes verbatim, so they sit below printable ASCII where they cannot
-/// be mistaken for text.
+/// Keys that type nothing on their own, and so never leave the driver. Shift,
+/// Alt and Sym change what the next key types, and the microphone key types
+/// only the `0` its symbol layer gives it. They used to be sent on as they
+/// are, and LVGL read them as keys of its own: Sym (0x02) as Home and Shift
+/// (0x03) as End, jumping the cursor in a text field, while Alt and the
+/// microphone key went into the text as control characters.
 const KEY_ALT: u16 = 0x01;
 const KEY_SYM: u16 = 0x02;
 const KEY_SHIFT: u16 = 0x03;
@@ -241,7 +244,7 @@ static KEY_MAP: [[u16; 10]; 8] = [
     // C0     C1     C2     C3     C4     C5     C6     C7     C8     C9
     [  b'q' as u16, b'w' as u16, b'e' as u16, b'r' as u16, b't' as u16, b'y' as u16, b'u' as u16, b'i' as u16, b'o' as u16, b'p' as u16  ],
     [  b'a' as u16, b's' as u16, b'd' as u16, b'f' as u16, b'g' as u16, b'h' as u16, b'j' as u16, b'k' as u16, b'l' as u16, 0x08u16      ],  // 0x08 = backspace
-    [  KEY_ALT,     b'z' as u16, b'x' as u16, b'c' as u16, b'v' as u16, b'b' as u16, b'n' as u16, b'm' as u16, b'.' as u16, b'\n' as u16 ],  // Alt Z X C V B N M . Enter
+    [  KEY_ALT,     b'z' as u16, b'x' as u16, b'c' as u16, b'v' as u16, b'b' as u16, b'n' as u16, b'm' as u16, b'$' as u16, b'\n' as u16 ],  // Alt Z X C V B N M $ Enter
     // Row 3: only 5 physical keys at TCA cols 0..4 (after mirror, c 5..9):
     //   c=5 shift(L)  c=6 mic  c=7 space  c=8 sym  c=9 shift(R)
     [  0,           0,           0,           0,           0,           KEY_SHIFT,   KEY_MIC,     b' ' as u16, KEY_SYM,     KEY_SHIFT   ],
@@ -250,6 +253,93 @@ static KEY_MAP: [[u16; 10]; 8] = [
     [  0,           0,           0,           0,           0,           0,           0,           0,           0,           0            ],
     [  0,           0,           0,           0,           0,           0,           0,           0,           0,           0            ],
 ];
+
+/// What each key types under Alt or Sym: the small legend printed above its
+/// letter. Transcribed from LilyGo's own symbol layer,
+/// `wifi_password_chat_map` in the T-Deck-MAX vendor checkout's
+/// `examples/factory/ui_deckpro.cpp`, plus the `0` the vendor keymap
+/// (`examples/factory/peri_keypad.cpp`) puts on the microphone key. Zero is
+/// a key with no second legend, which types its usual code under Alt.
+#[rustfmt::skip]
+static SYMBOL_MAP: [[u16; 10]; 4] = [
+    // C0     C1     C2     C3     C4     C5     C6     C7     C8     C9
+    [  b'#' as u16, b'1' as u16, b'2' as u16, b'3' as u16, b'(' as u16, b')' as u16, b'_' as u16, b'-' as u16,  b'+' as u16, b'@' as u16 ],
+    [  b'*' as u16, b'4' as u16, b'5' as u16, b'6' as u16, b'/' as u16, b':' as u16, b';' as u16, b'\'' as u16, b'"' as u16, 0           ],
+    [  0,           b'7' as u16, b'8' as u16, b'9' as u16, b'?' as u16, b'!' as u16, b',' as u16, b'.' as u16,  0,           0           ],
+    [  0,           0,           0,           0,           0,           0,           b'0' as u16, 0,            0,           0           ],
+];
+
+/// Key positions the chip can report: eight rows of ten.
+const KEY_POSITIONS: usize = 80;
+
+/// What the key at physical `row`, `col` types with Shift and the symbol
+/// layer as given. The symbol layer wins where a key has a legend for it;
+/// Shift capitalises a letter and leaves every other key alone.
+fn layered_code(row: usize, col: usize, shift: bool, symbol: bool) -> u16 {
+    let base = KEY_MAP[row][col];
+    if symbol && row < SYMBOL_MAP.len() && SYMBOL_MAP[row][col] != 0 {
+        return SYMBOL_MAP[row][col];
+    }
+    if shift && (b'a' as u16..=b'z' as u16).contains(&base) {
+        return base - (b'a' - b'A') as u16;
+    }
+    base
+}
+
+/// Shift, or the symbol layer that Alt and Sym both select. Either works held
+/// down across the key it modifies, or tapped on its own to apply to the next
+/// key: one thumb cannot hold Shift on one side of the keyboard and reach a
+/// letter on the other. Tapping it a second time takes the tap back.
+#[derive(Clone, Copy)]
+struct Modifier {
+    /// How many of its keys are down. Shift has one on each side.
+    held: u8,
+    /// Tapped and let go: applies to the next key, then clears.
+    latched: bool,
+    /// A key was typed while this was held, so letting go is not a tap.
+    used: bool,
+}
+
+impl Modifier {
+    const fn new() -> Self {
+        Modifier {
+            held: 0,
+            latched: false,
+            used: false,
+        }
+    }
+
+    fn active(&self) -> bool {
+        self.held > 0 || self.latched
+    }
+
+    fn press(&mut self) {
+        if self.held == 0 {
+            self.used = false;
+        }
+        self.held = self.held.saturating_add(1);
+    }
+
+    fn release(&mut self) {
+        // A release of a key not seen going down — pressed before init, or
+        // its press lost — is no tap.
+        if self.held == 0 {
+            return;
+        }
+        self.held -= 1;
+        if self.held == 0 && !self.used {
+            self.latched = !self.latched;
+        }
+    }
+
+    /// A key has been typed through this modifier.
+    fn spend(&mut self) {
+        if self.held > 0 {
+            self.used = true;
+        }
+        self.latched = false;
+    }
+}
 
 // ── Configuration struct ─────────────────────────────────────────────────────
 
@@ -547,6 +637,15 @@ struct KbdState {
     /// board that leaves the line unwired, and on one where claiming the LEDC
     /// timer failed — in which case the keys still work, unlit.
     backlight_ready: bool,
+    shift: Modifier,
+    /// The symbol layer, selected by Alt and Sym alike.
+    symbol: Modifier,
+    /// The code each key position went down as, so that it comes up as the
+    /// same one. A key pressed under Shift and released after it must release
+    /// the capital it typed: the LVGL window manager ignores a release that
+    /// names a key other than the one it saw go down, and LVGL repeats a held
+    /// key, so the capital would keep typing until the next key went down.
+    down_code: [u16; KEY_POSITIONS],
 }
 
 // SAFETY: The driver state is accessed only from the HAL init/poll/deinit
@@ -571,7 +670,48 @@ impl KbdState {
             initialized: false,
             backlight: 0,
             backlight_ready: false,
+            shift: Modifier::new(),
+            symbol: Modifier::new(),
+            down_code: [0; KEY_POSITIONS],
         }
+    }
+
+    /// Turn a key event at 0-based chip position `pos` into the code the
+    /// window manager receives, if any. Modifiers are kept here, not sent.
+    fn key_event(&mut self, pos: usize, pressed: bool) -> Option<u16> {
+        if pos >= KEY_POSITIONS {
+            return None;
+        }
+        let row = pos / 10;
+        // Mirror the column index: T-Deck Pro wiring puts physical col 0 on
+        // TCA col 9 and vice versa. KEY_MAP is written in physical order.
+        let col = 9 - pos % 10;
+
+        let modifier = match KEY_MAP[row][col] {
+            0 => return None, // Unmapped key
+            KEY_SHIFT => &mut self.shift,
+            KEY_ALT | KEY_SYM => &mut self.symbol,
+            _ if pressed => {
+                let code = layered_code(row, col, self.shift.active(), self.symbol.active());
+                self.shift.spend();
+                self.symbol.spend();
+                if code == KEY_MIC {
+                    return None;
+                }
+                self.down_code[pos] = code;
+                return Some(code);
+            }
+            _ => {
+                let code = std::mem::replace(&mut self.down_code[pos], 0);
+                return (code != 0).then_some(code);
+            }
+        };
+        if pressed {
+            modifier.press();
+        } else {
+            modifier.release();
+        }
+        None
     }
 }
 
@@ -782,6 +922,9 @@ unsafe extern "C" fn tca8418_deinit() {
 
     kbd.cb = None;
     kbd.cb_data = std::ptr::null_mut();
+    kbd.shift = Modifier::new();
+    kbd.symbol = Modifier::new();
+    kbd.down_code = [0; KEY_POSITIONS];
     kbd.initialized = false;
 }
 
@@ -851,23 +994,10 @@ unsafe extern "C" fn tca8418_poll() -> i32 {
         }
 
         // key_code is 1-based: key_code = row*10 + col + 1
-        let kc0 = key_code - 1; // make 0-based
-        let row = (kc0 / 10) as usize;
-        let col_raw = (kc0 % 10) as usize;
-        // Mirror the column index: T-Deck Pro wiring puts physical col 0 on
-        // TCA col 9 and vice versa. KEY_MAP is written in physical order.
-        let col = 9 - col_raw;
-
-        let keycode: u16 = if row < 8 && col < 10 {
-            KEY_MAP[row][col]
-        } else {
-            0
+        let keycode = match kbd.key_event((key_code - 1) as usize, pressed) {
+            Some(code) => code,
+            None => continue,
         };
-
-        if keycode == 0 {
-            // Unmapped key — skip silently
-            continue;
-        }
 
         if let Some(cb) = kbd.cb {
             let timestamp = (esp_ffi::esp_timer_get_time() / 1000) as u32;
@@ -1149,8 +1279,8 @@ mod tests {
     #[test]
     fn the_modifier_keys_decode_to_codes_of_their_own() {
         // Alt and the microphone key carry no character, but they are keys the
-        // user can press, so they have to reach the window manager — and they
-        // must not reach it as each other.
+        // user can press, so the driver has to recognise them — and must not
+        // take one for another.
         assert_eq!(KEY_MAP[2][0], KEY_ALT);
         assert_eq!(KEY_MAP[3][6], KEY_MIC);
 
@@ -1160,6 +1290,244 @@ mod tests {
                 !modifiers[i + 1..].contains(code),
                 "two modifiers share code {code:#04x}"
             );
+        }
+    }
+
+    // ── Shift and the symbol layer ──────────────────────────────────────────
+
+    // Physical (row, col) of the keys the tests below press.
+    const Q: (u8, u8) = (0, 0);
+    const W: (u8, u8) = (0, 1);
+    const BACKSPACE: (u8, u8) = (1, 9);
+    const ALT: (u8, u8) = (2, 0);
+    const M: (u8, u8) = (2, 7);
+    const DOLLAR: (u8, u8) = (2, 8);
+    const ENTER: (u8, u8) = (2, 9);
+    const LEFT_SHIFT: (u8, u8) = (3, 5);
+    const MIC: (u8, u8) = (3, 6);
+    const SPACE: (u8, u8) = (3, 7);
+    const SYM: (u8, u8) = (3, 8);
+    const RIGHT_SHIFT: (u8, u8) = (3, 9);
+
+    fn down(key: (u8, u8)) -> (u8, u8, bool) {
+        (key.0, key.1, true)
+    }
+
+    fn up(key: (u8, u8)) -> (u8, u8, bool) {
+        (key.0, key.1, false)
+    }
+
+    /// Press and let go of `key`.
+    fn tap(key: (u8, u8)) -> [(u8, u8, bool); 2] {
+        [down(key), up(key)]
+    }
+
+    /// What the window manager hears when the keyboard runs through `keys`.
+    static HEARD: std::sync::Mutex<Vec<(HalInputEventType, u16)>> =
+        std::sync::Mutex::new(Vec::new());
+
+    unsafe extern "C" fn hear(event: *const HalInputEvent, _user_data: *mut c_void) {
+        let event = &*event;
+        HEARD
+            .lock()
+            .unwrap()
+            .push((event.event_type, event.data.key.keycode));
+    }
+
+    /// Run `keys` — physical (row, col, pressed) — through a scripted chip and
+    /// the real poll, and return every event the window manager received.
+    fn press_keys(keys: &[(u8, u8, bool)]) -> Vec<(HalInputEventType, u16)> {
+        use esp_ffi::{ChipScript, SCRIPT};
+
+        unsafe {
+            esp_ffi::reset_chip();
+            reset_state();
+
+            let mut script = ChipScript::default();
+            script
+                .registers
+                .insert(TCA8418_REG_INT_STAT, TCA8418_INT_STAT_K_INT);
+            for &(row, col, pressed) in keys {
+                // The decode's inverse: 1-based, columns mirrored.
+                let code = row * 10 + (9 - col) + 1;
+                script.events.push_back(if pressed {
+                    KEY_EVENT_PRESS | code
+                } else {
+                    code
+                });
+            }
+            *SCRIPT.lock().unwrap() = Some(script);
+
+            let kbd = &mut *(&raw mut S_KBD);
+            kbd.initialized = true;
+            kbd.dev = 1usize as *mut c_void;
+            kbd.cb = Some(hear);
+            HEARD.lock().unwrap().clear();
+
+            // A poll drains at most one FIFO's worth.
+            for _ in 0..keys.len() / TCA8418_FIFO_DEPTH + 1 {
+                assert_eq!(tca8418_poll(), ESP_OK);
+            }
+
+            *kbd = KbdState::new();
+            esp_ffi::reset_chip();
+        }
+        HEARD.lock().unwrap().clone()
+    }
+
+    /// The text `keys` type: every key-down, as characters.
+    fn typed(keys: &[(u8, u8, bool)]) -> String {
+        press_keys(keys)
+            .into_iter()
+            .filter(|(kind, _)| *kind == HalInputEventType::KeyDown)
+            .map(|(_, code)| char::from_u32(code as u32).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn the_key_left_of_enter_types_the_dollar_printed_on_it() {
+        // The vendor keymap and the key cap both say '$'. The '.' this key
+        // once typed is Alt+M, where the cap prints it.
+        assert_eq!(typed(&tap(DOLLAR)), "$");
+        assert_eq!(typed(&[tap(ALT), tap(DOLLAR)].concat()), "$");
+        assert_eq!(typed(&[tap(ALT), tap(M)].concat()), ".");
+    }
+
+    #[test]
+    fn a_letter_typed_with_shift_held_is_a_capital() {
+        let keys = [down(LEFT_SHIFT), down(Q), up(Q), up(LEFT_SHIFT)];
+        assert_eq!(typed(&keys), "Q");
+
+        let keys = [down(RIGHT_SHIFT), down(M), up(M), up(RIGHT_SHIFT)];
+        assert_eq!(typed(&keys), "M");
+    }
+
+    #[test]
+    fn shift_tapped_on_its_own_capitalises_the_next_letter_only() {
+        let keys = [tap(LEFT_SHIFT), tap(Q), tap(Q)].concat();
+        assert_eq!(typed(&keys), "Qq");
+    }
+
+    #[test]
+    fn a_second_tap_of_shift_takes_the_first_back() {
+        let keys = [tap(LEFT_SHIFT), tap(RIGHT_SHIFT), tap(Q)].concat();
+        assert_eq!(typed(&keys), "q");
+    }
+
+    #[test]
+    fn shift_held_through_several_letters_capitalises_them_all() {
+        let keys = [
+            &[down(LEFT_SHIFT)][..],
+            &tap(Q),
+            &tap(W),
+            &[up(LEFT_SHIFT)],
+            &tap(Q),
+        ]
+        .concat();
+        // Shift was used while held, so letting it go is not a tap: the last
+        // letter is lower case.
+        assert_eq!(typed(&keys), "QWq");
+    }
+
+    #[test]
+    fn alt_types_the_legend_printed_above_each_key() {
+        // Every key in the three letter rows that carries a legend, left to
+        // right, under Alt held.
+        let rows = [(0, 0..10), (1, 0..9), (2, 1..8)];
+        let legends = ["#123()_-+@", "*456/:;'\"", "789?!,."];
+
+        for ((row, cols), legend) in rows.into_iter().zip(legends) {
+            let mut keys = vec![down(ALT)];
+            for col in cols {
+                keys.extend(tap((row, col)));
+            }
+            keys.push(up(ALT));
+            assert_eq!(typed(&keys), legend);
+        }
+    }
+
+    #[test]
+    fn sym_selects_the_same_symbols_as_alt() {
+        let keys = [down(SYM), down(Q), up(Q), up(SYM)];
+        assert_eq!(typed(&keys), "#");
+
+        let keys = [tap(SYM), tap(W), tap(W)].concat();
+        assert_eq!(typed(&keys), "1w");
+    }
+
+    #[test]
+    fn alt_wins_over_shift() {
+        let keys = [
+            down(LEFT_SHIFT),
+            down(ALT),
+            down(W),
+            up(W),
+            up(ALT),
+            up(LEFT_SHIFT),
+        ];
+        assert_eq!(typed(&keys), "1");
+    }
+
+    #[test]
+    fn the_microphone_key_types_its_zero_under_alt_and_nothing_without() {
+        assert_eq!(typed(&[tap(ALT), tap(MIC)].concat()), "0");
+        assert!(press_keys(&tap(MIC)).is_empty());
+    }
+
+    #[test]
+    fn a_key_with_no_second_legend_types_its_own_code_under_alt() {
+        let keys = [
+            &[down(ALT)][..],
+            &tap(BACKSPACE),
+            &tap(SPACE),
+            &tap(ENTER),
+            &[up(ALT)],
+        ]
+        .concat();
+        assert_eq!(typed(&keys), "\u{8} \n");
+    }
+
+    #[test]
+    fn the_modifier_keys_themselves_never_reach_the_window_manager() {
+        // LVGL reads 0x02 as Home and 0x03 as End, and types 0x01 and 0x04
+        // into a text field as control characters.
+        let keys = [
+            tap(LEFT_SHIFT),
+            tap(ALT),
+            tap(SYM),
+            tap(RIGHT_SHIFT),
+            tap(MIC),
+        ]
+        .concat();
+        assert_eq!(press_keys(&keys), Vec::new());
+    }
+
+    #[test]
+    fn a_key_comes_up_as_the_code_it_went_down_as() {
+        // Shift let go before the letter: the release must still name the
+        // capital, or LVGL ignores it and repeats 'Q' until another key goes
+        // down.
+        let keys = [down(LEFT_SHIFT), down(Q), up(LEFT_SHIFT), up(Q)];
+        assert_eq!(
+            press_keys(&keys),
+            vec![
+                (HalInputEventType::KeyDown, b'Q' as u16),
+                (HalInputEventType::KeyUp, b'Q' as u16),
+            ]
+        );
+    }
+
+    #[test]
+    fn deinit_forgets_a_modifier_left_pending() {
+        unsafe {
+            reset_state();
+            let kbd = &mut *(&raw mut S_KBD);
+            kbd.initialized = true;
+            kbd.key_event(30 + (9 - 5), true); // Left Shift down
+            kbd.key_event(30 + (9 - 5), false); // and up: a tap, latched
+
+            tca8418_deinit();
+            assert!(!kbd.shift.active());
         }
     }
 
