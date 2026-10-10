@@ -4,6 +4,7 @@
 #include "esp_log.h"
 #include "thistle/app_manager.h"
 #include "thistle/wifi_manager.h"
+#include "ui/manager.h"
 #include "ui/toast.h"
 #include "ui/theme.h"
 
@@ -484,6 +485,18 @@ static void apps_btn_clicked_cb(lv_event_t *e)
     }
 }
 
+/* Back to the bare home screen, from the app drawer or a folder. Also the
+ * Home key's handler, for a press made while the launcher is in front. */
+static void close_overlays(void)
+{
+    if (s_drawer_visible) {
+        close_app_drawer();
+    }
+    if (s_folder_visible) {
+        close_folder();
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /* Public API                                                          */
 /* ------------------------------------------------------------------ */
@@ -582,6 +595,8 @@ esp_err_t launcher_ui_create(lv_obj_t *parent)
     s_drawer_visible = false;
     s_folder_visible = false;
 
+    ui_manager_set_home_handler(close_overlays);
+
     return ESP_OK;
 }
 
@@ -595,12 +610,7 @@ void launcher_ui_show(void)
 void launcher_ui_hide(void)
 {
     /* Close transient layers so returning always shows the home screen. */
-    if (s_drawer_visible) {
-        close_app_drawer();
-    }
-    if (s_folder_visible) {
-        close_folder();
-    }
+    close_overlays();
     if (s_root) {
         lv_obj_add_flag(s_root, LV_OBJ_FLAG_HIDDEN);
     }

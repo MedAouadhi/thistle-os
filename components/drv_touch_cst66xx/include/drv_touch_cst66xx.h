@@ -19,6 +19,7 @@ typedef struct {
     int32_t                 rst_expander_pin; /* Pin on that expander */
     uint16_t                max_x;            /* Panel width  (e.g. 240) */
     uint16_t                max_y;            /* Panel height (e.g. 320) */
+    int32_t                 home_key;         /* Touch key id reported as HAL_KEY_HOME, -1 if none */
 } touch_cst66xx_config_t;
 
 /* Return the driver vtable instance. */

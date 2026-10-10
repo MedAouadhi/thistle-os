@@ -82,7 +82,8 @@
                 "rst_expander": 0,
                 "rst_expander_pin": 7,
                 "max_x": 240,
-                "max_y": 320
+                "max_y": 320,
+                "home_key": 0
             }
         },
         {

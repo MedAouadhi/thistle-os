@@ -34,7 +34,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::hal_registry::{
     HalInputCb, HalInputDriver, HalInputEvent, HalInputEventData, HalInputEventType,
-    HalInputTouchData,
+    HalInputKeyData, HalInputTouchData, HAL_KEY_HOME,
 };
 
 // ── ESP error codes ─────────────────────────────────────────────────────────
@@ -346,6 +346,24 @@ fn log_no_ack() {
 #[cfg(not(target_os = "espidf"))]
 fn log_no_ack() {}
 
+/// Every key press, mapped or not: the chip only numbers its keys, so this
+/// line is how a board profile learns which number is which key.
+#[cfg(target_os = "espidf")]
+fn log_key(id: u8, mapped: bool) {
+    unsafe {
+        esp_log_write(
+            ESP_LOG_INFO,
+            LOG_TAG.as_ptr(),
+            b"\ncst66xx: touch key %u pressed%s\n\0".as_ptr(),
+            id as u32,
+            if mapped { b" (home)\0".as_ptr() } else { b"\0".as_ptr() },
+        );
+    }
+}
+
+#[cfg(not(target_os = "espidf"))]
+fn log_key(_id: u8, _mapped: bool) {}
+
 // ── Configuration struct (C-compatible) ─────────────────────────────────────
 
 /// Configuration passed to `cst66xx_init`.  Layout must match the C
@@ -369,6 +387,10 @@ pub struct TouchCst66xxConfig {
     pub max_x: u16,
     /// Panel height in pixels.
     pub max_y: u16,
+    /// Id of the touch key below the panel that is reported as
+    /// `HAL_KEY_HOME`, or `-1`.  The chip numbers its keys and says nothing
+    /// of what is printed on them, so the board profile names this one.
+    pub home_key: i32,
 }
 
 // ── Driver state ─────────────────────────────────────────────────────────────
@@ -382,6 +404,8 @@ struct TouchState {
     touching: bool,
     last_x: u16,
     last_y: u16,
+    /// The touch key held down, if any.
+    key_down: Option<u8>,
     initialized: bool,
 }
 
@@ -403,6 +427,7 @@ impl TouchState {
                 rst_expander_pin: 0,
                 max_x: 240,
                 max_y: 320,
+                home_key: -1,
             },
             cb: None,
             cb_data: std::ptr::null_mut(),
@@ -410,6 +435,7 @@ impl TouchState {
             touching: false,
             last_x: 0,
             last_y: 0,
+            key_down: None,
             initialized: false,
         }
     }
@@ -462,6 +488,8 @@ impl Shape {
 enum Report {
     /// A finger resting on the glass.
     Contact(Contact),
+    /// One of the touch keys below the panel, going down or coming up.
+    Key { id: u8, pressed: bool },
     /// A well-formed report with nobody touching.
     Empty,
     /// A torn or corrupt read, worth one retry.
@@ -502,7 +530,12 @@ fn checksum(points: &[u8]) -> u16 {
 ///            +0 X low 8      +1 Y low 8      +2 pressure
 ///            +3 Y high 4 (high nibble) | X high 4 (low nibble)
 ///            +4 finger id (low nibble) | event (high nibble)
+///          a key carries only its +4 byte: key id (low nibble) |
+///          state (high nibble, non-zero while pressed)
 /// ```
+///
+/// A report carrying a key is taken as that key alone, as `cst66xx_report`
+/// takes it: LilyGo report keys and coordinates one at a time, key first.
 fn decode_report(buf: &[u8], shape: Shape) -> Report {
     let total = shape.keys + shape.fingers;
     if buf.len() < shape.total_len() {
@@ -526,7 +559,19 @@ fn decode_report(buf: &[u8], shape: Shape) -> Report {
         return Report::Junk;
     }
 
-    if buf[2] != CST66_REPORT_POSITION || shape.fingers == 0 {
+    if buf[2] != CST66_REPORT_POSITION {
+        return Report::Empty;
+    }
+
+    if shape.keys > 0 {
+        let record = buf[4 + 4];
+        return Report::Key {
+            id: record & 0x0F,
+            pressed: record >> 4 != 0,
+        };
+    }
+
+    if shape.fingers == 0 {
         return Report::Empty;
     }
 
@@ -573,6 +618,26 @@ fn to_panel(c: Contact, max_x: u16, max_y: u16) -> (u16, u16) {
     let w = if max_x > 0 { max_x } else { 240 };
     let h = if max_y > 0 { max_y } else { 320 };
     (c.x.min(w - 1), c.y.min(h - 1))
+}
+
+/// The keycode a touch key reports, or `None` for a key the board gave no
+/// meaning.
+fn keycode_for(id: u8, home_key: i32) -> Option<u16> {
+    (id as i32 == home_key).then_some(HAL_KEY_HOME)
+}
+
+/// What one key report does to the key held down.
+///
+/// Returns the key now held, then the key to release and the key to press,
+/// in that order. One key is tracked at a time: a press of another releases
+/// the first, and a release of a key that is not held changes nothing.
+fn key_step(held: Option<u8>, id: u8, pressed: bool) -> (Option<u8>, Option<u8>, Option<u8>) {
+    match (pressed, held) {
+        (true, Some(h)) if h == id => (held, None, None),
+        (true, _) => (Some(id), held, Some(id)),
+        (false, Some(h)) if h == id => (None, Some(id), None),
+        (false, _) => (held, None, None),
+    }
 }
 
 // ── I2C helpers ──────────────────────────────────────────────────────────────
@@ -714,9 +779,11 @@ unsafe extern "C" fn cst66xx_init(config: *const c_void) -> i32 {
     S_TOUCH.cfg.rst_expander_pin = src.rst_expander_pin;
     S_TOUCH.cfg.max_x = src.max_x;
     S_TOUCH.cfg.max_y = src.max_y;
+    S_TOUCH.cfg.home_key = src.home_key;
 
     S_TOUCH.irq_pending.store(false, Ordering::Relaxed);
     S_TOUCH.touching = false;
+    S_TOUCH.key_down = None;
 
     // ── Reset, on a GPIO or through an expander ───────────────────────────
     if S_TOUCH.cfg.rst_expander >= 0 {
@@ -842,6 +909,7 @@ unsafe extern "C" fn cst66xx_deinit() {
     S_TOUCH.cb = None;
     S_TOUCH.cb_data = std::ptr::null_mut();
     S_TOUCH.touching = false;
+    S_TOUCH.key_down = None;
     S_TOUCH.initialized = false;
 }
 
@@ -890,6 +958,40 @@ unsafe fn cst66_read_report() -> Report {
     Report::Junk
 }
 
+/// Send a key event, if the board gave this touch key a keycode.
+///
+/// # Safety
+/// Reads the driver state; called from `cst66xx_poll` only.
+unsafe fn send_key(id: u8, event_type: HalInputEventType, now_ms: u32) {
+    let (Some(keycode), Some(cb)) = (keycode_for(id, S_TOUCH.cfg.home_key), S_TOUCH.cb) else {
+        return;
+    };
+    let event = HalInputEvent {
+        event_type,
+        timestamp: now_ms,
+        data: HalInputEventData {
+            key: HalInputKeyData { keycode },
+        },
+    };
+    cb(&event, S_TOUCH.cb_data);
+}
+
+/// Follow a touch key down or up, and report what changed.
+///
+/// # Safety
+/// Mutates the driver state; called from `cst66xx_poll` only.
+unsafe fn key_report(id: u8, pressed: bool, now_ms: u32) {
+    let (held, released, newly_pressed) = key_step(S_TOUCH.key_down, id, pressed);
+    S_TOUCH.key_down = held;
+    if let Some(r) = released {
+        send_key(r, HalInputEventType::KeyUp, now_ms);
+    }
+    if let Some(p) = newly_pressed {
+        log_key(p, keycode_for(p, S_TOUCH.cfg.home_key).is_some());
+        send_key(p, HalInputEventType::KeyDown, now_ms);
+    }
+}
+
 /// Poll for new touch events and dispatch callbacks.
 ///
 /// # Safety
@@ -913,6 +1015,7 @@ unsafe extern "C" fn cst66xx_poll() -> i32 {
         && !S_TOUCH.irq_pending.load(Ordering::Relaxed)
         && gpio_get_level(S_TOUCH.cfg.pin_int) != 0
         && !S_TOUCH.touching
+        && S_TOUCH.key_down.is_none()
     {
         return ESP_OK;
     }
@@ -942,7 +1045,13 @@ unsafe extern "C" fn cst66xx_poll() -> i32 {
                 cb(&event, S_TOUCH.cb_data);
             }
         }
+        Report::Key { id, pressed } => key_report(id, pressed, now_ms),
         Report::Empty => {
+            // Whether a key's release comes as a key report or as an idle
+            // one, it ends here.
+            if let Some(id) = S_TOUCH.key_down {
+                key_report(id, false, now_ms);
+            }
             if S_TOUCH.touching {
                 S_TOUCH.touching = false;
                 if let Some(cb) = S_TOUCH.cb {
@@ -1084,15 +1193,6 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_skips_past_key_points_to_reach_the_finger() {
-        // Keys are reported first, so a report carrying one puts the finger
-        // five bytes further along.
-        let c = contact(&report(0x0C8, 0x190, 1, 1, 6)).unwrap();
-        assert_eq!(c.x, 0x0C8);
-        assert_eq!(c.y, 0x190);
-    }
-
-    #[test]
     fn test_an_idle_part_serving_zeros_reads_as_empty_not_junk() {
         // Observed on hardware: with nobody touching, the report block comes
         // back all zeros. Treating that as a torn read would strand the
@@ -1138,6 +1238,69 @@ mod tests {
             buf[0..2].copy_from_slice(&sum.to_le_bytes());
             assert_eq!(decode(&buf), Report::Empty);
         }
+    }
+
+    /// Build a report carrying one touch key and no finger.
+    fn key_report_buf(id: u8, state: u8) -> Vec<u8> {
+        let mut buf = vec![0u8; CST66_HEADER_LEN];
+        buf[2] = CST66_REPORT_POSITION;
+        buf[3] = 1 << 4;
+        buf[8] = (state << 4) | id;
+        let sum = checksum(&buf[4..4 + CST66_POINT_LEN]);
+        buf[0..2].copy_from_slice(&sum.to_le_bytes());
+        buf
+    }
+
+    #[test]
+    fn test_decode_reads_a_key_press_and_its_release() {
+        assert_eq!(decode(&key_report_buf(1, 1)), Report::Key { id: 1, pressed: true });
+        assert_eq!(decode(&key_report_buf(1, 0)), Report::Key { id: 1, pressed: false });
+    }
+
+    #[test]
+    fn test_decode_takes_a_report_with_a_key_as_the_key_alone() {
+        // LilyGo report the key and drop the finger beside it.
+        let mut buf = report(100, 200, 1, 1, 6);
+        buf[8] = (1 << 4) | 2;
+        let sum = checksum(&buf[4..4 + 2 * CST66_POINT_LEN]);
+        buf[0..2].copy_from_slice(&sum.to_le_bytes());
+        assert_eq!(decode(&buf), Report::Key { id: 2, pressed: true });
+    }
+
+    #[test]
+    fn test_decode_rejects_a_key_report_whose_checksum_does_not_hold() {
+        let mut buf = key_report_buf(0, 1);
+        buf[8] ^= 0x02;
+        assert_eq!(decode(&buf), Report::Junk);
+    }
+
+    // ── Touch keys ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_only_the_configured_key_reports_home() {
+        assert_eq!(keycode_for(1, 1), Some(HAL_KEY_HOME));
+        assert_eq!(keycode_for(0, 1), None);
+        assert_eq!(keycode_for(2, 1), None);
+        // -1, the default, gives no key a meaning.
+        assert_eq!(keycode_for(0, -1), None);
+    }
+
+    #[test]
+    fn test_a_key_press_is_reported_once_however_often_the_chip_repeats_it() {
+        assert_eq!(key_step(None, 1, true), (Some(1), None, Some(1)));
+        assert_eq!(key_step(Some(1), 1, true), (Some(1), None, None));
+    }
+
+    #[test]
+    fn test_a_release_ends_the_press_of_that_key_only() {
+        assert_eq!(key_step(Some(1), 1, false), (None, Some(1), None));
+        assert_eq!(key_step(Some(1), 0, false), (Some(1), None, None));
+        assert_eq!(key_step(None, 1, false), (None, None, None));
+    }
+
+    #[test]
+    fn test_pressing_a_second_key_releases_the_first() {
+        assert_eq!(key_step(Some(0), 2, true), (Some(2), Some(0), Some(2)));
     }
 
     #[test]

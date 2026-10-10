@@ -36,3 +36,8 @@ void ui_manager_unlock(void);
 
 /* Show splash screen overlay — auto-hides after duration_ms milliseconds */
 void ui_manager_show_splash(uint32_t duration_ms);
+
+/* Called with the LVGL lock held after a HAL_KEY_HOME press has brought the
+ * launcher forward, so the launcher can close whatever it had open over its
+ * home screen. One handler; NULL clears it. */
+void ui_manager_set_home_handler(void (*handler)(void));

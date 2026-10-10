@@ -89,6 +89,31 @@ static kbd_event_t s_kbd_queue[KBD_QUEUE_LEN];
 static uint8_t     s_kbd_queue_head = 0;
 static uint8_t     s_kbd_queue_len  = 0;
 
+/* A Home press waiting for the LVGL lock. Input drivers are polled before
+ * lvgl_task takes the lock, so the HAL callback only records the press, and
+ * an LVGL timer acts on it from inside lv_timer_handler(), lock held, the way
+ * a tap on a launcher icon launches an app. */
+#define HOME_TIMER_PERIOD_MS 20
+static bool s_home_pending = false;
+static void (*s_home_handler)(void) = NULL;
+
+void ui_manager_set_home_handler(void (*handler)(void))
+{
+    s_home_handler = handler;
+}
+
+static void home_timer_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    if (!s_home_pending) return;
+    s_home_pending = false;
+
+    app_manager_launch("com.thistle.launcher");
+    if (s_home_handler) {
+        s_home_handler();
+    }
+}
+
 static void kbd_queue_push(kbd_event_t ev)
 {
     if (s_kbd_queue_len == KBD_QUEUE_LEN) {
@@ -119,6 +144,14 @@ static void ui_input_hal_cb(const hal_input_event_t *event, void *user_data)
             break;
         case HAL_INPUT_EVENT_KEY_DOWN:
         case HAL_INPUT_EVENT_KEY_UP: {
+            /* Home types nothing, so it never reaches LVGL's keypad. */
+            if (event->key.keycode == HAL_KEY_HOME) {
+                if (event->type == HAL_INPUT_EVENT_KEY_DOWN) {
+                    s_home_pending = true;
+                }
+                break;
+            }
+
             uint32_t lv_key = event->key.keycode;
             if      (lv_key == '\n')  lv_key = LV_KEY_ENTER;
             else if (lv_key == '\b')  lv_key = LV_KEY_BACKSPACE;
@@ -405,6 +438,9 @@ esp_err_t ui_manager_init(ui_flush_fn_t flush_cb, bool use_deferred_refresh)
     s_kbd_indev = lv_indev_create();
     lv_indev_set_type(s_kbd_indev, LV_INDEV_TYPE_KEYPAD);
     lv_indev_set_read_cb(s_kbd_indev, ui_kbd_read_cb);
+
+    /* 4b1. Act on a Home press from inside lv_timer_handler() */
+    lv_timer_create(home_timer_cb, HOME_TIMER_PERIOD_MS, NULL);
 
     /* Touch stays in TIMER mode — LVGL polls at each lv_timer_handler call */
 

@@ -87,6 +87,10 @@ pub struct HalInputKeyData {
     pub keycode: u16,
 }
 
+/// Mirrors `HAL_KEY_HOME` in hal/input.h: a key that types nothing and sends
+/// the user back to the launcher's home screen.
+pub const HAL_KEY_HOME: u16 = 0x0100;
+
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct HalInputTouchData {

@@ -84,7 +84,7 @@ static const char JSON_TDECK_MAX[] =
 "    \"drivers\": [\n"
 "        {\"id\": \"com.thistle.drv.epaper-gdeq031t10\", \"hal\": \"display\", \"entry\": \"epaper-gdeq031t10.drv.elf\", \"config\": {\"spi_bus\": 0, \"cs\": 34, \"dc\": 35, \"rst\": 9, \"busy\": 37, \"bl\": 41, \"spi_clock_hz\": 2000000, \"rotation\": 180}},\n"
 "        {\"id\": \"com.thistle.drv.kbd-tca8418\", \"hal\": \"input\", \"entry\": \"kbd-tca8418.drv.elf\", \"config\": {\"i2c_bus\": 0, \"i2c_addr\": \"0x34\", \"pin_int\": 15, \"pin_backlight\": 42}},\n"
-"        {\"id\": \"com.thistle.drv.touch-cst66xx\", \"hal\": \"input\", \"entry\": \"touch-cst66xx.drv.elf\", \"config\": {\"i2c_bus\": 0, \"i2c_addr\": \"0x1A\", \"pin_int\": 12, \"pin_rst\": -1, \"rst_expander\": 0, \"rst_expander_pin\": 7, \"max_x\": 240, \"max_y\": 320}},\n"
+"        {\"id\": \"com.thistle.drv.touch-cst66xx\", \"hal\": \"input\", \"entry\": \"touch-cst66xx.drv.elf\", \"config\": {\"i2c_bus\": 0, \"i2c_addr\": \"0x1A\", \"pin_int\": 12, \"pin_rst\": -1, \"rst_expander\": 0, \"rst_expander_pin\": 7, \"max_x\": 240, \"max_y\": 320, \"home_key\": 0}},\n"
 "        {\"id\": \"com.thistle.drv.gps-mia-m10q\", \"hal\": \"gps\", \"entry\": \"gps-mia-m10q.drv.elf\", \"config\": {\"uart_num\": 2, \"tx\": 16, \"rx\": 2, \"baud_rate\": 38400}},\n"
 "        {\"id\": \"com.thistle.drv.radio-sx1262\", \"hal\": \"radio\", \"entry\": \"radio-sx1262.drv.elf\", \"config\": {\"spi_bus\": 0, \"cs\": 3, \"dio1\": 5, \"rst\": 4, \"busy\": 6, \"freq_hz\": 868000000, \"tcxo_mv\": 2400, \"dio2_rf_switch\": true}},\n"
 "        {\"id\": \"com.thistle.drv.imu-bhi260ap\", \"hal\": \"imu\", \"entry\": \"imu-bhi260ap.drv.elf\", \"config\": {\"i2c_bus\": 0, \"i2c_addr\": \"0x28\", \"pin_int\": 21}},\n"
