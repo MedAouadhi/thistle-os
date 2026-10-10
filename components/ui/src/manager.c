@@ -147,15 +147,6 @@ static void ui_kbd_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
 void ui_flush_cb_epaper(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
 {
     const hal_registry_t *reg = hal_get_registry();
-    /* Debug: count non-zero pixels in the RGB565 data */
-    {
-        const uint16_t *dbg = (const uint16_t *)px_map;
-        uint32_t pc = (uint32_t)(area->x2 - area->x1 + 1) * (area->y2 - area->y1 + 1);
-        uint32_t nz = 0;
-        for (uint32_t i = 0; i < pc; i++) if (dbg[i] != 0xFFFF) nz++;
-        ESP_LOGI(TAG, "epaper flush: (%d,%d)-(%d,%d) non_white=%lu/%lu",
-                 area->x1, area->y1, area->x2, area->y2, (unsigned long)nz, (unsigned long)pc);
-    }
 
     if (reg && reg->display && reg->display->flush) {
         hal_area_t hal_area = {
@@ -165,26 +156,33 @@ void ui_flush_cb_epaper(lv_display_t *disp, const lv_area_t *area, uint8_t *px_m
             .y2 = (uint16_t)area->y2,
         };
 
-        /* E-paper displays need 1-bit data, LVGL outputs RGB565. Convert. */
+        /* E-paper displays need 1-bit data, LVGL outputs RGB565. Convert.
+         * Each row starts on a fresh byte, (w + 7) / 8 bytes per row, which is
+         * how the e-paper drivers read it. Rows packed back to back sheared
+         * every area narrower than a multiple of 8 pixels, such as a label
+         * that a timer rewrites on its own. */
         uint16_t w = hal_area.x2 - hal_area.x1 + 1;
         uint16_t h = hal_area.y2 - hal_area.y1 + 1;
-        uint32_t pixel_count = (uint32_t)w * h;
-        uint32_t mono_bytes = (pixel_count + 7) / 8;
+        uint32_t row_bytes = ((uint32_t)w + 7) / 8;
+        uint32_t mono_bytes = row_bytes * h;
         uint8_t *mono_buf = (uint8_t *)malloc(mono_bytes);
         esp_err_t err;
         if (mono_buf) {
             memset(mono_buf, 0, mono_bytes);
             const uint16_t *rgb565 = (const uint16_t *)px_map;
-            for (uint32_t i = 0; i < pixel_count; i++) {
-                uint16_t c = rgb565[i];
-                /* Luminance threshold: white if bright enough */
-                uint8_t r5 = (c >> 11) & 0x1F;
-                uint8_t g6 = (c >> 5) & 0x3F;
-                uint8_t b5 = c & 0x1F;
-                /* Weighted luminance (BT.601): 0.299R + 0.587G + 0.114B */
-                uint16_t lum = r5 * 77 + g6 * 150 + b5 * 29;  /* max ~8160 */
-                if (lum > 4080) {  /* ~50% threshold */
-                    mono_buf[i / 8] |= (0x80 >> (i & 7));  /* white */
+            for (uint16_t y = 0; y < h; y++) {
+                uint8_t *row = mono_buf + (uint32_t)y * row_bytes;
+                for (uint16_t x = 0; x < w; x++) {
+                    uint16_t c = *rgb565++;
+                    /* Luminance threshold: white if bright enough */
+                    uint8_t r5 = (c >> 11) & 0x1F;
+                    uint8_t g6 = (c >> 5) & 0x3F;
+                    uint8_t b5 = c & 0x1F;
+                    /* Weighted luminance (BT.601): 0.299R + 0.587G + 0.114B */
+                    uint16_t lum = r5 * 77 + g6 * 150 + b5 * 29;  /* max ~8160 */
+                    if (lum > 4080) {  /* ~50% threshold */
+                        row[x / 8] |= (0x80 >> (x & 7));  /* white */
+                    }
                 }
             }
             err = reg->display->flush(&hal_area, mono_buf);

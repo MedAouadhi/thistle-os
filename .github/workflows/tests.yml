@@ -298,6 +298,10 @@ jobs:
         working-directory: simulator
         run: python3 tests/test_touch_taps.py --sim build/thistle_sim
 
+      - name: Run e-paper partial flush regression tests
+        working-directory: simulator
+        run: python3 tests/test_epaper_partial_flush.py --sim build/thistle_sim
+
       - name: Upload launcher framebuffer failures
         if: failure()
         uses: actions/upload-artifact@v4

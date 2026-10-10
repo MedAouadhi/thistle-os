@@ -13,6 +13,10 @@ void sim_display_set_resolution(int width, int height);
 /* Select strict 1-bit input and e-paper HAL capabilities. */
 void sim_display_set_epaper(bool enabled);
 
+/* Print every area the window manager flushes, for tests that need to know
+ * what was redrawn. */
+void sim_display_set_log_flushes(bool enabled);
+
 /* Set the window title to include the device name */
 void sim_display_set_title(const char *device_name);
 

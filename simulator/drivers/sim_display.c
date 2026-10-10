@@ -18,6 +18,7 @@ static uint32_t     *s_fb32     = NULL;  /* RGBA8888 for SDL texture (Emscripten
 static bool          s_initialized = false;
 static int           s_scale       = 2;
 static bool          s_epaper     = false;
+static bool          s_log_flushes = false;
 
 /* Scale factor: small displays get a bigger scale so the window is usable */
 static int calc_scale(int w, int h)
@@ -36,6 +37,11 @@ void sim_display_set_resolution(int width, int height)
 void sim_display_set_epaper(bool enabled)
 {
     s_epaper = enabled;
+}
+
+void sim_display_set_log_flushes(bool enabled)
+{
+    s_log_flushes = enabled;
 }
 
 void sim_display_set_title(const char *device_name)
@@ -176,11 +182,21 @@ static esp_err_t sim_display_flush(const hal_area_t *area, const uint8_t *data)
     if (!s_initialized || !area || !data) return ESP_FAIL;
 
     uint16_t w = area->x2 - area->x1 + 1;
+    if (s_log_flushes) {
+        printf("[sim] flush (%u,%u)-(%u,%u)\n",
+               (unsigned)area->x1, (unsigned)area->y1,
+               (unsigned)area->x2, (unsigned)area->y2);
+    }
 
     if (s_epaper) {
+        /* Each row starts on a fresh byte, as the GDEQ031T10 drivers read it.
+         * Decoding rows back to back instead hid a window manager that packed
+         * them that way: every flush narrower than a multiple of 8 pixels came
+         * out sheared on the panel and straight here. */
+        size_t row_bytes = ((size_t)w + 7) / 8;
         for (uint16_t y = area->y1; y <= area->y2 && y < (uint16_t)s_height; y++) {
             for (uint16_t x = area->x1; x <= area->x2 && x < (uint16_t)s_width; x++) {
-                size_t bit = (size_t)(y - area->y1) * w + (x - area->x1);
+                size_t bit = (size_t)(y - area->y1) * row_bytes * 8 + (x - area->x1);
                 /* thistle-tk stores Off/white as a set bit and On/black as
                  * a cleared bit, matching the physical packed framebuffer. */
                 bool black = (data[bit / 8] & (uint8_t)(0x80u >> (bit % 8))) == 0;

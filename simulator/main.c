@@ -119,6 +119,8 @@ int main(int argc, char **argv)
             s_wm_override = argv[i] + 5;
         } else if (strncmp(argv[i], "--tap=", 6) == 0) {
             if (!add_tap(argv[i] + 6)) return 2;
+        } else if (strcmp(argv[i], "--log-flushes") == 0) {
+            sim_display_set_log_flushes(true);
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             printf("Usage: %s [OPTIONS]\n", argv[0]);
             printf("Options:\n");
@@ -132,6 +134,7 @@ int main(int argc, char **argv)
             printf("                      repeat for more, %u ms apart\n", SIM_TAP_GAP_MS);
             printf("  --tap-hold MS       How long each tap is held (default 100;\n");
             printf("                      0 = press and release between two pointer reads)\n");
+            printf("  --log-flushes       Print every area flushed to the display\n");
             printf("  --launch-app ID     Launch a registered app instead of the launcher\n");
             printf("  --wm NAME           Window manager, overriding system.json:\n");
             printf("                      thistle-tk, lvgl-epaper-wm or lvgl-lcd-wm\n");
