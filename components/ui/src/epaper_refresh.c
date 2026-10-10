@@ -10,6 +10,12 @@ static uint16_t s_disp_h   = 0;
 static bool     s_dirty     = false;
 static uint32_t s_count     = 0;
 
+static epaper_refresh_policy_t s_policy = EPAPER_REFRESH_POLICY_FAST;
+/* Set from the splash timer's task, read from the LVGL task. */
+static volatile bool s_full_requested = false;
+/* Fast refreshes since the last full one. */
+static uint32_t s_fast_run = 0;
+
 /* Current dirty bounding box */
 static uint16_t s_x1 = 0;
 static uint16_t s_y1 = 0;
@@ -27,6 +33,9 @@ esp_err_t epaper_refresh_init(uint16_t display_width, uint16_t display_height)
     s_disp_h = display_height;
     s_dirty  = false;
     s_count  = 0;
+    s_policy = EPAPER_REFRESH_POLICY_FAST;
+    s_full_requested = false;
+    s_fast_run = 0;
     s_x1 = 0;
     s_y1 = 0;
     s_x2 = 0;
@@ -96,4 +105,48 @@ void epaper_refresh_clear(void)
 uint32_t epaper_refresh_get_count(void)
 {
     return s_count;
+}
+
+void epaper_refresh_set_policy(epaper_refresh_policy_t policy)
+{
+    switch (policy) {
+        case EPAPER_REFRESH_POLICY_FAST:
+        case EPAPER_REFRESH_POLICY_FULL:
+        case EPAPER_REFRESH_POLICY_AUTO:
+            s_policy = policy;
+            break;
+        default:
+            s_policy = EPAPER_REFRESH_POLICY_FAST;
+            break;
+    }
+}
+
+epaper_refresh_policy_t epaper_refresh_get_policy(void)
+{
+    return s_policy;
+}
+
+void epaper_refresh_request_full(void)
+{
+    s_full_requested = true;
+}
+
+bool epaper_refresh_next_is_full(void)
+{
+    bool full;
+    if (s_full_requested) {
+        full = true;
+    } else if (s_policy == EPAPER_REFRESH_POLICY_FULL) {
+        full = true;
+    } else if (s_policy == EPAPER_REFRESH_POLICY_AUTO) {
+        full = s_fast_run >= EPAPER_REFRESH_AUTO_FAST_RUN;
+    } else {
+        full = false;
+    }
+
+    s_full_requested = false;
+    /* A full refresh clears the ghosting whoever asked for it, so Auto counts
+     * its run from the last one, not from its own. */
+    s_fast_run = full ? 0 : s_fast_run + 1;
+    return full;
 }

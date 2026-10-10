@@ -802,21 +802,6 @@ fn is_leap(year: u64) -> bool {
 // WiFi credential persistence — save/load from system.json
 // ---------------------------------------------------------------------------
 
-/// Resolve the path to system.json (SD card first, then SPIFFS, then simulator).
-pub(crate) fn system_json_path() -> &'static str {
-    #[cfg(target_os = "espidf")]
-    {
-        if std::path::Path::new("/sdcard/config/system.json").exists() {
-            return "/sdcard/config/system.json";
-        }
-        "/spiffs/config/system.json"
-    }
-    #[cfg(not(target_os = "espidf"))]
-    {
-        "/tmp/thistle_sdcard/config/system.json"
-    }
-}
-
 fn update_wifi_object(json: &str, ssid: &str, password: &str, enabled: bool) -> Option<String> {
     let mut root: serde_json::Value = serde_json::from_str(json).ok()?;
     let wifi = if root.get("thistle_os").is_some() {
@@ -906,7 +891,7 @@ pub unsafe extern "C" fn wifi_manager_save_credentials(
         return ESP_ERR_INVALID_ARG;
     }
 
-    let path = system_json_path();
+    let path = crate::system_json::path();
     let json = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(_) => {
@@ -961,7 +946,7 @@ const ESP_ERR_NOT_FOUND: i32 = 0x105;
 /// May be called from C.
 #[no_mangle]
 pub unsafe extern "C" fn wifi_manager_auto_connect() -> i32 {
-    let path = system_json_path();
+    let path = crate::system_json::path();
     let json = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(_) => {

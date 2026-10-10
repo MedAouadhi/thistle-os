@@ -5,6 +5,7 @@
 #include "hal/board.h"
 #include "hal/input.h"
 #include "thistle/app_manager.h"
+#include "thistle/refresh_prefs.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
@@ -348,7 +349,16 @@ static void lvgl_task(void *arg)
         {
             int64_t now = esp_timer_get_time();
             if ((now - s_last_flush_time) >= EPAPER_REFRESH_DEBOUNCE_US) {
-                ESP_LOGI(TAG, "e-paper debounce elapsed, refreshing panel");
+                /* The driver is told on every refresh, so the policy is the
+                 * only thing that decides: drivers drop back to fast after a
+                 * full refresh of their own accord. */
+                bool full = epaper_refresh_next_is_full();
+                if (reg->display->set_refresh_mode) {
+                    reg->display->set_refresh_mode(full ? HAL_DISPLAY_REFRESH_FULL
+                                                        : HAL_DISPLAY_REFRESH_FAST);
+                }
+                ESP_LOGI(TAG, "e-paper debounce elapsed, refreshing panel (%s)",
+                         full ? "full" : "fast");
                 esp_err_t ref_err = reg->display->refresh();
                 if (ref_err != ESP_OK) {
                     ESP_LOGE(TAG, "e-paper refresh failed: %s",
@@ -534,6 +544,10 @@ esp_err_t ui_manager_init(ui_flush_fn_t flush_cb, bool use_deferred_refresh)
         ESP_LOGE(TAG, "epaper_refresh_init failed: %s", esp_err_to_name(err));
         return err;
     }
+    if (use_deferred_refresh) {
+        epaper_refresh_set_policy((epaper_refresh_policy_t)refresh_prefs_load());
+        ESP_LOGI(TAG, "e-paper refresh policy: %d", (int)epaper_refresh_get_policy());
+    }
 
     ESP_LOGI(TAG, "UI manager ready (%dx%d)", s_display_w, s_display_h);
 
@@ -568,11 +582,9 @@ static void splash_dismiss_cb(void *arg)
     lv_obj_delete(splash);
     ui_manager_unlock();
 
-    /* Force the e-paper to do a full refresh (not fast) to clear splash ghosting */
-    const hal_registry_t *dr = hal_get_registry();
-    if (dr && dr->display && dr->display->refresh && dr->display->set_refresh_mode) {
-        dr->display->set_refresh_mode(HAL_DISPLAY_REFRESH_FULL);
-    }
+    /* Make the e-paper's next refresh full, whatever the policy, to clear
+     * splash ghosting */
+    epaper_refresh_request_full();
 
     /* Clean up the timer handle so it does not leak. */
     if (s_splash_timer != NULL) {
@@ -661,15 +673,8 @@ void ui_manager_request_refresh(void)
 
 void ui_manager_force_refresh(void)
 {
-    const hal_registry_t *reg = hal_get_registry();
-
     epaper_refresh_mark_full();
-
-    if (reg && reg->display) {
-        if (reg->display->set_refresh_mode) {
-            reg->display->set_refresh_mode(HAL_DISPLAY_REFRESH_FULL);
-        }
-    }
+    epaper_refresh_request_full();
 
     if (s_display != NULL) {
         lv_obj_invalidate(s_screen);

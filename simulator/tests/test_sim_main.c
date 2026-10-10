@@ -48,6 +48,15 @@ extern void test_wm_select_honours_thistle_tk_on_a_board_that_would_default_othe
 extern void test_wm_select_falls_back_when_the_name_matches_no_manager(void);
 extern void test_wm_select_never_offers_lvgl_apps_to_thistle_tk(void);
 
+/* test_epaper_refresh_policy.c */
+extern void test_epaper_policy_defaults_to_fast(void);
+extern void test_epaper_policy_full_stays_full(void);
+extern void test_epaper_policy_auto_cleans_after_every_run_of_fast_refreshes(void);
+extern void test_epaper_policy_requested_full_happens_once_under_fast(void);
+extern void test_epaper_policy_requested_full_restarts_the_auto_run(void);
+extern void test_epaper_policy_unknown_value_falls_back_to_fast(void);
+extern void test_epaper_policy_init_forgets_the_policy_and_any_request(void);
+
 /* test_xl9555.c */
 extern void test_xl9555_resets_to_all_inputs_with_its_latches_high(void);
 extern void test_xl9555_records_every_write_in_order(void);
@@ -124,6 +133,15 @@ int main(void)
     RUN_TEST(wm_select_honours_thistle_tk_on_a_board_that_would_default_otherwise);
     RUN_TEST(wm_select_falls_back_when_the_name_matches_no_manager);
     RUN_TEST(wm_select_never_offers_lvgl_apps_to_thistle_tk);
+
+    printf("\n[epaper_refresh_policy]\n");
+    RUN_TEST(epaper_policy_defaults_to_fast);
+    RUN_TEST(epaper_policy_full_stays_full);
+    RUN_TEST(epaper_policy_auto_cleans_after_every_run_of_fast_refreshes);
+    RUN_TEST(epaper_policy_requested_full_happens_once_under_fast);
+    RUN_TEST(epaper_policy_requested_full_restarts_the_auto_run);
+    RUN_TEST(epaper_policy_unknown_value_falls_back_to_fast);
+    RUN_TEST(epaper_policy_init_forgets_the_policy_and_any_request);
 
     printf("\n[xl9555]\n");
     RUN_TEST(xl9555_resets_to_all_inputs_with_its_latches_high);

@@ -4,7 +4,7 @@
         "theme": "default",
         "window_manager": "auto",
         "display": {
-            "refresh_mode": "partial"
+            "refresh_mode": "fast"
         },
         "wifi": {
             "enabled": false,

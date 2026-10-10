@@ -24,10 +24,12 @@
 #include "thistle/ota.h"
 #include "thistle/driver_loader.h"
 #include "thistle/light_prefs.h"
+#include "thistle/refresh_prefs.h"
 #include "hal/board.h"
 #include "hal/sdcard_path.h"
 #include "ui/theme.h"
 #include "ui/toast.h"
+#include "ui/epaper_refresh.h"
 #include "ui/statusbar.h"
 
 #include <stdio.h>
@@ -1480,14 +1482,40 @@ static void display_brightness_cb(lv_event_t *e)
     }
 }
 
+/* Mark a refresh-mode button as the mode in use, or not. Its label carries
+ * the state too: the theme colours labels itself, so a label does not take
+ * the button's colour and would stay black on the inverted button. */
+static void refresh_mode_set_checked(lv_obj_t *btn, bool checked)
+{
+    lv_obj_t *label = lv_obj_get_child(btn, 0);
+    if (checked) {
+        lv_obj_add_state(btn, LV_STATE_CHECKED);
+        if (label) lv_obj_add_state(label, LV_STATE_CHECKED);
+    } else {
+        lv_obj_remove_state(btn, LV_STATE_CHECKED);
+        if (label) lv_obj_remove_state(label, LV_STATE_CHECKED);
+    }
+}
+
 static void display_refresh_mode_cb(lv_event_t *e)
 {
-    hal_display_refresh_mode_t mode =
-        (hal_display_refresh_mode_t)(uintptr_t)lv_event_get_user_data(e);
-    const hal_registry_t *reg = hal_get_registry();
-    if (reg && reg->display && reg->display->set_refresh_mode) {
-        reg->display->set_refresh_mode(mode);
-        ESP_LOGI(TAG, "Display: refresh mode -> %d", (int)mode);
+    epaper_refresh_policy_t policy =
+        (epaper_refresh_policy_t)(uintptr_t)lv_event_get_user_data(e);
+    lv_obj_t *btn = lv_event_get_current_target(e);
+
+    /* Mark the chosen mode, and only it. */
+    lv_obj_t *row = lv_obj_get_parent(btn);
+    for (uint32_t i = 0; i < lv_obj_get_child_count(row); i++) {
+        lv_obj_t *other = lv_obj_get_child(row, (int32_t)i);
+        refresh_mode_set_checked(other, other == btn);
+    }
+
+    /* The UI manager applies the policy to every panel refresh, starting with
+     * the one this tap's redraw brings, so Full shows itself at once. */
+    epaper_refresh_set_policy(policy);
+    ESP_LOGI(TAG, "Display: refresh policy -> %d", (int)policy);
+    if (refresh_prefs_save((uint8_t)policy) != ESP_OK) {
+        toast_warn("Refresh mode not saved for next boot");
     }
 }
 
@@ -1514,7 +1542,9 @@ static void open_detail_display(lv_obj_t *content)
     create_info_row(content, buf);
     create_separator(content);
 
-    if (d->set_refresh_mode) {
+    /* Only e-paper has refresh modes. An LCD's driver takes the call and
+     * ignores it, which made this row three buttons that did nothing. */
+    if (d->type == HAL_DISPLAY_TYPE_EPAPER && d->set_refresh_mode) {
         create_info_row(content, "Refresh mode:");
         create_separator(content);
 
@@ -1537,14 +1567,17 @@ static void open_detail_display(lv_obj_t *content)
                               LV_FLEX_ALIGN_CENTER);
         lv_obj_set_style_pad_column(btn_row, 6, LV_PART_MAIN);
 
+        /* Full is clean but flashes on every update; Fast is quick but leaves
+         * ghosting; Auto is Fast with a full refresh after every few. */
         static const struct {
             const char *label;
-            hal_display_refresh_mode_t mode;
+            epaper_refresh_policy_t policy;
         } modes[3] = {
-            { "Full",    HAL_DISPLAY_REFRESH_FULL    },
-            { "Partial", HAL_DISPLAY_REFRESH_PARTIAL },
-            { "Fast",    HAL_DISPLAY_REFRESH_FAST    },
+            { "Full", EPAPER_REFRESH_POLICY_FULL },
+            { "Auto", EPAPER_REFRESH_POLICY_AUTO },
+            { "Fast", EPAPER_REFRESH_POLICY_FAST },
         };
+        epaper_refresh_policy_t current = epaper_refresh_get_policy();
 
         for (int i = 0; i < 3; i++) {
             lv_obj_t *b = lv_obj_create(btn_row);
@@ -1561,17 +1594,22 @@ static void open_detail_display(lv_obj_t *content)
             lv_obj_set_style_pad_bottom(b, 0, LV_PART_MAIN);
             lv_obj_set_style_bg_color(b, tc_disp->primary, LV_STATE_PRESSED);
             lv_obj_set_style_bg_opa(b, LV_OPA_COVER, LV_STATE_PRESSED);
+            /* The mode in use reads inverted. */
+            lv_obj_set_style_bg_color(b, tc_disp->text, LV_STATE_CHECKED);
+            lv_obj_set_style_bg_opa(b, LV_OPA_COVER, LV_STATE_CHECKED);
             lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE);
             lv_obj_clear_flag(b, LV_OBJ_FLAG_SCROLLABLE);
             lv_obj_add_event_cb(b, display_refresh_mode_cb, LV_EVENT_CLICKED,
-                                (void *)(uintptr_t)modes[i].mode);
+                                (void *)(uintptr_t)modes[i].policy);
 
             lv_obj_t *bl = lv_label_create(b);
             lv_label_set_text(bl, modes[i].label);
             lv_obj_set_style_text_font(bl, &lv_font_montserrat_14, LV_PART_MAIN);
             lv_obj_set_style_text_color(bl, tc_disp->text, LV_PART_MAIN);
-            lv_obj_set_style_text_color(bl, tc_disp->bg, LV_STATE_PRESSED);
+            lv_obj_set_style_text_color(bl, tc_disp->bg, LV_STATE_CHECKED);
             lv_obj_align(bl, LV_ALIGN_CENTER, 0, 0);
+
+            refresh_mode_set_checked(b, modes[i].policy == current);
         }
         create_separator(content);
     }

@@ -14,12 +14,10 @@
 //! panel reads without light, and boot should not spend battery on it.
 
 use crate::hal_registry::{registry, HalDisplayType};
-use crate::wifi_manager::system_json_path;
+use crate::system_json;
 
 const ESP_OK: i32 = 0;
 const ESP_ERR_INVALID_ARG: i32 = 0x102;
-const ESP_ERR_INVALID_STATE: i32 = 0x103;
-const ESP_FAIL: i32 = -1;
 
 const DISPLAY_SECTION: &str = "display";
 const KEYBOARD_SECTION: &str = "keyboard";
@@ -44,52 +42,16 @@ macro_rules! light_log {
     ($level:expr, $fmt:expr $(, $arg:expr)*) => { let _ = ($level, $($arg,)*); };
 }
 
-const ESP_LOG_WARN: i32 = 2;
 const ESP_LOG_INFO: i32 = 3;
-
-/// The object a section hangs off: `thistle_os` in the shipped file, or the
-/// root itself in a file that has no such wrapper — the same two shapes the
-/// WiFi credentials are read from.
-fn scope(root: &serde_json::Value) -> &serde_json::Value {
-    root.get("thistle_os").unwrap_or(root)
-}
 
 /// The level saved under `section`, or `None` if there is none or it is not
 /// a percent.
 fn read_level(json: &str, section: &str) -> Option<u8> {
-    let root: serde_json::Value = serde_json::from_str(json).ok()?;
-    let level = scope(&root).get(section)?.get(LEVEL_KEY)?.as_u64()?;
+    let level = system_json::get(json, section, LEVEL_KEY)?.as_u64()?;
     if level > 100 {
         return None;
     }
     Some(level as u8)
-}
-
-/// `json` with `section`'s level set to `percent`, creating the section if
-/// the file has none. `None` for a file that does not parse, or whose
-/// section is something other than an object — rewriting either would lose
-/// whatever else the file holds, the WiFi credentials among it.
-fn with_level(json: &str, section: &str, percent: u8) -> Option<String> {
-    let mut root: serde_json::Value = serde_json::from_str(json).ok()?;
-    let scope = if root.get("thistle_os").is_some() {
-        root.get_mut("thistle_os")?
-    } else {
-        &mut root
-    };
-    let scope = scope.as_object_mut()?;
-    let section = scope
-        .entry(section.to_string())
-        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()))
-        .as_object_mut()?;
-    section.insert(LEVEL_KEY.to_string(), serde_json::Value::from(percent));
-    serde_json::to_string_pretty(&root).ok()
-}
-
-/// A file holding nothing but this one level, for a device that has no
-/// system.json yet.
-fn fresh_with_level(section: &str, percent: u8) -> String {
-    with_level(r#"{ "thistle_os": {} }"#, section, percent)
-        .expect("a fresh system.json always takes a level")
 }
 
 /// The level to give the screen at boot. An emissive screen is never put out:
@@ -106,31 +68,7 @@ fn save(section: &str, percent: u8) -> i32 {
     if percent > 100 {
         return ESP_ERR_INVALID_ARG;
     }
-    let path = system_json_path();
-    let updated = match std::fs::read_to_string(path) {
-        Ok(json) => {
-            // Every tap lands here. Rewriting a file that already says this
-            // costs a flash write and risks the rest of it for nothing.
-            if read_level(&json, section) == Some(percent) {
-                return ESP_OK;
-            }
-            match with_level(&json, section, percent) {
-                Some(updated) => updated,
-                None => {
-                    light_log!(ESP_LOG_WARN, b"system.json is not valid JSON; level not saved\0");
-                    return ESP_ERR_INVALID_STATE;
-                }
-            }
-        }
-        Err(_) => fresh_with_level(section, percent),
-    };
-    match std::fs::write(path, updated) {
-        Ok(()) => ESP_OK,
-        Err(_) => {
-            light_log!(ESP_LOG_WARN, b"could not write system.json; level not saved\0");
-            ESP_FAIL
-        }
-    }
+    system_json::save(section, LEVEL_KEY, serde_json::Value::from(percent))
 }
 
 /// Save the screen's light level, 0-100 percent.
@@ -149,8 +87,7 @@ pub extern "C" fn light_prefs_save_keys(percent: u8) -> i32 {
 /// drivers have started; a level nobody saved leaves its driver's default.
 #[no_mangle]
 pub extern "C" fn light_prefs_restore() {
-    let path = system_json_path();
-    let Ok(json) = std::fs::read_to_string(path) else {
+    let Ok(json) = std::fs::read_to_string(system_json::path()) else {
         return;
     };
     let reg = registry();
@@ -188,52 +125,30 @@ mod tests {
     const SHIPPED: &str = r#"{
     "thistle_os": {
         "theme": "default",
-        "display": { "refresh_mode": "partial" },
+        "display": { "refresh_mode": "fast" },
         "wifi": { "enabled": true, "ssid": "home", "password": "secret" }
     }
 }"#;
 
-    #[test]
-    fn test_with_level_sets_display_light_and_keeps_the_rest() {
-        let updated = with_level(SHIPPED, DISPLAY_SECTION, 60).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&updated).unwrap();
-        let os = &parsed["thistle_os"];
-        assert_eq!(os["display"]["light"].as_u64(), Some(60));
-        assert_eq!(os["display"]["refresh_mode"].as_str(), Some("partial"));
-        assert_eq!(os["wifi"]["ssid"].as_str(), Some("home"));
-        assert_eq!(os["wifi"]["password"].as_str(), Some("secret"));
-        assert_eq!(os["theme"].as_str(), Some("default"));
+    fn saved(section: &str, percent: u8) -> String {
+        system_json::with_value(SHIPPED, section, LEVEL_KEY, serde_json::Value::from(percent))
+            .unwrap()
     }
 
     #[test]
-    fn test_with_level_creates_a_missing_section() {
-        let updated = with_level(SHIPPED, KEYBOARD_SECTION, 25).unwrap();
-        assert_eq!(read_level(&updated, KEYBOARD_SECTION), Some(25));
-    }
-
-    #[test]
-    fn test_with_level_writes_into_a_file_without_the_wrapper() {
-        let updated = with_level(r#"{ "wifi": {} }"#, DISPLAY_SECTION, 100).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&updated).unwrap();
-        assert_eq!(parsed["display"]["light"].as_u64(), Some(100));
-        assert!(parsed.get("thistle_os").is_none());
-    }
-
-    #[test]
-    fn test_with_level_refuses_malformed_json() {
-        assert_eq!(with_level("{ not json", DISPLAY_SECTION, 60), None);
-    }
-
-    #[test]
-    fn test_with_level_refuses_a_section_that_is_not_an_object() {
-        let json = r#"{ "thistle_os": { "display": "lcd" } }"#;
-        assert_eq!(with_level(json, DISPLAY_SECTION, 60), None);
+    fn test_a_saved_level_reads_back() {
+        assert_eq!(read_level(&saved(DISPLAY_SECTION, 60), DISPLAY_SECTION), Some(60));
+        assert_eq!(read_level(&saved(KEYBOARD_SECTION, 25), KEYBOARD_SECTION), Some(25));
     }
 
     #[test]
     fn test_off_is_saved_as_a_level() {
-        let updated = with_level(SHIPPED, DISPLAY_SECTION, 0).unwrap();
-        assert_eq!(read_level(&updated, DISPLAY_SECTION), Some(0));
+        assert_eq!(read_level(&saved(DISPLAY_SECTION, 0), DISPLAY_SECTION), Some(0));
+    }
+
+    #[test]
+    fn test_a_level_over_100_is_refused_before_it_reaches_the_file() {
+        assert_eq!(save(DISPLAY_SECTION, 101), ESP_ERR_INVALID_ARG);
     }
 
     #[test]
@@ -256,14 +171,6 @@ mod tests {
                                          "keyboard": { "light": "full" } } }"#;
         assert_eq!(read_level(json, DISPLAY_SECTION), None);
         assert_eq!(read_level(json, KEYBOARD_SECTION), None);
-    }
-
-    #[test]
-    fn test_fresh_file_holds_only_the_level() {
-        let json = fresh_with_level(DISPLAY_SECTION, 25);
-        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed["thistle_os"]["display"]["light"].as_u64(), Some(25));
-        assert_eq!(parsed["thistle_os"].as_object().unwrap().len(), 1);
     }
 
     #[test]
