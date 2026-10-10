@@ -53,6 +53,12 @@ static const char *s_wm_override = NULL;
 static struct { int x, y; } s_taps[SIM_MAX_TAPS];
 static int s_tap_count = 0;
 static int s_tap_hold_ms = 100;
+/* Text to type after the taps. Every key's press and release arrive in one
+ * main-loop iteration, as one drain of the TCA8418's event FIFO delivers
+ * them, so LVGL reads the keypad only after all of them. */
+static const char *s_type_text = NULL;
+/* Press each key before releasing the one before it, as fast typing does. */
+static bool s_type_rollover = false;
 
 static bool add_tap(const char *spec)
 {
@@ -119,6 +125,10 @@ int main(int argc, char **argv)
             s_wm_override = argv[i] + 5;
         } else if (strncmp(argv[i], "--tap=", 6) == 0) {
             if (!add_tap(argv[i] + 6)) return 2;
+        } else if (strcmp(argv[i], "--type") == 0 && i + 1 < argc) {
+            s_type_text = argv[++i];
+        } else if (strcmp(argv[i], "--type-rollover") == 0) {
+            s_type_rollover = true;
         } else if (strcmp(argv[i], "--log-flushes") == 0) {
             sim_display_set_log_flushes(true);
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
@@ -134,6 +144,10 @@ int main(int argc, char **argv)
             printf("                      repeat for more, %u ms apart\n", SIM_TAP_GAP_MS);
             printf("  --tap-hold MS       How long each tap is held (default 100;\n");
             printf("                      0 = press and release between two pointer reads)\n");
+            printf("  --type TEXT         Type TEXT after the taps, every key pressed and\n");
+            printf("                      released before LVGL next reads the keypad;\n");
+            printf("                      prints the focused text field on exit\n");
+            printf("  --type-rollover     Press each typed key before releasing the last\n");
             printf("  --log-flushes       Print every area flushed to the display\n");
             printf("  --launch-app ID     Launch a registered app instead of the launcher\n");
             printf("  --wm NAME           Window manager, overriding system.json:\n");
@@ -241,6 +255,7 @@ int main(int argc, char **argv)
     uint32_t start_ms = 0;
     int tap_index = 0;
     int tap_phase = 0;   /* 0 = waiting to press, 1 = pressed */
+    bool typed = false;
     while (1) {
         /* Update LVGL tick */
         struct timeval tv;
@@ -285,9 +300,35 @@ int main(int argc, char **argv)
             }
         }
 
+        if (s_type_text && !typed && tap_index >= s_tap_count) {
+            uint32_t type_ms = (use_tk_wm ? 250u : 2250u) +
+                               (uint32_t)s_tap_count * SIM_TAP_GAP_MS;
+            if (now_ms - start_ms > type_ms) {
+                for (const char *c = s_type_text; *c; c++) {
+                    sim_input_inject_key((uint8_t)*c, true);
+                    if (!s_type_rollover) {
+                        sim_input_inject_key((uint8_t)*c, false);
+                    } else if (c > s_type_text) {
+                        sim_input_inject_key((uint8_t)c[-1], false);
+                    }
+                }
+                size_t n = strlen(s_type_text);
+                if (s_type_rollover && n > 0) {
+                    sim_input_inject_key((uint8_t)s_type_text[n - 1], false);
+                }
+                typed = true;
+            }
+        }
+
         /* Headless timeout */
         if (s_headless && s_timeout_ms > 0 && (now_ms - start_ms) > (uint32_t)s_timeout_ms) {
             printf("Simulator timeout reached (%d ms)\n", s_timeout_ms);
+            if (s_type_text && !use_tk_wm) {
+                lv_obj_t *focused = lv_group_get_focused(lv_group_get_default());
+                printf("Focused text: \"%s\"\n",
+                       focused && lv_obj_check_type(focused, &lv_textarea_class)
+                           ? lv_textarea_get_text(focused) : "");
+            }
             if (s_screenshot_file && !sim_display_save_ppm(s_screenshot_file)) {
                 fprintf(stderr, "Failed to save simulator screenshot\n");
                 exit(1);

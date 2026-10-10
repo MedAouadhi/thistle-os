@@ -69,17 +69,40 @@ static struct {
  * under it, and dropped the next tap. */
 static bool s_touch_press_unread = false;
 
-static lv_indev_t *s_kbd_indev = NULL;
-static struct {
+typedef struct {
     uint32_t key;
     lv_indev_state_t state;
-} s_kbd_state = { 0, LV_INDEV_STATE_RELEASED };
+} kbd_event_t;
+
+static lv_indev_t *s_kbd_indev = NULL;
+/* The keypad as the latest key event left it; reported once the queue below
+ * is empty. */
+static kbd_event_t s_kbd_state = { 0, LV_INDEV_STATE_RELEASED };
+
+/* Key events LVGL has not read yet, oldest first. The keyboard driver drains
+ * its whole event FIFO in one poll, so a key, or several, can go down and up
+ * before LVGL next reads the keypad. Reporting s_kbd_state alone, LVGL saw
+ * only the last of those events and lost the keys. A full queue drops the
+ * event; s_kbd_state still follows the keyboard, so no key is left held. */
+#define KBD_QUEUE_LEN 32
+static kbd_event_t s_kbd_queue[KBD_QUEUE_LEN];
+static uint8_t     s_kbd_queue_head = 0;
+static uint8_t     s_kbd_queue_len  = 0;
+
+static void kbd_queue_push(kbd_event_t ev)
+{
+    if (s_kbd_queue_len == KBD_QUEUE_LEN) {
+        ESP_LOGW(TAG, "key queue full, dropping a key event");
+        return;
+    }
+    s_kbd_queue[(s_kbd_queue_head + s_kbd_queue_len) % KBD_QUEUE_LEN] = ev;
+    s_kbd_queue_len++;
+}
 
 /* HAL input callback — handles all event types from any registered driver.
  * Touch events update s_touch_state; key events update s_kbd_state.
  * A single callback is registered on every driver so that combined drivers
  * (e.g. the SDL2 simulator driver) work correctly regardless of is_touch. */
-
 static void ui_input_hal_cb(const hal_input_event_t *event, void *user_data)
 {
     (void)user_data;
@@ -94,12 +117,22 @@ static void ui_input_hal_cb(const hal_input_event_t *event, void *user_data)
         case HAL_INPUT_EVENT_TOUCH_UP:
             s_touch_state.state = LV_INDEV_STATE_RELEASED;
             break;
-        case HAL_INPUT_EVENT_KEY_DOWN: {
+        case HAL_INPUT_EVENT_KEY_DOWN:
+        case HAL_INPUT_EVENT_KEY_UP: {
             uint32_t lv_key = event->key.keycode;
             if      (lv_key == '\n')  lv_key = LV_KEY_ENTER;
             else if (lv_key == '\b')  lv_key = LV_KEY_BACKSPACE;
             else if (lv_key == 0x1B) lv_key = LV_KEY_ESC;
             else if (lv_key == '\t')  lv_key = LV_KEY_NEXT;
+
+            if (event->type == HAL_INPUT_EVENT_KEY_UP) {
+                /* A key let go after a later one went down was released
+                 * below when that one was pressed. */
+                if (lv_key != s_kbd_state.key) break;
+                s_kbd_state.state = LV_INDEV_STATE_RELEASED;
+                kbd_queue_push(s_kbd_state);
+                break;
+            }
 
             /* Global ESC handler: if foreground app is not the launcher,
              * switch back to the launcher regardless of focus. */
@@ -107,13 +140,18 @@ static void ui_input_hal_cb(const hal_input_event_t *event, void *user_data)
                 app_manager_launch("com.thistle.launcher");
             }
 
+            /* LVGL tracks one key: a second press while one is held reads as
+             * the first still held, and the second key is never sent. Typing
+             * fast overlaps keys like that, so release the held one first. */
+            if (s_kbd_state.state == LV_INDEV_STATE_PRESSED) {
+                s_kbd_state.state = LV_INDEV_STATE_RELEASED;
+                kbd_queue_push(s_kbd_state);
+            }
             s_kbd_state.key   = lv_key;
             s_kbd_state.state = LV_INDEV_STATE_PRESSED;
+            kbd_queue_push(s_kbd_state);
             break;
         }
-        case HAL_INPUT_EVENT_KEY_UP:
-            s_kbd_state.state = LV_INDEV_STATE_RELEASED;
-            break;
         default:
             break;
     }
@@ -136,8 +174,17 @@ static void ui_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
 static void ui_kbd_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
 {
     (void)indev;
-    data->key   = s_kbd_state.key;
-    data->state = s_kbd_state.state;
+    kbd_event_t ev = s_kbd_state;
+    if (s_kbd_queue_len > 0) {
+        ev = s_kbd_queue[s_kbd_queue_head];
+        s_kbd_queue_head = (uint8_t)((s_kbd_queue_head + 1) % KBD_QUEUE_LEN);
+        s_kbd_queue_len--;
+        /* LVGL calls back at once while this is set, so the whole queue is
+         * handled in this read, in order. */
+        data->continue_reading = s_kbd_queue_len > 0;
+    }
+    data->key   = ev.key;
+    data->state = ev.state;
 }
 
 /* -------------------------------------------------------------------------

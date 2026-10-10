@@ -24,6 +24,8 @@ Requires SDL2 (`brew install sdl2` / `apt install libsdl2-dev`) and a prior ESP-
 | `--scenario FILE` | Load hardware scenario from JSON |
 | `--tap X,Y` | Inject a tap after startup; repeat for more taps, 1.5 s apart |
 | `--tap-hold MS` | How long each tap is held (default 100; `0` delivers press and release before LVGL next reads the pointer) |
+| `--type TEXT` | Type TEXT after the taps, every key pressed and released before LVGL next reads the keypad; prints `Focused text: "..."` on exit |
+| `--type-rollover` | With `--type`, press each key before releasing the one before it |
 | `--log-flushes` | Print every area the window manager flushes to the display |
 | `--launch-app ID` | Launch a registered app instead of the launcher |
 | `--wm NAME` | Window manager for this run, overriding `system.json`: `thistle-tk`, `lvgl-epaper-wm` or `lvgl-lcd-wm` |

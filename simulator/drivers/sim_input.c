@@ -148,3 +148,16 @@ bool sim_input_inject_touch(uint16_t x, uint16_t y, bool pressed)
     s_cb(&event, s_cb_data);
     return true;
 }
+
+bool sim_input_inject_key(uint16_t keycode, bool pressed)
+{
+    if (!s_initialized || !s_cb) return false;
+
+    hal_input_event_t event = {
+        .type = pressed ? HAL_INPUT_EVENT_KEY_DOWN : HAL_INPUT_EVENT_KEY_UP,
+        .timestamp = 0,
+    };
+    event.key.keycode = keycode;
+    s_cb(&event, s_cb_data);
+    return true;
+}

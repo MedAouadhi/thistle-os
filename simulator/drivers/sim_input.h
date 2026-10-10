@@ -9,3 +9,6 @@ void sim_input_poll_sdl(void);
 
 /* Inject one touch edge in native display coordinates. */
 bool sim_input_inject_touch(uint16_t x, uint16_t y, bool pressed);
+
+/* Inject one key edge, as the keyboard driver reports it. */
+bool sim_input_inject_key(uint16_t keycode, bool pressed);
