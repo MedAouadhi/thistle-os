@@ -14,9 +14,12 @@
  * font and width as the label that shows them, so a page neither runs off
  * the bottom nor stops short. Arabic is shaped here, before that measuring:
  * see arabic_shape.c for why LVGL does not do it.
+ *
+ * A book opens where it was left: see book_progress.h.
  */
 #include "reader/reader_app.h"
 #include "reader/arabic_shape.h"
+#include "reader/book_progress.h"
 #include "reader/epub.h"
 #include "reader/epub_port.h"
 
@@ -63,6 +66,12 @@ static int s_app_h = 296;
  * else in PSRAM. */
 #define MAX_TEXT_FILE   (4 * 1024 * 1024)
 
+/* ThistleOS's own, apart from any other reader's on the same card. */
+#define PROGRESS_PATH   THISTLE_SDCARD "/data/reader/progress"
+/* The place is saved once the pages stop turning for this long: one write for
+ * a run of pages, made while the reader reads rather than as a page turns. */
+#define SAVE_DELAY_MS   2000
+
 /* ------------------------------------------------------------------ */
 /* State                                                                */
 /* ------------------------------------------------------------------ */
@@ -99,6 +108,13 @@ static struct {
     size_t   *pages;             /* where each page begins, then text_len */
     int       page_count;
     int       page;
+
+    /* Where the open book was left */
+    char      book_key[384];     /* its path from the card's root; "" for none */
+    uint32_t  book_size;
+    book_progress_t saved;       /* its place on the card, if has_saved */
+    bool      has_saved;
+    lv_timer_t *save_timer;      /* paused unless a save is due */
 } s_reader;
 
 /* ------------------------------------------------------------------ */
@@ -110,6 +126,7 @@ static void switch_to_reading(void);
 static void switch_to_contents(void);
 static void open_book(const char *path);
 static void show_page(int page);
+static void save_progress(void);
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                              */
@@ -185,12 +202,15 @@ static void free_text(void)
 
 static void close_book(void)
 {
+    save_progress();
     free_text();
     epub_close(s_reader.epub);
     free(s_reader.toc_page);
-    s_reader.epub     = NULL;
-    s_reader.toc_page = NULL;
-    s_reader.chapter  = 0;
+    s_reader.epub        = NULL;
+    s_reader.toc_page    = NULL;
+    s_reader.chapter     = 0;
+    s_reader.book_key[0] = '\0';
+    s_reader.has_saved   = false;
 }
 
 static int cmp_size(const void *a, const void *b)
@@ -259,6 +279,53 @@ static int page_of(size_t offset)
     int page = 0;
     while (page + 1 < s_reader.page_count && s_reader.pages[page + 1] <= offset) page++;
     return page;
+}
+
+/* ------------------------------------------------------------------ */
+/* Where the book was left                                              */
+/* ------------------------------------------------------------------ */
+
+/* Where a place saved in the chapter now open is in its text. A chapter
+ * whose text is no longer as long, as after a change to how books are read,
+ * is opened as far through. */
+static size_t place_in_text(const book_progress_t *left)
+{
+    if (left->text_len == 0 || left->text_len == s_reader.text_len) return left->offset;
+    return (size_t)((uint64_t)left->offset * s_reader.text_len / left->text_len);
+}
+
+/* Saves the open book's place: the first byte of the page shown. */
+static void save_progress(void)
+{
+    if (s_reader.save_timer) lv_timer_pause(s_reader.save_timer);
+    if (!s_reader.book_key[0] || !s_reader.text || s_reader.page_count <= 0) return;
+
+    uint32_t chapter = s_reader.epub ? (uint32_t)s_reader.chapter : 0;
+    /* Not while the page still holds the place saved. On a screen whose
+     * pages begin elsewhere, its first byte comes before that place, and
+     * saving it would move the place back each time the card changed
+     * devices. */
+    if (s_reader.has_saved && s_reader.saved.chapter == chapter &&
+        page_of(place_in_text(&s_reader.saved)) == s_reader.page) {
+        return;
+    }
+
+    book_progress_t now = {
+        .book_size = s_reader.book_size,
+        .chapter   = chapter,
+        .offset    = (uint32_t)s_reader.pages[s_reader.page],
+        .text_len  = (uint32_t)s_reader.text_len,
+    };
+    if (book_progress_save(PROGRESS_PATH, s_reader.book_key, &now)) {
+        s_reader.saved     = now;
+        s_reader.has_saved = true;
+    }
+}
+
+static void save_timer_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    save_progress();
 }
 
 /* Takes `text` (len bytes, from epub_malloc) as the text being read, shaping
@@ -435,6 +502,11 @@ static void show_page(int page)
                  page + 1, s_reader.page_count, (page + 1) * 100 / s_reader.page_count);
     }
     lv_label_set_text(s_reader.footer_label, footer);
+
+    if (s_reader.save_timer) {
+        lv_timer_reset(s_reader.save_timer);
+        lv_timer_resume(s_reader.save_timer);
+    }
 }
 
 static void next_page(void)
@@ -602,10 +674,26 @@ static void open_book(const char *path)
 {
     close_book();
 
+    /* Its place is kept by its path from the card's root, which any device
+     * the card goes into sees the same, and its size: a book that has changed
+     * since starts at the beginning. */
+    size_t root_len = strlen(THISTLE_SDCARD);
+    const char *key = strncmp(path, THISTLE_SDCARD, root_len) == 0 && path[root_len] == '/'
+                          ? path + root_len : path;
+    snprintf(s_reader.book_key, sizeof(s_reader.book_key), "%s", key);
+    struct stat st;
+    s_reader.book_size = stat(path, &st) == 0 ? (uint32_t)st.st_size : 0;
+    book_progress_t left = {0};
+    bool resume = book_progress_load(PROGRESS_PATH, s_reader.book_key, &left) &&
+                  left.book_size == s_reader.book_size;
+
     bool ok;
     if (has_ext(path, ".epub")) {
         s_reader.epub = epub_open(path);
-        ok = s_reader.epub && open_chapter(0, 1, -1, false);
+        resume = resume && s_reader.epub && left.chapter < (uint32_t)epub_chapter_count(s_reader.epub);
+        ok = s_reader.epub && ((resume && open_chapter((int)left.chapter, 1, -1, false)) ||
+                               open_chapter(0, 1, -1, false));
+        resume = resume && ok && (uint32_t)s_reader.chapter == left.chapter;
     } else {
         ok = load_text_file(path);
         if (ok) show_page(0);
@@ -614,6 +702,13 @@ static void open_book(const char *path)
         close_book();
         toast_warn("Cannot open book");
         return;
+    }
+    if (resume) {
+        show_page(page_of(place_in_text(&left)));
+        s_reader.saved     = left;
+        s_reader.has_saved = true;
+        ESP_LOGI(TAG, "%s: back at chapter %d, page %d of %d", s_reader.book_key,
+                 s_reader.chapter + 1, s_reader.page + 1, s_reader.page_count);
     }
 
     /* A right-to-left book reads from the right even on a page that begins
@@ -978,6 +1073,8 @@ esp_err_t reader_ui_create(lv_obj_t *parent)
 
     memset(&s_reader, 0, sizeof(s_reader));
     s_reader.font = book_font();
+    s_reader.save_timer = lv_timer_create(save_timer_cb, SAVE_DELAY_MS, NULL);
+    if (s_reader.save_timer) lv_timer_pause(s_reader.save_timer);
 
     s_reader.root = lv_obj_create(parent);
     lv_obj_set_size(s_reader.root, LV_PCT(100), LV_PCT(100));
@@ -1006,6 +1103,7 @@ void reader_ui_show(void)
 
 void reader_ui_hide(void)
 {
+    save_progress();
     if (s_reader.root) {
         lv_obj_add_flag(s_reader.root, LV_OBJ_FLAG_HIDDEN);
     }
@@ -1014,6 +1112,10 @@ void reader_ui_hide(void)
 void reader_ui_destroy(void)
 {
     close_book();
+    if (s_reader.save_timer) {
+        lv_timer_delete(s_reader.save_timer);
+        s_reader.save_timer = NULL;
+    }
     free(s_reader.books);
     s_reader.books = NULL;
     if (s_reader.root) {
