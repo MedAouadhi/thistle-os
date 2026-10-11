@@ -1,0 +1,834 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LVGL Apps · ThistleOS</title>
+  <link rel="stylesheet" href="style.css">
+  <!-- Faces used inside the diagrams only (Diagram Design default skin). -->
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&family=Noto+Serif:ital@0;1&display=swap" rel="stylesheet">
+  <style>
+    .dd-figure { margin: 8px 0 32px; }
+    /* The SVG keeps its 744px drawing width; a narrow screen scrolls the
+       figure, not the page. */
+    .dd-figure .diagram-container {
+      width: 100%;
+      overflow-x: auto;
+      background: #f5f5f5;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+    }
+    .dd-figure svg { width: 100%; min-width: 744px; display: block; }
+    .dd-figure figcaption { margin-top: 10px; font-size: 13px; color: var(--text-dim); }
+    /* Long paths and flags in step text wrap instead of widening the page. */
+    .steps code { overflow-wrap: anywhere; }
+    @media print {
+      .dd-figure .diagram-container { overflow-x: visible; }
+      .dd-figure svg { min-width: 0; }
+    }
+  </style>
+</head>
+<body>
+<nav class="top-nav">
+  <div class="top-nav-inner">
+    <a href="/thistle-os/" class="top-nav-brand">ThistleOS</a>
+    <div class="top-nav-links">
+      <a href="/thistle-os/docs/">Docs</a>
+      <a href="/thistle-os/docs/devices.html">Devices</a>
+      <a href="/thistle-os/docs/drivers.html">Drivers</a>
+      <a href="/thistle-os/docs/apps.html">Apps</a>
+      <a href="/thistle-os/docs/kernel-modules.html">Modules</a>
+      <a href="/thistle-os/simulator/">Simulator</a>
+      <a href="https://github.com/wan0net/thistle-os">GitHub</a>
+    </div>
+  </div>
+</nav>
+<div class="site-wrapper">
+
+  <nav class="sidebar">
+    <div class="sidebar-inner">
+      <a href="index.html" class="sidebar-logo">
+        <img src="thistle-logo.svg" alt="ThistleOS">
+        <div>
+          <div class="sidebar-logo-text">ThistleOS</div>
+          <div class="sidebar-logo-sub">Documentation</div>
+        </div>
+      </a>
+      <div class="sidebar-nav">
+        <div class="nav-label">Getting Started</div>
+        <a href="index.html">Overview</a>
+        <a href="architecture.html">Architecture</a>
+
+        <div class="nav-label">Development</div>
+        <a href="app-development.html">Building Apps</a>
+        <a href="lvgl-app-development.html" class="active">LVGL Apps</a>
+        <a href="driver-development.html">Building Drivers</a>
+        <div class="nav-label">Reference</div>
+        <a href="devices.html">Devices</a>
+        <a href="drivers.html">Drivers</a>
+        <a href="apps.html">Apps</a>
+        <a href="window-managers.html">Window Managers</a>
+        <a href="kernel-modules.html">Kernel Modules</a>
+
+        <div class="nav-label">Testing</div>
+        <a href="simulator-testing.html">Simulator &amp; Testing</a>
+
+        <div class="nav-label">System</div>
+        <a href="app-store.html">App Store</a>
+        <a href="security.html">Security &amp; Signing</a>
+        <a href="recovery.html">Recovery OS</a>
+      </div>
+    </div>
+  </nav>
+
+  <main class="main-content">
+    <div class="page-header">
+      <div class="breadcrumb"><a href="index.html">ThistleOS</a> / LVGL Apps</div>
+      <h1>Building apps for the LVGL window manager</h1>
+      <p class="lead">On ESP32-S3 boards an LVGL window manager hosts all fourteen built-in apps, the launcher included. This page covers what an app must implement to run under it, when ThistleOS calls that code, and which interfaces it can use.</p>
+      <a href="https://github.com/wan0net/thistle-os/blob/main/docs/lvgl-app-development.html" class="edit-link">&#9998; Edit on GitHub</a>
+    </div>
+
+    <div class="callout warn">
+      <div class="callout-title">S3 firmware only</div>
+      The LVGL managers and the C apps they host are compiled into the S3 image alone. <code>main/CMakeLists.txt</code> defines <code>THISTLE_LEGACY_C_APPS</code> for <code>esp32s3</code>. Every other target boots thistle-tk and loads signed <code>.app.elf</code> files. Both simulators build the LVGL apps as well.
+    </div>
+
+    <h2>Two kinds of app</h2>
+    <p>An app reaches the LVGL window manager in one of two ways. Most of this page is about the first, because all fourteen apps on the device today are written that way.</p>
+
+    <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th></th><th>Built-in LVGL app</th><th>Loadable <code>.app.elf</code></th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Source lives in</td><td><code>apps/&lt;name&gt;/</code>, compiled into the firmware</td><td>Its own CMake project, like <code>standalone_apps/notes/</code></td></tr>
+        <tr><td>Draws with</td><td>LVGL itself: <code>lv_obj_t</code>, styles, every widget</td><td>The <code>thistle_ui_*</code> widget API, which the manager turns into LVGL objects</td></tr>
+        <tr><td>Registered by</td><td>Your <code>*_app_register()</code>, called from <code>lvgl_apps_register_builtin()</code></td><td>The ELF loader at boot, from <code>/spiffs/apps/</code> and <code>/sdcard/apps/</code></td></tr>
+        <tr><td>Runs on</td><td>The LVGL task, with the LVGL lock held</td><td>Its own FreeRTOS task, 8 KB stack</td></tr>
+        <tr><td>Permissions</td><td>One <code>permissions_grant()</code> line in <code>main/main.c</code></td><td>The manifest's list, only if the Ed25519 signature verifies</td></tr>
+        <tr><td>Under thistle-tk</td><td>Never registered: launching one would dereference a NULL app area</td><td>Same binary, same calls</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Write a built-in app when you need real LVGL: lists, multi-line text areas, custom styles, keyboard focus, anything the widget API cannot express. Write a loadable app when one binary has to run on every board and under either window manager, and read <a href="#elf-apps">the gaps listed for that path</a> first.</p>
+
+    <h2>How the LVGL manager gets chosen</h2>
+    <p><code>"window_manager"</code> in <code>config/system.json</code> names a manager by its own <code>name</code>. At boot, <code>thistle_wm_select()</code> in <code>components/ui/src/wm_select.c</code> resolves it:</p>
+    <ul>
+      <li><code>"lvgl-epaper-wm"</code> flushes into the panel's framebuffer and refreshes the glass only after the UI has been still for 300 ms.</li>
+      <li><code>"lvgl-lcd-wm"</code> flushes straight to the panel and shows a splash screen.</li>
+      <li><code>"auto"</code>, empty, absent or unknown picks e-paper when the display driver has a <code>refresh()</code> hook, LCD otherwise.</li>
+      <li><code>"thistle-tk"</code> skips the LVGL apps entirely.</li>
+    </ul>
+    <p>The selector returns the manager and a <code>hosts_lvgl_apps</code> flag together, and <code>main.c</code> registers the LVGL apps only when that flag is set. Both LVGL variants share <code>lvgl_wm.c</code> and <code>manager.c</code>. They differ in their flush callback and in whether the refresh is deferred. Your app code is the same for both. In the simulator, <code>--wm NAME</code> overrides <code>system.json</code> for one run.</p>
+
+    <h2>Where your app sits</h2>
+    <figure class="dd-figure">
+      <div class="diagram-container">
+<svg viewBox="0 0 744 576" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="lvgl-arch-title lvgl-arch-desc">
+<title id="lvgl-arch-title">Where an LVGL app sits in ThistleOS</title>
+<desc id="lvgl-arch-desc">Architecture: the kernel app manager drives a built-in LVGL app, which builds its widgets in the window manager's app area; a loadable ELF app reaches the same area through the kernel widget dispatcher, while the LVGL render task reads input drivers and flushes to the display driver.</desc>
+<defs>
+<marker id="lvgl-arch-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/></marker>
+<marker id="lvgl-arch-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#bf4520"/></marker>
+<marker id="lvgl-arch-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#2e5aa8"/></marker>
+</defs>
+<rect width="100%" height="100%" fill="#f5f5f5"/>
+<rect x="28" y="264" width="688" height="104" rx="8" fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+<rect x="268" y="400" width="448" height="104" rx="8" fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+<rect x="280" y="404" width="68" height="12" rx="2" fill="#f5f5f5"/>
+<text x="314" y="413" fill="#5a6580" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.14em">HAL DRIVERS</text>
+<rect x="176" y="268" width="108" height="12" rx="2" fill="#f5f5f5"/>
+<text x="230" y="277" fill="#5a6580" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.14em">LVGL WINDOW MANAGER</text>
+<path d="M 344,88 V 112 Q 344,120 336,120 H 140 Q 132,120 132,128 V 152" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#lvgl-arch-arrow)"/>
+<path d="M 400,88 V 112 Q 400,120 408,120 H 604 Q 612,120 612,128 V 152" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#lvgl-arch-arrow)"/>
+<path d="M 524,180 H 460" fill="none" stroke="#2e5aa8" stroke-width="1.2" marker-end="url(#lvgl-arch-arrow-link)"/>
+<path d="M 400,208 V 296" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#lvgl-arch-arrow)"/>
+<path d="M 160,208 V 228 Q 160,236 168,236 H 336 Q 344,236 344,244 V 296" fill="none" stroke="#bf4520" stroke-width="1.4" marker-end="url(#lvgl-arch-arrow-accent)"/>
+<path d="M 104,208 V 296" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#lvgl-arch-arrow)"/>
+<path d="M 524,324 H 460" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#lvgl-arch-arrow)"/>
+<path d="M 372,432 V 400 Q 372,392 380,392 H 576 Q 584,392 584,384 V 352" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#lvgl-arch-arrow)"/>
+<path d="M 640,352 V 432" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#lvgl-arch-arrow)"/>
+<rect x="208" y="102" width="60" height="12" rx="2" fill="#f5f5f5"/>
+<text x="238" y="111" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">LIFECYCLE</text>
+<rect x="472" y="102" width="68" height="12" rx="2" fill="#f5f5f5"/>
+<text x="506" y="111" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">SPAWNS TASK</text>
+<rect x="468" y="162" width="48" height="12" rx="2" fill="#f5f5f5"/>
+<text x="492" y="171" fill="#2e5aa8" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">SYSCALL</text>
+<rect x="408" y="240" width="60" height="12" rx="2" fill="#f5f5f5"/>
+<text x="438" y="249" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">WM VTABLE</text>
+<rect x="220" y="218" width="64" height="12" rx="2" fill="#f5f5f5"/>
+<text x="252" y="227" fill="#bf4520" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">PARENTS UI</text>
+<rect x="36" y="240" width="60" height="12" rx="2" fill="#f5f5f5"/>
+<text x="66" y="249" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">SET TITLE</text>
+<rect x="474" y="306" width="36" height="12" rx="2" fill="#f5f5f5"/>
+<text x="492" y="315" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">DRAWS</text>
+<rect x="444" y="374" width="68" height="12" rx="2" fill="#f5f5f5"/>
+<text x="478" y="383" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">KEY · TOUCH</text>
+<rect x="648" y="386" width="36" height="12" rx="2" fill="#f5f5f5"/>
+<text x="666" y="395" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">FLUSH</text>
+<rect x="284" y="32" width="176" height="56" rx="6" fill="#f5f5f5"/>
+<rect x="284" y="32" width="176" height="56" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+<rect x="292" y="38" width="40" height="12" rx="2" fill="none" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+<text x="312" y="47" fill="#2d3142" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">KERNEL</text>
+<text x="372" y="67" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">App manager</text>
+<text x="372" y="81" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">app_manager.rs</text>
+<rect x="44" y="152" width="176" height="56" rx="6" fill="#f5f5f5"/>
+<rect x="44" y="152" width="176" height="56" rx="6" fill="rgba(191,69,32,0.08)" stroke="#bf4520" stroke-width="1"/>
+<rect x="52" y="158" width="36" height="12" rx="2" fill="none" stroke="rgba(191,69,32,0.50)" stroke-width="0.8"/>
+<text x="70" y="167" fill="#bf4520" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">C APP</text>
+<text x="132" y="187" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Built-in LVGL app</text>
+<text x="132" y="201" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">apps/&lt;name&gt;/ · S3 only</text>
+<rect x="284" y="152" width="176" height="56" rx="6" fill="#f5f5f5"/>
+<rect x="284" y="152" width="176" height="56" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+<rect x="292" y="158" width="40" height="12" rx="2" fill="none" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+<text x="312" y="167" fill="#2d3142" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">KERNEL</text>
+<text x="372" y="187" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Widget dispatcher</text>
+<text x="372" y="201" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">thistle_ui_* → WM vtable</text>
+<rect x="524" y="152" width="176" height="56" rx="6" fill="#f5f5f5"/>
+<rect x="524" y="152" width="176" height="56" rx="6" fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.40)" stroke-width="1" stroke-dasharray="4,3"/>
+<rect x="532" y="158" width="24" height="12" rx="2" fill="none" stroke="rgba(45,49,66,0.22)" stroke-width="0.8"/>
+<text x="544" y="167" fill="#5a6580" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">ELF</text>
+<text x="612" y="187" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Loadable app</text>
+<text x="612" y="201" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">.app.elf · own task</text>
+<rect x="44" y="296" width="176" height="56" rx="6" fill="#f5f5f5"/>
+<rect x="44" y="296" width="176" height="56" rx="6" fill="rgba(45,49,66,0.05)" stroke="#4f5d75" stroke-width="1"/>
+<rect x="52" y="302" width="40" height="12" rx="2" fill="none" stroke="rgba(79,93,117,0.50)" stroke-width="0.8"/>
+<text x="72" y="311" fill="#4f5d75" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">LV_OBJ</text>
+<text x="132" y="331" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Status bar</text>
+<text x="132" y="345" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">24 px · statusbar.c</text>
+<rect x="284" y="296" width="176" height="56" rx="6" fill="#f5f5f5"/>
+<rect x="284" y="296" width="176" height="56" rx="6" fill="rgba(45,49,66,0.05)" stroke="#4f5d75" stroke-width="1"/>
+<rect x="292" y="302" width="40" height="12" rx="2" fill="none" stroke="rgba(79,93,117,0.50)" stroke-width="0.8"/>
+<text x="312" y="311" fill="#4f5d75" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">LV_OBJ</text>
+<text x="372" y="331" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">App area</text>
+<text x="372" y="345" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">ui_manager_get_app_area()</text>
+<rect x="524" y="296" width="176" height="56" rx="6" fill="#f5f5f5"/>
+<rect x="524" y="296" width="176" height="56" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+<rect x="532" y="302" width="28" height="12" rx="2" fill="none" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+<text x="546" y="311" fill="#2d3142" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">TASK</text>
+<text x="612" y="331" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">LVGL render task</text>
+<text x="612" y="345" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">lv_timer_handler · 10 ms</text>
+<rect x="284" y="432" width="176" height="56" rx="6" fill="#f5f5f5"/>
+<rect x="284" y="432" width="176" height="56" rx="6" fill="rgba(45,49,66,0.03)" stroke="rgba(45,49,66,0.30)" stroke-width="1"/>
+<rect x="292" y="438" width="24" height="12" rx="2" fill="none" stroke="rgba(45,49,66,0.22)" stroke-width="0.8"/>
+<text x="304" y="447" fill="#5a6580" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">HAL</text>
+<text x="372" y="467" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Input drivers</text>
+<text x="372" y="481" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">keyboard · touch</text>
+<rect x="524" y="432" width="176" height="56" rx="6" fill="#f5f5f5"/>
+<rect x="524" y="432" width="176" height="56" rx="6" fill="rgba(45,49,66,0.03)" stroke="rgba(45,49,66,0.30)" stroke-width="1"/>
+<rect x="532" y="438" width="24" height="12" rx="2" fill="none" stroke="rgba(45,49,66,0.22)" stroke-width="0.8"/>
+<text x="544" y="447" fill="#5a6580" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">HAL</text>
+<text x="612" y="467" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Display driver</text>
+<text x="612" y="481" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">e-paper · LCD</text>
+<line x1="24" y1="528" x2="720" y2="528" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+<text x="24" y="544" fill="#4f5d75" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" letter-spacing="0.18em">LEGEND</text>
+<rect x="24" y="556" width="14" height="10" rx="2" fill="rgba(191,69,32,0.08)" stroke="#bf4520" stroke-width="1"/>
+<text x="44" y="564" fill="#4f5d75" font-size="8.5" font-family="'Geist', system-ui, sans-serif">Your app</text>
+<rect x="128" y="556" width="14" height="10" rx="2" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+<text x="148" y="564" fill="#4f5d75" font-size="8.5" font-family="'Geist', system-ui, sans-serif">Kernel · task</text>
+<rect x="248" y="556" width="14" height="10" rx="2" fill="rgba(45,49,66,0.05)" stroke="#4f5d75" stroke-width="1"/>
+<text x="268" y="564" fill="#4f5d75" font-size="8.5" font-family="'Geist', system-ui, sans-serif">LVGL object</text>
+<rect x="360" y="556" width="14" height="10" rx="2" fill="rgba(45,49,66,0.03)" stroke="rgba(45,49,66,0.30)" stroke-width="1"/>
+<text x="380" y="564" fill="#4f5d75" font-size="8.5" font-family="'Geist', system-ui, sans-serif">HAL driver</text>
+<rect x="468" y="556" width="14" height="10" rx="2" fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.40)" stroke-width="1" stroke-dasharray="3,2"/>
+<text x="488" y="564" fill="#4f5d75" font-size="8.5" font-family="'Geist', system-ui, sans-serif">Loadable ELF</text>
+<line x1="588" y1="561" x2="616" y2="561" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#lvgl-arch-arrow)"/>
+<text x="624" y="564" fill="#4f5d75" font-size="8.5" font-family="'Geist', system-ui, sans-serif">Call / data</text>
+</svg>
+      </div>
+      <figcaption>The app manager drives your callbacks. Your widgets live in the app area. The render task owns input and the display.</figcaption>
+    </figure>
+    <p>The window manager splits the screen once, in <code>ui_manager_init()</code>. The top 24 px belong to the status bar. Everything below is one LVGL object, the <em>app area</em>, which every app shares. You build your UI as children of it, and you delete those children yourself. No one else will.</p>
+    <p>The app manager in <code>components/kernel_rs/src/app_manager.rs</code> owns the lifecycle. It holds at most 20 apps, keyed by ID. A second registration of an ID returns <code>ESP_OK</code> but keeps the first, which is why each window manager registers only its own App Store and Flashlight.</p>
+    <p>The LVGL render task wakes every 10 ms. It polls the input drivers, takes the LVGL mutex, runs <code>lv_timer_handler()</code>, and flushes whatever changed to the display driver. Loadable apps never see an <code>lv_obj_t</code>. They get 32-bit widget handles, and the kernel's widget dispatcher forwards each <code>thistle_ui_*</code> call to the active manager's vtable.</p>
+
+    <h2>What a built-in app implements</h2>
+    <p>Two structs from <code>thistle/app_manager.h</code> and one registration function. That is the whole contract.</p>
+    <pre><code><span class="tok-keyword">typedef struct</span> {
+    <span class="tok-keyword">const char</span> *id;          <span class="tok-comment">// "com.thistle.notes": unique, and what the launcher launches</span>
+    <span class="tok-keyword">const char</span> *name;        <span class="tok-comment">// label under the launcher icon</span>
+    <span class="tok-keyword">const char</span> *version;     <span class="tok-comment">// semver</span>
+    <span class="tok-type">bool</span> allow_background;   <span class="tok-comment">// stored, but launch() never reads it</span>
+    <span class="tok-type">uint32_t</span> min_memory_kb;  <span class="tok-comment">// stored, not enforced</span>
+} <span class="tok-type">app_manifest_t</span>;
+
+<span class="tok-keyword">typedef struct</span> {
+    <span class="tok-type">esp_err_t</span> (*<span class="tok-fn">on_create</span>)(<span class="tok-keyword">void</span>);
+    <span class="tok-keyword">void</span> (*<span class="tok-fn">on_start</span>)(<span class="tok-keyword">void</span>);
+    <span class="tok-keyword">void</span> (*<span class="tok-fn">on_pause</span>)(<span class="tok-keyword">void</span>);
+    <span class="tok-keyword">void</span> (*<span class="tok-fn">on_resume</span>)(<span class="tok-keyword">void</span>);
+    <span class="tok-keyword">void</span> (*<span class="tok-fn">on_destroy</span>)(<span class="tok-keyword">void</span>);
+    <span class="tok-keyword">const</span> <span class="tok-type">app_manifest_t</span> *manifest;
+} <span class="tok-type">app_entry_t</span>;
+
+<span class="tok-type">esp_err_t</span> <span class="tok-fn">app_manager_register</span>(<span class="tok-keyword">const</span> <span class="tok-type">app_entry_t</span> *app);</code></pre>
+    <p>The kernel keeps the pointer you pass, so both structs must be <code>static</code>. Any callback may be <code>NULL</code>.</p>
+
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th>Callback</th><th>The kernel calls it when</th><th>Your app should</th></tr></thead>
+      <tbody>
+        <tr><td><code>on_create</code></td><td>Something launches the app while it is Unloaded</td><td>Build the UI under <code>ui_manager_get_app_area()</code>. Return <code>ESP_OK</code>. Any other value cancels the launch.</td></tr>
+        <tr><td><code>on_start</code></td><td>Straight after a successful <code>on_create</code></td><td>Set the status bar title and show your root object.</td></tr>
+        <tr><td><code>on_pause</code></td><td>Only for the launcher on switch-away, or on <code>app_manager_suspend()</code></td><td>Save, then hide your root.</td></tr>
+        <tr><td><code>on_resume</code></td><td>Launch while Backgrounded or Suspended</td><td>Show your root and set the title again.</td></tr>
+        <tr><td><code>on_destroy</code></td><td>Any other app is launched: Home, Esc, or a launcher tap</td><td>Save, delete your root object, free memory, and set every static pointer back to <code>NULL</code>.</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <div class="callout danger">
+      <div class="callout-title">Your app is destroyed, not paused</div>
+      When anything launches another app, <code>launch()</code> runs <code>on_destroy</code> on the foreground app unless that app is the launcher. Every launch of your app therefore starts from <code>on_create</code>, with nothing left from last time. Keep state you want back in a file, not in a static that still points at a deleted widget.
+    </div>
+
+    <h3>The lifecycle as the kernel runs it</h3>
+    <figure class="dd-figure">
+      <div class="diagram-container">
+<svg viewBox="0 0 744 408" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="lvgl-life-title lvgl-life-desc">
+<title id="lvgl-life-title">App lifecycle as app_manager.rs runs it</title>
+<desc id="lvgl-life-desc">State machine: a registered app goes from Unloaded through on_create and on_start to Running; switching to another app destroys it back to Unloaded, only the launcher is paused and resumed, and kill or LRU eviction clears the slot so the app can no longer be launched.</desc>
+<defs>
+<marker id="lvgl-life-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/></marker>
+<marker id="lvgl-life-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#bf4520"/></marker>
+<marker id="lvgl-life-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#2e5aa8"/></marker>
+</defs>
+<rect width="100%" height="100%" fill="#f5f5f5"/>
+<path d="M 34,132 H 88" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#lvgl-life-arrow)"/>
+<path d="M 248,132 H 320" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#lvgl-life-arrow)"/>
+<path d="M 480,132 H 552" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#lvgl-life-arrow)"/>
+<path d="M 632,100 V 72 Q 632,64 624,64 H 176 Q 168,64 168,72 V 100" fill="none" stroke="#bf4520" stroke-width="1.4" marker-end="url(#lvgl-life-arrow-accent)"/>
+<path d="M 400,164 V 188 Q 400,196 392,196 H 176 Q 168,196 168,188 V 164" fill="none" stroke="#4f5d75" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#lvgl-life-arrow)"/>
+<path d="M 604,164 V 264" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#lvgl-life-arrow)"/>
+<path d="M 660,264 V 164" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#lvgl-life-arrow)"/>
+<path d="M 552,300 H 410" fill="none" stroke="#4f5d75" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#lvgl-life-arrow)"/>
+<rect x="35" y="114" width="52" height="12" rx="2" fill="#f5f5f5"/>
+<text x="61" y="123" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">REGISTER</text>
+<rect x="254" y="114" width="60" height="12" rx="2" fill="#f5f5f5"/>
+<text x="284" y="123" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">ON_CREATE</text>
+<rect x="490" y="114" width="52" height="12" rx="2" fill="#f5f5f5"/>
+<text x="516" y="123" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">ON_START</text>
+<rect x="368" y="46" width="64" height="12" rx="2" fill="#f5f5f5"/>
+<text x="400" y="55" fill="#bf4520" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">ON_DESTROY</text>
+<rect x="244" y="202" width="80" height="12" rx="2" fill="#f5f5f5"/>
+<text x="284" y="211" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">CREATE FAILED</text>
+<rect x="544" y="208" width="52" height="12" rx="2" fill="#f5f5f5"/>
+<text x="570" y="217" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">ON_PAUSE</text>
+<rect x="668" y="208" width="60" height="12" rx="2" fill="#f5f5f5"/>
+<text x="698" y="217" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">ON_RESUME</text>
+<rect x="444" y="282" width="76" height="12" rx="2" fill="#f5f5f5"/>
+<text x="482" y="291" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">KILL · EVICT</text>
+<text x="712" y="30" fill="#bf4520" font-size="14" font-style="italic" font-family="'Instrument Serif', 'Noto Serif', serif" text-anchor="end">leaving any app but the launcher destroys it</text>
+<path d="M 600,38 Q 600,52 590,60" fill="none" stroke="rgba(191,69,32,0.50)" stroke-width="1" stroke-dasharray="4,3"/>
+<circle cx="588" cy="64" r="2" fill="#bf4520"/>
+<circle cx="28" cy="132" r="6" fill="#2d3142"/>
+<circle cx="400" cy="300" r="8" fill="#f5f5f5" stroke="#2d3142" stroke-width="1"/>
+<circle cx="400" cy="300" r="5" fill="#2d3142"/>
+<text x="400" y="326" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">slot cleared · launch fails</text>
+<rect x="88" y="100" width="160" height="64" rx="8" fill="#f5f5f5"/>
+<rect x="88" y="100" width="160" height="64" rx="8" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+<rect x="96" y="106" width="36" height="12" rx="2" fill="none" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+<text x="114" y="115" fill="#2d3142" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">STATE</text>
+<text x="168" y="139" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Unloaded</text>
+<text x="168" y="153" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">registered, no UI</text>
+<rect x="320" y="100" width="160" height="64" rx="8" fill="#f5f5f5"/>
+<rect x="320" y="100" width="160" height="64" rx="8" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+<rect x="328" y="106" width="36" height="12" rx="2" fill="none" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+<text x="346" y="115" fill="#2d3142" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">STATE</text>
+<text x="400" y="139" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Loading</text>
+<text x="400" y="153" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">inside on_create()</text>
+<rect x="552" y="100" width="160" height="64" rx="8" fill="#f5f5f5"/>
+<rect x="552" y="100" width="160" height="64" rx="8" fill="rgba(191,69,32,0.08)" stroke="#bf4520" stroke-width="1"/>
+<rect x="560" y="106" width="36" height="12" rx="2" fill="none" stroke="rgba(191,69,32,0.50)" stroke-width="0.8"/>
+<text x="578" y="115" fill="#bf4520" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">STATE</text>
+<text x="632" y="139" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Running</text>
+<text x="632" y="153" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">foreground</text>
+<rect x="552" y="264" width="160" height="72" rx="8" fill="#f5f5f5"/>
+<rect x="552" y="264" width="160" height="72" rx="8" fill="rgba(45,49,66,0.05)" stroke="#4f5d75" stroke-width="1"/>
+<rect x="560" y="270" width="36" height="12" rx="2" fill="none" stroke="rgba(79,93,117,0.50)" stroke-width="0.8"/>
+<text x="578" y="279" fill="#4f5d75" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">STATE</text>
+<text x="632" y="300" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Backgrounded</text>
+<text x="632" y="314" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">launcher on switch-away</text>
+<text x="632" y="328" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">SUSPENDED behaves alike</text>
+<line x1="24" y1="360" x2="720" y2="360" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+<text x="24" y="376" fill="#4f5d75" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" letter-spacing="0.18em">LEGEND</text>
+<rect x="24" y="388" width="14" height="10" rx="2" fill="rgba(191,69,32,0.08)" stroke="#bf4520" stroke-width="1"/>
+<text x="44" y="396" fill="#4f5d75" font-size="8.5" font-family="'Geist', system-ui, sans-serif">Foreground</text>
+<rect x="128" y="388" width="14" height="10" rx="2" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+<text x="148" y="396" fill="#4f5d75" font-size="8.5" font-family="'Geist', system-ui, sans-serif">State</text>
+<line x1="208" y1="393" x2="236" y2="393" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#lvgl-life-arrow)"/>
+<text x="244" y="396" fill="#4f5d75" font-size="8.5" font-family="'Geist', system-ui, sans-serif">Callback the kernel runs</text>
+<line x1="376" y1="393" x2="404" y2="393" stroke="#4f5d75" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#lvgl-life-arrow)"/>
+<text x="412" y="396" fill="#4f5d75" font-size="8.5" font-family="'Geist', system-ui, sans-serif">Rollback · teardown</text>
+<circle cx="533" cy="393" r="4" fill="#2d3142"/>
+<circle cx="548" cy="393" r="5" fill="none" stroke="#2d3142" stroke-width="1"/>
+<circle cx="548" cy="393" r="3" fill="#2d3142"/>
+<text x="560" y="396" fill="#4f5d75" font-size="8.5" font-family="'Geist', system-ui, sans-serif">Register · removed</text>
+</svg>
+      </div>
+      <figcaption>States are <code>app_state_t</code>. Labels name the callback the kernel runs on that transition.</figcaption>
+    </figure>
+    <ul>
+      <li>A failed <code>on_create</code> puts your app back to Unloaded and marks the previous app Running again. It does not call that app's <code>on_resume</code> or <code>on_create</code>, so a launcher that hid itself in <code>on_pause</code> stays hidden. Fail before you build anything, and clean up what you built if you fail later.</li>
+      <li><code>app_manager_kill()</code> and the low-memory LRU eviction (under 50 KB free) both run <code>on_destroy</code> and then empty the slot. The launcher still shows the icon, but launching it fails with <code>ESP_ERR_NOT_FOUND</code> until the next boot. Nothing outside the tests calls kill or suspend today.</li>
+      <li><code>app_manager_launch()</code> holds the app manager's lock while it calls your callbacks. Call it from an LVGL event handler, never from inside a lifecycle callback.</li>
+    </ul>
+
+    <h3>A minimal app</h3>
+    <p>Apps under <code>apps/</code> follow one layout, and <code>cmake/thistle_apps.cmake</code> relies on it. Each app needs both <code>&lt;stem&gt;_app.c</code> and <code>&lt;stem&gt;_ui.c</code>, or the simulator builds fail.</p>
+    <div class="diagram">apps/hello/
+├── CMakeLists.txt
+├── manifest.json            <span class="d-dim"># id, name, version, permissions; the firmware build does not read it</span>
+└── hello/
+    ├── hello_app.h
+    ├── hello_app.c          <span class="d-dim"># lifecycle + registration</span>
+    └── hello_ui.c           <span class="d-dim"># LVGL widgets</span></div>
+
+    <pre><code><span class="tok-comment"># apps/hello/CMakeLists.txt</span>
+idf_component_register(
+    SRCS "hello/hello_app.c" "hello/hello_ui.c"
+    INCLUDE_DIRS "."
+    REQUIRES kernel ui thistle_hal
+)</code></pre>
+
+    <pre><code><span class="tok-comment">/* apps/hello/hello/hello_app.h */</span>
+<span class="tok-macro">#pragma once</span>
+<span class="tok-macro">#include</span> <span class="tok-string">"esp_err.h"</span>
+<span class="tok-macro">#include</span> <span class="tok-string">"lvgl.h"</span>
+
+<span class="tok-type">esp_err_t</span> <span class="tok-fn">hello_app_register</span>(<span class="tok-keyword">void</span>);
+<span class="tok-type">esp_err_t</span> <span class="tok-fn">hello_ui_create</span>(<span class="tok-type">lv_obj_t</span> *parent);
+<span class="tok-keyword">void</span> <span class="tok-fn">hello_ui_destroy</span>(<span class="tok-keyword">void</span>);</code></pre>
+
+    <pre><code><span class="tok-comment">/* apps/hello/hello/hello_app.c */</span>
+<span class="tok-macro">#include</span> <span class="tok-string">"hello/hello_app.h"</span>
+<span class="tok-macro">#include</span> <span class="tok-string">"thistle/app_manager.h"</span>
+<span class="tok-macro">#include</span> <span class="tok-string">"ui/manager.h"</span>
+<span class="tok-macro">#include</span> <span class="tok-string">"ui/statusbar.h"</span>
+
+<span class="tok-keyword">static</span> <span class="tok-type">esp_err_t</span> <span class="tok-fn">hello_on_create</span>(<span class="tok-keyword">void</span>)
+{
+    <span class="tok-keyword">return</span> <span class="tok-fn">hello_ui_create</span>(<span class="tok-fn">ui_manager_get_app_area</span>());
+}
+
+<span class="tok-keyword">static</span> <span class="tok-keyword">void</span> <span class="tok-fn">hello_on_start</span>(<span class="tok-keyword">void</span>)   { <span class="tok-fn">statusbar_set_title</span>(<span class="tok-string">"Hello"</span>); }
+<span class="tok-keyword">static</span> <span class="tok-keyword">void</span> <span class="tok-fn">hello_on_resume</span>(<span class="tok-keyword">void</span>)  { <span class="tok-fn">statusbar_set_title</span>(<span class="tok-string">"Hello"</span>); }
+<span class="tok-keyword">static</span> <span class="tok-keyword">void</span> <span class="tok-fn">hello_on_destroy</span>(<span class="tok-keyword">void</span>) { <span class="tok-fn">hello_ui_destroy</span>(); }
+
+<span class="tok-keyword">static const</span> <span class="tok-type">app_manifest_t</span> hello_manifest = {
+    .id               = <span class="tok-string">"com.example.hello"</span>,
+    .name             = <span class="tok-string">"Hello"</span>,
+    .version          = <span class="tok-string">"0.1.0"</span>,
+    .allow_background = <span class="tok-keyword">false</span>,
+};
+
+<span class="tok-keyword">static</span> <span class="tok-type">app_entry_t</span> hello_entry = {
+    .manifest   = &amp;hello_manifest,
+    .on_create  = hello_on_create,
+    .on_start   = hello_on_start,
+    .on_resume  = hello_on_resume,
+    .on_destroy = hello_on_destroy,
+};
+
+<span class="tok-type">esp_err_t</span> <span class="tok-fn">hello_app_register</span>(<span class="tok-keyword">void</span>)
+{
+    <span class="tok-keyword">return</span> <span class="tok-fn">app_manager_register</span>(&amp;hello_entry);
+}</code></pre>
+
+    <pre><code><span class="tok-comment">/* apps/hello/hello/hello_ui.c */</span>
+<span class="tok-macro">#include</span> <span class="tok-string">"hello/hello_app.h"</span>
+<span class="tok-macro">#include</span> <span class="tok-string">"ui/theme.h"</span>
+
+<span class="tok-keyword">static</span> <span class="tok-type">lv_obj_t</span> *s_root;
+<span class="tok-keyword">static</span> <span class="tok-type">lv_obj_t</span> *s_count;
+<span class="tok-keyword">static</span> <span class="tok-keyword">int</span> s_taps;
+
+<span class="tok-keyword">static</span> <span class="tok-keyword">void</span> <span class="tok-fn">tap_cb</span>(<span class="tok-type">lv_event_t</span> *e)
+{
+    (<span class="tok-keyword">void</span>)e;
+    <span class="tok-fn">lv_label_set_text_fmt</span>(s_count, <span class="tok-string">"Tapped %d times"</span>, ++s_taps);
+}
+
+<span class="tok-type">esp_err_t</span> <span class="tok-fn">hello_ui_create</span>(<span class="tok-type">lv_obj_t</span> *parent)
+{
+    <span class="tok-keyword">const</span> <span class="tok-type">theme_colors_t</span> *c = <span class="tok-fn">theme_get_colors</span>();
+    s_taps = <span class="tok-number">0</span>;
+
+    <span class="tok-comment">/* One root that fills the app area; on_destroy deletes just this. */</span>
+    s_root = <span class="tok-fn">lv_obj_create</span>(parent);
+    <span class="tok-fn">lv_obj_set_size</span>(s_root, <span class="tok-fn">LV_PCT</span>(<span class="tok-number">100</span>), <span class="tok-fn">LV_PCT</span>(<span class="tok-number">100</span>));
+    <span class="tok-fn">lv_obj_set_style_bg_color</span>(s_root, c-&gt;bg, <span class="tok-number">0</span>);
+    <span class="tok-fn">lv_obj_set_style_border_width</span>(s_root, <span class="tok-number">0</span>, <span class="tok-number">0</span>);
+    <span class="tok-fn">lv_obj_set_style_radius</span>(s_root, <span class="tok-number">0</span>, <span class="tok-number">0</span>);
+    <span class="tok-fn">lv_obj_set_flex_flow</span>(s_root, LV_FLEX_FLOW_COLUMN);
+    <span class="tok-fn">lv_obj_set_flex_align</span>(s_root, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    s_count = <span class="tok-fn">lv_label_create</span>(s_root);
+    <span class="tok-fn">lv_label_set_text</span>(s_count, <span class="tok-string">"Tapped 0 times"</span>);
+    <span class="tok-fn">lv_obj_set_style_text_color</span>(s_count, c-&gt;text, <span class="tok-number">0</span>);
+
+    <span class="tok-type">lv_obj_t</span> *btn = <span class="tok-fn">lv_button_create</span>(s_root);
+    <span class="tok-fn">lv_obj_set_style_bg_color</span>(btn, c-&gt;primary, <span class="tok-number">0</span>);
+    <span class="tok-fn">lv_obj_add_event_cb</span>(btn, tap_cb, LV_EVENT_CLICKED, NULL);
+    <span class="tok-fn">lv_label_set_text</span>(<span class="tok-fn">lv_label_create</span>(btn), <span class="tok-string">"Tap me"</span>);
+
+    <span class="tok-comment">/* Keyboard boards: only objects in the default group get keys. */</span>
+    <span class="tok-fn">lv_group_add_obj</span>(<span class="tok-fn">lv_group_get_default</span>(), btn);
+    <span class="tok-keyword">return</span> ESP_OK;
+}
+
+<span class="tok-keyword">void</span> <span class="tok-fn">hello_ui_destroy</span>(<span class="tok-keyword">void</span>)
+{
+    <span class="tok-keyword">if</span> (s_root) {
+        <span class="tok-fn">lv_obj_delete</span>(s_root);   <span class="tok-comment">/* children and group membership go with it */</span>
+        s_root  = NULL;
+        s_count = NULL;
+    }
+}</code></pre>
+
+    <h3>Wiring it into the build</h3>
+    <ol class="steps">
+      <li>Put the component in <code>apps/hello/</code>. The firmware finds it through <code>EXTRA_COMPONENT_DIRS</code> in the top-level <code>CMakeLists.txt</code>.</li>
+      <li>Add <code>"hello|HELLO|hello"</code> to <code>THISTLE_OPTIONAL_APPS</code> in <code>cmake/thistle_apps.cmake</code>. The entry reads <code>&lt;dir&gt;|&lt;flag suffix&gt;|&lt;source stem&gt;</code>. Neither simulator has a component system, and this list is how they find your sources. Extra source files go in <code>apps/hello/sources.cmake</code> as <code>THISTLE_HELLO_SRCS</code>.</li>
+      <li>Add <code>hello</code> to <code>PRIV_REQUIRES</code> in <code>components/apps_builtin/CMakeLists.txt</code>.</li>
+      <li>In <code>components/apps_builtin/lvgl_apps.c</code>, add an <code>#ifndef THISTLE_HAVE_HELLO</code> default of 1, the <code>#include "hello/hello_app.h"</code>, and <code>REGISTER(hello_app_register);</code>. Wrap the last in <code>if (has_radio)</code> or <code>if (has_gps)</code> if the app needs that hardware.</li>
+      <li>Pass <code>THISTLE_HAVE_HELLO=${THISTLE_HAVE_HELLO}</code> next to the other flags in <code>simulator/CMakeLists.txt</code> and <code>wasm/CMakeLists.txt</code>.</li>
+      <li>Grant permissions in the <code>THISTLE_LEGACY_C_APPS</code> block of <code>main/main.c</code>, for example <code>permissions_grant("com.example.hello", PERM_STORAGE);</code>. The flags are <code>PERM_RADIO</code>, <code>PERM_GPS</code>, <code>PERM_STORAGE</code>, <code>PERM_NETWORK</code>, <code>PERM_AUDIO</code>, <code>PERM_SYSTEM</code> and <code>PERM_IPC</code>.</li>
+      <li>Optionally, give it an icon in <code>app_icon_symbol()</code> in <code>components/apps_builtin/launcher/launcher_ui.c</code>. It matches substrings of the ID and falls back to <code>LV_SYMBOL_FILE</code>.</li>
+    </ol>
+
+    <h2>Boot: how your app reaches the screen</h2>
+    <figure class="dd-figure">
+      <div class="diagram-container">
+<svg viewBox="0 0 744 604" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="lvgl-boot-title lvgl-boot-desc">
+<title id="lvgl-boot-title">Boot: from window manager to your app on screen</title>
+<desc id="lvgl-boot-desc">Sequence diagram of the S3 boot: main.c selects and registers the LVGL window manager, which builds the screen; it registers the built-in apps, scans ELF apps, grants permissions, launches the launcher and starts the LVGL task; later a tap makes the kernel pause the launcher and create and start your app.</desc>
+<defs>
+<marker id="lvgl-boot-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/></marker>
+<marker id="lvgl-boot-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#bf4520"/></marker>
+<marker id="lvgl-boot-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#2e5aa8"/></marker>
+</defs>
+<rect width="100%" height="100%" fill="#f5f5f5"/>
+<line x1="84" y1="80" x2="84" y2="536" stroke="rgba(45,49,66,0.20)" stroke-width="1" stroke-dasharray="3,3"/>
+<line x1="228" y1="80" x2="228" y2="536" stroke="rgba(45,49,66,0.20)" stroke-width="1" stroke-dasharray="3,3"/>
+<line x1="372" y1="80" x2="372" y2="536" stroke="rgba(45,49,66,0.20)" stroke-width="1" stroke-dasharray="3,3"/>
+<line x1="516" y1="80" x2="516" y2="536" stroke="rgba(45,49,66,0.20)" stroke-width="1" stroke-dasharray="3,3"/>
+<line x1="660" y1="80" x2="660" y2="536" stroke="rgba(45,49,66,0.20)" stroke-width="1" stroke-dasharray="3,3"/>
+<rect x="348" y="380" width="336" height="136" rx="4" fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.22)" stroke-width="1"/>
+<rect x="348" y="380" width="40" height="16" rx="2" fill="#f5f5f5" stroke="rgba(45,49,66,0.22)" stroke-width="1"/>
+<text x="368" y="392" fill="#4f5d75" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.12em">OPT</text>
+<text x="384" y="410" fill="#4f5d75" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" letter-spacing="0.04em">[user taps your icon]</text>
+<path d="M 84,112 H 228" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#lvgl-boot-arrow)"/>
+<path d="M 84,140 H 372" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#lvgl-boot-arrow)"/>
+<path d="M 372,168 H 228" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#lvgl-boot-arrow)"/>
+<path d="M 84,204 H 660" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#lvgl-boot-arrow)"/>
+<path d="M 660,232 H 372" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#lvgl-boot-arrow)"/>
+<path d="M 84,268 H 372" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#lvgl-boot-arrow)"/>
+<path d="M 84,296 H 372" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#lvgl-boot-arrow)"/>
+<path d="M 372,324 H 516" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#lvgl-boot-arrow)"/>
+<path d="M 84,352 H 228" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#lvgl-boot-arrow)"/>
+<path d="M 516,440 H 372" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#lvgl-boot-arrow)"/>
+<path d="M 372,468 H 516" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#lvgl-boot-arrow)"/>
+<path d="M 372,496 H 660" fill="none" stroke="#bf4520" stroke-width="1.4" marker-end="url(#lvgl-boot-arrow-accent)"/>
+<rect x="116" y="94" width="80" height="12" rx="2" fill="#f5f5f5"/>
+<text x="156" y="103" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">1 · SELECT WM</text>
+<rect x="110" y="122" width="92" height="12" rx="2" fill="#f5f5f5"/>
+<text x="156" y="131" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">2 · REGISTER WM</text>
+<rect x="244" y="150" width="112" height="12" rx="2" fill="#f5f5f5"/>
+<text x="300" y="159" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">3 · INIT · BUILD UI</text>
+<rect x="104" y="186" width="104" height="12" rx="2" fill="#f5f5f5"/>
+<text x="156" y="195" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">4 · REGISTER APPS</text>
+<rect x="534" y="214" width="108" height="12" rx="2" fill="#f5f5f5"/>
+<text x="588" y="223" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">5 · REGISTER ENTRY</text>
+<rect x="96" y="250" width="120" height="12" rx="2" fill="#f5f5f5"/>
+<text x="156" y="259" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">6 · ELF SCAN · PERMS</text>
+<rect x="100" y="278" width="112" height="12" rx="2" fill="#f5f5f5"/>
+<text x="156" y="287" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">7 · LAUNCH LAUNCHER</text>
+<rect x="390" y="306" width="108" height="12" rx="2" fill="#f5f5f5"/>
+<text x="444" y="315" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">8 · CREATE · START</text>
+<rect x="96" y="334" width="120" height="12" rx="2" fill="#f5f5f5"/>
+<text x="156" y="343" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">9 · UI_MANAGER_START</text>
+<rect x="384" y="422" width="120" height="12" rx="2" fill="#f5f5f5"/>
+<text x="444" y="431" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">10 · LAUNCH(YOUR ID)</text>
+<rect x="404" y="450" width="80" height="12" rx="2" fill="#f5f5f5"/>
+<text x="444" y="459" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">11 · ON_PAUSE</text>
+<rect x="532" y="478" width="112" height="12" rx="2" fill="#f5f5f5"/>
+<text x="588" y="487" fill="#bf4520" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">12 · CREATE · START</text>
+<rect x="24" y="24" width="120" height="56" rx="6" fill="#f5f5f5"/>
+<rect x="24" y="24" width="120" height="56" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+<rect x="32" y="30" width="28" height="12" rx="2" fill="none" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+<text x="46" y="39" fill="#2d3142" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">BOOT</text>
+<text x="84" y="59" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Boot</text>
+<text x="84" y="73" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">main/main.c</text>
+<rect x="168" y="24" width="120" height="56" rx="6" fill="#f5f5f5"/>
+<rect x="168" y="24" width="120" height="56" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+<rect x="176" y="30" width="20" height="12" rx="2" fill="none" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+<text x="186" y="39" fill="#2d3142" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">WM</text>
+<text x="228" y="59" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">LVGL WM</text>
+<text x="228" y="73" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">components/ui</text>
+<rect x="312" y="24" width="120" height="56" rx="6" fill="#f5f5f5"/>
+<rect x="312" y="24" width="120" height="56" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+<rect x="320" y="30" width="40" height="12" rx="2" fill="none" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+<text x="340" y="39" fill="#2d3142" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">KERNEL</text>
+<text x="372" y="59" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Kernel</text>
+<text x="372" y="73" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">app_manager.rs</text>
+<rect x="456" y="24" width="120" height="56" rx="6" fill="#f5f5f5"/>
+<rect x="456" y="24" width="120" height="56" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+<rect x="464" y="30" width="24" height="12" rx="2" fill="none" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+<text x="476" y="39" fill="#2d3142" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">APP</text>
+<text x="516" y="59" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Launcher</text>
+<text x="516" y="73" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">launcher_app.c</text>
+<rect x="600" y="24" width="120" height="56" rx="6" fill="#f5f5f5"/>
+<rect x="600" y="24" width="120" height="56" rx="6" fill="rgba(191,69,32,0.08)" stroke="#bf4520" stroke-width="1"/>
+<rect x="608" y="30" width="36" height="12" rx="2" fill="none" stroke="rgba(191,69,32,0.50)" stroke-width="0.8"/>
+<text x="626" y="39" fill="#bf4520" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">YOURS</text>
+<text x="660" y="59" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Your app</text>
+<text x="660" y="73" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">apps/&lt;name&gt;/</text>
+<line x1="24" y1="556" x2="720" y2="556" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+<text x="24" y="572" fill="#4f5d75" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" letter-spacing="0.18em">LEGEND</text>
+<rect x="24" y="584" width="14" height="10" rx="2" fill="rgba(191,69,32,0.08)" stroke="#bf4520" stroke-width="1"/>
+<text x="44" y="592" fill="#4f5d75" font-size="8.5" font-family="'Geist', system-ui, sans-serif">Your app</text>
+<rect x="128" y="584" width="14" height="10" rx="2" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+<text x="148" y="592" fill="#4f5d75" font-size="8.5" font-family="'Geist', system-ui, sans-serif">Participant</text>
+<line x1="240" y1="589" x2="268" y2="589" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#lvgl-boot-arrow)"/>
+<text x="276" y="592" fill="#4f5d75" font-size="8.5" font-family="'Geist', system-ui, sans-serif">Call</text>
+<line x1="328" y1="589" x2="356" y2="589" stroke="#bf4520" stroke-width="1.4" marker-end="url(#lvgl-boot-arrow-accent)"/>
+<text x="364" y="592" fill="#4f5d75" font-size="8.5" font-family="'Geist', system-ui, sans-serif">Your app goes live</text>
+<rect x="488" y="584" width="14" height="10" rx="2" fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.22)" stroke-width="1"/>
+<text x="508" y="592" fill="#4f5d75" font-size="8.5" font-family="'Geist', system-ui, sans-serif">Later, on user action</text>
+</svg>
+      </div>
+      <figcaption>The S3 path through <code>app_main()</code>. Steps 10 to 12 happen whenever a user opens your app.</figcaption>
+    </figure>
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th>#</th><th>Call</th><th>What happens</th></tr></thead>
+      <tbody>
+        <tr><td>1</td><td><code>thistle_wm_select()</code></td><td>Reads <code>window_manager</code>, returns the manager and <code>hosts_lvgl_apps</code>.</td></tr>
+        <tr><td>2</td><td><code>display_server_register_wm()</code></td><td>Makes it the active manager and calls its <code>init()</code>.</td></tr>
+        <tr><td>3</td><td><code>ui_manager_init()</code></td><td>Creates the LVGL display, touch and keypad input devices, the default group, the theme, the status bar and the app area.</td></tr>
+        <tr><td>4</td><td><code>lvgl_apps_register_builtin()</code></td><td>Calls every app's register function, yours included.</td></tr>
+        <tr><td>5</td><td><code>app_manager_register()</code></td><td>Your app gets a slot in the Unloaded state.</td></tr>
+        <tr><td>6</td><td><code>elf_app_scan_and_register()</code>, <code>permissions_grant()</code></td><td>Loadable apps join the list, and built-ins get their permissions.</td></tr>
+        <tr><td>7, 8</td><td><code>app_manager_launch("com.thistle.launcher")</code></td><td>The launcher's <code>on_create</code> and <code>on_start</code> build the home screen.</td></tr>
+        <tr><td>9</td><td><code>ui_manager_start()</code></td><td>Starts the LVGL task. Nothing draws before this, so registration code must not wait on the UI.</td></tr>
+        <tr><td>10 to 12</td><td>launcher tap handler</td><td>Calls <code>app_manager_launch(your_id)</code>. The launcher gets <code>on_pause</code>, and your app gets <code>on_create</code> then <code>on_start</code>.</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <h2>Threads, input and the screen</h2>
+    <figure class="dd-figure">
+      <div class="diagram-container">
+<svg viewBox="0 0 744 432" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="lvgl-loop-title lvgl-loop-desc">
+<title id="lvgl-loop-title">One cycle of the LVGL task</title>
+<desc id="lvgl-loop-desc">Data flow: every 10 ms the LVGL task polls the input drivers, then with the LVGL mutex held runs LVGL timers that deliver events to your callback and flush dirty areas to the display driver; on e-paper the panel refreshes once flushes have been quiet for 300 ms.</desc>
+<defs>
+<marker id="lvgl-loop-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/></marker>
+<marker id="lvgl-loop-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#bf4520"/></marker>
+<marker id="lvgl-loop-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#2e5aa8"/></marker>
+</defs>
+<rect width="100%" height="100%" fill="#f5f5f5"/>
+<rect x="12" y="136" width="720" height="104" rx="8" fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+<rect x="24" y="140" width="64" height="12" rx="2" fill="#f5f5f5"/>
+<text x="56" y="149" fill="#5a6580" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.14em">MUTEX HELD</text>
+<path d="M 184,68 H 292" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#lvgl-loop-arrow)"/>
+<path d="M 452,68 H 560" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#lvgl-loop-arrow)"/>
+<path d="M 372,96 V 168" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#lvgl-loop-arrow)"/>
+<path d="M 292,196 H 184" fill="none" stroke="#bf4520" stroke-width="1.4" marker-end="url(#lvgl-loop-arrow-accent)"/>
+<path d="M 452,196 H 560" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#lvgl-loop-arrow)"/>
+<path d="M 640,224 V 304" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#lvgl-loop-arrow)"/>
+<path d="M 372,224 V 304" fill="none" stroke="#4f5d75" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#lvgl-loop-arrow)"/>
+<path d="M 452,332 H 560" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#lvgl-loop-arrow)"/>
+<rect x="204" y="50" width="68" height="12" rx="2" fill="#f5f5f5"/>
+<text x="238" y="59" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">KEY · TOUCH</text>
+<rect x="474" y="50" width="64" height="12" rx="2" fill="#f5f5f5"/>
+<text x="506" y="59" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">HOME · ESC</text>
+<rect x="380" y="120" width="76" height="12" rx="2" fill="#f5f5f5"/>
+<text x="418" y="129" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">KEYPAD QUEUE</text>
+<rect x="206" y="178" width="64" height="12" rx="2" fill="#f5f5f5"/>
+<text x="238" y="187" fill="#bf4520" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">LV_EVENT_*</text>
+<rect x="472" y="178" width="68" height="12" rx="2" fill="#f5f5f5"/>
+<text x="506" y="187" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">DIRTY AREAS</text>
+<rect x="648" y="256" width="68" height="12" rx="2" fill="#f5f5f5"/>
+<text x="682" y="265" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">FLUSH(AREA)</text>
+<rect x="380" y="256" width="76" height="12" rx="2" fill="#f5f5f5"/>
+<text x="418" y="265" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">300 MS QUIET</text>
+<rect x="476" y="314" width="60" height="12" rx="2" fill="#f5f5f5"/>
+<text x="506" y="323" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">REFRESH()</text>
+<text x="24" y="320" fill="#2d3142" font-size="14" font-style="italic" font-family="'Instrument Serif', 'Noto Serif', serif">your callbacks run inside this lock;</text>
+<text x="24" y="338" fill="#2d3142" font-size="14" font-style="italic" font-family="'Instrument Serif', 'Noto Serif', serif">other tasks take ui_manager_lock() first</text>
+<path d="M 120,302 Q 112,276 106,244" fill="none" stroke="rgba(45,49,66,0.40)" stroke-width="1" stroke-dasharray="4,3"/>
+<circle cx="104" cy="240" r="2" fill="#2d3142"/>
+<rect x="24" y="40" width="160" height="56" rx="6" fill="#f5f5f5"/>
+<rect x="24" y="40" width="160" height="56" rx="6" fill="rgba(45,49,66,0.03)" stroke="rgba(45,49,66,0.30)" stroke-width="1"/>
+<rect x="32" y="46" width="24" height="12" rx="2" fill="none" stroke="rgba(45,49,66,0.22)" stroke-width="0.8"/>
+<text x="44" y="55" fill="#5a6580" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">HAL</text>
+<text x="104" y="75" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Input drivers</text>
+<text x="104" y="89" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">poll() every cycle</text>
+<rect x="292" y="40" width="160" height="56" rx="6" fill="#f5f5f5"/>
+<rect x="292" y="40" width="160" height="56" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+<rect x="300" y="46" width="20" height="12" rx="2" fill="none" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+<text x="310" y="55" fill="#2d3142" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">CB</text>
+<text x="372" y="75" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Input callback</text>
+<text x="372" y="89" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">ui_input_hal_cb()</text>
+<rect x="560" y="40" width="160" height="56" rx="6" fill="#f5f5f5"/>
+<rect x="560" y="40" width="160" height="56" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+<rect x="568" y="46" width="24" height="12" rx="2" fill="none" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+<text x="580" y="55" fill="#2d3142" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">APP</text>
+<text x="640" y="75" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Launcher</text>
+<text x="640" y="89" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">app_manager_launch()</text>
+<rect x="24" y="168" width="160" height="56" rx="6" fill="#f5f5f5"/>
+<rect x="24" y="168" width="160" height="56" rx="6" fill="rgba(191,69,32,0.08)" stroke="#bf4520" stroke-width="1"/>
+<rect x="32" y="174" width="36" height="12" rx="2" fill="none" stroke="rgba(191,69,32,0.50)" stroke-width="0.8"/>
+<text x="50" y="183" fill="#bf4520" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">YOURS</text>
+<text x="104" y="203" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Your event callback</text>
+<text x="104" y="217" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">LV_EVENT_CLICKED · KEY</text>
+<rect x="292" y="168" width="160" height="56" rx="6" fill="#f5f5f5"/>
+<rect x="292" y="168" width="160" height="56" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+<rect x="300" y="174" width="28" height="12" rx="2" fill="none" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+<text x="314" y="183" fill="#2d3142" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">LVGL</text>
+<text x="372" y="203" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">LVGL timers</text>
+<text x="372" y="217" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">lv_timer_handler()</text>
+<rect x="560" y="168" width="160" height="56" rx="6" fill="#f5f5f5"/>
+<rect x="560" y="168" width="160" height="56" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+<rect x="568" y="174" width="20" height="12" rx="2" fill="none" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+<text x="578" y="183" fill="#2d3142" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">CB</text>
+<text x="640" y="203" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Flush callback</text>
+<text x="640" y="217" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">e-paper: RGB565 → 1-bit</text>
+<rect x="292" y="304" width="160" height="56" rx="6" fill="#f5f5f5"/>
+<rect x="292" y="304" width="160" height="56" rx="6" fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.40)" stroke-width="1" stroke-dasharray="4,3"/>
+<rect x="300" y="310" width="44" height="12" rx="2" fill="none" stroke="rgba(45,49,66,0.22)" stroke-width="0.8"/>
+<text x="322" y="319" fill="#5a6580" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">E-PAPER</text>
+<text x="372" y="339" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Panel refresh</text>
+<text x="372" y="353" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">full or fast, by policy</text>
+<rect x="560" y="304" width="160" height="56" rx="6" fill="#f5f5f5"/>
+<rect x="560" y="304" width="160" height="56" rx="6" fill="rgba(45,49,66,0.03)" stroke="rgba(45,49,66,0.30)" stroke-width="1"/>
+<rect x="568" y="310" width="24" height="12" rx="2" fill="none" stroke="rgba(45,49,66,0.22)" stroke-width="0.8"/>
+<text x="580" y="319" fill="#5a6580" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">HAL</text>
+<text x="640" y="339" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Display driver</text>
+<text x="640" y="353" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">flush() · refresh()</text>
+<line x1="24" y1="384" x2="720" y2="384" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+<text x="24" y="400" fill="#4f5d75" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" letter-spacing="0.18em">LEGEND</text>
+<rect x="24" y="412" width="14" height="10" rx="2" fill="rgba(191,69,32,0.08)" stroke="#bf4520" stroke-width="1"/>
+<text x="44" y="420" fill="#4f5d75" font-size="8.5" font-family="'Geist', system-ui, sans-serif">Your code</text>
+<rect x="124" y="412" width="14" height="10" rx="2" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+<text x="144" y="420" fill="#4f5d75" font-size="8.5" font-family="'Geist', system-ui, sans-serif">Callback · timer</text>
+<rect x="256" y="412" width="14" height="10" rx="2" fill="rgba(45,49,66,0.03)" stroke="rgba(45,49,66,0.30)" stroke-width="1"/>
+<text x="276" y="420" fill="#4f5d75" font-size="8.5" font-family="'Geist', system-ui, sans-serif">HAL driver</text>
+<rect x="364" y="412" width="14" height="10" rx="2" fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.40)" stroke-width="1" stroke-dasharray="3,2"/>
+<text x="384" y="420" fill="#4f5d75" font-size="8.5" font-family="'Geist', system-ui, sans-serif">E-paper only</text>
+<line x1="480" y1="417" x2="508" y2="417" stroke="#bf4520" stroke-width="1.4" marker-end="url(#lvgl-loop-arrow-accent)"/>
+<text x="516" y="420" fill="#4f5d75" font-size="8.5" font-family="'Geist', system-ui, sans-serif">Calls into your app</text>
+</svg>
+      </div>
+      <figcaption>One pass of <code>lvgl_task()</code> in <code>components/ui/src/manager.c</code>.</figcaption>
+    </figure>
+
+    <h3>Which thread runs your code</h3>
+    <p>Lifecycle callbacks and LVGL event callbacks run on the LVGL task, nearly always with the LVGL mutex held. A launcher tap and a Home press both reach <code>app_manager_launch()</code> from inside <code>lv_timer_handler()</code>, so you can call <code>lv_*</code> functions directly. Two exceptions apply. The launcher's first launch at boot runs before the LVGL task exists. Esc calls <code>app_manager_launch()</code> from the input callback, before the task takes the mutex, so <code>on_destroy</code> after an Esc runs without the lock.</p>
+    <p>Any other task must take the lock around every LVGL call. The Terminal app's UART reader does exactly this:</p>
+    <pre><code><span class="tok-fn">ui_manager_lock</span>();
+<span class="tok-fn">lv_label_set_text</span>(s_status, buf);
+<span class="tok-fn">ui_manager_unlock</span>();</code></pre>
+    <p>Keep the critical section short, because the render loop waits on it. Use <code>toast_post()</code> to show a toast from any task. <code>toast_show()</code>, <code>toast_info()</code> and <code>toast_warn()</code> build LVGL objects and belong on the LVGL task. In LVGL 9.2, <code>lv_async_call()</code> creates an LVGL timer, so it needs the lock as well. <code>messenger_ui.c</code> calls it without the lock, so don't copy that pattern.</p>
+
+    <h3>Keyboard and touch</h3>
+    <ul>
+      <li>Touch arrives as an LVGL pointer device, and the usual <code>LV_EVENT_CLICKED</code> and friends fire on the widget under the finger.</li>
+      <li>The hardware keyboard is a keypad device bound to <code>lv_group_get_default()</code>. Only objects in that group receive keys. Add your focusable widgets, focus one with <code>lv_group_focus_obj()</code>, and read <code>lv_event_get_key(e)</code> in an <code>LV_EVENT_KEY</code> handler.</li>
+      <li>The manager maps <code>'\n'</code> to <code>LV_KEY_ENTER</code>, <code>'\b'</code> to <code>LV_KEY_BACKSPACE</code>, <code>0x1B</code> to <code>LV_KEY_ESC</code> and <code>'\t'</code> to <code>LV_KEY_NEXT</code>.</li>
+      <li>Home and Esc both bring the launcher forward, which destroys your app. Home never reaches LVGL, and Esc is acted on before LVGL delivers it. Neither key works as an in-app back button, so give screens deeper than one level an on-screen Back.</li>
+    </ul>
+
+    <h3>Screen size, theme and status bar</h3>
+    <ul>
+      <li>The app area is the display width by its height minus 24. That is 240 × 296 on the T-Deck Pro, 320 × 216 on the T-Deck, 240 × 111 on the Cardputer. Read it at runtime with <code>lv_obj_update_layout(parent)</code> and <code>lv_obj_get_width()</code>, as Notes does, instead of hard-coding it. <code>test_app_matrix.py</code> fails any app whose first screen runs past the left or right edge.</li>
+      <li><code>theme_get_colors()</code> returns <code>primary</code>, <code>secondary</code>, <code>bg</code>, <code>surface</code>, <code>text</code> and <code>text_secondary</code>, plus <code>radius</code> and <code>padding</code>. Use these instead of literal colours, since users switch themes from Settings.</li>
+      <li><code>sdkconfig.defaults</code> enables LVGL's Montserrat 14, 18 and 22. Any other font has to be compiled into your app.</li>
+      <li>Set your title with <code>statusbar_set_title()</code> in <code>on_start</code> and again in <code>on_resume</code>.</li>
+    </ul>
+
+    <h3>E-paper</h3>
+    <ul>
+      <li>The e-paper flush converts every pixel to black or white at half luminance, with no dithering. Mid greys land on one side or the other, so check theme colours on a real panel or in the simulator's e-paper profile.</li>
+      <li>The panel refreshes only after 300 ms without a flush. A timer that redraws more often than that keeps the panel from refreshing at all.</li>
+      <li>Whether a refresh is fast or full follows the user's policy: fast, full, or auto, which makes every sixth refresh full. Call <code>ui_manager_force_refresh()</code> after replacing the whole screen to make the next one full and clear the ghosting.</li>
+    </ul>
+
+    <h2 id="elf-apps">Loadable apps under the LVGL manager</h2>
+    <p>A loadable app includes <code>app_sdk/include/thistle_app.h</code>, declares a <code>thistle_app_t</code> with the same five callbacks, and exports it with <code>THISTLE_APP(my_app)</code>. The <code>thistle_app()</code> CMake function in <code>app_sdk/CMakeLists.txt</code> builds it into <code>&lt;name&gt;.app.elf</code>. A <code>manifest.json</code> beside the ELF gives the ID, entry, architecture and permissions, and <code>tools/sign_elf.py</code> writes the 64-byte <code>.sig</code>. <code>standalone_apps/notes/</code> is a complete example.</p>
+    <p>At boot the loader reads the manifest and verifies the signature over the bytes it has already loaded. Then it links the ELF against an allowlist:</p>
+    <ul>
+      <li>A signed app gets the documented <code>thistle_*</code> wrappers (<code>APP_VISIBLE_SYMBOLS</code> in <code>syscall_table.rs</code>) and the permissions its manifest asks for. No <code>lv_*</code> symbol is on that list.</li>
+      <li>An unsigned app is refused in release builds. Debug builds load it with IPC only, so the only syscalls that link are <code>thistle_msg_send</code> and <code>thistle_msg_recv</code>.</li>
+    </ul>
+    <p>Under the LVGL manager, <code>lvgl_wm.c</code> implements the widget API:</p>
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th>Widget API</th><th>LVGL result</th></tr></thead>
+      <tbody>
+        <tr><td><code>thistle_ui_get_app_root()</code></td><td>The shared app area</td></tr>
+        <tr><td><code>create_container</code> / <code>label</code> / <code>button</code> / <code>text_input</code></td><td>A borderless transparent <code>lv_obj</code>, an <code>lv_label</code>, an <code>lv_button</code> with a centred label, a one-line <code>lv_textarea</code></td></tr>
+        <tr><td><code>set_size(w, h)</code></td><td><code>-1</code> is 100%, <code>-2</code> is size to content</td></tr>
+        <tr><td><code>set_font_size(n)</code></td><td>Montserrat 22 from 22 up, 18 from 18 up, otherwise 14</td></tr>
+        <tr><td><code>THISTLE_EVENT_CLICK</code> / <code>VALUE_CHANGED</code> / <code>KEY</code></td><td><code>LV_EVENT_CLICKED</code> / <code>VALUE_CHANGED</code> / <code>KEY</code></td></tr>
+        <tr><td>colours</td><td><code>0xRRGGBB</code></td></tr>
+      </tbody>
+    </table>
+    </div>
+    <p>The handle table has 255 entries shared by every loadable app, and a create call returns <code>0</code> once it is full. Each <code>thistle_ui_on_event()</code> allocates a small context that is never freed.</p>
+
+    <div class="callout warn">
+      <div class="callout-title">Gaps on this path (checked against the code, October 2026)</div>
+      <ul>
+        <li>On the device, the app manager's <code>on_create</code> for an ELF is <code>elf_app_start()</code>, which runs the ELF's entry point in a new task through <code>esp_elf_request()</code>. Nothing on the device reads <code>_thistle_app_entry</code>. Only the simulator's <code>sim_app_loader.c</code> does, and only there do your five callbacks run as written.</li>
+        <li><code>thistle_ui_*</code> calls reach <code>lvgl_wm.c</code> without taking the LVGL lock, from the app's own task. Under the LVGL manager they race the render task.</li>
+        <li>The ELF's <code>on_destroy</code> is <code>elf_app_unload()</code>. It deletes the task and frees the ELF, but nothing deletes the widgets the app created in the shared app area.</li>
+      </ul>
+      Until these are closed, a built-in app is the dependable way to ship LVGL UI on S3.
+    </div>
+
+    <h2>Running it</h2>
+    <p>The simulator links the real kernel and the same app sources:</p>
+    <pre><code><span class="tok-keyword">cd</span> simulator/build &amp;&amp; cmake .. &amp;&amp; make -j8
+
+<span class="tok-comment"># e-paper and LCD managers, straight into your app</span>
+./thistle_sim --device tdeck-pro --wm lvgl-epaper-wm --launch-app com.example.hello
+./thistle_sim --device tdeck     --wm lvgl-lcd-wm    --launch-app com.example.hello
+
+<span class="tok-comment"># headless: exit after 3 s, list anything drawn off-screen, save the framebuffer</span>
+./thistle_sim --device tdeck-pro --headless --timeout 3000 \
+    --launch-app com.example.hello --report-offscreen --screenshot hello.ppm</code></pre>
+    <p><code>simulator/tests/test_app_matrix.py</code> opens every built-in app on every device profile. It builds IDs as <code>com.thistle.&lt;name&gt;</code>, so add your app to <code>UNGATED_APPS</code> (or the radio or GPS tuple) if it uses that prefix. Run it from <code>simulator/</code> with <code>python3 tests/test_app_matrix.py</code>.</p>
+    <p>On hardware, check the serial port first, since another reader on it breaks flashing:</p>
+    <pre><code>idf.py build
+tools/check_serial_port.sh /dev/ttyACM0
+idf.py -p /dev/ttyACM0 flash monitor</code></pre>
+
+    <h2>Checklist</h2>
+    <ul>
+      <li>Static <code>app_manifest_t</code> and <code>app_entry_t</code>, with a unique ID.</li>
+      <li><code>on_create</code> builds one root under <code>ui_manager_get_app_area()</code> and returns <code>ESP_OK</code>.</li>
+      <li><code>on_destroy</code> saves state, deletes that root, and sets static pointers to <code>NULL</code>.</li>
+      <li>Status bar title set in <code>on_start</code> and <code>on_resume</code>.</li>
+      <li>Sizes read from the app area, colours from <code>theme_get_colors()</code>.</li>
+      <li>Focusable widgets added to the default group, and an on-screen Back for nested screens.</li>
+      <li>Every LVGL call from another task wrapped in <code>ui_manager_lock()</code>.</li>
+      <li>The app registered in <code>thistle_apps.cmake</code>, <code>apps_builtin</code>, <code>lvgl_apps.c</code>, both simulator CMake files, and <code>main.c</code> for permissions.</li>
+      <li>Opened in the simulator under <code>lvgl-epaper-wm</code> and <code>lvgl-lcd-wm</code>.</li>
+    </ul>
+
+    <div class="page-footer">
+      <span>ThistleOS v0.1.0 &middot; BSD 3-Clause</span>
+      <a href="https://github.com/wan0net/thistle-os">GitHub</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>
