@@ -475,7 +475,13 @@ static void wifi_pwd_connect_cb(lv_event_t *e)
     wifi_pwd_ctx_t *ctx = (wifi_pwd_ctx_t *)lv_event_get_user_data(e);
     if (!ctx) return;
 
-    const char *password = lv_textarea_get_text(ctx->ta);
+    /* A copy, because deleting the dialog below frees the text area's own
+     * buffer, and the allocator writes its free-list pointers over the
+     * start of it. Connecting with that pointer sent the first 8 characters
+     * as garbage, so even the right password failed to authenticate. */
+    char password[WIFI_PASS_MAX_LEN + 1];
+    strncpy(password, lv_textarea_get_text(ctx->ta), sizeof(password) - 1);
+    password[sizeof(password) - 1] = '\0';
     ESP_LOGI(TAG, "WiFi: connecting to \"%s\" with password", ctx->ssid);
 
     if (s_wifi_status_label) {
@@ -499,6 +505,7 @@ static void wifi_pwd_connect_cb(lv_event_t *e)
     } else {
         ESP_LOGW(TAG, "WiFi: connect to \"%s\" failed: 0x%x", ctx->ssid, err);
     }
+    memset(password, 0, sizeof(password));
     wifi_update_status_label();
 }
 
