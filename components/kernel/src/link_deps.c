@@ -61,6 +61,27 @@ esp_err_t thistle_wifi_init(void)
     return ret;
 }
 
+// wifi_manager.rs reads and writes these structs by byte offset. Its
+// constants must match the headers; when an ESP-IDF update moves a field,
+// the build stops here instead of the scan quietly reading the wrong bytes.
+#include <stddef.h>
+_Static_assert(sizeof(wifi_ap_record_t) == 92, "AP_RECORD_SIZE");
+_Static_assert(offsetof(wifi_ap_record_t, ssid) == 6, "AP_SSID_OFFSET");
+_Static_assert(sizeof(((wifi_ap_record_t *)0)->ssid) == 33, "AP_SSID_FIELD_LEN");
+_Static_assert(offsetof(wifi_ap_record_t, primary) == 39, "AP_CHANNEL_OFFSET");
+_Static_assert(offsetof(wifi_ap_record_t, rssi) == 44, "AP_RSSI_OFFSET");
+_Static_assert(offsetof(wifi_ap_record_t, authmode) == 48, "AP_AUTHMODE_OFFSET");
+_Static_assert(sizeof(((wifi_ap_record_t *)0)->authmode) == 4, "authmode is read as a u32");
+_Static_assert(offsetof(wifi_event_sta_disconnected_t, reason) == 39,
+               "STA_DISCONNECTED_REASON_OFFSET");
+_Static_assert(sizeof(((wifi_event_sta_disconnected_t *)0)->reason) == 1,
+               "reason is read as a u8");
+_Static_assert(sizeof(wifi_config_t) <= 256, "wifi_manager_connect's config buffer");
+_Static_assert(offsetof(wifi_sta_config_t, password) == 32, "password at offset 32");
+_Static_assert(offsetof(wifi_sta_config_t, sae_pwe_h2e) == 136, "STA_SAE_PWE_H2E_OFFSET");
+_Static_assert(sizeof(((wifi_sta_config_t *)0)->sae_pwe_h2e) == 4, "sae_pwe_h2e is a u32");
+_Static_assert(WPA3_SAE_PWE_BOTH == 3, "WPA3_SAE_PWE_BOTH");
+
 // Reference each symbol so the linker pulls it from the ESP-IDF archive.
 // This function is never called — it's dead code that exists only to
 // create linker references.

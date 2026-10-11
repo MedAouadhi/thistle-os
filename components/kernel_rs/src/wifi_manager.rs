@@ -40,6 +40,28 @@ const IP_EVENT_STA_GOT_IP: i32 = 0;
 const WIFI_SSID_MAX_LEN: usize = 32;
 const WIFI_PASSWORD_MAX_LEN: usize = 64;
 
+// ESP-IDF v5.5 struct layouts this module reads by offset. Rust cannot see
+// the C headers, so components/kernel/src/link_deps.c asserts every one of
+// these at compile time: a header change fails the build, not the scan. The
+// guesses these replaced put the SSID where the BSSID is, which turned every
+// scanned name into MAC bytes followed by the SSID, so no connect could match.
+const AP_RECORD_SIZE: usize = 92; // sizeof(wifi_ap_record_t)
+const AP_SSID_OFFSET: usize = 6; // ssid[33], after bssid[6]
+const AP_SSID_FIELD_LEN: usize = 33;
+const AP_CHANNEL_OFFSET: usize = 39; // primary
+const AP_RSSI_OFFSET: usize = 44;
+const AP_AUTHMODE_OFFSET: usize = 48;
+const WIFI_AUTH_OPEN: u32 = 0;
+#[cfg(target_os = "espidf")]
+const STA_DISCONNECTED_REASON_OFFSET: usize = 39; // u8 reason, wifi_err_reason_t
+// wifi_sta_config_t.sae_pwe_h2e, a u32 enum. Zero ("unspecified") restricts
+// WPA3 to hunt-and-peck; BOTH also uses hash-to-element when the AP offers
+// it, as ESP-IDF's own station example does.
+#[cfg(target_os = "espidf")]
+const STA_SAE_PWE_H2E_OFFSET: usize = 136;
+#[cfg(target_os = "espidf")]
+const WPA3_SAE_PWE_BOTH: u32 = 3;
+
 static TAG: &[u8] = b"wifi_mgr\0";
 
 // ---------------------------------------------------------------------------
@@ -151,7 +173,19 @@ unsafe extern "C" fn wifi_event_handler(
             WIFI_STATE_DISCONNECTED
         };
         wifi_manager_set_state(next_state, std::ptr::null());
-        esp_log_write(ESP_LOG_INFO, TAG.as_ptr(), b"WiFi disconnected\0".as_ptr());
+        // The reason is what tells a wrong password (15, 202, 204) from a
+        // network that is not there (201).
+        let reason = if event_data.is_null() {
+            0
+        } else {
+            *(event_data as *const u8).add(STA_DISCONNECTED_REASON_OFFSET)
+        };
+        esp_log_write(
+            ESP_LOG_INFO,
+            TAG.as_ptr(),
+            b"WiFi disconnected, reason %d\0".as_ptr(),
+            reason as i32,
+        );
     } else if event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP {
         let got_ip = event_data as *const IpEventGotIp;
         if !got_ip.is_null() {
@@ -354,9 +388,10 @@ pub unsafe extern "C" fn wifi_manager_scan(
 
     #[cfg(target_os = "espidf")]
     {
-        // scan_config: show_hidden=false, scan_type=ACTIVE(0), min=100ms, max=300ms
-        let scan_cfg = [0u8; 40]; // wifi_scan_config_t — let C defaults fill it
-        let ret = esp_wifi_scan_start(scan_cfg.as_ptr() as *const c_void, true);
+        // NULL scans with ESP-IDF's defaults. A zeroed 40-byte array used to
+        // stand in for the 44-byte wifi_scan_config_t, so the driver read
+        // coex_background_scan from whatever followed it on the stack.
+        let ret = esp_wifi_scan_start(std::ptr::null(), true);
         if ret != ESP_OK {
             return ret;
         }
@@ -365,8 +400,7 @@ pub unsafe extern "C" fn wifi_manager_scan(
         esp_wifi_scan_get_ap_num(&mut ap_count);
 
         let fetch = ap_count.min(max_results as u16);
-        // wifi_ap_record_t is ~108 bytes; allocate via calloc
-        let records = calloc(fetch as usize, 108);
+        let records = calloc(fetch as usize, AP_RECORD_SIZE);
         if records.is_null() {
             return ESP_ERR_NO_MEM;
         }
@@ -374,33 +408,26 @@ pub unsafe extern "C" fn wifi_manager_scan(
         let mut fetch_count = fetch;
         esp_wifi_scan_get_ap_records(&mut fetch_count, records);
 
-        // wifi_ap_record_t layout (108 bytes):
-        //   ssid[33] at offset 0, bssid[6] at offset 33,
-        //   primary (channel, u8) at offset 39, second at 40,
-        //   rssi (i8) at offset 41, authmode (u32) at offset 44
-        const AP_RECORD_SIZE: usize = 108;
-        const AP_SSID_OFFSET: usize = 0;
-        const AP_CHANNEL_OFFSET: usize = 39;
-        const AP_RSSI_OFFSET: usize = 41;
-        const AP_AUTHMODE_OFFSET: usize = 44;
-        const WIFI_AUTH_OPEN: u32 = 0;
-
         for i in 0..fetch_count as usize {
-            let r = &mut *results.add(i);
-            r.ssid = [0u8; WIFI_SSID_MAX_LEN + 1];
+            let rec = std::slice::from_raw_parts(
+                (records as *const u8).add(i * AP_RECORD_SIZE),
+                AP_RECORD_SIZE,
+            );
+            *results.add(i) = parse_ap_record(rec);
 
-            let rec = (records as *const u8).add(i * AP_RECORD_SIZE);
-            // SSID: null-terminated string at offset 0
-            let ssid_ptr = rec.add(AP_SSID_OFFSET) as *const c_char;
-            let ssid_bytes = std::ffi::CStr::from_ptr(ssid_ptr).to_bytes();
-            let copy_len = ssid_bytes.len().min(WIFI_SSID_MAX_LEN);
-            r.ssid[..copy_len].copy_from_slice(&ssid_bytes[..copy_len]);
-
-            r.channel = *rec.add(AP_CHANNEL_OFFSET);
-            r.rssi = *rec.add(AP_RSSI_OFFSET) as i8;
-            // authmode is a u32 at offset 44
-            let authmode = (rec.add(AP_AUTHMODE_OFFSET) as *const u32).read_unaligned();
-            r.is_open = authmode == WIFI_AUTH_OPEN;
+            // wifi_auth_mode_t: 3 WPA2, 6 WPA3, 7 WPA2/WPA3.
+            let r = &*results.add(i);
+            let mut authmode = [0u8; 4];
+            authmode.copy_from_slice(&rec[AP_AUTHMODE_OFFSET..AP_AUTHMODE_OFFSET + 4]);
+            esp_log_write(
+                ESP_LOG_INFO,
+                TAG.as_ptr(),
+                b"  %s: ch %d, %d dBm, auth %d\0".as_ptr(),
+                r.ssid.as_ptr(),
+                r.channel as i32,
+                r.rssi as i32,
+                u32::from_le_bytes(authmode) as i32,
+            );
         }
 
         free(records);
@@ -436,6 +463,30 @@ pub unsafe extern "C" fn wifi_manager_scan(
     }
 
     ESP_OK
+}
+
+/// One scan result from one ESP-IDF `wifi_ap_record_t`, `AP_RECORD_SIZE`
+/// bytes. The SSID field always holds a NUL, but a name is cut at the field's
+/// end rather than trusting that.
+fn parse_ap_record(rec: &[u8]) -> WifiScanResult {
+    let ssid_field = &rec[AP_SSID_OFFSET..AP_SSID_OFFSET + AP_SSID_FIELD_LEN];
+    let ssid_len = ssid_field
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(AP_SSID_FIELD_LEN)
+        .min(WIFI_SSID_MAX_LEN);
+    let mut ssid = [0u8; WIFI_SSID_MAX_LEN + 1];
+    ssid[..ssid_len].copy_from_slice(&ssid_field[..ssid_len]);
+
+    let mut authmode = [0u8; 4];
+    authmode.copy_from_slice(&rec[AP_AUTHMODE_OFFSET..AP_AUTHMODE_OFFSET + 4]);
+
+    WifiScanResult {
+        ssid,
+        rssi: rec[AP_RSSI_OFFSET] as i8,
+        channel: rec[AP_CHANNEL_OFFSET],
+        is_open: u32::from_le_bytes(authmode) == WIFI_AUTH_OPEN,
+    }
 }
 
 /// What a scan finds in the simulator: (SSID, RSSI, channel, open). Without
@@ -490,6 +541,9 @@ pub unsafe extern "C" fn wifi_manager_connect(
             let pass_len = pass_bytes.len().min(64);
             wifi_cfg[32..32 + pass_len].copy_from_slice(&pass_bytes[..pass_len]);
         }
+
+        wifi_cfg[STA_SAE_PWE_H2E_OFFSET..STA_SAE_PWE_H2E_OFFSET + 4]
+            .copy_from_slice(&WPA3_SAE_PWE_BOTH.to_le_bytes());
 
         let _ = esp_wifi_set_config(0 /* WIFI_IF_STA */, wifi_cfg.as_ptr() as *const c_void);
 
@@ -648,10 +702,9 @@ pub extern "C" fn wifi_manager_get_rssi() -> i8 {
 
     #[cfg(target_os = "espidf")]
     unsafe {
-        // wifi_ap_record_t is ~108 bytes; rssi is i8 after 33+6 bytes of MAC+SSID
-        let mut ap_info = [0u8; 128];
+        let mut ap_info = [0u8; AP_RECORD_SIZE];
         if esp_wifi_sta_get_ap_info(ap_info.as_mut_ptr() as *mut c_void) == ESP_OK {
-            return ap_info[39] as i8; // rssi offset in wifi_ap_record_t
+            return ap_info[AP_RSSI_OFFSET] as i8;
         }
     }
 
@@ -1355,5 +1408,41 @@ mod tests {
             }
         });
         assert_eq!(parse_wifi_credentials(&oversized.to_string()), Err(()));
+    }
+
+    /// A wifi_ap_record_t as ESP-IDF v5.5.1 fills it in, offsets measured with
+    /// the ESP32-S3 compiler and written out here independently of the
+    /// constants under test.
+    fn ap_record(ssid: &[u8], channel: u8, rssi: i8, authmode: u32) -> [u8; 92] {
+        let mut rec = [0u8; 92];
+        rec[0..6].copy_from_slice(&[0x80, 0x45, 0x6b, 0x46, 0xcf, 0x20]); // bssid
+        rec[6..6 + ssid.len()].copy_from_slice(ssid);
+        rec[39] = channel;
+        rec[44] = rssi as u8;
+        rec[48..52].copy_from_slice(&authmode.to_le_bytes());
+        rec
+    }
+
+    #[test]
+    fn test_parse_ap_record_reads_the_ssid_not_the_bssid() {
+        let r = parse_ap_record(&ap_record(b"HomeNetwork", 6, -52, 3));
+        assert_eq!(&r.ssid[..12], b"HomeNetwork\0");
+        assert_eq!(r.channel, 6);
+        assert_eq!(r.rssi, -52);
+        assert!(!r.is_open);
+    }
+
+    #[test]
+    fn test_parse_ap_record_open_network() {
+        let r = parse_ap_record(&ap_record(b"CoffeeShop", 11, -70, 0));
+        assert!(r.is_open);
+    }
+
+    #[test]
+    fn test_parse_ap_record_keeps_a_32_byte_ssid_terminated() {
+        let name = [b'x'; 32];
+        let r = parse_ap_record(&ap_record(&name, 1, -40, 3));
+        assert_eq!(&r.ssid[..32], &name);
+        assert_eq!(r.ssid[32], 0);
     }
 }
