@@ -85,6 +85,9 @@ struct WifiState {
     state: u32,
     ip: [u8; 16],
     initialized: bool,
+    /// The attempt in progress ended with no answer from the AP. Set by the
+    /// event handler; wifi_manager_connect() decides whether to try again.
+    unanswered: bool,
 }
 
 impl WifiState {
@@ -93,12 +96,53 @@ impl WifiState {
             state: WIFI_STATE_DISCONNECTED,
             ip: [0u8; 16],
             initialized: false,
+            unanswered: false,
         }
     }
 }
 
 static WIFI_STATE: Mutex<WifiState> = Mutex::new(WifiState::new());
 static WIFI_STATE_CV: Condvar = Condvar::new();
+
+// wifi_err_reason_t values for an attempt the AP did not answer.
+const WIFI_REASON_AUTH_EXPIRE: u8 = 2;
+const WIFI_REASON_ASSOC_EXPIRE: u8 = 4;
+
+/// What one attempt needs once the AP answers: about 0.5 s to authenticate and
+/// associate, then about 2.5 s for DHCP, measured on a T-Deck Max.
+const MIN_ATTEMPT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Whether a connect attempt that ended with `reason` went unanswered by the
+/// AP, and so is worth another while the caller's timeout allows one.
+///
+/// A device that lost power or reset while connected never said goodbye. The
+/// AP, apparently still holding that session (WPA3 means protected management
+/// frames, which guard it against forged goodbyes), does not answer the first
+/// attempt after such a reboot, which times out with AUTH_EXPIRE after 4.3 s.
+/// A second attempt is accepted. Measured on a T-Deck Max against a WPA2/WPA3
+/// router: 8 of 8 resets while connected failed the first attempt, and every
+/// reboot from a clean disconnect joined at once. A rejected password is
+/// never retried.
+fn unanswered(reason: u8) -> bool {
+    matches!(reason, WIFI_REASON_AUTH_EXPIRE | WIFI_REASON_ASSOC_EXPIRE)
+}
+
+/// Record that the attempt in progress went unanswered, for
+/// wifi_manager_connect() to act on. False if no attempt is in progress.
+#[cfg(target_os = "espidf")]
+fn mark_unanswered_if_connecting() -> bool {
+    let marked = match WIFI_STATE.lock() {
+        Ok(mut s) if s.state == WIFI_STATE_CONNECTING => {
+            s.unanswered = true;
+            true
+        }
+        _ => false,
+    };
+    if marked {
+        WIFI_STATE_CV.notify_all();
+    }
+    marked
+}
 
 // ---------------------------------------------------------------------------
 // ESP-IDF WiFi FFI (hardware only)
@@ -166,15 +210,8 @@ unsafe extern "C" fn wifi_event_handler(
     event_data: *mut c_void,
 ) {
     if event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED {
-        let old_state = wifi_manager_get_state();
-        let next_state = if old_state == WIFI_STATE_CONNECTING {
-            WIFI_STATE_FAILED
-        } else {
-            WIFI_STATE_DISCONNECTED
-        };
-        wifi_manager_set_state(next_state, std::ptr::null());
         // The reason is what tells a wrong password (15, 202, 204) from a
-        // network that is not there (201).
+        // network that is not there (201) or an AP that did not answer (2).
         let reason = if event_data.is_null() {
             0
         } else {
@@ -186,6 +223,20 @@ unsafe extern "C" fn wifi_event_handler(
             b"WiFi disconnected, reason %d\0".as_ptr(),
             reason as i32,
         );
+
+        // Leave an unanswered attempt for wifi_manager_connect() to retry,
+        // without announcing a disconnect it may yet recover from.
+        if unanswered(reason) && mark_unanswered_if_connecting() {
+            return;
+        }
+
+        let old_state = wifi_manager_get_state();
+        let next_state = if old_state == WIFI_STATE_CONNECTING {
+            WIFI_STATE_FAILED
+        } else {
+            WIFI_STATE_DISCONNECTED
+        };
+        wifi_manager_set_state(next_state, std::ptr::null());
     } else if event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP {
         let got_ip = event_data as *const IpEventGotIp;
         if !got_ip.is_null() {
@@ -550,6 +601,7 @@ pub unsafe extern "C" fn wifi_manager_connect(
         if let Ok(mut s) = WIFI_STATE.lock() {
             s.state = WIFI_STATE_CONNECTING;
             s.ip = [0u8; 16];
+            s.unanswered = false;
         }
         WIFI_STATE_CV.notify_all();
 
@@ -589,6 +641,31 @@ pub unsafe extern "C" fn wifi_manager_connect(
             }
 
             let now = std::time::Instant::now();
+            if guard.unanswered {
+                guard.unanswered = false;
+                // The config goes in again first. After a failed attempt the
+                // driver passes over that AP, so a bare esp_wifi_connect()
+                // scanned, found nothing else and failed with 205
+                // (CONNECTION_FAIL) without ever authenticating; 2 of 2. Set
+                // again, the retry joined 4 of 4 times, 0.5 s after the first
+                // attempt gave up.
+                if deadline.saturating_duration_since(now) < MIN_ATTEMPT
+                    || esp_wifi_set_config(0 /* WIFI_IF_STA */, wifi_cfg.as_ptr() as *const c_void)
+                        != ESP_OK
+                    || esp_wifi_connect() != ESP_OK
+                {
+                    guard.state = WIFI_STATE_FAILED;
+                    guard.ip = [0u8; 16];
+                    WIFI_STATE_CV.notify_all();
+                    return ESP_ERR_TIMEOUT;
+                }
+                esp_log_write(
+                    ESP_LOG_INFO,
+                    TAG.as_ptr(),
+                    b"The AP did not answer; trying again\0".as_ptr(),
+                );
+                continue;
+            }
             if now >= deadline {
                 let _ = esp_wifi_disconnect();
                 guard.state = WIFI_STATE_FAILED;
@@ -1460,6 +1537,16 @@ mod tests {
         assert_eq!(r.channel, 6);
         assert_eq!(r.rssi, -52);
         assert!(!r.is_open);
+    }
+
+    #[test]
+    fn test_only_an_unanswered_attempt_is_retried() {
+        assert!(unanswered(2)); // AUTH_EXPIRE: the reboot-while-connected case
+        assert!(unanswered(4)); // ASSOC_EXPIRE
+        assert!(!unanswered(15)); // 4-way handshake timeout: wrong WPA2 password
+        assert!(!unanswered(201)); // no AP found
+        assert!(!unanswered(202)); // auth failed: wrong WPA3 password
+        assert!(!unanswered(204)); // handshake timeout
     }
 
     #[test]
