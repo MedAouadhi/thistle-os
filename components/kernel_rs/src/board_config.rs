@@ -47,6 +47,7 @@ extern "C" {
 
 // Reuse manifest JSON helpers
 use crate::manifest::{json_get_int, json_get_string};
+use crate::radio_antenna::AntennaSwitch;
 
 fn set_board_name(name: &str) {
     if let Ok(mut buf) = BOARD_NAME.lock() {
@@ -155,6 +156,9 @@ trait BootEffects {
     /// Configure an expander pin as an output, before anything drives it.
     fn configure_expander_output(&mut self, output: &ExpanderOutput) -> i32;
     fn set_expander_level(&mut self, output: &ExpanderOutput) -> i32;
+    /// Tell the kernel which radio antenna switch the board has, if any, once
+    /// the sequence has thrown it to the internal antenna.
+    fn declare_antenna_switch(&mut self, switch: Option<AntennaSwitch>);
     /// Wait, for a settling delay a board profile declares.
     fn delay(&mut self, ms: i32);
     fn init_driver_loader(&mut self);
@@ -186,6 +190,9 @@ fn run_boot_sequence<E: BootEffects>(profile: &str, effects: &mut E) -> i32 {
         Err(ret) => return ret,
     };
     apply_expander_outputs(profile, effects, &expanders);
+    let antenna_switch = parse_antenna_switch(profile, &expanders)
+        .and_then(|switch| select_internal_antenna(effects, switch));
+    effects.declare_antenna_switch(antenna_switch);
 
     load_drivers(profile, effects);
 
@@ -327,6 +334,59 @@ fn parse_expander_output(entry: &str, expanders: &[bool]) -> Option<ExpanderOutp
     })
 }
 
+/// Read the profile's `radio_antenna_switch`, or `None` if it declares none or
+/// names a pin the kernel cannot address.
+///
+/// `internal_level` is required rather than defaulted: a guessed level that
+/// came out wrong would route the radio to an empty connector.
+fn parse_antenna_switch(profile: &str, expanders: &[bool]) -> Option<AntennaSwitch> {
+    let entry = extract_object(profile, "radio_antenna_switch")?;
+
+    let expander = json_get_int(&entry, "expander")?;
+    if expander < 0 || !expanders.get(expander as usize).copied().unwrap_or(false) {
+        return None;
+    }
+
+    let pin = json_get_int(&entry, "pin")?;
+    if !(0..MAX_EXPANDER_PINS as i64).contains(&pin) {
+        return None;
+    }
+
+    let internal_level = match json_get_int(&entry, "internal_level")? {
+        0 => false,
+        1 => true,
+        _ => return None,
+    };
+
+    Some(AntennaSwitch {
+        expander: expander as usize,
+        pin: pin as u8,
+        internal_level,
+    })
+}
+
+/// Throw a declared antenna switch to the internal antenna, which is always
+/// fitted, before any driver loads. The switch is offered as a choice only if
+/// this took: one the kernel could not drive is one it cannot move later.
+fn select_internal_antenna<E: BootEffects>(
+    effects: &mut E,
+    switch: AntennaSwitch,
+) -> Option<AntennaSwitch> {
+    let output = ExpanderOutput {
+        expander: switch.expander,
+        pin: switch.pin as i32,
+        level: switch.internal_level as i32,
+        delay_ms: 0,
+    };
+    if effects.configure_expander_output(&output) != ESP_OK {
+        return None;
+    }
+    if effects.set_expander_level(&output) != ESP_OK {
+        return None;
+    }
+    Some(switch)
+}
+
 /// Read an I²C address, which board profiles write either as a bare integer or
 /// as the quoted hex string driver entries use (`"0x20"`).
 fn json_get_address(json: &str, key: &str) -> Option<i32> {
@@ -461,6 +521,10 @@ impl BootEffects for HardwareEffects {
 
     fn set_expander_level(&mut self, output: &ExpanderOutput) -> i32 {
         crate::drv_ioexp_xl9555::set_level(output.expander, output.pin as u8, output.level != 0)
+    }
+
+    fn declare_antenna_switch(&mut self, switch: Option<AntennaSwitch>) {
+        crate::radio_antenna::declare(switch);
     }
 
     fn delay(&mut self, ms: i32) {
@@ -884,6 +948,8 @@ mod tests {
         present_elfs: Vec<String>,
         /// Every driver entry handed to an effect, whatever it resolved to.
         loaded: Vec<DriverEntry>,
+        /// The antenna switch the sequence declared, or `None` until it does.
+        antenna_switch: Option<Option<AntennaSwitch>>,
     }
 
     impl Recorder {
@@ -1038,6 +1104,10 @@ mod tests {
                 level: output.level,
             });
             ESP_OK
+        }
+
+        fn declare_antenna_switch(&mut self, switch: Option<AntennaSwitch>) {
+            self.antenna_switch = Some(switch);
         }
 
         fn delay(&mut self, ms: i32) {
@@ -1751,14 +1821,14 @@ mod tests {
 
         // Both resets are active low, so each is held down and then released.
         // Leaving them high would start the parts from whatever state an
-        // unclean shutdown left behind. The rails and the antenna switch go up
-        // first and stay up — a level each, not a pulse.
+        // unclean shutdown left behind. The rails go up first and stay up — a
+        // level each, not a pulse. The antenna switch is declared on its own,
+        // so it is thrown once the declared pins are done.
         assert_eq!(
             expander_levels(&rec),
             vec![
                 (0, GPS_EN_PIN, 1),
                 (0, LORA_EN_PIN, 1),
-                (0, LORA_SEL_PIN, LORA_ANTENNA_INTERNAL),
                 (0, IMU_EN_PIN, 1),
                 (0, TOUCH_RST_PIN, 0),
                 (0, KEY_RST_PIN, 0),
@@ -1766,6 +1836,7 @@ mod tests {
                 (0, KEY_RST_PIN, 1),
                 (0, AMP_EN_PIN, 0),
                 (0, AUDIO_SEL_PIN, AUDIO_ROUTE_CODEC),
+                (0, LORA_SEL_PIN, LORA_ANTENNA_INTERNAL),
             ]
         );
     }
@@ -1850,8 +1921,99 @@ mod tests {
                 .filter(|(_, pin, _)| *pin == LORA_SEL_PIN)
                 .count(),
             1,
-            "the switch is set once and left there"
+            "the switch is set once and left there until Settings moves it"
         );
+    }
+
+    #[test]
+    fn the_tdeck_max_offers_its_antenna_switch_as_a_choice() {
+        let mut rec = Recorder::default();
+        run_boot_sequence(TDECK_MAX_PROFILE, &mut rec);
+
+        assert_eq!(
+            rec.antenna_switch,
+            Some(Some(AntennaSwitch {
+                expander: 0,
+                pin: LORA_SEL_PIN as u8,
+                internal_level: LORA_ANTENNA_INTERNAL == 1,
+            }))
+        );
+    }
+
+    // ── The radio antenna switch ──────────────────────────────────────────────
+
+    /// A board with one expander and whatever antenna switch `switch` says.
+    fn profile_with_antenna_switch(switch: &str) -> String {
+        format!(
+            r#"{{
+                "buses": {{ "i2c": [{{ "port": 0, "sda": 13, "scl": 14 }}] }},
+                "io_expanders": [{{ "id": "com.thistle.drv.ioexp-xl9555", "i2c_bus": 0, "i2c_addr": "0x20" }}],
+                {switch}
+                "drivers": []
+            }}"#
+        )
+    }
+
+    #[test]
+    fn a_board_with_no_antenna_switch_declares_none() {
+        let mut rec = Recorder::default();
+        run_boot_sequence(&profile_with_antenna_switch(""), &mut rec);
+        assert_eq!(rec.antenna_switch, Some(None));
+    }
+
+    #[test]
+    fn an_antenna_switch_whose_internal_level_is_inverted_is_driven_low() {
+        let mut rec = Recorder::default();
+        let profile = profile_with_antenna_switch(
+            r#""radio_antenna_switch": { "expander": 0, "pin": 5, "internal_level": 0 },"#,
+        );
+        run_boot_sequence(&profile, &mut rec);
+
+        assert_eq!(expander_levels(&rec), vec![(0, 5, 0)]);
+        assert_eq!(
+            rec.antenna_switch,
+            Some(Some(AntennaSwitch {
+                expander: 0,
+                pin: 5,
+                internal_level: false,
+            }))
+        );
+    }
+
+    #[test]
+    fn an_antenna_switch_with_no_internal_level_is_not_guessed_at() {
+        let mut rec = Recorder::default();
+        let profile = profile_with_antenna_switch(
+            r#""radio_antenna_switch": { "expander": 0, "pin": 4 },"#,
+        );
+        run_boot_sequence(&profile, &mut rec);
+
+        assert!(expander_levels(&rec).is_empty(), "{:?}", rec.phases());
+        assert_eq!(rec.antenna_switch, Some(None));
+    }
+
+    #[test]
+    fn an_antenna_switch_on_an_undeclared_expander_is_ignored() {
+        let mut rec = Recorder::default();
+        let profile = profile_with_antenna_switch(
+            r#""radio_antenna_switch": { "expander": 1, "pin": 4, "internal_level": 1 },"#,
+        );
+        run_boot_sequence(&profile, &mut rec);
+
+        assert!(expander_levels(&rec).is_empty(), "{:?}", rec.phases());
+        assert_eq!(rec.antenna_switch, Some(None));
+    }
+
+    #[test]
+    fn an_antenna_switch_that_cannot_be_driven_is_not_offered() {
+        let mut rec = Recorder::failing_pin(0, 4);
+        let profile = profile_with_antenna_switch(
+            r#""radio_antenna_switch": { "expander": 0, "pin": 4, "internal_level": 1 },"#,
+        );
+        run_boot_sequence(&profile, &mut rec);
+
+        assert!(expander_levels(&rec).is_empty(), "{:?}", rec.phases());
+        assert_eq!(rec.antenna_switch, Some(None));
     }
 
     #[test]

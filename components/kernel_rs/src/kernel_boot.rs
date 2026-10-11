@@ -183,6 +183,10 @@ pub extern "C" fn kernel_init() -> i32 {
     // are up and the SD card that may hold system.json is mounted.
     crate::light_prefs::light_prefs_restore();
 
+    // The LoRa antenna the user last chose. Boot left the radio on the
+    // internal one, and nothing has transmitted yet.
+    crate::radio_antenna::radio_antenna_restore();
+
     // App manager (Rust)
     crate::app_manager::app_manager_init();
 

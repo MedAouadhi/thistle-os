@@ -24,6 +24,7 @@
 #include "thistle/ota.h"
 #include "thistle/driver_loader.h"
 #include "thistle/light_prefs.h"
+#include "thistle/radio_antenna.h"
 #include "thistle/refresh_prefs.h"
 #include "hal/board.h"
 #include "hal/sdcard_path.h"
@@ -1511,10 +1512,12 @@ static void display_brightness_cb(lv_event_t *e)
     }
 }
 
-/* Mark a refresh-mode button as the mode in use, or not. Its label carries
- * the state too: the theme colours labels itself, so a label does not take
- * the button's colour and would stay black on the inverted button. */
-static void refresh_mode_set_checked(lv_obj_t *btn, bool checked)
+/* --- Choice rows: one button per option, the option in use inverted --- */
+
+/* Mark a choice button as the option in use, or not. Its label carries the
+ * state too: the theme colours labels itself, so a label does not take the
+ * button's colour and would stay black on the inverted button. */
+static void choice_set_checked(lv_obj_t *btn, bool checked)
 {
     lv_obj_t *label = lv_obj_get_child(btn, 0);
     if (checked) {
@@ -1526,18 +1529,80 @@ static void refresh_mode_set_checked(lv_obj_t *btn, bool checked)
     }
 }
 
+/* Mark the tapped button as the option in use, and only it. */
+static void choice_check_only(lv_obj_t *btn)
+{
+    lv_obj_t *row = lv_obj_get_parent(btn);
+    for (uint32_t i = 0; i < lv_obj_get_child_count(row); i++) {
+        lv_obj_t *other = lv_obj_get_child(row, (int32_t)i);
+        choice_set_checked(other, other == btn);
+    }
+}
+
+static lv_obj_t *create_choice_row(lv_obj_t *content)
+{
+    const theme_colors_t *tc = theme_get_colors();
+    lv_obj_t *btn_row = lv_obj_create(content);
+    lv_obj_set_size(btn_row, LV_PCT(100), ITEM_H + 4);
+    lv_obj_set_style_bg_color(btn_row, tc->bg, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(btn_row, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_radius(btn_row, 0, LV_PART_MAIN);
+    lv_obj_set_style_border_width(btn_row, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_left(btn_row, ITEM_PAD_LEFT, LV_PART_MAIN);
+    lv_obj_set_style_pad_right(btn_row, ITEM_PAD_RIGHT, LV_PART_MAIN);
+    lv_obj_set_style_pad_top(btn_row, 2, LV_PART_MAIN);
+    lv_obj_set_style_pad_bottom(btn_row, 2, LV_PART_MAIN);
+    lv_obj_clear_flag(btn_row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(btn_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(btn_row,
+                          LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(btn_row, 6, LV_PART_MAIN);
+    return btn_row;
+}
+
+static void create_choice_button(lv_obj_t *row, const char *text,
+                                 lv_event_cb_t cb, uintptr_t value,
+                                 bool checked)
+{
+    const theme_colors_t *tc = theme_get_colors();
+    lv_obj_t *b = lv_obj_create(row);
+    lv_obj_set_size(b, LV_SIZE_CONTENT, ITEM_H - 4);
+    lv_obj_set_style_bg_color(b, tc->bg, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(b, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_color(b, tc->text, LV_PART_MAIN);
+    lv_obj_set_style_border_width(b, 1, LV_PART_MAIN);
+    lv_obj_set_style_border_side(b, LV_BORDER_SIDE_FULL, LV_PART_MAIN);
+    lv_obj_set_style_radius(b, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_left(b, 6, LV_PART_MAIN);
+    lv_obj_set_style_pad_right(b, 6, LV_PART_MAIN);
+    lv_obj_set_style_pad_top(b, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_bottom(b, 0, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(b, tc->primary, LV_STATE_PRESSED);
+    lv_obj_set_style_bg_opa(b, LV_OPA_COVER, LV_STATE_PRESSED);
+    /* The option in use reads inverted. */
+    lv_obj_set_style_bg_color(b, tc->text, LV_STATE_CHECKED);
+    lv_obj_set_style_bg_opa(b, LV_OPA_COVER, LV_STATE_CHECKED);
+    lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(b, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, (void *)value);
+
+    lv_obj_t *bl = lv_label_create(b);
+    lv_label_set_text(bl, text);
+    lv_obj_set_style_text_font(bl, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_color(bl, tc->text, LV_PART_MAIN);
+    lv_obj_set_style_text_color(bl, tc->bg, LV_STATE_CHECKED);
+    lv_obj_align(bl, LV_ALIGN_CENTER, 0, 0);
+
+    choice_set_checked(b, checked);
+}
+
 static void display_refresh_mode_cb(lv_event_t *e)
 {
     epaper_refresh_policy_t policy =
         (epaper_refresh_policy_t)(uintptr_t)lv_event_get_user_data(e);
-    lv_obj_t *btn = lv_event_get_current_target(e);
-
-    /* Mark the chosen mode, and only it. */
-    lv_obj_t *row = lv_obj_get_parent(btn);
-    for (uint32_t i = 0; i < lv_obj_get_child_count(row); i++) {
-        lv_obj_t *other = lv_obj_get_child(row, (int32_t)i);
-        refresh_mode_set_checked(other, other == btn);
-    }
+    choice_check_only(lv_event_get_current_target(e));
 
     /* The UI manager applies the policy to every panel refresh, starting with
      * the one this tap's redraw brings, so Full shows itself at once. */
@@ -1577,25 +1642,6 @@ static void open_detail_display(lv_obj_t *content)
         create_info_row(content, "Refresh mode:");
         create_separator(content);
 
-        const theme_colors_t *tc_disp = theme_get_colors();
-        lv_obj_t *btn_row = lv_obj_create(content);
-        lv_obj_set_size(btn_row, LV_PCT(100), ITEM_H + 4);
-        lv_obj_set_style_bg_color(btn_row, tc_disp->bg, LV_PART_MAIN);
-        lv_obj_set_style_bg_opa(btn_row, LV_OPA_COVER, LV_PART_MAIN);
-        lv_obj_set_style_radius(btn_row, 0, LV_PART_MAIN);
-        lv_obj_set_style_border_width(btn_row, 0, LV_PART_MAIN);
-        lv_obj_set_style_pad_left(btn_row, ITEM_PAD_LEFT, LV_PART_MAIN);
-        lv_obj_set_style_pad_right(btn_row, ITEM_PAD_RIGHT, LV_PART_MAIN);
-        lv_obj_set_style_pad_top(btn_row, 2, LV_PART_MAIN);
-        lv_obj_set_style_pad_bottom(btn_row, 2, LV_PART_MAIN);
-        lv_obj_clear_flag(btn_row, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_flex_flow(btn_row, LV_FLEX_FLOW_ROW);
-        lv_obj_set_flex_align(btn_row,
-                              LV_FLEX_ALIGN_START,
-                              LV_FLEX_ALIGN_CENTER,
-                              LV_FLEX_ALIGN_CENTER);
-        lv_obj_set_style_pad_column(btn_row, 6, LV_PART_MAIN);
-
         /* Full is clean but flashes on every update; Fast is quick but leaves
          * ghosting; Auto is Fast with a full refresh after every few. */
         static const struct {
@@ -1608,37 +1654,11 @@ static void open_detail_display(lv_obj_t *content)
         };
         epaper_refresh_policy_t current = epaper_refresh_get_policy();
 
+        lv_obj_t *btn_row = create_choice_row(content);
         for (int i = 0; i < 3; i++) {
-            lv_obj_t *b = lv_obj_create(btn_row);
-            lv_obj_set_size(b, LV_SIZE_CONTENT, ITEM_H - 4);
-            lv_obj_set_style_bg_color(b, tc_disp->bg, LV_PART_MAIN);
-            lv_obj_set_style_bg_opa(b, LV_OPA_COVER, LV_PART_MAIN);
-            lv_obj_set_style_border_color(b, tc_disp->text, LV_PART_MAIN);
-            lv_obj_set_style_border_width(b, 1, LV_PART_MAIN);
-            lv_obj_set_style_border_side(b, LV_BORDER_SIDE_FULL, LV_PART_MAIN);
-            lv_obj_set_style_radius(b, 0, LV_PART_MAIN);
-            lv_obj_set_style_pad_left(b, 6, LV_PART_MAIN);
-            lv_obj_set_style_pad_right(b, 6, LV_PART_MAIN);
-            lv_obj_set_style_pad_top(b, 0, LV_PART_MAIN);
-            lv_obj_set_style_pad_bottom(b, 0, LV_PART_MAIN);
-            lv_obj_set_style_bg_color(b, tc_disp->primary, LV_STATE_PRESSED);
-            lv_obj_set_style_bg_opa(b, LV_OPA_COVER, LV_STATE_PRESSED);
-            /* The mode in use reads inverted. */
-            lv_obj_set_style_bg_color(b, tc_disp->text, LV_STATE_CHECKED);
-            lv_obj_set_style_bg_opa(b, LV_OPA_COVER, LV_STATE_CHECKED);
-            lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE);
-            lv_obj_clear_flag(b, LV_OBJ_FLAG_SCROLLABLE);
-            lv_obj_add_event_cb(b, display_refresh_mode_cb, LV_EVENT_CLICKED,
-                                (void *)(uintptr_t)modes[i].policy);
-
-            lv_obj_t *bl = lv_label_create(b);
-            lv_label_set_text(bl, modes[i].label);
-            lv_obj_set_style_text_font(bl, &lv_font_montserrat_14, LV_PART_MAIN);
-            lv_obj_set_style_text_color(bl, tc_disp->text, LV_PART_MAIN);
-            lv_obj_set_style_text_color(bl, tc_disp->bg, LV_STATE_CHECKED);
-            lv_obj_align(bl, LV_ALIGN_CENTER, 0, 0);
-
-            refresh_mode_set_checked(b, modes[i].policy == current);
+            create_choice_button(btn_row, modes[i].label, display_refresh_mode_cb,
+                                 (uintptr_t)modes[i].policy,
+                                 modes[i].policy == current);
         }
         create_separator(content);
     }
@@ -1656,6 +1676,29 @@ static void open_detail_display(lv_obj_t *content)
 }
 
 /* --- Radio --- */
+
+static void radio_antenna_cb(lv_event_t *e)
+{
+    radio_antenna_t antenna = (radio_antenna_t)(uintptr_t)lv_event_get_user_data(e);
+
+    /* The mark moves only if the switch did: a row showing External while the
+     * radio is still on the internal antenna is worse than no row at all. */
+    if (radio_antenna_select(antenna) != ESP_OK) {
+        toast_warn("Could not switch antenna");
+        return;
+    }
+    choice_check_only(lv_event_get_current_target(e));
+    ESP_LOGI(TAG, "Radio: antenna -> %s",
+             antenna == RADIO_ANTENNA_EXTERNAL ? "external" : "internal");
+
+    if (radio_antenna_save(antenna) != ESP_OK) {
+        toast_warn("Antenna not saved for next boot");
+    } else if (antenna == RADIO_ANTENNA_EXTERNAL) {
+        /* Nothing can tell whether it is there, and sending into an empty
+         * connector reflects the power back into the radio. */
+        toast_warn("Screw the antenna on before sending");
+    }
+}
 
 static void open_detail_radio(lv_obj_t *content)
 {
@@ -1681,9 +1724,22 @@ static void open_detail_radio(lv_obj_t *content)
         create_separator(content);
     }
 
-    create_info_row(content, "Parameters set at board init.");
-    create_separator(content);
-    create_info_row(content, "(Editing: future work)");
+    /* Only a board whose profile declares an RF switch has a choice: the
+     * T-Deck Max's top connector, or the antenna inside the case. */
+    if (radio_antenna_switchable()) {
+        create_info_row(content, "Antenna:");
+        create_separator(content);
+
+        uint8_t current = radio_antenna_get();
+        lv_obj_t *row = create_choice_row(content);
+        create_choice_button(row, "Internal", radio_antenna_cb,
+                             RADIO_ANTENNA_INTERNAL,
+                             current == RADIO_ANTENNA_INTERNAL);
+        create_choice_button(row, "External", radio_antenna_cb,
+                             RADIO_ANTENNA_EXTERNAL,
+                             current == RADIO_ANTENNA_EXTERNAL);
+        create_separator(content);
+    }
 }
 
 /* --- GPS (with live timer) --- */

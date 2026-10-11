@@ -72,6 +72,7 @@ pub mod net_manager;
 pub mod notification;
 pub mod ota;
 pub mod permissions;
+pub mod radio_antenna;
 pub mod refresh_prefs;
 pub mod secure_wipe;
 pub mod signing;

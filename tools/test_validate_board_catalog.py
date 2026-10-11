@@ -116,6 +116,39 @@ class IoExpanderValidationTests(unittest.TestCase):
         self.assertTrue(any("at most 16 expander_outputs" in error for error in errors))
 
 
+SWITCH = {"expander": 0, "pin": 4, "internal_level": 1}
+
+
+class AntennaSwitchValidationTests(unittest.TestCase):
+    def test_a_well_formed_switch_passes(self):
+        self.assertEqual(errors_for(radio_antenna_switch=dict(SWITCH)), [])
+
+    def test_a_switch_needs_an_internal_level(self):
+        errors = errors_for(radio_antenna_switch={"expander": 0, "pin": 4})
+        self.assertTrue(any("internal_level must be 0 or 1" in error for error in errors))
+
+    def test_a_switch_on_an_undeclared_expander_is_rejected(self):
+        errors = errors_for(radio_antenna_switch={**SWITCH, "expander": 1})
+        self.assertTrue(any("not declared in io_expanders" in error for error in errors))
+
+    def test_a_switch_pin_beyond_the_expander_width_is_rejected(self):
+        errors = errors_for(radio_antenna_switch={**SWITCH, "pin": 16})
+        self.assertTrue(any("outside 0-15" in error for error in errors))
+
+    def test_a_switch_pin_also_driven_as_a_pin_state_is_rejected(self):
+        errors = errors_for(
+            radio_antenna_switch=dict(SWITCH),
+            expander_outputs=[
+                {"expander": 0, "pin": 4, "direction": "output", "level": 1, "delay_ms": 0}
+            ],
+        )
+        self.assertTrue(any("also driven by expander_outputs[0]" in error for error in errors))
+
+    def test_a_switch_that_is_not_an_object_is_rejected(self):
+        errors = errors_for(radio_antenna_switch=4)
+        self.assertTrue(any("must be an object" in error for error in errors))
+
+
 BOARD = {"board": {"board_id": "tdeck-max"}, "drivers": []}
 
 SOURCE = """

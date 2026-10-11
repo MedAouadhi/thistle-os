@@ -126,6 +126,51 @@ def validate_io_expanders(label: str, data: dict, known_ids: set[str]) -> list[s
         if not isinstance(delay_ms, int) or isinstance(delay_ms, bool) or delay_ms < 0:
             errors.append(f"{where} delay_ms must be a non-negative integer")
 
+    errors.extend(validate_antenna_switch(label, data, expanders, outputs))
+    return errors
+
+
+def is_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def validate_antenna_switch(
+    label: str, data: dict, expanders: list, outputs: list
+) -> list[str]:
+    """Validate the RF switch between the radio and its two antennas, if any."""
+    if "radio_antenna_switch" not in data:
+        return []
+    switch = data["radio_antenna_switch"]
+    where = f"{label}: radio_antenna_switch"
+    if not isinstance(switch, dict):
+        return [f"{where} must be an object"]
+
+    errors: list[str] = []
+    expander = switch.get("expander")
+    if not is_int(expander):
+        errors.append(f"{where} missing expander index")
+    elif not 0 <= expander < len(expanders):
+        errors.append(f"{where} expander {expander} is not declared in io_expanders")
+
+    pin = switch.get("pin")
+    if not is_int(pin):
+        errors.append(f"{where} missing pin")
+    elif not 0 <= pin < MAX_EXPANDER_PINS:
+        errors.append(f"{where} pin {pin} is outside 0-{MAX_EXPANDER_PINS - 1}")
+
+    # Required, not defaulted: the kernel will not guess it, because a wrong
+    # guess routes the radio to an empty connector.
+    if switch.get("internal_level") not in (0, 1):
+        errors.append(
+            f"{where} internal_level must be 0 or 1, got {switch.get('internal_level')!r}"
+        )
+
+    # The kernel drives the switch itself, and Settings moves it. A pin state
+    # for the same line would be a second owner setting it at boot.
+    for idx, output in enumerate(outputs):
+        if output.get("expander") == expander and output.get("pin") == pin:
+            errors.append(f"{where} pin {pin} is also driven by expander_outputs[{idx}]")
+
     return errors
 
 
