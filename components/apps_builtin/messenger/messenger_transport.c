@@ -4,7 +4,7 @@
  *
  * Four backends are registered at init time:
  *
- *  MSG_TRANSPORT_LORA     — uses hal_registry_t->radio (fully implemented)
+ *  MSG_TRANSPORT_LORA     — the kernel's MeshCore node: Public channel and direct messages
  *  MSG_TRANSPORT_SMS      — A7682E 4G modem (send/receive via AT commands)
  *  MSG_TRANSPORT_BLE      — ble_manager relay stub (logs TODO, returns NOT_SUPPORTED)
  *  MSG_TRANSPORT_INTERNET — HTTP/WebSocket stub    (logs TODO, returns NOT_SUPPORTED)
@@ -18,12 +18,13 @@
 
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "stdio.h"
 #include "stdlib.h"
 #include "string.h"
 
-#include "hal/board.h"   /* hal_get_registry() / hal_registry_t */
 #include "drv_modem_a7682e.h"
 #include "thistle/ble_manager.h"
+#include "thistle/mesh.h"
 
 static const char *TAG = "msg_transport";
 
@@ -35,133 +36,123 @@ static const msg_transport_driver_t *s_registry[MSG_TRANSPORT_COUNT];
 static int                           s_count;
 
 /* ------------------------------------------------------------------ */
-/* LoRa transport                                                       */
+/* LoRa transport: MeshCore                                             */
 /* ------------------------------------------------------------------ */
 
 /*
- * The LoRa transport wraps the HAL radio driver.  It keeps a single
- * shared RX callback so the radio driver (which has only one slot) can
- * be pointed at our shim, which then calls the messenger RX callback.
- *
- * Packet wire format (matches the original messenger_ui.c):
- *   bytes 0-3  : sender_id  (uint32_t, little-endian)
- *   bytes 4-5  : text_len   (uint16_t, little-endian)
- *   bytes 6+   : UTF-8 text (not null-terminated on wire)
+ * The kernel runs a MeshCore node from boot and queues what it hears, so
+ * nothing is lost while the messenger is closed; this hands it over when
+ * polled. The transport's own conversation is the Public channel every
+ * MeshCore node shares. Any other conversation is a direct message to a
+ * contact, addressed by the start of its key.
  */
 
-#define LORA_MAX_TEXT 249  /* 255 - 6 byte header */
+/* Messages handed over per poll: a burst waits for the next tick rather than
+ * holding up the LVGL task. */
+#define MESH_POLL_BUDGET 8
 
-static msg_rx_cb_t  s_lora_rx_cb;
-static uint32_t     s_lora_device_id;  /* set on first send/start_receive */
-
-static void lora_radio_rx_shim(const uint8_t *data, size_t len,
-                                int rssi, void *user_data)
+void messenger_mesh_address(const uint8_t *pub_key, char out[MSG_MESH_ADDR_LEN])
 {
-    (void)rssi;
-    (void)user_data;
-
-    if (!s_lora_rx_cb) return;
-    if (len < 7) return;  /* minimum: 4 id + 2 len + 1 char */
-
-    uint32_t sender_id;
-    uint16_t msg_len;
-    memcpy(&sender_id, data, 4);
-    memcpy(&msg_len, data + 4, 2);
-
-    /* Drop our own re-broadcasts */
-    if (sender_id == s_lora_device_id) return;
-
-    if (msg_len > len - 6) msg_len = (uint16_t)(len - 6);
-    if (msg_len > LORA_MAX_TEXT) msg_len = LORA_MAX_TEXT;
-
-    char sender[16];
-    snprintf(sender, sizeof(sender), "Node-%08X", (unsigned)sender_id);
-
-    char text[LORA_MAX_TEXT + 1];
-    memcpy(text, data + 6, msg_len);
-    text[msg_len] = '\0';
-
-    s_lora_rx_cb(MSG_TRANSPORT_LORA, sender, text);
+    for (int i = 0; i < MSG_MESH_KEY_PREFIX; i++) {
+        snprintf(out + 2 * i, 3, "%02x", pub_key[i]);
+    }
 }
 
-static bool lora_is_available(void)
+static bool mesh_parse_address(const char *addr, uint8_t prefix[MSG_MESH_KEY_PREFIX])
 {
-    const hal_registry_t *reg = hal_get_registry();
-    return (reg && reg->radio && reg->radio->send && reg->radio->start_receive);
+    if (!addr || strlen(addr) != MSG_MESH_KEY_PREFIX * 2) return false;
+    for (int i = 0; i < MSG_MESH_KEY_PREFIX; i++) {
+        unsigned int byte;
+        if (sscanf(addr + 2 * i, "%2x", &byte) != 1) return false;
+        prefix[i] = (uint8_t)byte;
+    }
+    return true;
 }
 
-static esp_err_t lora_send(const char *dest, const char *text)
+static bool mesh_is_available(void)
 {
-    (void)dest;  /* LoRa is broadcast — dest is ignored */
-
-    if (!lora_is_available()) {
-        return ESP_ERR_NOT_SUPPORTED;
-    }
-
-    if (!text || text[0] == '\0') {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    /* Ensure we have a device ID */
-    if (s_lora_device_id == 0) {
-        s_lora_device_id = (uint32_t)esp_timer_get_time() ^ 0xDEADBEEF;
-        if (s_lora_device_id == 0) s_lora_device_id = 0xCAFEBABE;
-    }
-
-    size_t text_len = strlen(text);
-    if (text_len > LORA_MAX_TEXT) text_len = LORA_MAX_TEXT;
-
-    uint8_t packet[255];
-    memcpy(packet, &s_lora_device_id, 4);
-    uint16_t len16 = (uint16_t)text_len;
-    memcpy(packet + 4, &len16, 2);
-    memcpy(packet + 6, text, text_len);
-
-    const hal_registry_t *reg = hal_get_registry();
-    esp_err_t err = reg->radio->send(packet, 6 + text_len);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "LoRa send failed: %s", esp_err_to_name(err));
-    }
-    return err;
+    return rs_mesh_is_running();
 }
 
-static esp_err_t lora_start_receive(msg_rx_cb_t cb)
+static esp_err_t mesh_send(const char *dest, const char *text, uint32_t *out_ref)
 {
-    if (!lora_is_available()) return ESP_ERR_NOT_SUPPORTED;
+    if (out_ref) *out_ref = 0;
+    if (!text || text[0] == '\0') return ESP_ERR_INVALID_ARG;
 
-    /* Ensure device ID is set so the shim can filter self-messages */
-    if (s_lora_device_id == 0) {
-        s_lora_device_id = (uint32_t)esp_timer_get_time() ^ 0xDEADBEEF;
-        if (s_lora_device_id == 0) s_lora_device_id = 0xCAFEBABE;
+    if (!dest || dest[0] == '\0') {
+        return rs_mesh_send_channel(MESH_PUBLIC_CHANNEL, text, out_ref);
     }
 
-    s_lora_rx_cb = cb;
-    const hal_registry_t *reg = hal_get_registry();
-    esp_err_t err = reg->radio->start_receive(lora_radio_rx_shim, NULL);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "LoRa start_receive failed: %s", esp_err_to_name(err));
-        s_lora_rx_cb = NULL;
-    }
-    return err;
+    uint8_t prefix[MSG_MESH_KEY_PREFIX];
+    if (!mesh_parse_address(dest, prefix)) return ESP_ERR_INVALID_ARG;
+    int idx = rs_mesh_find_contact_prefix(prefix, sizeof(prefix));
+    if (idx < 0) return ESP_ERR_NOT_FOUND;
+
+    mesh_contact_t contact;
+    esp_err_t err = rs_mesh_get_contact(idx, &contact);
+    if (err != ESP_OK) return err;
+    return rs_mesh_send_direct(contact.pub_key, text, out_ref);
 }
 
-static void lora_stop_receive(void)
+/* The node is always listening; there is nothing to start or stop. */
+static esp_err_t mesh_start_receive(msg_rx_cb_t cb)
 {
-    s_lora_rx_cb = NULL;
-    const hal_registry_t *reg = hal_get_registry();
-    if (reg && reg->radio && reg->radio->stop_receive) {
-        reg->radio->stop_receive();
+    (void)cb;
+    return mesh_is_available() ? ESP_OK : ESP_ERR_NOT_SUPPORTED;
+}
+
+static void mesh_stop_receive(void)
+{
+}
+
+static msg_status_t mesh_status(uint8_t delivery)
+{
+    switch (delivery) {
+        case MESH_DELIVERY_SENT:      return MSG_STATUS_SENT;
+        case MESH_DELIVERY_DELIVERED: return MSG_STATUS_DELIVERED;
+        case MESH_DELIVERY_FAILED:    return MSG_STATUS_FAILED;
+        default:                      return MSG_STATUS_NONE;
+    }
+}
+
+static void mesh_poll(msg_rx_cb_t rx, msg_status_cb_t status)
+{
+    mesh_message_t m;
+    for (int n = 0; n < MESH_POLL_BUDGET && rs_mesh_inbox_pop(&m); n++) {
+        /* Only the Public channel is joined; anything else is not ours. */
+        if (m.kind == MESH_MSG_CHANNEL && m.channel != MESH_PUBLIC_CHANNEL) continue;
+
+        char conv[MSG_MESH_ADDR_LEN] = "";
+        if (m.kind == MESH_MSG_DIRECT) messenger_mesh_address(m.sender_key, conv);
+
+        char sender[sizeof(m.sender_name) + 1];
+        memcpy(sender, m.sender_name, m.sender_name_len);
+        sender[m.sender_name_len] = '\0';
+
+        char text[sizeof(m.text) + 1];
+        memcpy(text, m.text, m.text_len);
+        text[m.text_len] = '\0';
+
+        if (rx) rx(MSG_TRANSPORT_LORA, conv, sender[0] ? sender : "?", text);
+    }
+
+    uint32_t id;
+    uint8_t delivery;
+    while (rs_mesh_delivery_pop(&id, &delivery)) {
+        if (status) status(MSG_TRANSPORT_LORA, id, mesh_status(delivery));
     }
 }
 
 static const msg_transport_driver_t s_lora_driver = {
     .type           = MSG_TRANSPORT_LORA,
-    .name           = "LoRa",
+    .name           = "MeshCore",
     .icon           = "[~]",
-    .is_available   = lora_is_available,
-    .send           = lora_send,
-    .start_receive  = lora_start_receive,
-    .stop_receive   = lora_stop_receive,
+    .default_conv   = "Public",
+    .is_available   = mesh_is_available,
+    .send           = mesh_send,
+    .start_receive  = mesh_start_receive,
+    .stop_receive   = mesh_stop_receive,
+    .poll           = mesh_poll,
 };
 
 /* ------------------------------------------------------------------ */
@@ -175,8 +166,9 @@ static bool sms_is_available(void)
     return drv_a7682e_is_ready();
 }
 
-static esp_err_t sms_send(const char *dest, const char *text)
+static esp_err_t sms_send(const char *dest, const char *text, uint32_t *out_ref)
 {
+    if (out_ref) *out_ref = 0;
     if (!dest || !text) return ESP_ERR_INVALID_ARG;
     return drv_a7682e_send_sms(dest, text);
 }
@@ -190,7 +182,7 @@ static void sms_incoming_handler(int index, void *user_data)
     char body[200]  = {0};
     if (drv_a7682e_read_sms(index, sender, sizeof(sender),
                              body, sizeof(body)) == ESP_OK) {
-        s_sms_rx_cb(MSG_TRANSPORT_SMS, sender, body);
+        s_sms_rx_cb(MSG_TRANSPORT_SMS, "", sender, body);
         drv_a7682e_delete_sms(index);
     }
 }
@@ -214,6 +206,7 @@ static const msg_transport_driver_t s_sms_driver = {
     .type           = MSG_TRANSPORT_SMS,
     .name           = "SMS",
     .icon           = "[M]",
+    .default_conv   = "SMS",
     .is_available   = sms_is_available,
     .send           = sms_send,
     .start_receive  = sms_start_receive,
@@ -268,7 +261,7 @@ static void ble_rx_handler(const uint8_t *data, size_t len, void *user_data)
         if ((uint32_t)sender_id == s_ble_device_id) return;
     }
 
-    s_ble_rx_cb(MSG_TRANSPORT_BLE, sender, text);
+    s_ble_rx_cb(MSG_TRANSPORT_BLE, "", sender, text);
 }
 
 static bool ble_is_available(void)
@@ -276,9 +269,10 @@ static bool ble_is_available(void)
     return (ble_manager_get_state() == BLE_STATE_CONNECTED);
 }
 
-static esp_err_t ble_send(const char *dest, const char *text)
+static esp_err_t ble_send(const char *dest, const char *text, uint32_t *out_ref)
 {
     (void)dest;
+    if (out_ref) *out_ref = 0;
     if (!ble_is_available()) return ESP_ERR_NOT_SUPPORTED;
     if (!text || text[0] == '\0') return ESP_ERR_INVALID_ARG;
 
@@ -323,6 +317,7 @@ static const msg_transport_driver_t s_ble_driver = {
     .type           = MSG_TRANSPORT_BLE,
     .name           = "BLE",
     .icon           = "[B]",
+    .default_conv   = "BLE",
     .is_available   = ble_is_available,
     .send           = ble_send,
     .start_receive  = ble_start_receive,
@@ -339,10 +334,11 @@ static bool internet_is_available(void)
     return false;
 }
 
-static esp_err_t internet_send(const char *dest, const char *text)
+static esp_err_t internet_send(const char *dest, const char *text, uint32_t *out_ref)
 {
     (void)dest;
     (void)text;
+    if (out_ref) *out_ref = 0;
     /*
      * TODO: POST to messaging API endpoint using esp_http_client.
      * The endpoint URL and auth token should be read from NVS.
@@ -371,6 +367,7 @@ static const msg_transport_driver_t s_internet_driver = {
     .type           = MSG_TRANSPORT_INTERNET,
     .name           = "Internet",
     .icon           = "[W]",
+    .default_conv   = "Internet",
     .is_available   = internet_is_available,
     .send           = internet_send,
     .start_receive  = internet_start_receive,

@@ -159,6 +159,9 @@ trait BootEffects {
     /// Tell the kernel which radio antenna switch the board has, if any, once
     /// the sequence has thrown it to the internal antenna.
     fn declare_antenna_switch(&mut self, switch: Option<AntennaSwitch>);
+    /// Tell the kernel which band the board's LoRa radio is matched for, if
+    /// it has one, so the mesh picks a frequency inside it.
+    fn declare_radio_band(&mut self, band_hz: Option<u32>);
     /// Wait, for a settling delay a board profile declares.
     fn delay(&mut self, ms: i32);
     fn init_driver_loader(&mut self);
@@ -195,8 +198,25 @@ fn run_boot_sequence<E: BootEffects>(profile: &str, effects: &mut E) -> i32 {
     effects.declare_antenna_switch(antenna_switch);
 
     load_drivers(profile, effects);
+    effects.declare_radio_band(radio_band_hz(profile));
 
     ESP_OK
+}
+
+/// What the SX1262 driver begins at when a profile names no band.
+const DEFAULT_RADIO_BAND_HZ: u32 = 915_000_000;
+
+/// The band a board's LoRa radio is matched for: what its driver entry
+/// declares, or the driver's own 915 MHz when it declares none. `None` for a
+/// board with no radio.
+fn radio_band_hz(profile: &str) -> Option<u32> {
+    let radio = objects_in(profile, "drivers", MAX_DRIVERS)
+        .find(|drv| json_get_string(drv, "hal").as_deref() == Some("radio"))?;
+    let declared = extract_object(&radio, "config")
+        .and_then(|config| json_get_int(&config, "freq_hz"))
+        .and_then(|hz| u32::try_from(hz).ok())
+        .filter(|hz| *hz > 0);
+    Some(declared.unwrap_or(DEFAULT_RADIO_BAND_HZ))
 }
 
 /// Drive board-level GPIO outputs (power enables, resets) before bus init.
@@ -525,6 +545,10 @@ impl BootEffects for HardwareEffects {
 
     fn declare_antenna_switch(&mut self, switch: Option<AntennaSwitch>) {
         crate::radio_antenna::declare(switch);
+    }
+
+    fn declare_radio_band(&mut self, band_hz: Option<u32>) {
+        crate::mesh_manager::declare_radio_band(band_hz);
     }
 
     fn delay(&mut self, ms: i32) {
@@ -950,6 +974,8 @@ mod tests {
         loaded: Vec<DriverEntry>,
         /// The antenna switch the sequence declared, or `None` until it does.
         antenna_switch: Option<Option<AntennaSwitch>>,
+        /// The radio band the sequence declared, or `None` until it does.
+        radio_band: Option<Option<u32>>,
     }
 
     impl Recorder {
@@ -1108,6 +1134,10 @@ mod tests {
 
         fn declare_antenna_switch(&mut self, switch: Option<AntennaSwitch>) {
             self.antenna_switch = Some(switch);
+        }
+
+        fn declare_radio_band(&mut self, band_hz: Option<u32>) {
+            self.radio_band = Some(band_hz);
         }
 
         fn delay(&mut self, ms: i32) {
@@ -1938,6 +1968,41 @@ mod tests {
                 internal_level: LORA_ANTENNA_INTERNAL == 1,
             }))
         );
+    }
+
+    // ── The radio band ────────────────────────────────────────────────────────
+
+    #[test]
+    fn the_tdeck_max_declares_the_band_its_radio_is_matched_for() {
+        let mut rec = Recorder::default();
+        run_boot_sequence(TDECK_MAX_PROFILE, &mut rec);
+        assert_eq!(rec.radio_band, Some(Some(868_000_000)));
+    }
+
+    #[test]
+    fn a_radio_that_names_no_band_is_at_the_drivers_915_mhz() {
+        let profile = r#"{
+            "drivers": [
+                { "id": "com.thistle.drv.radio-sx1262", "hal": "radio",
+                  "entry": "radio-sx1262.drv.elf", "config": { "cs": 9 } }
+            ]
+        }"#;
+        let mut rec = Recorder::default();
+        run_boot_sequence(profile, &mut rec);
+        assert_eq!(rec.radio_band, Some(Some(915_000_000)));
+    }
+
+    #[test]
+    fn a_board_with_no_radio_declares_no_band() {
+        let profile = r#"{
+            "drivers": [
+                { "id": "com.thistle.drv.gps-mia-m10q", "hal": "gps",
+                  "entry": "gps-mia-m10q.drv.elf", "config": { "freq_hz": 868000000 } }
+            ]
+        }"#;
+        let mut rec = Recorder::default();
+        run_boot_sequence(profile, &mut rec);
+        assert_eq!(rec.radio_band, Some(None));
     }
 
     // ── The radio antenna switch ──────────────────────────────────────────────

@@ -1,16 +1,14 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # ThistleOS — MeshCore mesh protocol integration
 #
-# Builds the MeshCore C++ library as an ESP-IDF component.
-# We compile only the core protocol files (not examples or UI helpers).
+# Builds the MeshCore C++ library (MIT, git submodule) as an ESP-IDF
+# component, with the engine in src/meshcore_shim.cpp that runs it on the HAL
+# radio. Only the core protocol files are compiled, not the examples or UI.
 #
-# NOTE: MeshCore is built for the Arduino framework on ESP32. Since the
-# mesh app is a standalone .app.elf loaded from SPIFFS/SD (not linked
-# into the kernel firmware), LGPL static-linking concerns don't apply.
-# We shim the Arduino APIs (include/Arduino.h, include/Stream.h, etc.)
-# with lightweight ESP-IDF-backed stubs rather than pulling in the
-# entire arduino-esp32 component — ~200 LOC of shims vs a large
-# dependency we don't otherwise need.
+# MeshCore is written for the Arduino framework. Rather than pull in all of
+# arduino-esp32, include/ stands in for the few Arduino headers it reaches for
+# (Arduino.h, Stream.h, FS.h) and routes its crypto (Ed25519.h, ed_25519.h,
+# SHA256.h, AES.h) to the kernel's.
 
 set(MESHCORE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/MeshCore/src)
 
@@ -23,11 +21,9 @@ set(MESHCORE_SRCS
     ${MESHCORE_DIR}/helpers/BaseChatMesh.cpp
     ${MESHCORE_DIR}/helpers/AdvertDataHelpers.cpp
     ${MESHCORE_DIR}/helpers/TxtDataHelpers.cpp
-    # IdentityStore.cpp and TransportKeyStore.cpp omitted — they use Arduino
-    # filesystem APIs (File, FILESYSTEM). We handle identity persistence in
-    # our Rust mesh_manager module instead.
+    # IdentityStore.cpp and TransportKeyStore.cpp are left out: they use the
+    # Arduino filesystem. The engine keeps its identity and contacts itself.
     ${MESHCORE_DIR}/helpers/StaticPoolPacketManager.cpp
-    # Our shim files
     src/meshcore_shim.cpp
 )
 
@@ -38,6 +34,14 @@ idf_component_register(
         "${MESHCORE_DIR}"
         "${MESHCORE_DIR}/helpers"
     REQUIRES thistle_hal kernel driver esp_driver_i2c esp_driver_spi esp_driver_gpio esp_timer
+)
+
+# BaseChatMesh's size depends on these, so every file that includes it has to
+# see the same values. MAX_GROUP_CHANNELS also switches on group channels at
+# all: without it there is no Public channel.
+target_compile_definitions(${COMPONENT_LIB} PRIVATE
+    MAX_CONTACTS=64
+    MAX_GROUP_CHANNELS=4
 )
 
 # Suppress warnings in third-party MeshCore code

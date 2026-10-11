@@ -51,8 +51,13 @@ unsafe fn get_hw_crypto() -> Option<&'static HalCryptoDriver> {
 }
 
 #[cfg(test)]
+static TEST_HW_CRYPTO: std::sync::Mutex<Option<&'static HalCryptoDriver>> =
+    std::sync::Mutex::new(None);
+
+/// Tests use software unless one stands a driver in for the hardware.
+#[cfg(test)]
 unsafe fn get_hw_crypto() -> Option<&'static HalCryptoDriver> {
-    None // Tests always use software fallback
+    *TEST_HW_CRYPTO.lock().unwrap()
 }
 
 // ── Software implementations (pure Rust) ────────────────────────────
@@ -156,6 +161,10 @@ fn sw_aes128_ecb_decrypt_block(key: &[u8; 16], block_in: &[u8; 16], block_out: &
 }
 
 // ── FFI exports (dispatch: hardware first, software fallback) ───────
+//
+// A hardware call that fails falls back to software too. Passing its error
+// on is not enough: callers such as MeshCore's AES wrapper ignore it and use
+// an output buffer nothing wrote.
 
 #[no_mangle]
 pub unsafe extern "C" fn thistle_crypto_sha256(
@@ -170,7 +179,9 @@ pub unsafe extern "C" fn thistle_crypto_sha256(
     // Try hardware
     if let Some(hw) = get_hw_crypto() {
         if let Some(f) = hw.sha256 {
-            return f(data, len, hash_out);
+            if f(data, len, hash_out) == ESP_OK {
+                return ESP_OK;
+            }
         }
     }
 
@@ -196,7 +207,9 @@ pub unsafe extern "C" fn thistle_crypto_hmac_sha256(
 
     if let Some(hw) = get_hw_crypto() {
         if let Some(f) = hw.hmac_sha256 {
-            return f(key, key_len, data, data_len, mac_out);
+            if f(key, key_len, data, data_len, mac_out) == ESP_OK {
+                return ESP_OK;
+            }
         }
     }
 
@@ -257,7 +270,9 @@ pub unsafe extern "C" fn thistle_crypto_aes256_cbc_encrypt(
 
     if let Some(hw) = get_hw_crypto() {
         if let Some(f) = hw.aes256_cbc_encrypt {
-            return f(key, iv, plaintext, len, ciphertext_out);
+            if f(key, iv, plaintext, len, ciphertext_out) == ESP_OK {
+                return ESP_OK;
+            }
         }
     }
 
@@ -286,7 +301,9 @@ pub unsafe extern "C" fn thistle_crypto_aes256_cbc_decrypt(
 
     if let Some(hw) = get_hw_crypto() {
         if let Some(f) = hw.aes256_cbc_decrypt {
-            return f(key, iv, ciphertext, len, plaintext_out);
+            if f(key, iv, ciphertext, len, plaintext_out) == ESP_OK {
+                return ESP_OK;
+            }
         }
     }
 
@@ -392,7 +409,9 @@ pub unsafe extern "C" fn thistle_crypto_aes128_ecb_encrypt(
     // Try hardware
     if let Some(hw) = get_hw_crypto() {
         if let Some(f) = hw.aes128_ecb_encrypt {
-            return f(key, plaintext, len, ciphertext_out);
+            if f(key, plaintext, len, ciphertext_out) == ESP_OK {
+                return ESP_OK;
+            }
         }
     }
     // Software fallback
@@ -424,7 +443,9 @@ pub unsafe extern "C" fn thistle_crypto_aes128_ecb_decrypt(
     // Try hardware
     if let Some(hw) = get_hw_crypto() {
         if let Some(f) = hw.aes128_ecb_decrypt {
-            return f(key, ciphertext, len, plaintext_out);
+            if f(key, ciphertext, len, plaintext_out) == ESP_OK {
+                return ESP_OK;
+            }
         }
     }
     // Software fallback
@@ -1219,5 +1240,123 @@ mod tests {
             thistle_crypto_x25519_key_exchange(dummy.as_ptr(), dummy.as_ptr(), std::ptr::null_mut())
         };
         assert_eq!(r, ESP_ERR_INVALID_ARG);
+    }
+
+    /// MeshCore keeps a private key the way orlp/ed25519 does: the clamped
+    /// scalar, then the hash prefix. This is its known-good test client
+    /// (LocalIdentity::validatePrivateKey in the MeshCore tree). A ThistleOS
+    /// node and that MeshCore node have to reach the same shared secret, or
+    /// no direct message between them decrypts.
+    #[test]
+    fn test_x25519_agrees_with_a_meshcore_node() {
+        const THEIR_PRV: [u8; 64] = [
+            0x70, 0x65, 0xe1, 0x8f, 0xd9, 0xfa, 0xbb, 0x70, 0xc1, 0xed, 0x90, 0xdc, 0xa1, 0x99,
+            0x07, 0xde, 0x69, 0x8c, 0x88, 0xb7, 0x09, 0xea, 0x14, 0x6e, 0xaf, 0xd9, 0x3d, 0x9b,
+            0x83, 0x0c, 0x7b, 0x60, 0xc4, 0x68, 0x11, 0x93, 0xc7, 0x9b, 0xbc, 0x39, 0x94, 0x5b,
+            0xa8, 0x06, 0x41, 0x04, 0xbb, 0x61, 0x8f, 0x8f, 0xd7, 0xa8, 0x4a, 0x0a, 0xf6, 0xf5,
+            0x70, 0x33, 0xd6, 0xe8, 0xdd, 0xcd, 0x64, 0x71,
+        ];
+        const THEIR_PUB: [u8; 32] = [
+            0x1e, 0xc7, 0x71, 0x75, 0xb0, 0x91, 0x8e, 0xd2, 0x06, 0xf9, 0xae, 0x04, 0xec, 0x13,
+            0x6d, 0x6d, 0x5d, 0x43, 0x15, 0xbb, 0x26, 0x30, 0x54, 0x27, 0xf6, 0x45, 0xb4, 0x92,
+            0xe9, 0x35, 0x0c, 0x10,
+        ];
+
+        // The vector is what it says it is: the public key is the scalar's.
+        let their_scalar: [u8; 32] = THEIR_PRV[..32].try_into().unwrap();
+        let derived = curve25519_dalek::edwards::EdwardsPoint::mul_base_clamped(their_scalar);
+        assert_eq!(derived.compress().to_bytes(), THEIR_PUB);
+
+        let seed = [0x42u8; 32];
+        let mut our_pub = [0u8; 32];
+        let mut ours = [0u8; 32];
+        unsafe {
+            assert_eq!(thistle_crypto_ed25519_derive_public(seed.as_ptr(), our_pub.as_mut_ptr()), ESP_OK);
+            assert_eq!(
+                thistle_crypto_x25519_key_exchange(seed.as_ptr(), THEIR_PUB.as_ptr(), ours.as_mut_ptr()),
+                ESP_OK
+            );
+        }
+
+        // What ed25519_key_exchange() computes on the MeshCore node: X25519
+        // of its scalar and our public key moved to Montgomery form.
+        let our_u = curve25519_dalek::edwards::CompressedEdwardsY(our_pub)
+            .decompress()
+            .unwrap()
+            .to_montgomery()
+            .to_bytes();
+        let theirs = x25519_dalek::x25519(their_scalar, our_u);
+        assert_eq!(ours, theirs, "a MeshCore node must reach the same secret");
+    }
+
+    unsafe extern "C" fn failing_sha256(_: *const u8, _: usize, _: *mut u8) -> i32 {
+        ESP_FAIL
+    }
+    unsafe extern "C" fn failing_hmac(_: *const u8, _: usize, _: *const u8, _: usize, _: *mut u8) -> i32 {
+        ESP_FAIL
+    }
+    unsafe extern "C" fn failing_aes128(_: *const u8, _: *const u8, _: usize, _: *mut u8) -> i32 {
+        ESP_FAIL
+    }
+
+    /// An accelerator whose every call fails without writing anything, as
+    /// PSA Crypto does before psa_crypto_init() has run.
+    static FAILING_HW: HalCryptoDriver = HalCryptoDriver {
+        sha256: Some(failing_sha256),
+        aes256_cbc_encrypt: None,
+        aes256_cbc_decrypt: None,
+        hmac_sha256: Some(failing_hmac),
+        random: None,
+        aes128_ecb_encrypt: Some(failing_aes128),
+        aes128_ecb_decrypt: Some(failing_aes128),
+        name: std::ptr::null(),
+    };
+
+    struct RestoreSoftware;
+    impl Drop for RestoreSoftware {
+        fn drop(&mut self) {
+            *TEST_HW_CRYPTO.lock().unwrap() = None;
+        }
+    }
+
+    #[test]
+    fn hardware_that_fails_leaves_software_to_answer() {
+        *TEST_HW_CRYPTO.lock().unwrap() = Some(&FAILING_HW);
+        let _restore = RestoreSoftware;
+
+        // FIPS-197 C.1
+        let key: [u8; 16] = core::array::from_fn(|i| i as u8);
+        let plain: [u8; 16] = core::array::from_fn(|i| (i as u8) * 0x11);
+        let expected = [
+            0x69, 0xc4, 0xe0, 0xd8, 0x6a, 0x7b, 0x04, 0x30, 0xd8, 0xcd, 0xb7, 0x80, 0x70, 0xb4,
+            0xc5, 0x5a,
+        ];
+        let mut cipher = [0u8; 16];
+        let mut back = [0u8; 16];
+        unsafe {
+            assert_eq!(
+                thistle_crypto_aes128_ecb_encrypt(key.as_ptr(), plain.as_ptr(), 16, cipher.as_mut_ptr()),
+                ESP_OK
+            );
+            assert_eq!(
+                thistle_crypto_aes128_ecb_decrypt(key.as_ptr(), cipher.as_ptr(), 16, back.as_mut_ptr()),
+                ESP_OK
+            );
+        }
+        assert_eq!(cipher, expected);
+        assert_eq!(back, plain);
+
+        // RFC 4231 test case 1
+        let mut mac = [0u8; 32];
+        let ret = unsafe {
+            thistle_crypto_hmac_sha256([0x0b; 20].as_ptr(), 20, b"Hi There".as_ptr(), 8, mac.as_mut_ptr())
+        };
+        assert_eq!(ret, ESP_OK);
+        assert_eq!(mac[..8], [0xb0, 0x34, 0x4c, 0x61, 0xd8, 0xdb, 0x38, 0x53]);
+
+        // FIPS 180-2: SHA-256("abc")
+        let mut hash = [0u8; 32];
+        assert_eq!(unsafe { thistle_crypto_sha256(b"abc".as_ptr(), 3, hash.as_mut_ptr()) }, ESP_OK);
+        assert_eq!(hash[..4], [0xba, 0x78, 0x16, 0xbf]);
     }
 }

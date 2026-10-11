@@ -28,6 +28,11 @@ extern "C" {
  * profiles could name one. */
 #define SX1262_DEFAULT_FREQ_MHZ 915.0f
 
+/* MeshCore nodes send and expect 16 preamble symbols (CustomSX1262::std_init
+ * in the MeshCore tree). A receiver set for fewer than a sender uses can miss
+ * the packet, so this matches them rather than RadioLib's default of 8. */
+#define SX1262_PREAMBLE_SYMBOLS 16
+
 enum class RadioLifecycle : uint8_t {
     Stopped,
     Starting,
@@ -405,10 +410,12 @@ static esp_err_t sx1262_init(const void *config) {
 
     s_radio.radio = new SX1262(s_radio.mod);
 
-    /* Band from the board profile; the rest are defaults: 125kHz BW, SF7, CR4/5 */
+    /* Band from the board profile; the rest are defaults until the mesh sets
+     * its own: 125kHz BW, SF7, CR4/5. */
     const float mhz = s_radio.cfg.freq_hz ? s_radio.cfg.freq_hz / 1000000.0f
                                           : SX1262_DEFAULT_FREQ_MHZ;
-    int state = s_radio.radio->begin(mhz, 125.0, 7, 5, RADIOLIB_SX126X_SYNC_WORD_PRIVATE, 22);
+    int state = s_radio.radio->begin(mhz, 125.0, 7, 5, RADIOLIB_SX126X_SYNC_WORD_PRIVATE, 22,
+                                     SX1262_PREAMBLE_SYMBOLS);
     if (state != RADIOLIB_ERR_NONE) {
         ESP_LOGE(TAG, "RadioLib begin() failed: %d", state);
         return abandon_init();

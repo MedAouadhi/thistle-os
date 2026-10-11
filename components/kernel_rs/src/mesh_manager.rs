@@ -1,16 +1,26 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // ThistleOS Kernel — mesh_manager module
 //
-// Rust wrapper around the MeshCore C shim (components/meshcore/include/meshcore_shim.h).
-// Provides mesh networking: send/receive messages, discover contacts, broadcast
-// advertisements, and query network statistics.
+// The kernel's side of the MeshCore mesh. The engine (components/meshcore)
+// runs the node on its own task and hears everything; this owns what apps see
+// of it: who this node is, the contacts it has heard from, messages waiting for
+// an app to read them, and what became of each message an app sent.
 //
-// On ESP-IDF targets, calls through to the real MeshCore C functions.
-// On simulator/test builds, all hardware calls are stubbed.
+// It also decides what the engine is given. A MeshCore node only hears peers
+// on the same frequency, bandwidth and spreading factor, so the board's band
+// picks MeshCore's own preset for that region, and system.json's `mesh`
+// section can override any of it:
+//
+//   "mesh": { "enabled": true, "name": "Mo's T-Deck",
+//             "frequency_mhz": 869.618, "bandwidth_khz": 62.5,
+//             "spreading_factor": 8, "coding_rate": 5, "tx_power_dbm": 22 }
+//
+// On simulator and test builds there is no engine: the mesh never starts, and
+// the store below is exercised directly.
 
+use std::collections::VecDeque;
 use std::os::raw::c_char;
-#[cfg(target_os = "espidf")]
-use std::os::raw::c_void;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
 
 // ---------------------------------------------------------------------------
@@ -20,29 +30,82 @@ use std::sync::Mutex;
 const ESP_OK: i32 = 0x000;
 const ESP_ERR_INVALID_ARG: i32 = 0x102;
 const ESP_ERR_INVALID_STATE: i32 = 0x103;
+const ESP_ERR_INVALID_SIZE: i32 = 0x104;
+const ESP_ERR_NOT_FOUND: i32 = 0x105;
+const ESP_ERR_NOT_SUPPORTED: i32 = 0x106;
 const ESP_FAIL: i32 = -1;
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-const INBOX_SIZE: usize = 16;
+const INBOX_SIZE: usize = 32;
+const DELIVERY_QUEUE_SIZE: usize = 32;
+/// How many recent messages a repeat is checked against. A sender that hears
+/// no acknowledgement sends the same message again, and it can arrive twice.
+const RECENT_SIGNATURES: usize = 32;
 const MESH_NAME_MAX: usize = 32;
+/// MeshCore's MAX_TEXT_LEN: ten cipher blocks.
+pub const MESH_TEXT_MAX: usize = 160;
+/// The channel every MeshCore node shares.
+pub const PUBLIC_CHANNEL: u8 = 0;
+
+/// What a contact's path length is when no route to it is known.
+pub const PATH_UNKNOWN: u8 = 0xFF;
+
+pub const MSG_DIRECT: u8 = 0;
+pub const MSG_CHANNEL: u8 = 1;
+
+/// Delivery states, as the engine reports them.
+pub const DELIVERY_SENT: u8 = 1;
+pub const DELIVERY_DELIVERED: u8 = 2;
+pub const DELIVERY_FAILED: u8 = 3;
+
+/// Where the engine keeps the node's identity and contacts.
+#[cfg(target_os = "espidf")]
+const STATE_DIR: &str = "/spiffs/config";
 
 // ---------------------------------------------------------------------------
-// FFI structs — C-compatible
+// Logging
 // ---------------------------------------------------------------------------
 
-/// A discovered mesh contact.
+#[cfg(not(test))]
+extern "C" {
+    fn esp_log_write(level: i32, tag: *const u8, format: *const u8, ...);
+}
+
+const ESP_LOG_WARN: i32 = 2;
+const ESP_LOG_INFO: i32 = 3;
+
+macro_rules! mesh_log {
+    ($level:expr, $fmt:expr $(, $arg:expr)*) => {{
+        #[cfg(not(test))]
+        unsafe {
+            esp_log_write($level, b"mesh\0".as_ptr(), $fmt.as_ptr() $(, $arg)*);
+        }
+        #[cfg(test)]
+        {
+            let _ = ($level, $fmt $(, $arg)*);
+        }
+    }};
+}
+
+// ---------------------------------------------------------------------------
+// FFI structs — C-compatible, shared with apps (thistle_app.h)
+// ---------------------------------------------------------------------------
+
+/// A contact this node has heard an advert from.
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CMeshContact {
     pub pub_key: [u8; 32],
     pub name: [u8; 32],
     pub name_len: u8,
     pub node_type: u8,
     pub last_rssi: i8,
+    /// Hops to it, or PATH_UNKNOWN when a message to it has to flood.
     pub path_len: u8,
+    /// When it last advertised, by its own clock.
     pub last_seen: u32,
     pub lat: f64,
     pub lon: f64,
@@ -57,7 +120,7 @@ impl Default for CMeshContact {
             name_len: 0,
             node_type: 0,
             last_rssi: 0,
-            path_len: 0,
+            path_len: PATH_UNKNOWN,
             last_seen: 0,
             lat: 0.0,
             lon: 0.0,
@@ -66,16 +129,23 @@ impl Default for CMeshContact {
     }
 }
 
-/// A received mesh message stored in the inbox ring buffer.
+/// A received message waiting for an app.
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CMeshMessage {
+    /// The sender, for a direct message; zero for a channel message, whose
+    /// sender is known only by the name it gave.
     pub sender_key: [u8; 32],
     pub sender_name: [u8; 32],
     pub sender_name_len: u8,
+    /// When it was sent, by the sender's clock.
     pub timestamp: u32,
     pub text: [u8; 200],
     pub text_len: u16,
+    /// MSG_DIRECT or MSG_CHANNEL.
+    pub kind: u8,
+    /// The channel, for a channel message.
+    pub channel: u8,
 }
 
 impl Default for CMeshMessage {
@@ -87,6 +157,8 @@ impl Default for CMeshMessage {
             timestamp: 0,
             text: [0u8; 200],
             text_len: 0,
+            kind: MSG_DIRECT,
+            channel: 0,
         }
     }
 }
@@ -104,423 +176,757 @@ pub struct CMeshStats {
 }
 
 // ---------------------------------------------------------------------------
-// MeshCore C shim FFI (hardware only)
+// The engine's C interface (components/meshcore/include/meshcore_shim.h)
 // ---------------------------------------------------------------------------
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+#[cfg_attr(not(target_os = "espidf"), allow(dead_code))]
+struct EngineConfig {
+    freq_hz: u32,
+    bw_hz: u32,
+    sf: u8,
+    cr: u8,
+    tx_power_dbm: i8,
+    name: [u8; 32],
+    state_dir: [u8; 48],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+#[cfg_attr(not(target_os = "espidf"), allow(dead_code))]
+pub(crate) struct EngineContact {
+    pub_key: [u8; 32],
+    name: [u8; 32],
+    node_type: u8,
+    path_len: u8,
+    last_advert: u32,
+    lat_e6: i32,
+    lon_e6: i32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+#[cfg_attr(not(target_os = "espidf"), allow(dead_code))]
+pub(crate) struct EngineMessage {
+    kind: u8,
+    channel: u8,
+    sender_key: [u8; 32],
+    sender_name: [u8; 32],
+    timestamp: u32,
+    text: [u8; MESH_TEXT_MAX + 1],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct EngineStats {
+    packets_sent: u32,
+    packets_received: u32,
+    messages_sent: u32,
+    messages_received: u32,
+    rx_dropped: u32,
+}
+
+#[repr(C)]
+#[cfg_attr(not(target_os = "espidf"), allow(dead_code))]
+struct EngineCallbacks {
+    on_ready: unsafe extern "C" fn(*const u8, *const c_char),
+    on_contact: unsafe extern "C" fn(*const EngineContact),
+    on_contact_removed: unsafe extern "C" fn(*const u8),
+    on_message: unsafe extern "C" fn(*const EngineMessage),
+    on_delivery: unsafe extern "C" fn(u32, u8),
+}
 
 #[cfg(target_os = "espidf")]
 extern "C" {
-    fn meshcore_init(node_name: *const c_char, node_type: u8) -> i32;
-    fn meshcore_deinit() -> i32;
-    fn meshcore_loop() -> i32;
-    fn meshcore_send_message(dest_pub_key: *const u8, text: *const c_char) -> i32;
+    fn meshcore_start(config: *const EngineConfig, callbacks: *const EngineCallbacks) -> i32;
+    fn meshcore_send_direct(pub_key: *const u8, text: *const c_char, message_id: u32) -> i32;
+    fn meshcore_send_channel(channel: u8, text: *const c_char, message_id: u32) -> i32;
     fn meshcore_send_advert() -> i32;
-    fn meshcore_send_advert_with_position(lat: f64, lon: f64) -> i32;
-    fn meshcore_get_contact_count() -> i32;
-    fn meshcore_get_contact(index: i32, out: *mut CMeshContact) -> i32;
-    fn meshcore_find_contact(pub_key: *const u8) -> i32;
-    fn meshcore_set_message_callback(
-        cb: Option<unsafe extern "C" fn(*const CMeshContact, u32, *const c_char, *mut c_void)>,
-        user_data: *mut c_void,
-    );
-    fn meshcore_set_contact_callback(
-        cb: Option<unsafe extern "C" fn(*const CMeshContact, *mut c_void)>,
-        user_data: *mut c_void,
-    );
-    fn meshcore_get_self_pub_key(out_key: *mut u8) -> i32;
-    fn meshcore_get_self_name() -> *const c_char;
-    fn meshcore_get_stats(out: *mut CMeshStats) -> i32;
+    fn meshcore_set_name(name: *const c_char) -> i32;
+    fn meshcore_get_stats(out: *mut EngineStats) -> i32;
 }
 
 // ---------------------------------------------------------------------------
-// Internal state
+// Radio settings
 // ---------------------------------------------------------------------------
 
-struct MeshManagerState {
-    initialized: bool,
-    node_name: [u8; MESH_NAME_MAX],
-    node_name_len: usize,
-    node_type: u8,
-    /// Message inbox (ring buffer of recent received messages).
-    /// Lazily heap-allocated on first use — `None` when idle (8 bytes DRAM).
-    /// When allocated, ~4.3 KB goes to heap (exceeds SPIRAM_MALLOC_ALWAYSINTERNAL
-    /// on boards with PSRAM, so it lands there automatically).
-    inbox: Option<Box<[CMeshMessage; INBOX_SIZE]>>,
-    inbox_count: usize,
-    inbox_head: usize,
+/// What the engine tunes the radio to.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct MeshParams {
+    pub freq_hz: u32,
+    pub bw_hz: u32,
+    pub sf: u8,
+    pub cr: u8,
+    pub tx_power_dbm: i8,
 }
 
-impl MeshManagerState {
-    const fn new() -> Self {
-        // const-compatible default initialisation — inbox starts as None (8 bytes)
-        Self {
-            initialized: false,
-            node_name: [0u8; MESH_NAME_MAX],
-            node_name_len: 0,
-            node_type: 0,
-            inbox: None,
-            inbox_count: 0,
-            inbox_head: 0,
-        }
-    }
+/// MeshCore's own default, and its "EU/UK (Narrow)" preset (platformio.ini
+/// in the MeshCore tree): inside the 869.4–869.65 MHz sub-band.
+const EU_PRESET: MeshParams = MeshParams {
+    freq_hz: 869_618_000,
+    bw_hz: 62_500,
+    sf: 8,
+    cr: 5,
+    tx_power_dbm: 22,
+};
 
-    /// Ensure the inbox array is heap-allocated, returning a mutable ref.
-    fn ensure_inbox(&mut self) -> &mut [CMeshMessage; INBOX_SIZE] {
-        if self.inbox.is_none() {
-            self.inbox = Some(Box::new(
-                [CMeshMessage {
-                    sender_key: [0u8; 32],
-                    sender_name: [0u8; 32],
-                    sender_name_len: 0,
-                    timestamp: 0,
-                    text: [0u8; 200],
-                    text_len: 0,
-                }; INBOX_SIZE],
-            ));
-        }
-        self.inbox.as_mut().unwrap()
-    }
+/// MeshCore's "USA/Canada (Recommended)" preset (docs/faq.md, 2.3).
+const US_PRESET: MeshParams = MeshParams {
+    freq_hz: 910_525_000,
+    bw_hz: 62_500,
+    sf: 7,
+    cr: 5,
+    tx_power_dbm: 22,
+};
 
-    /// Push a message into the ring buffer. Overwrites oldest on overflow.
-    /// Allocates the inbox on first use.
-    fn inbox_push(&mut self, msg: CMeshMessage) {
-        let write_idx = (self.inbox_head + self.inbox_count) % INBOX_SIZE;
-        self.ensure_inbox()[write_idx] = msg;
-        if self.inbox_count < INBOX_SIZE {
-            self.inbox_count += 1;
-        } else {
-            // Buffer full — advance head to drop the oldest message
-            self.inbox_head = (self.inbox_head + 1) % INBOX_SIZE;
-        }
-    }
-
-    /// Read a message by logical index (0 = oldest).
-    fn inbox_get(&self, index: usize) -> Option<&CMeshMessage> {
-        if index >= self.inbox_count {
-            return None;
-        }
-        let inbox = self.inbox.as_ref()?;
-        let real_idx = (self.inbox_head + index) % INBOX_SIZE;
-        Some(&inbox[real_idx])
-    }
-
-    /// Clear the inbox. Does not free the allocation (avoids re-alloc on next push).
-    fn inbox_clear(&mut self) {
-        self.inbox_count = 0;
-        self.inbox_head = 0;
-    }
+/// A band a board's radio is matched for, and where in it a node may sit.
+struct Band {
+    low_hz: u32,
+    high_hz: u32,
+    preset: MeshParams,
 }
 
-static MESH_STATE: Mutex<MeshManagerState> = Mutex::new(MeshManagerState::new());
+const BANDS: [Band; 2] = [
+    Band {
+        low_hz: 863_000_000,
+        high_hz: 870_000_000,
+        preset: EU_PRESET,
+    },
+    Band {
+        low_hz: 902_000_000,
+        high_hz: 928_000_000,
+        preset: US_PRESET,
+    },
+];
+
+fn band_containing(hz: u32) -> Option<&'static Band> {
+    BANDS.iter().find(|b| (b.low_hz..=b.high_hz).contains(&hz))
+}
+
+/// The radio settings for a board whose radio is matched for `band_hz`, with
+/// whatever the `mesh` section of system.json overrides. `None` when there is
+/// nothing to go on: no radio, or a band MeshCore has no preset for and no
+/// frequency given.
+///
+/// A frequency outside the board's band is refused rather than obeyed: the
+/// module is matched for one band, and the other is not licensed where the
+/// board was sold.
+pub(crate) fn mesh_params(band_hz: Option<u32>, json: Option<&str>) -> Option<MeshParams> {
+    let band = band_hz?;
+    let setting = |key: &str| json.and_then(|j| crate::system_json::get(j, "mesh", key));
+    let number = |key: &str| setting(key).and_then(|v| v.as_f64());
+
+    let board_band = band_containing(band);
+    let requested_hz = number("frequency_mhz")
+        .filter(|mhz| mhz.is_finite() && *mhz > 0.0)
+        .map(|mhz| (mhz * 1_000_000.0).round() as u32);
+
+    let mut params = match (board_band, requested_hz) {
+        (Some(b), Some(hz)) if (b.low_hz..=b.high_hz).contains(&hz) => MeshParams {
+            freq_hz: hz,
+            ..b.preset
+        },
+        (Some(b), Some(hz)) => {
+            mesh_log!(
+                ESP_LOG_WARN,
+                b"mesh: %u Hz is outside this radio's band; using %u Hz\n\0",
+                hz,
+                b.preset.freq_hz
+            );
+            b.preset
+        }
+        (Some(b), None) => b.preset,
+        (None, Some(hz)) => MeshParams {
+            freq_hz: hz,
+            ..EU_PRESET
+        },
+        (None, None) => return None,
+    };
+
+    if let Some(khz) = number("bandwidth_khz").filter(|k| k.is_finite() && *k > 0.0) {
+        params.bw_hz = (khz * 1000.0).round() as u32;
+    }
+    if let Some(sf) = number("spreading_factor").filter(|sf| (5.0..=12.0).contains(sf)) {
+        params.sf = sf as u8;
+    }
+    if let Some(cr) = number("coding_rate").filter(|cr| (5.0..=8.0).contains(cr)) {
+        params.cr = cr as u8;
+    }
+    if let Some(dbm) = number("tx_power_dbm").filter(|d| (-9.0..=22.0).contains(d)) {
+        params.tx_power_dbm = dbm as i8;
+    }
+    Some(params)
+}
+
+/// Whether system.json leaves the mesh on. It is on unless switched off.
+pub(crate) fn mesh_enabled(json: Option<&str>) -> bool {
+    json.and_then(|j| crate::system_json::get(j, "mesh", "enabled"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true)
+}
+
+/// The name system.json gives this node, if any, cut to what fits an advert.
+pub(crate) fn configured_name(json: Option<&str>) -> Option<String> {
+    let name = json.and_then(|j| crate::system_json::get(j, "mesh", "name"))?;
+    let name = name.as_str()?.trim();
+    if name.is_empty() {
+        return None;
+    }
+    Some(truncate_utf8(name, MESH_NAME_MAX - 1).to_string())
+}
+
+fn truncate_utf8(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
 
 // ---------------------------------------------------------------------------
-// Callbacks (hardware only)
+// State
 // ---------------------------------------------------------------------------
 
-/// Called by MeshCore when a message is received. Pushes into the inbox.
-#[cfg(target_os = "espidf")]
-unsafe extern "C" fn on_mesh_message(
-    sender: *const CMeshContact,
+/// A message's identity for spotting repeats: who, when, and what.
+#[derive(Clone, Copy, PartialEq)]
+struct Signature {
+    kind: u8,
+    channel: u8,
+    sender: [u8; 32],
     timestamp: u32,
-    text: *const c_char,
-    _ud: *mut c_void,
-) {
-    if sender.is_null() || text.is_null() {
+    text_hash: u64,
+}
+
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
+        (h ^ *b as u64).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
+struct MeshState {
+    running: bool,
+    self_key: [u8; 32],
+    self_name: [u8; MESH_NAME_MAX],
+    /// Most recently heard first.
+    contacts: Vec<CMeshContact>,
+    inbox: VecDeque<CMeshMessage>,
+    recent: VecDeque<Signature>,
+    deliveries: VecDeque<(u32, u8)>,
+}
+
+impl MeshState {
+    const fn new() -> Self {
+        Self {
+            running: false,
+            self_key: [0u8; 32],
+            self_name: [0u8; MESH_NAME_MAX],
+            contacts: Vec::new(),
+            inbox: VecDeque::new(),
+            recent: VecDeque::new(),
+            deliveries: VecDeque::new(),
+        }
+    }
+
+    fn upsert_contact(&mut self, contact: CMeshContact) {
+        self.contacts.retain(|c| c.pub_key != contact.pub_key);
+        let at = self
+            .contacts
+            .iter()
+            .position(|c| c.last_seen < contact.last_seen)
+            .unwrap_or(self.contacts.len());
+        self.contacts.insert(at, contact);
+    }
+
+    fn remove_contact(&mut self, pub_key: &[u8; 32]) {
+        self.contacts.retain(|c| &c.pub_key != pub_key);
+    }
+
+    /// Queue a message for apps, unless it is a repeat of one already
+    /// queued. Returns whether it was new.
+    fn receive(&mut self, msg: CMeshMessage) -> bool {
+        let sig = Signature {
+            kind: msg.kind,
+            channel: msg.channel,
+            sender: if msg.kind == MSG_DIRECT {
+                msg.sender_key
+            } else {
+                let mut name = [0u8; 32];
+                name.copy_from_slice(&msg.sender_name);
+                name
+            },
+            timestamp: msg.timestamp,
+            text_hash: fnv1a(&msg.text[..msg.text_len as usize]),
+        };
+        if self.recent.contains(&sig) {
+            return false;
+        }
+        if self.recent.len() == RECENT_SIGNATURES {
+            self.recent.pop_front();
+        }
+        self.recent.push_back(sig);
+
+        if self.inbox.len() == INBOX_SIZE {
+            self.inbox.pop_front();
+        }
+        self.inbox.push_back(msg);
+        true
+    }
+
+    fn deliver(&mut self, id: u32, state: u8) {
+        if self.deliveries.len() == DELIVERY_QUEUE_SIZE {
+            self.deliveries.pop_front();
+        }
+        self.deliveries.push_back((id, state));
+    }
+}
+
+static MESH_STATE: Mutex<MeshState> = Mutex::new(MeshState::new());
+static RADIO_BAND_HZ: Mutex<Option<u32>> = Mutex::new(None);
+/// What the engine was started on, for anyone setting another node to match.
+static PARAMS_IN_USE: Mutex<Option<MeshParams>> = Mutex::new(None);
+static NEXT_MESSAGE_ID: AtomicU32 = AtomicU32::new(1);
+/// The name as a C string for rs_mesh_get_self_name(): its address must stay
+/// put after the call returns, so it lives in a static of its own.
+static SELF_NAME_C: Mutex<[u8; MESH_NAME_MAX]> = Mutex::new([0u8; MESH_NAME_MAX]);
+
+fn next_message_id() -> u32 {
+    loop {
+        let id = NEXT_MESSAGE_ID.fetch_add(1, Ordering::Relaxed);
+        if id != 0 {
+            return id;
+        }
+    }
+}
+
+fn copy_name(dest: &mut [u8; MESH_NAME_MAX], src: &[u8]) -> u8 {
+    let src = &src[..src.iter().position(|b| *b == 0).unwrap_or(src.len())];
+    let n = src.len().min(MESH_NAME_MAX - 1);
+    *dest = [0u8; MESH_NAME_MAX];
+    dest[..n].copy_from_slice(&src[..n]);
+    n as u8
+}
+
+fn set_self_name(state: &mut MeshState, name: &[u8]) {
+    copy_name(&mut state.self_name, name);
+    if let Ok(mut c) = SELF_NAME_C.lock() {
+        *c = state.self_name;
+    }
+}
+
+/// Copy a C string into a buffer of `N` bytes, NUL-terminated, cut short if
+/// it has to be.
+#[cfg_attr(not(target_os = "espidf"), allow(dead_code))]
+fn to_c_array<const N: usize>(s: &str) -> [u8; N] {
+    let mut out = [0u8; N];
+    let s = truncate_utf8(s, N - 1);
+    out[..s.len()].copy_from_slice(s.as_bytes());
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Conversions from the engine
+// ---------------------------------------------------------------------------
+
+pub(crate) fn contact_from_engine(c: &EngineContact) -> CMeshContact {
+    let mut out = CMeshContact {
+        pub_key: c.pub_key,
+        node_type: c.node_type,
+        path_len: c.path_len,
+        last_seen: c.last_advert,
+        ..Default::default()
+    };
+    out.name_len = copy_name(&mut out.name, &c.name);
+    if c.lat_e6 != 0 || c.lon_e6 != 0 {
+        out.lat = c.lat_e6 as f64 / 1_000_000.0;
+        out.lon = c.lon_e6 as f64 / 1_000_000.0;
+        out.has_position = true;
+    }
+    out
+}
+
+pub(crate) fn message_from_engine(m: &EngineMessage) -> CMeshMessage {
+    let mut out = CMeshMessage {
+        sender_key: m.sender_key,
+        timestamp: m.timestamp,
+        kind: m.kind,
+        channel: m.channel,
+        ..Default::default()
+    };
+    out.sender_name_len = copy_name(&mut out.sender_name, &m.sender_name);
+    let text = &m.text[..m.text.iter().position(|b| *b == 0).unwrap_or(m.text.len())];
+    let n = text.len().min(out.text.len() - 1);
+    out.text[..n].copy_from_slice(&text[..n]);
+    out.text_len = n as u16;
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Callbacks from the engine, on its task
+// ---------------------------------------------------------------------------
+
+#[cfg_attr(not(target_os = "espidf"), allow(dead_code))]
+unsafe extern "C" fn on_ready(pub_key: *const u8, name: *const c_char) {
+    if pub_key.is_null() || name.is_null() {
         return;
     }
-    let contact = &*sender;
-    let c_str = std::ffi::CStr::from_ptr(text);
-    let text_bytes = c_str.to_bytes();
-
-    let mut msg = CMeshMessage::default();
-    msg.sender_key = contact.pub_key;
-    msg.sender_name = contact.name;
-    msg.sender_name_len = contact.name_len;
-    msg.timestamp = timestamp;
-
-    let copy_len = text_bytes.len().min(msg.text.len());
-    msg.text[..copy_len].copy_from_slice(&text_bytes[..copy_len]);
-    msg.text_len = copy_len as u16;
-
+    let name = std::ffi::CStr::from_ptr(name).to_bytes();
     if let Ok(mut state) = MESH_STATE.lock() {
-        state.inbox_push(msg);
+        state.self_key.copy_from_slice(std::slice::from_raw_parts(pub_key, 32));
+        set_self_name(&mut state, name);
+        state.running = true;
     }
 }
 
-/// Called by MeshCore when a contact is discovered or updated.
-/// We don't store contacts ourselves — the C shim maintains that list.
-/// This callback is a no-op placeholder for future event-bus integration.
-#[cfg(target_os = "espidf")]
-unsafe extern "C" fn on_mesh_contact(_contact: *const CMeshContact, _ud: *mut c_void) {
-    // Future: publish an event via the event bus
+#[cfg_attr(not(target_os = "espidf"), allow(dead_code))]
+unsafe extern "C" fn on_contact(contact: *const EngineContact) {
+    if contact.is_null() {
+        return;
+    }
+    let contact = contact_from_engine(&*contact);
+    if let Ok(mut state) = MESH_STATE.lock() {
+        state.upsert_contact(contact);
+    }
+}
+
+#[cfg_attr(not(target_os = "espidf"), allow(dead_code))]
+unsafe extern "C" fn on_contact_removed(pub_key: *const u8) {
+    if pub_key.is_null() {
+        return;
+    }
+    let key = &*(pub_key as *const [u8; 32]);
+    if let Ok(mut state) = MESH_STATE.lock() {
+        state.remove_contact(key);
+    }
+}
+
+#[cfg_attr(not(target_os = "espidf"), allow(dead_code))]
+unsafe extern "C" fn on_message(message: *const EngineMessage) {
+    if message.is_null() {
+        return;
+    }
+    let message = message_from_engine(&*message);
+    if let Ok(mut state) = MESH_STATE.lock() {
+        state.receive(message);
+    }
+}
+
+#[cfg_attr(not(target_os = "espidf"), allow(dead_code))]
+unsafe extern "C" fn on_delivery(id: u32, delivery: u8) {
+    if let Ok(mut state) = MESH_STATE.lock() {
+        state.deliver(id, delivery);
+    }
+}
+
+#[cfg_attr(not(target_os = "espidf"), allow(dead_code))]
+static CALLBACKS: EngineCallbacks = EngineCallbacks {
+    on_ready,
+    on_contact,
+    on_contact_removed,
+    on_message,
+    on_delivery,
+};
+
+// ---------------------------------------------------------------------------
+// Starting the mesh
+// ---------------------------------------------------------------------------
+
+/// Record the band the board's radio is matched for. board_config calls this
+/// once the drivers are loaded.
+pub(crate) fn declare_radio_band(band_hz: Option<u32>) {
+    if let Ok(mut band) = RADIO_BAND_HZ.lock() {
+        *band = band_hz;
+    }
+}
+
+fn radio_band() -> Option<u32> {
+    RADIO_BAND_HZ.lock().ok().and_then(|b| *b)
+}
+
+fn read_system_json() -> Option<String> {
+    std::fs::read_to_string(crate::system_json::path()).ok()
+}
+
+/// Bring the mesh up, if the board has a radio and system.json has not
+/// switched it off. kernel_init() calls this once the drivers have started and
+/// the antenna the user chose is selected.
+pub(crate) fn mesh_start() -> i32 {
+    if rs_mesh_is_running() {
+        return ESP_OK;
+    }
+    let json = read_system_json();
+    if !mesh_enabled(json.as_deref()) {
+        mesh_log!(ESP_LOG_INFO, b"mesh: off in system.json\n\0");
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    let params = match mesh_params(radio_band(), json.as_deref()) {
+        Some(p) => p,
+        None => return ESP_ERR_NOT_FOUND,
+    };
+    #[cfg(target_os = "espidf")]
+    {
+        let name = configured_name(json.as_deref()).unwrap_or_default();
+        let config = EngineConfig {
+            freq_hz: params.freq_hz,
+            bw_hz: params.bw_hz,
+            sf: params.sf,
+            cr: params.cr,
+            tx_power_dbm: params.tx_power_dbm,
+            name: to_c_array(&name),
+            state_dir: to_c_array(STATE_DIR),
+        };
+        let rc = unsafe { meshcore_start(&config, &CALLBACKS) };
+        if rc == ESP_OK {
+            if let Ok(mut in_use) = PARAMS_IN_USE.lock() {
+                *in_use = Some(params);
+            }
+        } else {
+            mesh_log!(ESP_LOG_WARN, b"mesh: could not start (%d)\n\0", rc);
+        }
+        rc
+    }
+    #[cfg(not(target_os = "espidf"))]
+    {
+        let _ = params;
+        ESP_ERR_NOT_SUPPORTED
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Static null-terminated name for rs_mesh_get_self_name fallback
+// FFI exports — what apps use
 // ---------------------------------------------------------------------------
 
-static EMPTY_NAME: &[u8] = b"\0";
+/// The radio settings the mesh runs on, as apps see them (thistle/mesh.h).
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+pub struct CMeshRadio {
+    pub freq_hz: u32,
+    pub bw_hz: u32,
+    pub sf: u8,
+    pub cr: u8,
+    pub tx_power_dbm: i8,
+}
 
-// ---------------------------------------------------------------------------
-// FFI exports
-// ---------------------------------------------------------------------------
+impl From<MeshParams> for CMeshRadio {
+    fn from(p: MeshParams) -> Self {
+        Self {
+            freq_hz: p.freq_hz,
+            bw_hz: p.bw_hz,
+            sf: p.sf,
+            cr: p.cr,
+            tx_power_dbm: p.tx_power_dbm,
+        }
+    }
+}
 
-/// Initialise the mesh manager. Calls meshcore_init on hardware.
-///
-/// The init sequence is carefully ordered to avoid two race conditions:
-/// 1. The Rust Mutex must NOT be held while calling into C (meshcore_init
-///    starts the radio, whose callbacks try to acquire the same Mutex).
-/// 2. Callbacks must be registered BEFORE meshcore_init so that packets
-///    arriving as soon as the radio starts are not silently dropped.
+/// The radio settings the mesh was started on: what another node has to be
+/// set to before the two can hear each other.
 #[no_mangle]
-pub unsafe extern "C" fn rs_mesh_init(name: *const c_char, node_type: u8) -> i32 {
+pub extern "C" fn rs_mesh_get_radio(out: *mut CMeshRadio) -> i32 {
+    if out.is_null() {
+        return ESP_ERR_INVALID_ARG;
+    }
+    match PARAMS_IN_USE.lock().ok().and_then(|p| *p) {
+        Some(params) => {
+            unsafe { *out = params.into() };
+            ESP_OK
+        }
+        None => ESP_ERR_INVALID_STATE,
+    }
+}
+
+/// Whether the mesh is on air.
+#[no_mangle]
+pub extern "C" fn rs_mesh_is_running() -> bool {
+    MESH_STATE.lock().map(|s| s.running).unwrap_or(false)
+}
+
+/// Send a direct message to a contact. Its id, for following its delivery
+/// with rs_mesh_delivery_pop(), goes to `out_id` if that is not null.
+#[no_mangle]
+pub unsafe extern "C" fn rs_mesh_send_direct(
+    pub_key: *const u8,
+    text: *const c_char,
+    out_id: *mut u32,
+) -> i32 {
+    if pub_key.is_null() || text.is_null() {
+        return ESP_ERR_INVALID_ARG;
+    }
+    let len = std::ffi::CStr::from_ptr(text).to_bytes().len();
+    if len == 0 {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if len > MESH_TEXT_MAX {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    let known = {
+        let state = match MESH_STATE.lock() {
+            Ok(s) => s,
+            Err(_) => return ESP_FAIL,
+        };
+        if !state.running {
+            return ESP_ERR_INVALID_STATE;
+        }
+        let key = &*(pub_key as *const [u8; 32]);
+        state.contacts.iter().any(|c| &c.pub_key == key)
+    };
+    if !known {
+        return ESP_ERR_NOT_FOUND;
+    }
+    let id = next_message_id();
+    #[cfg(target_os = "espidf")]
+    let rc = meshcore_send_direct(pub_key, text, id);
+    #[cfg(not(target_os = "espidf"))]
+    let rc = ESP_OK;
+    if rc == ESP_OK && !out_id.is_null() {
+        *out_id = id;
+    }
+    rc
+}
+
+/// Send a message to a group channel; PUBLIC_CHANNEL is the one every node
+/// shares. A channel message is never acknowledged, so its delivery reports
+/// only whether it went out.
+#[no_mangle]
+pub unsafe extern "C" fn rs_mesh_send_channel(
+    channel: u8,
+    text: *const c_char,
+    out_id: *mut u32,
+) -> i32 {
+    if text.is_null() {
+        return ESP_ERR_INVALID_ARG;
+    }
+    let len = std::ffi::CStr::from_ptr(text).to_bytes().len();
+    if len == 0 {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if len > MESH_TEXT_MAX {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    if !rs_mesh_is_running() {
+        return ESP_ERR_INVALID_STATE;
+    }
+    let id = next_message_id();
+    #[cfg(target_os = "espidf")]
+    let rc = meshcore_send_channel(channel, text, id);
+    #[cfg(not(target_os = "espidf"))]
+    let rc = {
+        let _ = channel;
+        ESP_OK
+    };
+    if rc == ESP_OK && !out_id.is_null() {
+        *out_id = id;
+    }
+    rc
+}
+
+/// Advertise this node, so peers can add it as a contact and message it.
+#[no_mangle]
+pub extern "C" fn rs_mesh_send_advert() -> i32 {
+    if !rs_mesh_is_running() {
+        return ESP_ERR_INVALID_STATE;
+    }
+    #[cfg(target_os = "espidf")]
+    return unsafe { meshcore_send_advert() };
+    #[cfg(not(target_os = "espidf"))]
+    ESP_OK
+}
+
+/// Rename this node, advertise the new name, and keep it in system.json.
+#[no_mangle]
+pub unsafe extern "C" fn rs_mesh_set_name(name: *const c_char) -> i32 {
     if name.is_null() {
         return ESP_ERR_INVALID_ARG;
     }
-
-    // Phase 1: claim initialisation under lock, store name, then drop lock
-    {
-        let mut state = match MESH_STATE.lock() {
-            Ok(s) => s,
-            Err(_) => return ESP_FAIL,
-        };
-
-        if state.initialized {
-            return ESP_ERR_INVALID_STATE;
-        }
-
-        // Copy node name into state
-        let name_bytes = std::ffi::CStr::from_ptr(name).to_bytes();
-        let copy_len = name_bytes.len().min(MESH_NAME_MAX - 1);
-        state.node_name[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
-        state.node_name[copy_len] = 0; // null-terminate
-        state.node_name_len = copy_len;
-        state.node_type = node_type;
-        state.inbox_clear();
-        state.initialized = true;
-        // Lock drops here
-    }
-
-    // Phase 2: register callbacks BEFORE starting mesh (no lock held)
-    #[cfg(target_os = "espidf")]
-    {
-        meshcore_set_message_callback(Some(on_mesh_message), std::ptr::null_mut());
-        meshcore_set_contact_callback(Some(on_mesh_contact), std::ptr::null_mut());
-    }
-
-    // Phase 3: init mesh — starts the radio; callbacks are already registered
-    #[cfg(target_os = "espidf")]
-    {
-        let rc = meshcore_init(name, node_type);
-        if rc != ESP_OK {
-            // Rollback: re-acquire lock, mark as not initialized
-            if let Ok(mut state) = MESH_STATE.lock() {
-                state.initialized = false;
-            }
-            return rc;
-        }
-    }
-
-    ESP_OK
-}
-
-/// Deinitialise the mesh manager.
-///
-/// The deinit sequence mirrors init: drop the Mutex before calling into C
-/// to avoid deadlock if meshcore_deinit triggers callbacks that acquire
-/// MESH_STATE.
-#[no_mangle]
-pub extern "C" fn rs_mesh_deinit() -> i32 {
-    // Phase 1: mark as not initialized under lock, then drop lock
-    {
-        let mut state = match MESH_STATE.lock() {
-            Ok(s) => s,
-            Err(_) => return ESP_FAIL,
-        };
-
-        if !state.initialized {
-            return ESP_ERR_INVALID_STATE;
-        }
-
-        state.initialized = false;
-        // Lock drops here
-    }
-
-    // Phase 2: call meshcore_deinit with no lock held
-    #[cfg(target_os = "espidf")]
-    {
-        let rc = unsafe { meshcore_deinit() };
-        if rc != ESP_OK {
-            // Rollback: re-acquire lock, mark as initialized again
-            if let Ok(mut state) = MESH_STATE.lock() {
-                state.initialized = true;
-            }
-            return rc;
-        }
-    }
-
-    // Phase 3: clear inbox under lock
-    if let Ok(mut state) = MESH_STATE.lock() {
-        state.inbox_clear();
-    }
-
-    ESP_OK
-}
-
-/// Run one iteration of the mesh protocol loop. Must be called periodically.
-#[no_mangle]
-pub extern "C" fn rs_mesh_loop() -> i32 {
-    let state = match MESH_STATE.lock() {
-        Ok(s) => s,
-        Err(_) => return ESP_FAIL,
+    let name = match std::ffi::CStr::from_ptr(name).to_str() {
+        Ok(n) => truncate_utf8(n.trim(), MESH_NAME_MAX - 1).to_string(),
+        Err(_) => return ESP_ERR_INVALID_ARG,
     };
-
-    if !state.initialized {
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    drop(state); // release lock before calling into C
-
-    #[cfg(target_os = "espidf")]
-    {
-        return unsafe { meshcore_loop() };
-    }
-
-    #[cfg(not(target_os = "espidf"))]
-    {
-        ESP_OK
-    }
-}
-
-/// Send a text message to a specific destination (identified by public key).
-#[no_mangle]
-pub extern "C" fn rs_mesh_send(dest_key: *const u8, text: *const c_char) -> i32 {
-    if dest_key.is_null() || text.is_null() {
+    if name.is_empty() {
         return ESP_ERR_INVALID_ARG;
     }
-
-    let state = match MESH_STATE.lock() {
-        Ok(s) => s,
-        Err(_) => return ESP_FAIL,
-    };
-
-    if !state.initialized {
+    if !rs_mesh_is_running() {
         return ESP_ERR_INVALID_STATE;
     }
-
-    drop(state);
-
     #[cfg(target_os = "espidf")]
     {
-        return unsafe { meshcore_send_message(dest_key, text) };
+        let c_name = to_c_array::<MESH_NAME_MAX>(&name);
+        let rc = meshcore_set_name(c_name.as_ptr() as *const c_char);
+        if rc != ESP_OK {
+            return rc;
+        }
     }
-
-    #[cfg(not(target_os = "espidf"))]
-    {
-        ESP_OK
+    if let Ok(mut state) = MESH_STATE.lock() {
+        set_self_name(&mut state, name.as_bytes());
     }
+    crate::system_json::save("mesh", "name", serde_json::Value::String(name))
 }
 
-/// Broadcast a self-advertisement to nearby nodes.
+/// Take the oldest received message, if any. Returns whether there was one.
 #[no_mangle]
-pub extern "C" fn rs_mesh_send_advert() -> i32 {
-    let state = match MESH_STATE.lock() {
-        Ok(s) => s,
-        Err(_) => return ESP_FAIL,
+pub unsafe extern "C" fn rs_mesh_inbox_pop(out: *mut CMeshMessage) -> bool {
+    if out.is_null() {
+        return false;
+    }
+    let msg = match MESH_STATE.lock() {
+        Ok(mut s) => s.inbox.pop_front(),
+        Err(_) => None,
     };
-
-    if !state.initialized {
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    drop(state);
-
-    #[cfg(target_os = "espidf")]
-    {
-        return unsafe { meshcore_send_advert() };
-    }
-
-    #[cfg(not(target_os = "espidf"))]
-    {
-        ESP_OK
+    match msg {
+        Some(m) => {
+            *out = m;
+            true
+        }
+        None => false,
     }
 }
 
-/// Broadcast a self-advertisement with GPS position.
+/// Take the oldest delivery report: a message id from rs_mesh_send_direct()
+/// or rs_mesh_send_channel(), and DELIVERY_SENT, _DELIVERED or _FAILED.
 #[no_mangle]
-pub extern "C" fn rs_mesh_send_advert_pos(lat: f64, lon: f64) -> i32 {
-    let state = match MESH_STATE.lock() {
-        Ok(s) => s,
-        Err(_) => return ESP_FAIL,
+pub unsafe extern "C" fn rs_mesh_delivery_pop(out_id: *mut u32, out_state: *mut u8) -> bool {
+    if out_id.is_null() || out_state.is_null() {
+        return false;
+    }
+    let report = match MESH_STATE.lock() {
+        Ok(mut s) => s.deliveries.pop_front(),
+        Err(_) => None,
     };
-
-    if !state.initialized {
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    drop(state);
-
-    #[cfg(target_os = "espidf")]
-    {
-        return unsafe { meshcore_send_advert_with_position(lat, lon) };
-    }
-
-    #[cfg(not(target_os = "espidf"))]
-    {
-        ESP_OK
+    match report {
+        Some((id, state)) => {
+            *out_id = id;
+            *out_state = state;
+            true
+        }
+        None => false,
     }
 }
 
-/// Return the number of discovered contacts.
+/// Return the number of contacts.
 #[no_mangle]
 pub extern "C" fn rs_mesh_get_contact_count() -> i32 {
-    let state = match MESH_STATE.lock() {
-        Ok(s) => s,
-        Err(_) => return -1,
-    };
-
-    if !state.initialized {
-        return -1;
-    }
-
-    drop(state);
-
-    #[cfg(target_os = "espidf")]
-    {
-        return unsafe { meshcore_get_contact_count() };
-    }
-
-    #[cfg(not(target_os = "espidf"))]
-    {
-        0
-    }
+    MESH_STATE.lock().map(|s| s.contacts.len() as i32).unwrap_or(-1)
 }
 
-/// Get a contact by index. Writes into the provided output struct.
+/// Get a contact by index, most recently heard first.
 #[no_mangle]
 pub extern "C" fn rs_mesh_get_contact(index: i32, out: *mut CMeshContact) -> i32 {
     if out.is_null() || index < 0 {
         return ESP_ERR_INVALID_ARG;
     }
-
     let state = match MESH_STATE.lock() {
         Ok(s) => s,
         Err(_) => return ESP_FAIL,
     };
-
-    if !state.initialized {
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    drop(state);
-
-    #[cfg(target_os = "espidf")]
-    {
-        return unsafe { meshcore_get_contact(index, out) };
-    }
-
-    #[cfg(not(target_os = "espidf"))]
-    {
-        ESP_ERR_INVALID_ARG
+    match state.contacts.get(index as usize) {
+        Some(c) => {
+            unsafe { *out = *c };
+            ESP_OK
+        }
+        None => ESP_ERR_NOT_FOUND,
     }
 }
 
@@ -530,85 +936,23 @@ pub extern "C" fn rs_mesh_find_contact(pub_key: *const u8) -> i32 {
     if pub_key.is_null() {
         return -1;
     }
+    rs_mesh_find_contact_prefix(pub_key, 32)
+}
 
-    let state = match MESH_STATE.lock() {
-        Ok(s) => s,
-        Err(_) => return -1,
-    };
-
-    if !state.initialized {
+/// Find a contact by the first `len` bytes of its public key, as MeshCore
+/// itself shortens keys. Returns the index or -1 if not found.
+#[no_mangle]
+pub extern "C" fn rs_mesh_find_contact_prefix(prefix: *const u8, len: usize) -> i32 {
+    if prefix.is_null() || len == 0 || len > 32 {
         return -1;
     }
-
-    drop(state);
-
-    #[cfg(target_os = "espidf")]
-    {
-        return unsafe { meshcore_find_contact(pub_key) };
-    }
-
-    #[cfg(not(target_os = "espidf"))]
-    {
-        -1
-    }
-}
-
-/// Return the number of messages in the inbox.
-#[no_mangle]
-pub extern "C" fn rs_mesh_get_inbox_count() -> i32 {
-    let state = match MESH_STATE.lock() {
-        Ok(s) => s,
-        Err(_) => return -1,
-    };
-
-    if !state.initialized {
-        return -1;
-    }
-
-    state.inbox_count as i32
-}
-
-/// Read a message from the inbox by index (0 = oldest).
-#[no_mangle]
-pub extern "C" fn rs_mesh_get_inbox_message(index: i32, out: *mut CMeshMessage) -> i32 {
-    if out.is_null() || index < 0 {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    let state = match MESH_STATE.lock() {
-        Ok(s) => s,
-        Err(_) => return ESP_FAIL,
-    };
-
-    if !state.initialized {
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    match state.inbox_get(index as usize) {
-        Some(msg) => {
-            unsafe {
-                *out = *msg;
-            }
-            ESP_OK
-        }
-        None => ESP_ERR_INVALID_ARG,
-    }
-}
-
-/// Clear all messages from the inbox.
-#[no_mangle]
-pub extern "C" fn rs_mesh_clear_inbox() -> i32 {
-    let mut state = match MESH_STATE.lock() {
-        Ok(s) => s,
-        Err(_) => return ESP_FAIL,
-    };
-
-    if !state.initialized {
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    state.inbox_clear();
-    ESP_OK
+    let prefix = unsafe { std::slice::from_raw_parts(prefix, len) };
+    MESH_STATE
+        .lock()
+        .ok()
+        .and_then(|s| s.contacts.iter().position(|c| c.pub_key.starts_with(prefix)))
+        .map(|i| i as i32)
+        .unwrap_or(-1)
 }
 
 /// Get the local node's public key. Writes 32 bytes to `out`.
@@ -617,57 +961,24 @@ pub extern "C" fn rs_mesh_get_self_key(out: *mut u8) -> i32 {
     if out.is_null() {
         return ESP_ERR_INVALID_ARG;
     }
-
     let state = match MESH_STATE.lock() {
         Ok(s) => s,
         Err(_) => return ESP_FAIL,
     };
-
-    if !state.initialized {
+    if !state.running {
         return ESP_ERR_INVALID_STATE;
     }
-
-    drop(state);
-
-    #[cfg(target_os = "espidf")]
-    {
-        return unsafe { meshcore_get_self_pub_key(out) };
-    }
-
-    #[cfg(not(target_os = "espidf"))]
-    {
-        // Stub: zero-fill
-        unsafe {
-            std::ptr::write_bytes(out, 0, 32);
-        }
-        ESP_OK
-    }
+    unsafe { std::ptr::copy_nonoverlapping(state.self_key.as_ptr(), out, 32) };
+    ESP_OK
 }
 
-/// Get the local node's name. Returns a pointer to a null-terminated string.
-/// The returned pointer is valid until the next call to rs_mesh_init or rs_mesh_deinit.
+/// Get the local node's name: empty until the mesh is running. The pointer
+/// stays valid; what it points at changes if the node is renamed.
 #[no_mangle]
 pub extern "C" fn rs_mesh_get_self_name() -> *const c_char {
-    let state = match MESH_STATE.lock() {
-        Ok(s) => s,
-        Err(_) => return EMPTY_NAME.as_ptr() as *const c_char,
-    };
-
-    if !state.initialized {
-        return EMPTY_NAME.as_ptr() as *const c_char;
-    }
-
-    drop(state);
-
-    #[cfg(target_os = "espidf")]
-    {
-        return unsafe { meshcore_get_self_name() };
-    }
-
-    #[cfg(not(target_os = "espidf"))]
-    {
-        // Stub: return empty string
-        EMPTY_NAME.as_ptr() as *const c_char
+    match SELF_NAME_C.lock() {
+        Ok(name) => name.as_ptr() as *const c_char,
+        Err(_) => b"\0".as_ptr() as *const c_char,
     }
 }
 
@@ -677,37 +988,119 @@ pub extern "C" fn rs_mesh_get_stats(out: *mut CMeshStats) -> i32 {
     if out.is_null() {
         return ESP_ERR_INVALID_ARG;
     }
+    let contacts = match MESH_STATE.lock() {
+        Ok(s) if s.running => s.contacts.len() as u32,
+        Ok(_) => return ESP_ERR_INVALID_STATE,
+        Err(_) => return ESP_FAIL,
+    };
+    #[allow(unused_mut)]
+    let mut engine = EngineStats::default();
+    #[cfg(target_os = "espidf")]
+    {
+        let rc = unsafe { meshcore_get_stats(&mut engine) };
+        if rc != ESP_OK {
+            return rc;
+        }
+    }
+    unsafe {
+        *out = CMeshStats {
+            packets_sent: engine.packets_sent,
+            packets_received: engine.packets_received,
+            packets_forwarded: 0,
+            messages_sent: engine.messages_sent,
+            messages_received: engine.messages_received,
+            contacts_discovered: contacts,
+        };
+    }
+    ESP_OK
+}
 
+// ── The older app interface ──────────────────────────────────────────────
+//
+// Apps once ran the mesh themselves: init, call loop() every few
+// milliseconds, deinit. The kernel runs it now, from boot, so these keep their
+// names for the app SDK and the thistle-tk chat but no longer start or stop
+// anything an app does not own.
+
+/// Start the mesh if it is not already running. The name is the one the node
+/// was given in system.json, not this one: the node is the device's, not an
+/// app's.
+#[no_mangle]
+pub unsafe extern "C" fn rs_mesh_init(name: *const c_char, _node_type: u8) -> i32 {
+    if name.is_null() {
+        return ESP_ERR_INVALID_ARG;
+    }
+    mesh_start()
+}
+
+/// Nothing to release: the mesh outlives the app that asked for it.
+#[no_mangle]
+pub extern "C" fn rs_mesh_deinit() -> i32 {
+    ESP_OK
+}
+
+/// The engine runs its own loop; this reports whether it is running.
+#[no_mangle]
+pub extern "C" fn rs_mesh_loop() -> i32 {
+    if rs_mesh_is_running() {
+        ESP_OK
+    } else {
+        ESP_ERR_INVALID_STATE
+    }
+}
+
+/// Send a direct message to a contact.
+#[no_mangle]
+pub extern "C" fn rs_mesh_send(dest_key: *const u8, text: *const c_char) -> i32 {
+    unsafe { rs_mesh_send_direct(dest_key, text, std::ptr::null_mut()) }
+}
+
+/// Advertise this node. The position is not sent yet.
+#[no_mangle]
+pub extern "C" fn rs_mesh_send_advert_pos(_lat: f64, _lon: f64) -> i32 {
+    rs_mesh_send_advert()
+}
+
+/// Return the number of messages waiting.
+#[no_mangle]
+pub extern "C" fn rs_mesh_get_inbox_count() -> i32 {
+    MESH_STATE.lock().map(|s| s.inbox.len() as i32).unwrap_or(-1)
+}
+
+/// Read a waiting message by index (0 = oldest), leaving it waiting.
+#[no_mangle]
+pub extern "C" fn rs_mesh_get_inbox_message(index: i32, out: *mut CMeshMessage) -> i32 {
+    if out.is_null() || index < 0 {
+        return ESP_ERR_INVALID_ARG;
+    }
     let state = match MESH_STATE.lock() {
         Ok(s) => s,
         Err(_) => return ESP_FAIL,
     };
-
-    if !state.initialized {
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    drop(state);
-
-    #[cfg(target_os = "espidf")]
-    {
-        return unsafe { meshcore_get_stats(out) };
-    }
-
-    #[cfg(not(target_os = "espidf"))]
-    {
-        unsafe {
-            *out = CMeshStats::default();
+    match state.inbox.get(index as usize) {
+        Some(msg) => {
+            unsafe { *out = *msg };
+            ESP_OK
         }
-        ESP_OK
+        None => ESP_ERR_INVALID_ARG,
+    }
+}
+
+/// Clear all waiting messages.
+#[no_mangle]
+pub extern "C" fn rs_mesh_clear_inbox() -> i32 {
+    match MESH_STATE.lock() {
+        Ok(mut s) => {
+            s.inbox.clear();
+            ESP_OK
+        }
+        Err(_) => ESP_FAIL,
     }
 }
 
 // ── Syscall wrappers (thistle_mesh_* → rs_mesh_*) ───────────────────
 //
-// These provide the thistle_* naming convention for the app syscall table.
-// The underlying rs_mesh_* functions are kept for backward compatibility
-// with the built-in tk_meshchat app during the transition period.
+// The thistle_* names loaded apps link against (app_sdk/include/thistle_app.h).
 
 #[no_mangle]
 pub unsafe extern "C" fn thistle_mesh_init(name: *const c_char, node_type: u8) -> i32 {
@@ -793,310 +1186,449 @@ mod tests {
     use super::*;
     use std::ffi::CString;
 
-    /// Reset the global state between tests. Must be called at the start of
-    /// each test because the Mutex singleton persists across test runs.
+    /// Reset the global state between tests; the statics persist across them.
     fn reset_state() {
-        let mut state = MESH_STATE.lock().unwrap();
-        *state = MeshManagerState::new();
+        *MESH_STATE.lock().unwrap() = MeshState::new();
+        *PARAMS_IN_USE.lock().unwrap() = None;
+        *SELF_NAME_C.lock().unwrap() = [0u8; MESH_NAME_MAX];
+        declare_radio_band(None);
     }
 
-    // -- Init / deinit state management ------------------------------------
-
-    #[test]
-    fn test_init_success() {
+    /// The state as it is once the engine has reported in.
+    fn running_as(name: &str) {
         reset_state();
-        let name = CString::new("TestNode").unwrap();
-        let rc = unsafe { rs_mesh_init(name.as_ptr(), 1) };
-        assert_eq!(rc, ESP_OK, "init must succeed");
-        rs_mesh_deinit();
+        let name = CString::new(name).unwrap();
+        let key = [0xA5u8; 32];
+        unsafe { on_ready(key.as_ptr(), name.as_ptr()) };
     }
 
-    #[test]
-    fn test_init_null_name() {
-        reset_state();
-        let rc = unsafe { rs_mesh_init(std::ptr::null(), 0) };
-        assert_eq!(rc, ESP_ERR_INVALID_ARG, "init with null name must fail");
-    }
-
-    #[test]
-    fn test_double_init_fails() {
-        reset_state();
-        let name = CString::new("Node").unwrap();
-        assert_eq!(unsafe { rs_mesh_init(name.as_ptr(), 0) }, ESP_OK);
-        assert_eq!(
-            unsafe { rs_mesh_init(name.as_ptr(), 0) },
-            ESP_ERR_INVALID_STATE,
-            "double init must return INVALID_STATE"
-        );
-        rs_mesh_deinit();
-    }
-
-    #[test]
-    fn test_deinit_without_init() {
-        reset_state();
-        let rc = rs_mesh_deinit();
-        assert_eq!(rc, ESP_ERR_INVALID_STATE, "deinit without init must fail");
-    }
-
-    #[test]
-    fn test_init_deinit_reinit() {
-        reset_state();
-        let name = CString::new("Node").unwrap();
-        assert_eq!(unsafe { rs_mesh_init(name.as_ptr(), 1) }, ESP_OK);
-        assert_eq!(rs_mesh_deinit(), ESP_OK);
-        assert_eq!(
-            unsafe { rs_mesh_init(name.as_ptr(), 2) },
-            ESP_OK,
-            "re-init after deinit must succeed"
-        );
-        rs_mesh_deinit();
-    }
-
-    // -- Inbox ring buffer -------------------------------------------------
-
-    #[test]
-    fn test_inbox_push_and_read() {
-        reset_state();
-        let name = CString::new("Node").unwrap();
-        unsafe { rs_mesh_init(name.as_ptr(), 0) };
-
-        // Push a message directly into state
-        {
-            let mut state = MESH_STATE.lock().unwrap();
-            let mut msg = CMeshMessage::default();
-            msg.timestamp = 42;
-            msg.text[0] = b'H';
-            msg.text[1] = b'i';
-            msg.text_len = 2;
-            state.inbox_push(msg);
+    fn engine_contact(key: u8, name: &str, last_advert: u32) -> EngineContact {
+        EngineContact {
+            pub_key: [key; 32],
+            name: to_c_array(name),
+            node_type: 1,
+            path_len: PATH_UNKNOWN,
+            last_advert,
+            lat_e6: 0,
+            lon_e6: 0,
         }
+    }
 
-        assert_eq!(rs_mesh_get_inbox_count(), 1);
+    fn engine_message(kind: u8, key: u8, name: &str, timestamp: u32, text: &str) -> EngineMessage {
+        EngineMessage {
+            kind,
+            channel: 0,
+            sender_key: if kind == MSG_DIRECT { [key; 32] } else { [0; 32] },
+            sender_name: to_c_array(name),
+            timestamp,
+            text: to_c_array(text),
+        }
+    }
 
+    fn text_of(msg: &CMeshMessage) -> &str {
+        std::str::from_utf8(&msg.text[..msg.text_len as usize]).unwrap()
+    }
+
+    fn pop() -> Option<CMeshMessage> {
         let mut out = CMeshMessage::default();
-        let rc = rs_mesh_get_inbox_message(0, &mut out as *mut CMeshMessage);
-        assert_eq!(rc, ESP_OK);
-        assert_eq!(out.timestamp, 42);
-        assert_eq!(out.text_len, 2);
-        assert_eq!(out.text[0], b'H');
-        assert_eq!(out.text[1], b'i');
+        unsafe { rs_mesh_inbox_pop(&mut out) }.then_some(out)
+    }
 
-        rs_mesh_deinit();
+    // -- Radio settings ----------------------------------------------------
+
+    #[test]
+    fn an_868_mhz_board_joins_meshcores_eu_channel() {
+        assert_eq!(mesh_params(Some(868_000_000), None), Some(EU_PRESET));
     }
 
     #[test]
-    fn test_inbox_overflow_wraps() {
+    fn a_915_mhz_board_joins_meshcores_us_channel() {
+        assert_eq!(mesh_params(Some(915_000_000), None), Some(US_PRESET));
+    }
+
+    #[test]
+    fn a_board_with_no_radio_has_no_mesh() {
+        assert_eq!(mesh_params(None, None), None);
+    }
+
+    #[test]
+    fn a_band_meshcore_has_no_preset_for_needs_a_frequency_given() {
+        assert_eq!(mesh_params(Some(433_000_000), None), None);
+        let json = r#"{ "thistle_os": { "mesh": { "frequency_mhz": 433.375 } } }"#;
+        let params = mesh_params(Some(433_000_000), Some(json)).unwrap();
+        assert_eq!(params.freq_hz, 433_375_000);
+    }
+
+    #[test]
+    fn system_json_can_move_the_node_within_its_band() {
+        let json = r#"{ "thistle_os": { "mesh": {
+            "frequency_mhz": 869.525, "bandwidth_khz": 250, "spreading_factor": 11,
+            "coding_rate": 5, "tx_power_dbm": 14 } } }"#;
+        assert_eq!(
+            mesh_params(Some(868_000_000), Some(json)),
+            Some(MeshParams {
+                freq_hz: 869_525_000,
+                bw_hz: 250_000,
+                sf: 11,
+                cr: 5,
+                tx_power_dbm: 14,
+            })
+        );
+    }
+
+    #[test]
+    fn a_frequency_outside_the_boards_band_is_refused() {
+        let json = r#"{ "thistle_os": { "mesh": { "frequency_mhz": 910.525 } } }"#;
+        assert_eq!(mesh_params(Some(868_000_000), Some(json)), Some(EU_PRESET));
+    }
+
+    #[test]
+    fn settings_out_of_range_are_ignored() {
+        let json = r#"{ "thistle_os": { "mesh": {
+            "spreading_factor": 13, "coding_rate": 9, "tx_power_dbm": 30,
+            "bandwidth_khz": -5 } } }"#;
+        assert_eq!(mesh_params(Some(868_000_000), Some(json)), Some(EU_PRESET));
+    }
+
+    #[test]
+    fn the_mesh_is_on_unless_switched_off() {
+        assert!(mesh_enabled(None));
+        assert!(mesh_enabled(Some(r#"{ "thistle_os": {} }"#)));
+        assert!(!mesh_enabled(Some(
+            r#"{ "thistle_os": { "mesh": { "enabled": false } } }"#
+        )));
+    }
+
+    #[test]
+    fn a_configured_name_is_trimmed_and_cut_to_fit_an_advert() {
+        assert_eq!(configured_name(None), None);
+        let blank = r#"{ "thistle_os": { "mesh": { "name": "   " } } }"#;
+        assert_eq!(configured_name(Some(blank)), None);
+        let named = r#"{ "thistle_os": { "mesh": { "name": " Mo's T-Deck " } } }"#;
+        assert_eq!(configured_name(Some(named)).as_deref(), Some("Mo's T-Deck"));
+        let long = format!(
+            r#"{{ "thistle_os": {{ "mesh": {{ "name": "{}" }} }} }}"#,
+            "é".repeat(20)
+        );
+        let cut = configured_name(Some(&long)).unwrap();
+        assert!(cut.len() <= MESH_NAME_MAX - 1);
+        assert!(cut.chars().all(|c| c == 'é'));
+    }
+
+    // -- Starting --------------------------------------------------------------
+
+    #[test]
+    fn the_radio_settings_are_reported_once_the_mesh_has_them() {
         reset_state();
-        let name = CString::new("Node").unwrap();
-        unsafe { rs_mesh_init(name.as_ptr(), 0) };
+        let mut radio = CMeshRadio::default();
+        assert_eq!(rs_mesh_get_radio(&mut radio), ESP_ERR_INVALID_STATE);
+        *PARAMS_IN_USE.lock().unwrap() = Some(EU_PRESET);
+        assert_eq!(rs_mesh_get_radio(&mut radio), ESP_OK);
+        assert_eq!(
+            radio,
+            CMeshRadio { freq_hz: 869_618_000, bw_hz: 62_500, sf: 8, cr: 5, tx_power_dbm: 22 }
+        );
+        assert_eq!(rs_mesh_get_radio(std::ptr::null_mut()), ESP_ERR_INVALID_ARG);
+    }
 
-        // Push INBOX_SIZE + 5 messages
-        {
-            let mut state = MESH_STATE.lock().unwrap();
-            for i in 0..(INBOX_SIZE + 5) {
-                let mut msg = CMeshMessage::default();
-                msg.timestamp = i as u32;
-                state.inbox_push(msg);
-            }
+    #[test]
+    fn nothing_is_running_until_the_engine_reports_in() {
+        reset_state();
+        assert!(!rs_mesh_is_running());
+        let mut key = [0u8; 32];
+        assert_eq!(rs_mesh_get_self_key(key.as_mut_ptr()), ESP_ERR_INVALID_STATE);
+        let name = unsafe { std::ffi::CStr::from_ptr(rs_mesh_get_self_name()) };
+        assert_eq!(name.to_bytes(), b"");
+    }
+
+    #[test]
+    fn a_board_with_no_radio_does_not_start_the_mesh() {
+        reset_state();
+        assert_eq!(mesh_start(), ESP_ERR_NOT_FOUND);
+        assert!(!rs_mesh_is_running());
+    }
+
+    #[test]
+    fn the_engine_reporting_in_names_the_node() {
+        running_as("ThistleOS-A5A5");
+        assert!(rs_mesh_is_running());
+        let mut key = [0u8; 32];
+        assert_eq!(rs_mesh_get_self_key(key.as_mut_ptr()), ESP_OK);
+        assert_eq!(key, [0xA5; 32]);
+        let name = unsafe { std::ffi::CStr::from_ptr(rs_mesh_get_self_name()) };
+        assert_eq!(name.to_bytes(), b"ThistleOS-A5A5");
+    }
+
+    // -- Contacts --------------------------------------------------------------
+
+    #[test]
+    fn contacts_are_listed_most_recently_heard_first() {
+        running_as("me");
+        unsafe {
+            on_contact(&engine_contact(1, "old", 100));
+            on_contact(&engine_contact(2, "new", 300));
+            on_contact(&engine_contact(3, "mid", 200));
         }
+        assert_eq!(rs_mesh_get_contact_count(), 3);
+        let names: Vec<String> = (0..3)
+            .map(|i| {
+                let mut c = CMeshContact::default();
+                assert_eq!(rs_mesh_get_contact(i, &mut c), ESP_OK);
+                String::from_utf8(c.name[..c.name_len as usize].to_vec()).unwrap()
+            })
+            .collect();
+        assert_eq!(names, ["new", "mid", "old"]);
+    }
 
-        // Count should be capped at INBOX_SIZE
+    #[test]
+    fn a_contact_heard_again_is_updated_not_duplicated() {
+        running_as("me");
+        unsafe {
+            on_contact(&engine_contact(1, "Heltec", 100));
+            on_contact(&engine_contact(2, "other", 200));
+            on_contact(&engine_contact(1, "Heltec V3", 300));
+        }
+        assert_eq!(rs_mesh_get_contact_count(), 2);
+        let mut c = CMeshContact::default();
+        rs_mesh_get_contact(0, &mut c);
+        assert_eq!(&c.name[..c.name_len as usize], b"Heltec V3");
+        assert_eq!(c.last_seen, 300);
+    }
+
+    #[test]
+    fn a_contact_the_engine_dropped_is_gone() {
+        running_as("me");
+        unsafe {
+            on_contact(&engine_contact(1, "a", 100));
+            on_contact_removed([1u8; 32].as_ptr());
+        }
+        assert_eq!(rs_mesh_get_contact_count(), 0);
+    }
+
+    #[test]
+    fn a_contact_is_found_by_a_prefix_of_its_key() {
+        running_as("me");
+        unsafe {
+            on_contact(&engine_contact(0x11, "a", 100));
+            on_contact(&engine_contact(0x22, "b", 200));
+        }
+        assert_eq!(rs_mesh_find_contact_prefix([0x11u8; 6].as_ptr(), 6), 1);
+        assert_eq!(rs_mesh_find_contact([0x22u8; 32].as_ptr()), 0);
+        assert_eq!(rs_mesh_find_contact_prefix([0x33u8; 6].as_ptr(), 6), -1);
+        assert_eq!(rs_mesh_find_contact_prefix(std::ptr::null(), 6), -1);
+    }
+
+    #[test]
+    fn a_contacts_position_comes_through_in_degrees() {
+        let mut c = engine_contact(1, "a", 100);
+        c.lat_e6 = 59_913_868;
+        c.lon_e6 = 10_752_245;
+        let out = contact_from_engine(&c);
+        assert!(out.has_position);
+        assert!((out.lat - 59.913868).abs() < 1e-9);
+        assert!((out.lon - 10.752245).abs() < 1e-9);
+        assert!(!contact_from_engine(&engine_contact(1, "a", 100)).has_position);
+    }
+
+    // -- Receiving -------------------------------------------------------------
+
+    #[test]
+    fn messages_wait_in_order_for_an_app() {
+        running_as("me");
+        unsafe {
+            on_message(&engine_message(MSG_DIRECT, 1, "Heltec", 10, "hello"));
+            on_message(&engine_message(MSG_CHANNEL, 0, "Bob", 11, "hi all"));
+        }
+        let first = pop().unwrap();
+        assert_eq!(first.kind, MSG_DIRECT);
+        assert_eq!(first.sender_key, [1; 32]);
+        assert_eq!(text_of(&first), "hello");
+        let second = pop().unwrap();
+        assert_eq!(second.kind, MSG_CHANNEL);
+        assert_eq!(&second.sender_name[..second.sender_name_len as usize], b"Bob");
+        assert_eq!(text_of(&second), "hi all");
+        assert!(pop().is_none());
+    }
+
+    #[test]
+    fn a_message_sent_again_for_want_of_an_ack_is_shown_once() {
+        running_as("me");
+        unsafe {
+            on_message(&engine_message(MSG_DIRECT, 1, "Heltec", 10, "hello"));
+            on_message(&engine_message(MSG_DIRECT, 1, "Heltec", 10, "hello"));
+            // Same words, sent later, are a new message.
+            on_message(&engine_message(MSG_DIRECT, 1, "Heltec", 12, "hello"));
+        }
+        assert_eq!(rs_mesh_get_inbox_count(), 2);
+    }
+
+    #[test]
+    fn a_full_inbox_drops_its_oldest_message() {
+        running_as("me");
+        for i in 0..(INBOX_SIZE as u32 + 3) {
+            unsafe { on_message(&engine_message(MSG_DIRECT, 1, "a", i, "x")) };
+        }
         assert_eq!(rs_mesh_get_inbox_count(), INBOX_SIZE as i32);
-
-        // Oldest should be message #5 (first 5 were overwritten)
-        let mut out = CMeshMessage::default();
-        rs_mesh_get_inbox_message(0, &mut out as *mut CMeshMessage);
-        assert_eq!(
-            out.timestamp, 5,
-            "oldest message should be #5 after overflow"
-        );
-
-        // Newest should be INBOX_SIZE + 4
-        rs_mesh_get_inbox_message((INBOX_SIZE - 1) as i32, &mut out as *mut CMeshMessage);
-        assert_eq!(
-            out.timestamp,
-            (INBOX_SIZE + 4) as u32,
-            "newest message should be last pushed"
-        );
-
-        rs_mesh_deinit();
+        assert_eq!(pop().unwrap().timestamp, 3);
     }
 
     #[test]
-    fn test_inbox_clear() {
-        reset_state();
-        let name = CString::new("Node").unwrap();
-        unsafe { rs_mesh_init(name.as_ptr(), 0) };
-
-        {
-            let mut state = MESH_STATE.lock().unwrap();
-            for _ in 0..5 {
-                state.inbox_push(CMeshMessage::default());
-            }
-        }
-
-        assert_eq!(rs_mesh_get_inbox_count(), 5);
+    fn the_older_inbox_interface_reads_without_taking() {
+        running_as("me");
+        unsafe { on_message(&engine_message(MSG_DIRECT, 1, "a", 42, "Hi")) };
+        let mut out = CMeshMessage::default();
+        assert_eq!(rs_mesh_get_inbox_message(0, &mut out), ESP_OK);
+        assert_eq!(out.timestamp, 42);
+        assert_eq!(rs_mesh_get_inbox_count(), 1);
+        assert_eq!(rs_mesh_get_inbox_message(1, &mut out), ESP_ERR_INVALID_ARG);
+        assert_eq!(rs_mesh_get_inbox_message(0, std::ptr::null_mut()), ESP_ERR_INVALID_ARG);
         assert_eq!(rs_mesh_clear_inbox(), ESP_OK);
         assert_eq!(rs_mesh_get_inbox_count(), 0);
-
-        rs_mesh_deinit();
     }
 
     #[test]
-    fn test_inbox_read_out_of_range() {
+    fn text_longer_than_an_app_buffer_is_cut_not_overrun() {
+        let long = "y".repeat(MESH_TEXT_MAX);
+        let msg = message_from_engine(&engine_message(MSG_DIRECT, 1, "a", 1, &long));
+        assert_eq!(msg.text_len as usize, MESH_TEXT_MAX);
+        assert_eq!(msg.text[MESH_TEXT_MAX], 0);
+    }
+
+    // -- Sending ---------------------------------------------------------------
+
+    #[test]
+    fn nothing_can_be_sent_before_the_mesh_is_running() {
         reset_state();
-        let name = CString::new("Node").unwrap();
-        unsafe { rs_mesh_init(name.as_ptr(), 0) };
-
-        let mut out = CMeshMessage::default();
-        let rc = rs_mesh_get_inbox_message(0, &mut out as *mut CMeshMessage);
-        assert_eq!(rc, ESP_ERR_INVALID_ARG, "reading empty inbox must fail");
-
-        let rc = rs_mesh_get_inbox_message(-1, &mut out as *mut CMeshMessage);
-        assert_eq!(rc, ESP_ERR_INVALID_ARG, "negative index must fail");
-
-        rs_mesh_deinit();
+        let text = CString::new("hi").unwrap();
+        let key = [1u8; 32];
+        unsafe {
+            assert_eq!(
+                rs_mesh_send_direct(key.as_ptr(), text.as_ptr(), std::ptr::null_mut()),
+                ESP_ERR_INVALID_STATE
+            );
+            assert_eq!(
+                rs_mesh_send_channel(PUBLIC_CHANNEL, text.as_ptr(), std::ptr::null_mut()),
+                ESP_ERR_INVALID_STATE
+            );
+        }
+        assert_eq!(rs_mesh_send_advert(), ESP_ERR_INVALID_STATE);
     }
 
     #[test]
-    fn test_inbox_read_null_out() {
+    fn a_direct_message_goes_only_to_a_known_contact() {
+        running_as("me");
+        unsafe { on_contact(&engine_contact(1, "Heltec", 100)) };
+        let text = CString::new("hello").unwrap();
+        let mut id = 0u32;
+        unsafe {
+            assert_eq!(rs_mesh_send_direct([1u8; 32].as_ptr(), text.as_ptr(), &mut id), ESP_OK);
+            assert_ne!(id, 0);
+            assert_eq!(
+                rs_mesh_send_direct([2u8; 32].as_ptr(), text.as_ptr(), &mut id),
+                ESP_ERR_NOT_FOUND
+            );
+        }
+    }
+
+    #[test]
+    fn each_message_sent_gets_its_own_id() {
+        running_as("me");
+        let text = CString::new("hello").unwrap();
+        let (mut a, mut b) = (0u32, 0u32);
+        unsafe {
+            assert_eq!(rs_mesh_send_channel(PUBLIC_CHANNEL, text.as_ptr(), &mut a), ESP_OK);
+            assert_eq!(rs_mesh_send_channel(PUBLIC_CHANNEL, text.as_ptr(), &mut b), ESP_OK);
+        }
+        assert_ne!(a, 0);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn text_meshcore_cannot_carry_is_refused() {
+        running_as("me");
+        let long = CString::new("z".repeat(MESH_TEXT_MAX + 1)).unwrap();
+        let empty = CString::new("").unwrap();
+        unsafe {
+            assert_eq!(
+                rs_mesh_send_channel(PUBLIC_CHANNEL, long.as_ptr(), std::ptr::null_mut()),
+                ESP_ERR_INVALID_SIZE
+            );
+            assert_eq!(
+                rs_mesh_send_channel(PUBLIC_CHANNEL, empty.as_ptr(), std::ptr::null_mut()),
+                ESP_ERR_INVALID_ARG
+            );
+            assert_eq!(
+                rs_mesh_send_channel(PUBLIC_CHANNEL, std::ptr::null(), std::ptr::null_mut()),
+                ESP_ERR_INVALID_ARG
+            );
+        }
+    }
+
+    #[test]
+    fn delivery_reports_come_back_in_order() {
+        running_as("me");
+        unsafe {
+            on_delivery(7, DELIVERY_SENT);
+            on_delivery(8, DELIVERY_DELIVERED);
+        }
+        let (mut id, mut state) = (0u32, 0u8);
+        unsafe {
+            assert!(rs_mesh_delivery_pop(&mut id, &mut state));
+            assert_eq!((id, state), (7, DELIVERY_SENT));
+            assert!(rs_mesh_delivery_pop(&mut id, &mut state));
+            assert_eq!((id, state), (8, DELIVERY_DELIVERED));
+            assert!(!rs_mesh_delivery_pop(&mut id, &mut state));
+        }
+    }
+
+    // -- The older app interface -----------------------------------------------
+
+    #[test]
+    fn the_older_interface_reports_the_running_mesh() {
         reset_state();
-        let name = CString::new("Node").unwrap();
-        unsafe { rs_mesh_init(name.as_ptr(), 0) };
-
-        let rc = rs_mesh_get_inbox_message(0, std::ptr::null_mut());
-        assert_eq!(rc, ESP_ERR_INVALID_ARG, "null output pointer must fail");
-
-        rs_mesh_deinit();
-    }
-
-    // -- Struct size/alignment ---------------------------------------------
-
-    #[test]
-    fn test_mesh_contact_size() {
-        // Ensure the struct is reasonably sized for FFI
-        let size = std::mem::size_of::<CMeshContact>();
-        assert!(size > 0, "CMeshContact must have non-zero size");
-        assert!(size <= 256, "CMeshContact should not exceed 256 bytes");
+        assert_eq!(rs_mesh_loop(), ESP_ERR_INVALID_STATE);
+        running_as("me");
+        assert_eq!(rs_mesh_loop(), ESP_OK);
+        assert_eq!(rs_mesh_deinit(), ESP_OK);
+        assert!(rs_mesh_is_running(), "an app letting go must not stop the mesh");
+        let name = CString::new("ignored").unwrap();
+        assert_eq!(unsafe { rs_mesh_init(name.as_ptr(), 0) }, ESP_OK);
+        assert_eq!(unsafe { rs_mesh_init(std::ptr::null(), 0) }, ESP_ERR_INVALID_ARG);
     }
 
     #[test]
-    fn test_mesh_message_size() {
-        let size = std::mem::size_of::<CMeshMessage>();
-        assert!(size > 0, "CMeshMessage must have non-zero size");
-        assert!(size <= 512, "CMeshMessage should not exceed 512 bytes");
+    fn stats_count_the_contacts_heard() {
+        running_as("me");
+        unsafe { on_contact(&engine_contact(1, "a", 1)) };
+        let mut stats = CMeshStats::default();
+        assert_eq!(rs_mesh_get_stats(&mut stats), ESP_OK);
+        assert_eq!(stats.contacts_discovered, 1);
+        assert_eq!(rs_mesh_get_stats(std::ptr::null_mut()), ESP_ERR_INVALID_ARG);
+    }
+
+    // -- Struct layout ---------------------------------------------------------
+
+    #[test]
+    fn the_engine_structs_match_meshcore_shim_h() {
+        // meshcore_contact_t: 32 + 32 + 1 + 1 + (2 pad) + 4 + 4 + 4
+        assert_eq!(std::mem::size_of::<EngineContact>(), 80);
+        // meshcore_message_t: 1 + 1 + 32 + 32 + (2 pad) + 4 + 161 + (3 pad)
+        assert_eq!(std::mem::size_of::<EngineMessage>(), 236);
+        // meshcore_config_t: 4 + 4 + 1 + 1 + 1 + 32 + 48 + (1 pad)
+        assert_eq!(std::mem::size_of::<EngineConfig>(), 92);
+        assert_eq!(std::mem::size_of::<EngineStats>(), 20);
+    }
+
+    #[test]
+    fn the_app_structs_match_thistle_mesh_h() {
+        // mesh_contact_t and mesh_message_t _Static_assert the same sizes.
+        assert_eq!(std::mem::size_of::<CMeshContact>(), 96);
+        assert_eq!(std::mem::size_of::<CMeshMessage>(), 276);
+        assert_eq!(std::mem::size_of::<CMeshRadio>(), 12);
     }
 
     #[test]
     fn test_mesh_stats_size() {
-        let size = std::mem::size_of::<CMeshStats>();
-        assert_eq!(size, 24, "CMeshStats should be 6 x u32 = 24 bytes");
-    }
-
-    // -- Null pointer safety on FFI functions -------------------------------
-
-    #[test]
-    fn test_send_null_dest() {
-        reset_state();
-        let name = CString::new("Node").unwrap();
-        unsafe { rs_mesh_init(name.as_ptr(), 0) };
-
-        let text = CString::new("hello").unwrap();
-        let rc = rs_mesh_send(std::ptr::null(), text.as_ptr());
-        assert_eq!(rc, ESP_ERR_INVALID_ARG, "null dest_key must fail");
-
-        rs_mesh_deinit();
-    }
-
-    #[test]
-    fn test_send_null_text() {
-        reset_state();
-        let name = CString::new("Node").unwrap();
-        unsafe { rs_mesh_init(name.as_ptr(), 0) };
-
-        let key = [0u8; 32];
-        let rc = rs_mesh_send(key.as_ptr(), std::ptr::null());
-        assert_eq!(rc, ESP_ERR_INVALID_ARG, "null text must fail");
-
-        rs_mesh_deinit();
-    }
-
-    #[test]
-    fn test_get_self_key_null() {
-        reset_state();
-        let rc = rs_mesh_get_self_key(std::ptr::null_mut());
-        assert_eq!(rc, ESP_ERR_INVALID_ARG, "null key output must fail");
-    }
-
-    #[test]
-    fn test_get_stats_null() {
-        reset_state();
-        let rc = rs_mesh_get_stats(std::ptr::null_mut());
-        assert_eq!(rc, ESP_ERR_INVALID_ARG, "null stats output must fail");
-    }
-
-    #[test]
-    fn test_get_contact_null() {
-        reset_state();
-        let name = CString::new("Node").unwrap();
-        unsafe { rs_mesh_init(name.as_ptr(), 0) };
-
-        let rc = rs_mesh_get_contact(0, std::ptr::null_mut());
-        assert_eq!(rc, ESP_ERR_INVALID_ARG, "null contact output must fail");
-
-        rs_mesh_deinit();
-    }
-
-    #[test]
-    fn test_find_contact_null() {
-        reset_state();
-        let name = CString::new("Node").unwrap();
-        unsafe { rs_mesh_init(name.as_ptr(), 0) };
-
-        let rc = rs_mesh_find_contact(std::ptr::null());
-        assert_eq!(rc, -1, "null pub_key must return -1");
-
-        rs_mesh_deinit();
-    }
-
-    // -- Operations require init -------------------------------------------
-
-    #[test]
-    fn test_loop_requires_init() {
-        reset_state();
-        let rc = rs_mesh_loop();
-        assert_eq!(rc, ESP_ERR_INVALID_STATE, "loop without init must fail");
-    }
-
-    #[test]
-    fn test_send_requires_init() {
-        reset_state();
-        let key = [0u8; 32];
-        let text = CString::new("hi").unwrap();
-        let rc = rs_mesh_send(key.as_ptr(), text.as_ptr());
-        assert_eq!(rc, ESP_ERR_INVALID_STATE, "send without init must fail");
-    }
-
-    #[test]
-    fn test_send_advert_requires_init() {
-        reset_state();
-        assert_eq!(rs_mesh_send_advert(), ESP_ERR_INVALID_STATE);
-        assert_eq!(rs_mesh_send_advert_pos(0.0, 0.0), ESP_ERR_INVALID_STATE);
-    }
-
-    #[test]
-    fn test_get_self_name_without_init() {
-        reset_state();
-        let ptr = rs_mesh_get_self_name();
-        assert!(
-            !ptr.is_null(),
-            "get_self_name must return non-null even without init"
-        );
-        let c_str = unsafe { std::ffi::CStr::from_ptr(ptr) };
-        assert_eq!(
-            c_str.to_bytes().len(),
-            0,
-            "name should be empty string without init"
-        );
+        assert_eq!(std::mem::size_of::<CMeshStats>(), 24, "6 x u32 = 24 bytes");
     }
 }

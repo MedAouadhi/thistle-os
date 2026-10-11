@@ -82,6 +82,7 @@ inline bool fail_semaphore_create;
 inline bool interrupt_attached;
 inline int begin_result = RADIOLIB_ERR_NONE;
 inline float begin_frequency;
+inline int begin_preamble;
 inline float tcxo_voltage;
 inline int tcxo_calls;
 inline int dio2_rf_switch_calls;
@@ -113,6 +114,7 @@ inline void reset()
     interrupt_attached = false;
     begin_result = RADIOLIB_ERR_NONE;
     begin_frequency = 0.0f;
+    begin_preamble = 0;
     tcxo_voltage = 0.0f;
     tcxo_calls = 0;
     dio2_rf_switch_calls = 0;
@@ -261,8 +263,9 @@ public:
     explicit SX1262(Module *) {}
     ~SX1262() { sx1262_test::record(sx1262_test::Event::RadioDelete); }
 
-    int begin(float frequency, float, int, int, int, int) {
+    int begin(float frequency, float, int, int, int, int, int preamble) {
         sx1262_test::begin_frequency = frequency;
+        sx1262_test::begin_preamble = preamble;
         return sx1262_test::begin_result;
     }
     void setDio1Action(void (*)(void)) {

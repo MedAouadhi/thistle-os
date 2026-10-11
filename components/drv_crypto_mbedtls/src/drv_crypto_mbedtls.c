@@ -15,6 +15,15 @@
 // helpers
 // ---------------------------------------------------------------------------
 
+// Every PSA call fails until psa_crypto_init() has run, and nothing else in
+// the firmware is sure to have run it. Callers that ignore the error then use
+// an output buffer nothing wrote: MeshCore's AES did, so no peer could read a
+// word this device sent. The call is cheap once it has succeeded.
+static bool psa_ready(void)
+{
+    return psa_crypto_init() == PSA_SUCCESS;
+}
+
 static psa_key_id_t import_aes_key(const uint8_t *key, size_t key_bytes,
                                     psa_algorithm_t alg, psa_key_usage_t usage)
 {
@@ -38,6 +47,7 @@ static esp_err_t hw_sha256(const uint8_t *data, size_t len, uint8_t *hash_out)
     if (!data || !hash_out) {
         return ESP_ERR_INVALID_ARG;
     }
+    if (!psa_ready()) return ESP_FAIL;
 
     size_t olen;
     psa_status_t st = psa_hash_compute(PSA_ALG_SHA_256,
@@ -53,6 +63,7 @@ static esp_err_t aes_cbc_op(const uint8_t *key, size_t key_bytes,
 {
     if (!key || !iv || !input || !output) return ESP_ERR_INVALID_ARG;
     if (len == 0 || (len % 16) != 0) return ESP_ERR_INVALID_SIZE;
+    if (!psa_ready()) return ESP_FAIL;
 
     psa_key_usage_t usage = encrypt ? PSA_KEY_USAGE_ENCRYPT : PSA_KEY_USAGE_DECRYPT;
     psa_key_id_t key_id = import_aes_key(key, key_bytes,
@@ -106,6 +117,7 @@ static esp_err_t hw_hmac_sha256(const uint8_t *key, size_t key_len,
 {
     if (!key || !data || !mac_out) return ESP_ERR_INVALID_ARG;
     if (key_len == 0) return ESP_ERR_INVALID_SIZE;
+    if (!psa_ready()) return ESP_FAIL;
 
     psa_key_attributes_t attr = PSA_KEY_ATTRIBUTES_INIT;
     psa_set_key_usage_flags(&attr, PSA_KEY_USAGE_SIGN_MESSAGE);
@@ -137,6 +149,7 @@ static esp_err_t aes_ecb_op(const uint8_t *key, size_t key_bytes,
 {
     if (!key || !input || !output) return ESP_ERR_INVALID_ARG;
     if (len == 0 || len % 16 != 0) return ESP_ERR_INVALID_SIZE;
+    if (!psa_ready()) return ESP_FAIL;
 
     psa_key_usage_t usage = encrypt ? PSA_KEY_USAGE_ENCRYPT : PSA_KEY_USAGE_DECRYPT;
     psa_key_id_t key_id = import_aes_key(key, key_bytes,

@@ -24,6 +24,7 @@
 #include "thistle/ota.h"
 #include "thistle/driver_loader.h"
 #include "thistle/light_prefs.h"
+#include "thistle/mesh.h"
 #include "thistle/radio_antenna.h"
 #include "thistle/refresh_prefs.h"
 #include "hal/board.h"
@@ -1700,6 +1701,99 @@ static void radio_antenna_cb(lv_event_t *e)
     }
 }
 
+/* --- MeshCore node --- */
+
+static lv_obj_t *s_mesh_name_ta;
+static lv_obj_t *s_mesh_name_lbl;
+
+static void mesh_rename_cb(lv_event_t *e)
+{
+    (void)e;
+    if (!s_mesh_name_ta) return;
+
+    char name[32];
+    strncpy(name, lv_textarea_get_text(s_mesh_name_ta), sizeof(name) - 1);
+    name[sizeof(name) - 1] = '\0';
+
+    esp_err_t err = rs_mesh_set_name(name);
+    if (err == ESP_ERR_INVALID_ARG) {
+        toast_warn("Enter a name first");
+        return;
+    }
+    if (err == ESP_ERR_INVALID_STATE) {
+        toast_warn("The mesh is not running");
+        return;
+    }
+    if (s_mesh_name_lbl) {
+        lv_label_set_text_fmt(s_mesh_name_lbl, "Name: %s", rs_mesh_get_self_name());
+    }
+    lv_textarea_set_text(s_mesh_name_ta, "");
+    if (err == ESP_OK) {
+        toast_info("Renamed, and advertised");
+    } else {
+        /* Renamed on air, but system.json would not take it. */
+        toast_warn("Name not saved for next boot");
+    }
+}
+
+/* What another MeshCore node needs to hear this one: the same radio settings,
+ * and then an advert to add it by. */
+static void open_mesh_rows(lv_obj_t *content)
+{
+    s_mesh_name_ta = NULL;
+    s_mesh_name_lbl = NULL;
+
+    if (!rs_mesh_is_running()) {
+        create_info_row(content, "MeshCore: off");
+        return;
+    }
+    char buf[64];
+
+    create_info_row(content, "MeshCore: on air");
+    create_separator(content);
+
+    snprintf(buf, sizeof(buf), "Name: %s", rs_mesh_get_self_name());
+    s_mesh_name_lbl = create_live_row(content, buf);
+    create_separator(content);
+
+    uint8_t key[32];
+    if (rs_mesh_get_self_key(key) == ESP_OK) {
+        snprintf(buf, sizeof(buf), "Key: %02x%02x%02x%02x%02x%02x...",
+                 key[0], key[1], key[2], key[3], key[4], key[5]);
+        create_info_row(content, buf);
+        create_separator(content);
+    }
+
+    mesh_radio_t radio;
+    if (rs_mesh_get_radio(&radio) == ESP_OK) {
+        snprintf(buf, sizeof(buf), "%" PRIu32 ".%03" PRIu32 " MHz, BW %" PRIu32 ".%" PRIu32 " kHz",
+                 radio.freq_hz / 1000000, (radio.freq_hz / 1000) % 1000,
+                 radio.bw_hz / 1000, (radio.bw_hz % 1000) / 100);
+        create_info_row(content, buf);
+        snprintf(buf, sizeof(buf), "SF%u, CR 4/%u, %d dBm",
+                 (unsigned)radio.sf, (unsigned)radio.cr, (int)radio.tx_power_dbm);
+        create_info_row(content, buf);
+        create_separator(content);
+    }
+
+    snprintf(buf, sizeof(buf), "Contacts: %d", rs_mesh_get_contact_count());
+    create_info_row(content, buf);
+    create_separator(content);
+
+    /* A new name goes out in an advert straight away. */
+    lv_obj_t *row = create_choice_row(content);
+    s_mesh_name_ta = lv_textarea_create(row);
+    lv_textarea_set_one_line(s_mesh_name_ta, true);
+    lv_textarea_set_max_length(s_mesh_name_ta, 31);
+    lv_textarea_set_placeholder_text(s_mesh_name_ta, "New name");
+    lv_obj_set_flex_grow(s_mesh_name_ta, 1);
+    lv_obj_set_height(s_mesh_name_ta, ITEM_H - 4);
+    lv_obj_set_style_text_font(s_mesh_name_ta, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_pad_ver(s_mesh_name_ta, 2, LV_PART_MAIN);
+    create_choice_button(row, "Rename", mesh_rename_cb, 0, false);
+    create_separator(content);
+}
+
 static void open_detail_radio(lv_obj_t *content)
 {
     const hal_registry_t *reg = hal_get_registry();
@@ -1740,6 +1834,8 @@ static void open_detail_radio(lv_obj_t *content)
                              current == RADIO_ANTENNA_EXTERNAL);
         create_separator(content);
     }
+
+    open_mesh_rows(content);
 }
 
 /* --- GPS (with live timer) --- */

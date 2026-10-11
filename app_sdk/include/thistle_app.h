@@ -137,12 +137,14 @@ typedef struct {
 } thistle_mesh_contact_t;
 
 typedef struct {
-    uint8_t  sender_key[32];
+    uint8_t  sender_key[32];    /* zero for a channel message */
     uint8_t  sender_name[32];
     uint8_t  sender_name_len;
     uint32_t timestamp;
     uint8_t  text[200];
     uint16_t text_len;
+    uint8_t  kind;              /* 0 direct message, 1 channel message */
+    uint8_t  channel;           /* 0 is the Public channel */
 } thistle_mesh_message_t;
 
 typedef struct {
@@ -154,6 +156,10 @@ typedef struct {
     uint32_t contacts_discovered;
 } thistle_mesh_stats_t;
 
+/* The kernel runs the MeshCore node from boot, so init only starts it if it
+ * is not already running (the name is the device's, from system.json, not
+ * this one), deinit leaves it running, and loop reports whether it is. The
+ * inbox is shared with the Messenger, which takes what it reads. */
 extern int         thistle_mesh_init(const char *name, uint8_t node_type);
 extern int         thistle_mesh_deinit(void);
 extern int         thistle_mesh_loop(void);

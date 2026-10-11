@@ -74,6 +74,17 @@ static void band_comes_from_the_board_that_declares_it()
     sx1262_deinit();
 }
 
+/* MeshCore nodes send 16 preamble symbols and listen for 16. A receiver set
+ * for fewer than a sender uses can miss the packet altogether. */
+static void the_radio_uses_the_preamble_meshcore_nodes_use()
+{
+    sx1262_test::reset();
+    auto cfg = config();
+    assert(sx1262_init(&cfg) == ESP_OK);
+    assert(sx1262_test::begin_preamble == 16);
+    sx1262_deinit();
+}
+
 /* Wait for the receive task to read, but bounded: a regression here should fail
  * the suite rather than hang CI until it is killed. */
 static void await_read(int expected)
@@ -142,6 +153,7 @@ int main()
     auto cfg = config();
 
     band_comes_from_the_board_that_declares_it();
+    the_radio_uses_the_preamble_meshcore_nodes_use();
     a_module_gets_the_oscillator_and_switch_its_board_declares();
     a_transmission_is_not_read_back_as_a_received_packet();
     a_listener_that_sends_is_still_listening_afterwards();
