@@ -260,9 +260,14 @@ void ui_flush_cb_epaper(lv_display_t *disp, const lv_area_t *area, uint8_t *px_m
                     uint8_t r5 = (c >> 11) & 0x1F;
                     uint8_t g6 = (c >> 5) & 0x3F;
                     uint8_t b5 = c & 0x1F;
-                    /* Weighted luminance (BT.601): 0.299R + 0.587G + 0.114B */
-                    uint16_t lum = r5 * 77 + g6 * 150 + b5 * 29;  /* max ~8160 */
-                    if (lum > 4080) {  /* ~50% threshold */
+                    /* Weighted luminance (BT.601): 0.299R + 0.587G + 0.114B.
+                     * Green has six bits, so white is 31*77 + 63*150 + 31*29
+                     * = 12736, and half of that is the cut. Halving 8160, as
+                     * if green had five, cut at a third: a pixel needed two
+                     * thirds ink to show, and the dots of Arabic letters, which
+                     * antialiasing spreads over a few lighter pixels, went. */
+                    uint16_t lum = r5 * 77 + g6 * 150 + b5 * 29;
+                    if (lum > 6368) {
                         row[x / 8] |= (0x80 >> (x & 7));  /* white */
                     }
                 }
