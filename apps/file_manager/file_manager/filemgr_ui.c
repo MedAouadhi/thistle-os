@@ -394,9 +394,16 @@ static void navigate_to(const char *path)
         create_parent_row(s_fm.list_container, parent);
     }
 
-    /* Collect directory entries */
-    fm_entry_t entries[MAX_ENTRIES];
-    int        count = 0;
+    /* Collect directory entries. On the heap: fifty of them are 13 KB, more
+     * than the whole 8 KB stack of the LVGL task this runs on, and on the
+     * stack they overwrote the heap below it whenever a card was in. */
+    fm_entry_t *entries = malloc(MAX_ENTRIES * sizeof(*entries));
+    if (!entries) {
+        ESP_LOGE(TAG, "OOM: directory entries");
+        closedir(dir);
+        return;
+    }
+    int count = 0;
 
     struct dirent *de;
     while ((de = readdir(dir)) != NULL && count < MAX_ENTRIES) {
@@ -439,6 +446,7 @@ static void navigate_to(const char *path)
     for (int i = 0; i < count; i++) {
         create_entry_row(s_fm.list_container, path, &entries[i]);
     }
+    free(entries);
 
     /* Show "Empty directory" message if no entries (after filtering) */
     if (count == 0) {
