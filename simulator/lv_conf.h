@@ -13,6 +13,11 @@
 #define LV_FONT_MONTSERRAT_22 1
 #define LV_FONT_DEFAULT &lv_font_montserrat_14
 
+/* Right-to-left text, as the firmware's sdkconfig.defaults has it, for the
+ * Reader's Arabic books. The Reader joins Arabic letters itself. */
+#define LV_USE_BIDI 1
+#define LV_BIDI_BASE_DIR_DEF LV_BASE_DIR_AUTO
+
 /* Features */
 #define LV_USE_LOG 1
 #define LV_LOG_LEVEL LV_LOG_LEVEL_WARN

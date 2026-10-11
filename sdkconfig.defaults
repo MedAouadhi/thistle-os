@@ -42,6 +42,11 @@ CONFIG_LV_FONT_MONTSERRAT_14=y
 CONFIG_LV_FONT_MONTSERRAT_18=y
 CONFIG_LV_FONT_MONTSERRAT_22=y
 
+# Right-to-left text, for books in Arabic. Text with no right-to-left letter is
+# laid out as before. LV_USE_ARABIC_PERSIAN_CHARS stays off: the Reader joins
+# Arabic letters itself (apps/reader/reader/arabic_shape.c says why).
+CONFIG_LV_USE_BIDI=y
+
 # PPP for cellular data (required by drv_modem_a7682e esp_modem backend)
 CONFIG_LWIP_PPP_SUPPORT=y
 CONFIG_LWIP_PPP_PAP_SUPPORT=y

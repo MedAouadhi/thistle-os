@@ -1,29 +1,46 @@
+#include "hal/board.h"
 #include "hal/sdcard_path.h"
 /*
  * SPDX-License-Identifier: BSD-3-Clause
  * ThistleOS — Reader app UI
  *
- * Two modes:
- *   Library  — browse /sdcard/books/ and select a .txt/.md file
- *   Reading  — paginated text display with keyboard navigation
+ * Three screens:
+ *   Library   — the .epub, .txt and .md files in /sdcard/books and at the top
+ *               of the card
+ *   Reading   — a page of text; an EPUB is read a chapter at a time
+ *   Contents  — an EPUB's table of contents, or its chapters by number
+ *
+ * Pages are cut where LVGL's own line breaking would cut them, with the same
+ * font and width as the label that shows them, so a page neither runs off
+ * the bottom nor stops short. Arabic is shaped here, before that measuring:
+ * see arabic_shape.c for why LVGL does not do it.
  */
 #include "reader/reader_app.h"
+#include "reader/arabic_shape.h"
+#include "reader/epub.h"
+#include "reader/epub_port.h"
 
 #include "ui/theme.h"
 #include "ui/toast.h"
 #include "thistle/app_manager.h"
 
 #include "lvgl.h"
+#include "src/misc/lv_text_private.h" /* lv_text_get_next_line(), as the label uses */
 #include "esp_log.h"
+#include "esp_timer.h"
 
 #include <dirent.h>
-#include <sys/stat.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/stat.h>
 
 static const char *TAG = "reader_ui";
+
+LV_FONT_DECLARE(reader_font_16);
+LV_FONT_DECLARE(reader_font_16_mono);
 
 /* ------------------------------------------------------------------ */
 /* Layout constants                                                     */
@@ -33,19 +50,18 @@ static int s_app_w = 240;
 static int s_app_h = 296;
 #define TITLE_BAR_H      30
 #define FOOTER_H         24
-#define TEXT_MARGIN_H     8   /* top/bottom margin inside text area */
+#define TEXT_MARGIN_H     8   /* top margin inside the text area */
 #define TEXT_MARGIN_W     8   /* left/right margin */
-
-/* Pagination geometry (static estimate for monospaced 14px font) */
-static int s_text_w = 224; /* s_app_w - TEXT_MARGIN_W * 2 */
-static int s_text_h = 264; /* s_app_h - FOOTER_H - TEXT_MARGIN_H */
-#define CHARS_PER_LINE   38   /* ~304 / 8 px per glyph */
-#define LINES_PER_PAGE   10   /* ~184 / 18 px per line  */
-#define CHARS_PER_PAGE  (CHARS_PER_LINE * LINES_PER_PAGE)       /* 380   */
+/* DejaVu's line is 24 px at 16 px (23 in the mono font), tall enough for
+ * Arabic's marks above and below; two less still clears them and fits
+ * another line on a page. */
+#define LINE_SPACE       (-2)
 
 #define BOOKS_PATH      THISTLE_SDCARD "/books"
 #define MAX_BOOK_FILES   64
-#define ITEM_H           30
+/* A plain text file is read whole; past this it would crowd out everything
+ * else in PSRAM. */
+#define MAX_TEXT_FILE   (4 * 1024 * 1024)
 
 /* ------------------------------------------------------------------ */
 /* State                                                                */
@@ -54,25 +70,35 @@ static int s_text_h = 264; /* s_app_h - FOOTER_H - TEXT_MARGIN_H */
 static struct {
     lv_obj_t *root;
 
-    /* Library mode */
+    /* Library */
     lv_obj_t *library_screen;
-    lv_obj_t *lib_list;
+    lv_obj_t *lib_list;          /* an lv_table, one row a book */
+    struct book_entry *books;    /* the rows' files */
+    int       book_count;
+    bool      filling_list;      /* a list's rows are being set, not chosen */
 
-    /* Reading mode */
+    /* Reading */
     lv_obj_t *reader_screen;
     lv_obj_t *text_label;
     lv_obj_t *footer_label;
+    const lv_font_t *font;       /* the font books are set in */
+    int32_t   text_w;            /* the label's width, for measuring lines */
+    int       lines_per_page;
 
-    /* Book data */
-    char     *book_text;
-    size_t    book_size;
-    char      book_path[256];
+    /* Contents */
+    lv_obj_t *toc_screen;
+    lv_obj_t *toc_list;          /* an lv_table, one row an entry */
 
-    /* Pagination */
-    int       current_page;
-    int       total_pages;
-    int      *page_offsets;   /* array of char offsets, length = total_pages + 1 */
-    int       page_offset_count;
+    /* The open book: an EPUB, or a whole text file in `text` */
+    epub_t   *epub;
+    int       chapter;           /* the EPUB chapter `text` holds */
+    int      *toc_page;          /* per contents entry: the page it begins on
+                                  * in this chapter, or -1 if in another */
+    char     *text;              /* shaped, NUL-terminated */
+    size_t    text_len;
+    size_t   *pages;             /* where each page begins, then text_len */
+    int       page_count;
+    int       page;
 } s_reader;
 
 /* ------------------------------------------------------------------ */
@@ -80,6 +106,8 @@ static struct {
 /* ------------------------------------------------------------------ */
 
 static void switch_to_library(void);
+static void switch_to_reading(void);
+static void switch_to_contents(void);
 static void open_book(const char *path);
 static void show_page(int page);
 
@@ -98,113 +126,278 @@ static void format_size(off_t size, char *buf, size_t buf_len)
 }
 
 /* Any case: a FAT short name, as written by older tools, is upper case. */
-static bool is_readable_ext(const char *name)
+static bool has_ext(const char *name, const char *ext)
 {
     const char *dot = strrchr(name, '.');
-    if (!dot) return false;
-    return (strcasecmp(dot, ".txt") == 0 || strcasecmp(dot, ".md") == 0);
+    return dot && strcasecmp(dot, ext) == 0;
 }
 
-/* ------------------------------------------------------------------ */
-/* Pagination                                                           */
-/* ------------------------------------------------------------------ */
-
-static void calculate_pagination(void)
+static bool is_readable_ext(const char *name)
 {
-    if (!s_reader.book_text) return;
+    return has_ext(name, ".txt") || has_ext(name, ".md") || has_ext(name, ".epub");
+}
 
-    int text_len = (int)strlen(s_reader.book_text);
-    s_reader.total_pages = (text_len + CHARS_PER_PAGE - 1) / CHARS_PER_PAGE;
-    if (s_reader.total_pages < 1) s_reader.total_pages = 1;
-
-    /* Rebuild page offset array */
-    if (s_reader.page_offsets) {
-        free(s_reader.page_offsets);
-        s_reader.page_offsets = NULL;
-    }
-    s_reader.page_offsets = (int *)calloc(s_reader.total_pages + 1, sizeof(int));
-    if (!s_reader.page_offsets) {
-        ESP_LOGE(TAG, "OOM: page_offsets");
-        s_reader.total_pages = 0;
-        return;
-    }
-    s_reader.page_offset_count = s_reader.total_pages + 1;
-
-    s_reader.page_offsets[0] = 0;
-
-    for (int i = 1; i <= s_reader.total_pages; i++) {
-        int raw = i * CHARS_PER_PAGE;
-        if (raw >= text_len) {
-            s_reader.page_offsets[i] = text_len;
-            continue;
+/* The languages written right to left, by their BCP 47 primary subtag. */
+static bool is_rtl_language(const char *lang)
+{
+    static const char *const RTL[] = {"ar", "fa", "he", "ur", "ps", "sd", "ug", "yi", "dv", "ku"};
+    for (size_t i = 0; i < sizeof(RTL) / sizeof(RTL[0]); i++) {
+        size_t n = strlen(RTL[i]);
+        if (strncasecmp(lang, RTL[i], n) == 0 && (lang[n] == '\0' || lang[n] == '-' || lang[n] == '_')) {
+            return true;
         }
-
-        /* Walk back to the nearest word boundary so we don't break mid-word */
-        int start_of_page = (i - 1) * CHARS_PER_PAGE;
-        int offset = raw;
-        while (offset > start_of_page &&
-               s_reader.book_text[offset] != ' ' &&
-               s_reader.book_text[offset] != '\n' &&
-               s_reader.book_text[offset] != '\t') {
-            offset--;
-        }
-        /* Skip past the whitespace character itself */
-        if (offset > start_of_page &&
-            (s_reader.book_text[offset] == ' ' ||
-             s_reader.book_text[offset] == '\n' ||
-             s_reader.book_text[offset] == '\t')) {
-            offset++;
-        }
-        s_reader.page_offsets[i] = offset;
     }
+    return false;
+}
+
+/* Puts `obj` in the keypad's group and gives it the focus, so the keyboard
+ * reaches the screen being shown. */
+static void focus(lv_obj_t *obj)
+{
+    lv_group_t *grp = lv_group_get_default();
+    if (!grp || !obj) return;
+    if (lv_obj_get_group(obj) != grp) lv_group_add_obj(grp, obj);
+    lv_group_focus_obj(obj);
+}
+
+/* Whether the event came from the touch panel rather than a key: Enter on a
+ * focused object clicks it too, at no point on the screen. */
+static bool from_touch(void)
+{
+    lv_indev_t *indev = lv_indev_active();
+    return indev && lv_indev_get_type(indev) == LV_INDEV_TYPE_POINTER;
 }
 
 /* ------------------------------------------------------------------ */
-/* Book loading                                                         */
+/* The text being read                                                  */
 /* ------------------------------------------------------------------ */
 
-static esp_err_t load_book(const char *path)
+static void free_text(void)
+{
+    free(s_reader.text);
+    free(s_reader.pages);
+    s_reader.text       = NULL;
+    s_reader.pages      = NULL;
+    s_reader.text_len   = 0;
+    s_reader.page_count = 0;
+    s_reader.page       = 0;
+}
+
+static void close_book(void)
+{
+    free_text();
+    epub_close(s_reader.epub);
+    free(s_reader.toc_page);
+    s_reader.epub     = NULL;
+    s_reader.toc_page = NULL;
+    s_reader.chapter  = 0;
+}
+
+static int cmp_size(const void *a, const void *b)
+{
+    size_t x = *(const size_t *)a, y = *(const size_t *)b;
+    return x < y ? -1 : x > y;
+}
+
+/* Cuts the text into pages: lines broken by lv_text_get_next_line() with the
+ * label's font and width, as the label breaks them, lines_per_page to a page.
+ * A page does not begin with the blank line between two paragraphs.
+ *
+ * `breaks`, sorted, are where a new page must begin: a book's chapters start
+ * on a page of their own, as on paper, even when one file holds many. */
+static bool paginate(const size_t *breaks, size_t break_count)
+{
+    const char *text = s_reader.text;
+    size_t len = s_reader.text_len;
+    size_t cap = 64;
+    size_t *pages = epub_malloc(cap * sizeof(size_t));
+    if (!pages) return false;
+
+    int count = 0;
+    int line = 0;
+    size_t pos = 0;
+    size_t b = 0;
+    while (pos < len) {
+        while (b < break_count && breaks[b] <= pos) {
+            if (breaks[b] == pos && line > 0) line = 0;
+            b++;
+        }
+        if (line == 0) {
+            while (pos < len && (text[pos] == '\n' || text[pos] == '\r')) pos++;
+            if (pos >= len) break;
+            if ((size_t)count + 2 > cap) {
+                size_t *grown = epub_realloc(pages, cap * 2 * sizeof(size_t));
+                if (!grown) {
+                    free(pages);
+                    return false;
+                }
+                pages = grown;
+                cap *= 2;
+            }
+            pages[count++] = pos;
+        }
+        uint32_t n = lv_text_get_next_line(text + pos, s_reader.font, 0,
+                                           s_reader.text_w, NULL, LV_TEXT_FLAG_NONE);
+        /* A line runs to a break that falls inside it only for a chapter
+         * starting mid-line, which the text never has; it is cut there. */
+        if (b < break_count && breaks[b] > pos && breaks[b] < pos + n) n = (uint32_t)(breaks[b] - pos);
+        pos += n ? n : 1;
+        if (++line == s_reader.lines_per_page) line = 0;
+    }
+    if (count == 0) pages[count++] = 0;
+    pages[count] = len;
+
+    free(s_reader.pages);
+    s_reader.pages      = pages;
+    s_reader.page_count = count;
+    return true;
+}
+
+/* The page holding byte `offset` of the text. */
+static int page_of(size_t offset)
+{
+    int page = 0;
+    while (page + 1 < s_reader.page_count && s_reader.pages[page + 1] <= offset) page++;
+    return page;
+}
+
+/* Takes `text` (len bytes, from epub_malloc) as the text being read, shaping
+ * any Arabic in it, and pages it. `offsets` are positions in it, moved to the
+ * same places in the shaped text; the first `break_count` of them are where
+ * pages must break. */
+static bool take_text(char *text, size_t len, size_t *offsets, size_t offset_count,
+                      size_t break_count)
+{
+    if (arabic_present(text, len)) {
+        size_t shaped_len = 0;
+        char *shaped = arabic_shape(text, len, offsets, offset_count, &shaped_len);
+        free(text);
+        if (!shaped) return false;
+        text = shaped;
+        len  = shaped_len;
+    }
+
+    free_text();
+    s_reader.text     = text;
+    s_reader.text_len = len;
+
+    size_t *breaks = NULL;
+    if (break_count > 0) {
+        breaks = epub_malloc(break_count * sizeof(size_t));
+        if (!breaks) break_count = 0;
+        else memcpy(breaks, offsets, break_count * sizeof(size_t));
+        if (breaks) qsort(breaks, break_count, sizeof(size_t), cmp_size);
+    }
+    bool ok = paginate(breaks, break_count);
+    free(breaks);
+    if (!ok) {
+        free_text();
+        return false;
+    }
+    return true;
+}
+
+static bool load_text_file(const char *path)
 {
     FILE *f = fopen(path, "r");
     if (!f) {
         ESP_LOGW(TAG, "Cannot open: %s", path);
-        return ESP_ERR_NOT_FOUND;
+        return false;
     }
-
     fseek(f, 0, SEEK_END);
     long size = ftell(f);
     fseek(f, 0, SEEK_SET);
-
-    if (size <= 0) {
+    if (size <= 0 || size > MAX_TEXT_FILE) {
+        ESP_LOGW(TAG, "%s: %ld bytes, not read", path, size);
         fclose(f);
-        return ESP_ERR_INVALID_SIZE;
+        return false;
     }
 
-    if (s_reader.book_text) {
-        free(s_reader.book_text);
-        s_reader.book_text = NULL;
-    }
-
-    s_reader.book_text = (char *)malloc((size_t)size + 1);
-    if (!s_reader.book_text) {
+    char *text = epub_malloc((size_t)size + 1);
+    if (!text) {
         fclose(f);
-        ESP_LOGE(TAG, "OOM: book_text malloc(%ld)", size);
-        return ESP_ERR_NO_MEM;
+        ESP_LOGE(TAG, "OOM: text of %ld bytes", size);
+        return false;
     }
-
-    size_t read_bytes = fread(s_reader.book_text, 1, (size_t)size, f);
-    s_reader.book_text[read_bytes] = '\0';
-    s_reader.book_size = read_bytes;
+    size_t got = fread(text, 1, (size_t)size, f);
     fclose(f);
+    text[got] = '\0';
+    return take_text(text, got, NULL, 0, 0);
+}
 
-    strncpy(s_reader.book_path, path, sizeof(s_reader.book_path) - 1);
-    s_reader.book_path[sizeof(s_reader.book_path) - 1] = '\0';
+/* Shows `chapter`, or, if it has no text (a cover, a page of pictures), the
+ * nearest one after it with step 1 or before it with step -1: at contents
+ * entry `toc_entry` when it is not -1, else at its first page, or its last
+ * when `at_end`. False, with nothing changed, when no chapter that way has
+ * text.
+ *
+ * One file often holds many of the book's chapters, so every contents entry
+ * in the one loaded is placed on its page, for the contents screen to show
+ * where the reader is. */
+static bool open_chapter(int chapter, int step, int toc_entry, bool at_end)
+{
+    int64_t t0 = esp_timer_get_time();
+    int toc_count = epub_toc_count(s_reader.epub);
+    const char **anchors = NULL;
+    size_t *at = NULL;
+    int *which = NULL;
+    if (toc_count > 0) {
+        anchors = epub_malloc(sizeof(*anchors) * (size_t)toc_count);
+        at      = epub_malloc(sizeof(*at) * (size_t)toc_count);
+        which   = epub_malloc(sizeof(*which) * (size_t)toc_count);
+        if (!s_reader.toc_page) s_reader.toc_page = epub_malloc(sizeof(int) * (size_t)toc_count);
+        if (!anchors || !at || !which || !s_reader.toc_page) toc_count = 0;
+    }
 
-    calculate_pagination();
-    s_reader.current_page = 0;
+    bool opened = false;
+    for (int c = chapter; c >= 0 && c < epub_chapter_count(s_reader.epub); c += step) {
+        /* Top-level entries first: those are the chapters, which begin a
+         * page; one below is often a subtitle a line under its heading. */
+        size_t n = 0, top = 0;
+        for (int pass = 0; pass < 2; pass++) {
+            for (int i = 0; i < toc_count; i++) {
+                const epub_toc_entry_t *e = epub_toc_get(s_reader.epub, i);
+                if (e->chapter == c && e->anchor && (e->depth == 1) == (pass == 0)) {
+                    anchors[n] = e->anchor;
+                    which[n++] = i;
+                }
+            }
+            if (pass == 0) top = n;
+        }
 
-    ESP_LOGI(TAG, "Loaded %s: %zu bytes, %d pages", path, s_reader.book_size, s_reader.total_pages);
-    return ESP_OK;
+        size_t len = 0;
+        char *text = epub_chapter_text(s_reader.epub, c, anchors, n, at, &len);
+        if (!text || len == 0) {
+            free(text);
+            toc_entry = -1;
+            continue;
+        }
+        if (!take_text(text, len, at, n, top)) {
+            toast_warn("Not enough memory for this chapter");
+            break;
+        }
+        s_reader.chapter = c;
+
+        for (int i = 0; i < toc_count; i++) {
+            s_reader.toc_page[i] = epub_toc_get(s_reader.epub, i)->chapter == c ? 0 : -1;
+        }
+        for (size_t k = 0; k < n; k++) s_reader.toc_page[which[k]] = page_of(at[k]);
+
+        ESP_LOGI(TAG, "Chapter %d/%d: %u bytes, %d pages, in %lld ms", c + 1,
+                 epub_chapter_count(s_reader.epub), (unsigned)s_reader.text_len,
+                 s_reader.page_count, (esp_timer_get_time() - t0) / 1000);
+        int page = toc_entry >= 0 && toc_entry < toc_count && s_reader.toc_page[toc_entry] >= 0
+                       ? s_reader.toc_page[toc_entry]
+                       : at_end ? s_reader.page_count - 1 : 0;
+        show_page(page);
+        opened = true;
+        break;
+    }
+
+    free(anchors);
+    free(at);
+    free(which);
+    return opened;
 }
 
 /* ------------------------------------------------------------------ */
@@ -213,64 +406,83 @@ static esp_err_t load_book(const char *path)
 
 static void show_page(int page)
 {
-    if (!s_reader.book_text || s_reader.total_pages <= 0) return;
-
+    if (!s_reader.text || s_reader.page_count <= 0) return;
     if (page < 0) page = 0;
-    if (page >= s_reader.total_pages) page = s_reader.total_pages - 1;
-    s_reader.current_page = page;
+    if (page >= s_reader.page_count) page = s_reader.page_count - 1;
+    s_reader.page = page;
 
-    int start = s_reader.page_offsets[page];
-    int end   = (page + 1 <= s_reader.total_pages)
-                    ? s_reader.page_offsets[page + 1]
-                    : (int)s_reader.book_size;
+    size_t start = s_reader.pages[page];
+    size_t end   = s_reader.pages[page + 1];
+    while (end > start && (s_reader.text[end - 1] == '\n' || s_reader.text[end - 1] == '\r')) end--;
 
-    if (end < start) end = start;
-
-    /* Extract page slice into a temp buffer */
-    int len = end - start;
-    char *page_text = (char *)malloc((size_t)len + 1);
+    char *page_text = malloc(end - start + 1);
     if (!page_text) {
         lv_label_set_text(s_reader.text_label, "(out of memory)");
         return;
     }
-    memcpy(page_text, s_reader.book_text + start, (size_t)len);
-    page_text[len] = '\0';
-
+    memcpy(page_text, s_reader.text + start, end - start);
+    page_text[end - start] = '\0';
     lv_label_set_text(s_reader.text_label, page_text);
     free(page_text);
 
-    /* Update footer: "Page N / T    PP%" */
     char footer[64];
-    int pct = (s_reader.total_pages > 0)
-                  ? ((page + 1) * 100 / s_reader.total_pages)
-                  : 0;
-    snprintf(footer, sizeof(footer), "Page %d / %d    %d%%",
-             page + 1, s_reader.total_pages, pct);
+    if (s_reader.epub) {
+        snprintf(footer, sizeof(footer), "Ch %d/%d    Page %d/%d",
+                 s_reader.chapter + 1, epub_chapter_count(s_reader.epub),
+                 page + 1, s_reader.page_count);
+    } else {
+        snprintf(footer, sizeof(footer), "Page %d / %d    %d%%",
+                 page + 1, s_reader.page_count, (page + 1) * 100 / s_reader.page_count);
+    }
     lv_label_set_text(s_reader.footer_label, footer);
 }
 
+static void next_page(void)
+{
+    if (s_reader.page + 1 < s_reader.page_count) {
+        show_page(s_reader.page + 1);
+    } else if (s_reader.epub && !open_chapter(s_reader.chapter + 1, 1, -1, false)) {
+        toast_info("End of book");
+    }
+}
+
+static void prev_page(void)
+{
+    if (s_reader.page > 0) {
+        show_page(s_reader.page - 1);
+    } else if (s_reader.epub) {
+        open_chapter(s_reader.chapter - 1, -1, -1, true);
+    }
+}
+
 /* ------------------------------------------------------------------ */
-/* Keyboard navigation (reading mode)                                   */
+/* Reading screen                                                       */
 /* ------------------------------------------------------------------ */
 
 static void reader_key_cb(lv_event_t *e)
 {
-    uint32_t key = lv_event_get_key(e);
-
-    switch (key) {
+    switch (lv_event_get_key(e)) {
         case ' ':
+        case 'n':
+        case 'j':
         case LV_KEY_RIGHT:
         case LV_KEY_DOWN:
-            show_page(s_reader.current_page + 1);
+            next_page();
             break;
 
         case LV_KEY_BACKSPACE:
+        case 'p':
+        case 'k':
         case LV_KEY_LEFT:
         case LV_KEY_UP:
-            show_page(s_reader.current_page - 1);
+            prev_page();
             break;
 
-        case LV_KEY_ESC:
+        case 'c':
+        case 't':
+            if (s_reader.epub) switch_to_contents();
+            break;
+
         case 'q':
         case 'Q':
             switch_to_library();
@@ -281,9 +493,29 @@ static void reader_key_cb(lv_event_t *e)
     }
 }
 
-/* ------------------------------------------------------------------ */
-/* Reading screen creation / display                                    */
-/* ------------------------------------------------------------------ */
+/* A tap on the left third of the page goes back; anywhere else, and Enter,
+ * goes on. */
+static void reader_clicked_cb(lv_event_t *e)
+{
+    (void)e;
+    if (from_touch()) {
+        lv_point_t p;
+        lv_indev_get_point(lv_indev_active(), &p);
+        lv_area_t area;
+        lv_obj_get_coords(s_reader.reader_screen, &area);
+        if (p.x < area.x1 + lv_area_get_width(&area) / 3) {
+            prev_page();
+            return;
+        }
+    }
+    next_page();
+}
+
+static void footer_clicked_cb(lv_event_t *e)
+{
+    (void)e;
+    if (s_reader.epub) switch_to_contents();
+}
 
 static void create_reader_screen(void)
 {
@@ -298,10 +530,9 @@ static void create_reader_screen(void)
     lv_obj_set_style_pad_all(s_reader.reader_screen, 0, LV_PART_MAIN);
     lv_obj_set_style_radius(s_reader.reader_screen, 0, LV_PART_MAIN);
     lv_obj_clear_flag(s_reader.reader_screen, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_reader.reader_screen, LV_OBJ_FLAG_HIDDEN);
 
-    /* ----------------------------------------------------------------
-     * Text area — fills the space above the footer
-     * ---------------------------------------------------------------- */
+    /* Text area — fills the space above the footer; taps pass to the screen */
     lv_obj_t *text_area = lv_obj_create(s_reader.reader_screen);
     lv_obj_set_pos(text_area, 0, 0);
     lv_obj_set_size(text_area, s_app_w, s_app_h - FOOTER_H);
@@ -314,19 +545,30 @@ static void create_reader_screen(void)
     lv_obj_set_style_pad_bottom(text_area, 0, LV_PART_MAIN);
     lv_obj_set_style_radius(text_area, 0, LV_PART_MAIN);
     lv_obj_clear_flag(text_area, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(text_area, LV_OBJ_FLAG_CLICKABLE);
 
-    /* Text label — clipped to the area, no scroll */
+    /* Text label — wrapped at the area's width, as paginate() measures it.
+     * LONG_CLIP would not do: in LVGL 9 it turns wrapping off, and every
+     * paragraph ran off the edge as one line. The area clips the bottom. */
     s_reader.text_label = lv_label_create(text_area);
-    lv_label_set_long_mode(s_reader.text_label, LV_LABEL_LONG_CLIP);
+    lv_label_set_long_mode(s_reader.text_label, LV_LABEL_LONG_WRAP);
     lv_obj_set_size(s_reader.text_label, LV_PCT(100), LV_PCT(100));
-    lv_obj_set_style_text_font(s_reader.text_label, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_font(s_reader.text_label, s_reader.font, LV_PART_MAIN);
+    lv_obj_set_style_text_line_space(s_reader.text_label, LINE_SPACE, LV_PART_MAIN);
     lv_obj_set_style_text_color(s_reader.text_label, clr->text, LV_PART_MAIN);
-    lv_obj_set_style_text_align(s_reader.text_label, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
+    lv_obj_set_style_text_align(s_reader.text_label, LV_TEXT_ALIGN_AUTO, LV_PART_MAIN);
     lv_label_set_text(s_reader.text_label, "");
 
-    /* ----------------------------------------------------------------
-     * Footer bar (24 px)
-     * ---------------------------------------------------------------- */
+    /* What a page holds: the label's own width, and as many lines as fit. */
+    lv_obj_update_layout(text_area);
+    s_reader.text_w = lv_obj_get_content_width(text_area);
+    int32_t text_h = lv_obj_get_content_height(text_area);
+    int32_t line_h = lv_font_get_line_height(s_reader.font) + LINE_SPACE;
+    /* n lines stand n * line_h - LINE_SPACE tall. */
+    s_reader.lines_per_page = (int)((text_h + LINE_SPACE) / line_h);
+    if (s_reader.lines_per_page < 1) s_reader.lines_per_page = 1;
+
+    /* Footer bar (24 px); a tap opens the contents */
     lv_obj_t *footer_bar = lv_obj_create(s_reader.reader_screen);
     lv_obj_set_pos(footer_bar, 0, s_app_h - FOOTER_H);
     lv_obj_set_size(footer_bar, s_app_w, FOOTER_H);
@@ -341,6 +583,8 @@ static void create_reader_screen(void)
     lv_obj_set_style_pad_top(footer_bar, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_bottom(footer_bar, 0, LV_PART_MAIN);
     lv_obj_clear_flag(footer_bar, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(footer_bar, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(footer_bar, footer_clicked_cb, LV_EVENT_CLICKED, NULL);
 
     s_reader.footer_label = lv_label_create(footer_bar);
     lv_label_set_long_mode(s_reader.footer_label, LV_LABEL_LONG_CLIP);
@@ -349,198 +593,374 @@ static void create_reader_screen(void)
     lv_obj_align(s_reader.footer_label, LV_ALIGN_LEFT_MID, 0, 0);
     lv_label_set_text(s_reader.footer_label, "Page -- / --");
 
-    /* Register keyboard events on the reading screen */
     lv_obj_add_flag(s_reader.reader_screen, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(s_reader.reader_screen, reader_key_cb, LV_EVENT_KEY, NULL);
+    lv_obj_add_event_cb(s_reader.reader_screen, reader_clicked_cb, LV_EVENT_CLICKED, NULL);
 }
 
 static void open_book(const char *path)
 {
-    if (load_book(path) != ESP_OK) {
+    close_book();
+
+    bool ok;
+    if (has_ext(path, ".epub")) {
+        s_reader.epub = epub_open(path);
+        ok = s_reader.epub && open_chapter(0, 1, -1, false);
+    } else {
+        ok = load_text_file(path);
+        if (ok) show_page(0);
+    }
+    if (!ok) {
+        close_book();
         toast_warn("Cannot open book");
         return;
     }
 
-    /* Hide library, reveal reading screen */
+    /* A right-to-left book reads from the right even on a page that begins
+     * with a number or a Latin word. */
+    lv_base_dir_t dir = s_reader.epub && is_rtl_language(epub_language(s_reader.epub))
+                            ? LV_BASE_DIR_RTL : LV_BASE_DIR_AUTO;
+    lv_obj_set_style_base_dir(s_reader.text_label, dir, LV_PART_MAIN);
+    switch_to_reading();
+}
+
+static void switch_to_reading(void)
+{
     lv_obj_add_flag(s_reader.library_screen, LV_OBJ_FLAG_HIDDEN);
-
-    if (!s_reader.reader_screen) {
-        create_reader_screen();
-    }
+    if (s_reader.toc_screen) lv_obj_add_flag(s_reader.toc_screen, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(s_reader.reader_screen, LV_OBJ_FLAG_HIDDEN);
-
-    show_page(0);
+    focus(s_reader.reader_screen);
 }
 
 /* ------------------------------------------------------------------ */
-/* Library mode                                                         */
+/* Lists: the library and the contents                                  */
 /* ------------------------------------------------------------------ */
 
-/* user_data on each book row: malloc'd full path string */
-static void book_row_delete_cb(lv_event_t *e)
+/* A list is one lv_table, a row of text costing a string in LVGL's 64 KB
+ * pool. A row of widgets with their own styles cost some 400 bytes: Moby
+ * Dick's 145 contents entries ran the pool out, and LVGL then stops in an
+ * assert for good. Up and down move the selection; a tap or Enter opens. */
+
+static void open_library_row(uint32_t row);
+static void open_contents_row(uint32_t row);
+
+static void list_changed_cb(lv_event_t *e)
 {
-    void *ud = lv_obj_get_user_data(lv_event_get_target(e));
-    if (ud) {
-        free(ud);
-        lv_obj_set_user_data(lv_event_get_target(e), NULL);
+    if (s_reader.filling_list) return;
+
+    /* The selection also moves with the arrow keys, which must not open it. */
+    lv_indev_t *indev = lv_indev_active();
+    if (indev && lv_indev_get_type(indev) == LV_INDEV_TYPE_KEYPAD &&
+        lv_indev_get_key(indev) != LV_KEY_ENTER) {
+        return;
+    }
+
+    lv_obj_t *table = lv_event_get_target(e);
+    uint32_t row = 0, col = 0;
+    lv_table_get_selected_cell(table, &row, &col);
+    if (row == LV_TABLE_CELL_NONE) return;
+    if (table == s_reader.lib_list) {
+        open_library_row(row);
+    } else if (table == s_reader.toc_list) {
+        open_contents_row(row);
     }
 }
 
-static void book_row_clicked_cb(lv_event_t *e)
+/* j and k move like the arrows; q goes back. */
+static void list_key_cb(lv_event_t *e)
 {
-    lv_obj_t   *row  = lv_event_get_target(e);
-    const char *path = (const char *)lv_obj_get_user_data(row);
-    if (path) {
-        open_book(path);
+    lv_obj_t *table = lv_event_get_target(e);
+    uint32_t key = lv_event_get_key(e);
+    if (key == 'j' || key == 'k') {
+        uint32_t row = 0, col = 0;
+        lv_table_get_selected_cell(table, &row, &col);
+        uint32_t rows = lv_table_get_row_count(table);
+        if (row == LV_TABLE_CELL_NONE) row = 0;
+        else if (key == 'j' && row + 1 < rows) row++;
+        else if (key == 'k' && row > 0) row--;
+        lv_table_set_selected_cell(table, (uint16_t)row, 0);
+    } else if (key == 'q' || key == 'Q') {
+        if (table == s_reader.toc_list) {
+            switch_to_reading();
+        } else {
+            app_manager_launch("com.thistle.launcher");
+        }
     }
+}
+
+/* Selects `row` without opening it. */
+static void select_row(lv_obj_t *table, uint32_t row)
+{
+    if (lv_table_get_row_count(table) == 0) return;
+    s_reader.filling_list = true;
+    lv_table_set_selected_cell(table, (uint16_t)row, 0);
+    s_reader.filling_list = false;
+}
+
+/* Sets a cell, shaping any Arabic in its text first. */
+static void set_cell(lv_obj_t *table, uint32_t row, uint32_t col, const char *text)
+{
+    size_t len = strlen(text);
+    char *shaped = arabic_present(text, len) ? arabic_shape(text, len, NULL, 0, NULL) : NULL;
+    lv_table_set_cell_value(table, row, col, shaped ? shaped : text);
+    free(shaped);
+}
+
+static lv_obj_t *create_list_screen(const char *title, lv_event_cb_t title_clicked,
+                                    lv_obj_t **list_out)
+{
+    const theme_colors_t *clr = theme_get_colors();
+
+    lv_obj_t *screen = lv_obj_create(s_reader.root);
+    lv_obj_set_size(screen, s_app_w, s_app_h);
+    lv_obj_set_pos(screen, 0, 0);
+    lv_obj_set_style_bg_color(screen, clr->bg, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_width(screen, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(screen, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(screen, 0, LV_PART_MAIN);
+    lv_obj_clear_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *title_bar = lv_obj_create(screen);
+    lv_obj_set_pos(title_bar, 0, 0);
+    lv_obj_set_size(title_bar, s_app_w, TITLE_BAR_H);
+    lv_obj_set_style_bg_color(title_bar, clr->surface, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(title_bar, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_radius(title_bar, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_left(title_bar, 8, LV_PART_MAIN);
+    lv_obj_set_style_pad_right(title_bar, 8, LV_PART_MAIN);
+    lv_obj_set_style_pad_top(title_bar, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_bottom(title_bar, 0, LV_PART_MAIN);
+    lv_obj_set_style_border_side(title_bar, LV_BORDER_SIDE_BOTTOM, LV_PART_MAIN);
+    lv_obj_set_style_border_color(title_bar, clr->text, LV_PART_MAIN);
+    lv_obj_set_style_border_width(title_bar, 1, LV_PART_MAIN);
+    lv_obj_clear_flag(title_bar, LV_OBJ_FLAG_SCROLLABLE);
+    if (title_clicked) {
+        lv_obj_add_flag(title_bar, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(title_bar, title_clicked, LV_EVENT_CLICKED, NULL);
+    }
+
+    lv_obj_t *title_lbl = lv_label_create(title_bar);
+    lv_label_set_text(title_lbl, title);
+    lv_label_set_long_mode(title_lbl, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_font(title_lbl, &lv_font_montserrat_18, LV_PART_MAIN);
+    lv_obj_set_style_text_color(title_lbl, clr->text, LV_PART_MAIN);
+    lv_obj_align(title_lbl, LV_ALIGN_LEFT_MID, 0, 0);
+
+    lv_obj_t *table = lv_table_create(screen);
+    lv_obj_set_pos(table, 0, TITLE_BAR_H);
+    lv_obj_set_size(table, s_app_w, s_app_h - TITLE_BAR_H);
+    lv_obj_set_style_bg_color(table, clr->bg, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(table, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_width(table, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(table, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(table, 0, LV_PART_MAIN);
+    lv_obj_set_style_text_font(table, s_reader.font, LV_PART_ITEMS);
+    lv_obj_set_style_text_color(table, clr->text, LV_PART_ITEMS);
+    lv_obj_set_style_text_line_space(table, LINE_SPACE, LV_PART_ITEMS);
+    lv_obj_set_style_bg_color(table, clr->surface, LV_PART_ITEMS);
+    lv_obj_set_style_bg_opa(table, LV_OPA_COVER, LV_PART_ITEMS);
+    lv_obj_set_style_border_side(table, LV_BORDER_SIDE_BOTTOM, LV_PART_ITEMS);
+    lv_obj_set_style_border_color(table, clr->text_secondary, LV_PART_ITEMS);
+    lv_obj_set_style_border_width(table, 1, LV_PART_ITEMS);
+    lv_obj_set_style_pad_left(table, 8, LV_PART_ITEMS);
+    lv_obj_set_style_pad_right(table, 8, LV_PART_ITEMS);
+    lv_obj_set_style_pad_top(table, 4, LV_PART_ITEMS);
+    lv_obj_set_style_pad_bottom(table, 4, LV_PART_ITEMS);
+    /* The selected row, inverted, as the other lists draw a pressed one. */
+    lv_obj_set_style_bg_color(table, clr->primary, LV_PART_ITEMS | LV_STATE_FOCUSED);
+    lv_obj_set_style_text_color(table, clr->bg, LV_PART_ITEMS | LV_STATE_FOCUSED);
+    lv_obj_set_style_bg_color(table, clr->primary, LV_PART_ITEMS | LV_STATE_PRESSED);
+    lv_obj_set_style_text_color(table, clr->bg, LV_PART_ITEMS | LV_STATE_PRESSED);
+    lv_obj_set_scrollbar_mode(table, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_style_bg_color(table, clr->primary, LV_PART_SCROLLBAR);
+    lv_obj_set_style_width(table, 2, LV_PART_SCROLLBAR);
+    lv_obj_add_event_cb(table, list_changed_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_add_event_cb(table, list_key_cb, LV_EVENT_KEY, NULL);
+    lv_table_set_column_count(table, 1);
+    lv_table_set_column_width(table, 0, s_app_w);
+
+    *list_out = table;
+    return screen;
+}
+
+/* ------------------------------------------------------------------ */
+/* Library                                                              */
+/* ------------------------------------------------------------------ */
+
+typedef struct book_entry {
+    char  name[256];    /* shown: the file name without its extension */
+    char  path[384];
+    off_t size;
+} book_entry_t;
+
+static int book_cmp(const void *a, const void *b)
+{
+    return strcasecmp(((const book_entry_t *)a)->name, ((const book_entry_t *)b)->name);
+}
+
+/* Adds the books in `dir` to `entries`. */
+static void scan_books(const char *dir_path, book_entry_t *entries, int *count)
+{
+    DIR *dir = opendir(dir_path);
+    if (!dir) return;
+
+    struct dirent *de;
+    while ((de = readdir(dir)) != NULL && *count < MAX_BOOK_FILES) {
+        /* Dot files include macOS's "._" companions, which are not books. */
+        if (de->d_name[0] == '.' || !is_readable_ext(de->d_name)) continue;
+
+        book_entry_t *b = &entries[*count];
+        if (snprintf(b->path, sizeof(b->path), "%s/%s", dir_path, de->d_name) >= (int)sizeof(b->path)) {
+            continue;
+        }
+        struct stat st;
+        if (stat(b->path, &st) != 0 || S_ISDIR(st.st_mode)) continue;
+        b->size = st.st_size;
+
+        snprintf(b->name, sizeof(b->name), "%s", de->d_name);
+        char *dot = strrchr(b->name, '.');
+        if (dot && dot != b->name) *dot = '\0';
+        (*count)++;
+    }
+    closedir(dir);
+}
+
+static void open_library_row(uint32_t row)
+{
+    if (row < (uint32_t)s_reader.book_count) open_book(s_reader.books[row].path);
 }
 
 static void populate_library(void)
 {
-    lv_obj_clean(s_reader.lib_list);
-    lv_obj_scroll_to_y(s_reader.lib_list, 0, LV_ANIM_OFF);
+    free(s_reader.books);
+    s_reader.book_count = 0;
+    s_reader.books = epub_malloc(MAX_BOOK_FILES * sizeof(book_entry_t));
+    if (!s_reader.books) return;
+    scan_books(BOOKS_PATH, s_reader.books, &s_reader.book_count);
+    scan_books(THISTLE_SDCARD, s_reader.books, &s_reader.book_count);
+    qsort(s_reader.books, (size_t)s_reader.book_count, sizeof(book_entry_t), book_cmp);
 
-    const theme_colors_t *clr = theme_get_colors();
-
-    DIR *dir = opendir(BOOKS_PATH);
-    if (!dir) {
-        /* Directory missing — show hint */
-        lv_obj_t *lbl = lv_label_create(s_reader.lib_list);
-        lv_label_set_text(lbl, "No books found.\nAdd .txt files to\n/sdcard/books/");
-        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, LV_PART_MAIN);
-        lv_obj_set_style_text_color(lbl, clr->text_secondary, LV_PART_MAIN);
-        lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-        lv_obj_set_width(lbl, LV_PCT(100));
-        lv_obj_set_style_pad_top(lbl, 20, LV_PART_MAIN);
-        ESP_LOGW(TAG, "Cannot open %s", BOOKS_PATH);
-        return;
+    lv_obj_t *table = s_reader.lib_list;
+    s_reader.filling_list = true;
+    if (s_reader.book_count == 0) {
+        lv_table_set_row_count(table, 1);
+        lv_table_set_cell_value(table, 0, 0, "No books found. Add .epub or .txt files to the SD card.");
+    } else {
+        lv_table_set_row_count(table, (uint32_t)s_reader.book_count);
+        for (int i = 0; i < s_reader.book_count; i++) {
+            char size_str[16], cell[sizeof(s_reader.books[i].name) + sizeof(size_str) + 2];
+            format_size(s_reader.books[i].size, size_str, sizeof(size_str));
+            snprintf(cell, sizeof(cell), "%s\n%s", s_reader.books[i].name, size_str);
+            set_cell(table, (uint32_t)i, 0, cell);
+        }
     }
-
-    /* Collect entries */
-    typedef struct { char name[256]; off_t size; } book_entry_t;
-    book_entry_t *entries = (book_entry_t *)malloc(MAX_BOOK_FILES * sizeof(book_entry_t));
-    if (!entries) { closedir(dir); return; }
-    int count = 0;
-
-    struct dirent *de;
-    while ((de = readdir(dir)) != NULL && count < MAX_BOOK_FILES) {
-        if (de->d_name[0] == '.') continue;
-        if (!is_readable_ext(de->d_name)) continue;
-
-        strncpy(entries[count].name, de->d_name, sizeof(entries[count].name) - 1);
-        entries[count].name[sizeof(entries[count].name) - 1] = '\0';
-
-        char full[512];
-        snprintf(full, sizeof(full), "%s/%s", BOOKS_PATH, de->d_name);
-        struct stat st;
-        entries[count].size = (stat(full, &st) == 0) ? st.st_size : 0;
-        count++;
-    }
-    closedir(dir);
-
-    if (count == 0) {
-        free(entries);
-        lv_obj_t *lbl = lv_label_create(s_reader.lib_list);
-        lv_label_set_text(lbl, "No books found.\nAdd .txt files to\n/sdcard/books/");
-        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, LV_PART_MAIN);
-        lv_obj_set_style_text_color(lbl, clr->text_secondary, LV_PART_MAIN);
-        lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-        lv_obj_set_width(lbl, LV_PCT(100));
-        lv_obj_set_style_pad_top(lbl, 20, LV_PART_MAIN);
-        return;
-    }
-
-    /* Render one row per book */
-    for (int i = 0; i < count; i++) {
-        /* Full path stored as user_data */
-        char *full_path = (char *)malloc(512);
-        if (!full_path) continue;
-        snprintf(full_path, 512, "%s/%s", BOOKS_PATH, entries[i].name);
-
-        lv_obj_t *row = lv_obj_create(s_reader.lib_list);
-        lv_obj_set_size(row, LV_PCT(100), ITEM_H);
-        lv_obj_set_style_bg_color(row, clr->surface, LV_PART_MAIN);
-        lv_obj_set_style_bg_opa(row, LV_OPA_COVER, LV_PART_MAIN);
-        lv_obj_set_style_radius(row, 0, LV_PART_MAIN);
-        lv_obj_set_style_pad_left(row, 8, LV_PART_MAIN);
-        lv_obj_set_style_pad_right(row, 8, LV_PART_MAIN);
-        lv_obj_set_style_pad_top(row, 0, LV_PART_MAIN);
-        lv_obj_set_style_pad_bottom(row, 0, LV_PART_MAIN);
-        lv_obj_set_style_border_side(row, LV_BORDER_SIDE_BOTTOM, LV_PART_MAIN);
-        lv_obj_set_style_border_color(row, clr->text_secondary, LV_PART_MAIN);
-        lv_obj_set_style_border_width(row, 1, LV_PART_MAIN);
-        lv_obj_set_style_bg_color(row, clr->primary, LV_STATE_PRESSED);
-        lv_obj_set_style_bg_opa(row, LV_OPA_COVER, LV_STATE_PRESSED);
-        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-        lv_obj_set_style_pad_column(row, 6, LV_PART_MAIN);
-        lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_set_user_data(row, full_path);
-        lv_obj_add_event_cb(row, book_row_clicked_cb, LV_EVENT_CLICKED, NULL);
-        lv_obj_add_event_cb(row, book_row_delete_cb, LV_EVENT_DELETE, NULL);
-
-        /* Filename — grows to fill available space */
-        lv_obj_t *lbl_name = lv_label_create(row);
-        lv_label_set_text(lbl_name, entries[i].name);
-        lv_label_set_long_mode(lbl_name, LV_LABEL_LONG_CLIP);
-        lv_obj_set_style_text_font(lbl_name, &lv_font_montserrat_14, LV_PART_MAIN);
-        lv_obj_set_style_text_color(lbl_name, clr->text, LV_PART_MAIN);
-        lv_obj_set_style_text_color(lbl_name, clr->bg, LV_STATE_PRESSED);
-        lv_obj_set_flex_grow(lbl_name, 1);
-
-        /* Size label on the right */
-        char size_str[16];
-        format_size(entries[i].size, size_str, sizeof(size_str));
-        lv_obj_t *lbl_size = lv_label_create(row);
-        lv_label_set_text(lbl_size, size_str);
-        lv_obj_set_style_text_font(lbl_size, &lv_font_montserrat_14, LV_PART_MAIN);
-        lv_obj_set_style_text_color(lbl_size, clr->text_secondary, LV_PART_MAIN);
-        lv_obj_set_style_text_color(lbl_size, clr->bg, LV_STATE_PRESSED);
-    }
-
-    free(entries);
+    s_reader.filling_list = false;
+    if (s_reader.book_count > 0) select_row(table, 0);
+    focus(table);
 }
 
 static void switch_to_library(void)
 {
-    if (s_reader.reader_screen) {
-        lv_obj_add_flag(s_reader.reader_screen, LV_OBJ_FLAG_HIDDEN);
-    }
-    if (s_reader.library_screen) {
-        lv_obj_clear_flag(s_reader.library_screen, LV_OBJ_FLAG_HIDDEN);
-    }
+    lv_obj_add_flag(s_reader.reader_screen, LV_OBJ_FLAG_HIDDEN);
+    if (s_reader.toc_screen) lv_obj_add_flag(s_reader.toc_screen, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(s_reader.library_screen, LV_OBJ_FLAG_HIDDEN);
 
-    /* Free book data to reclaim heap */
-    if (s_reader.book_text) {
-        free(s_reader.book_text);
-        s_reader.book_text = NULL;
-        s_reader.book_size = 0;
-    }
-    if (s_reader.page_offsets) {
-        free(s_reader.page_offsets);
-        s_reader.page_offsets = NULL;
-        s_reader.page_offset_count = 0;
-    }
-    s_reader.total_pages   = 0;
-    s_reader.current_page  = 0;
+    /* Free the book to reclaim PSRAM. */
+    close_book();
+    lv_label_set_text(s_reader.text_label, "");
+    focus(s_reader.lib_list);
 }
 
 /* ------------------------------------------------------------------ */
-/* Library keyboard: ESC → back to launcher                            */
+/* Contents                                                             */
 /* ------------------------------------------------------------------ */
 
-static void library_key_cb(lv_event_t *e)
+static void open_contents_row(uint32_t row)
 {
-    uint32_t key = lv_event_get_key(e);
-    if (key == LV_KEY_ESC || key == 'q' || key == 'Q') {
-        app_manager_launch("com.thistle.launcher");
+    if (epub_toc_count(s_reader.epub) > 0) {
+        const epub_toc_entry_t *entry = epub_toc_get(s_reader.epub, (int)row);
+        if (entry) open_chapter(entry->chapter, 1, (int)row, false);
+    } else {
+        open_chapter((int)row, 1, -1, false);
     }
+    switch_to_reading();
+}
+
+static void contents_title_clicked_cb(lv_event_t *e)
+{
+    (void)e;
+    switch_to_reading();
+}
+
+/* The table of contents, or, for a book without one, its chapters by
+ * number. The last entry at or before the page being read is selected. */
+static void switch_to_contents(void)
+{
+    if (!s_reader.toc_screen) {
+        s_reader.toc_screen = create_list_screen("< Contents", contents_title_clicked_cb,
+                                                 &s_reader.toc_list);
+    }
+    lv_obj_t *table = s_reader.toc_list;
+
+    int toc_count = epub_toc_count(s_reader.epub);
+    int rows = toc_count > 0 ? toc_count : epub_chapter_count(s_reader.epub);
+    int current = 0;
+    s_reader.filling_list = true;
+    lv_table_set_row_count(table, (uint32_t)(rows > 0 ? rows : 1));
+    for (int i = 0; i < rows; i++) {
+        char title[200];
+        int chapter;
+        if (toc_count > 0) {
+            const epub_toc_entry_t *entry = epub_toc_get(s_reader.epub, i);
+            int indent = entry->depth > 1 ? (entry->depth - 1) * 2 : 0;
+            if (indent > 8) indent = 8;
+            snprintf(title, sizeof(title), "%*s%s", indent, "", entry->title);
+            chapter = entry->chapter;
+        } else {
+            snprintf(title, sizeof(title), "Chapter %d", i + 1);
+            chapter = i;
+        }
+        set_cell(table, (uint32_t)i, 0, title);
+
+        bool before = toc_count > 0
+                          ? chapter < s_reader.chapter ||
+                                (chapter == s_reader.chapter && s_reader.toc_page &&
+                                 s_reader.toc_page[i] >= 0 && s_reader.toc_page[i] <= s_reader.page)
+                          : chapter <= s_reader.chapter;
+        if (before) current = i;
+    }
+    s_reader.filling_list = false;
+
+    lv_obj_add_flag(s_reader.reader_screen, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(s_reader.toc_screen, LV_OBJ_FLAG_HIDDEN);
+    focus(table);
+    select_row(table, (uint32_t)current);
 }
 
 /* ------------------------------------------------------------------ */
 /* Public API                                                           */
 /* ------------------------------------------------------------------ */
+
+static void library_title_clicked_cb(lv_event_t *e)
+{
+    (void)e;
+    app_manager_launch("com.thistle.launcher");
+}
+
+/* E-paper shows a pixel black or white, black only if it is at least half
+ * ink. Antialiased, the dots of Arabic letters are spread over a few lighter
+ * pixels and some of them drop out; the mono font draws each pixel inked or
+ * not to begin with, so the dots stay whole. A colour screen keeps the
+ * smoother antialiased font, which drawn in one bit would look jagged. */
+static const lv_font_t *book_font(void)
+{
+    const hal_registry_t *reg = hal_get_registry();
+    if (reg && reg->display && reg->display->type == HAL_DISPLAY_TYPE_EPAPER) {
+        return &reader_font_16_mono;
+    }
+    return &reader_font_16;
+}
 
 esp_err_t reader_ui_create(lv_obj_t *parent)
 {
@@ -555,15 +975,10 @@ esp_err_t reader_ui_create(lv_obj_t *parent)
     s_app_h = lv_obj_get_height(parent);
     if (s_app_w == 0) s_app_w = 240;
     if (s_app_h == 0) s_app_h = 296;
-    s_text_w = s_app_w - TEXT_MARGIN_W * 2;
-    s_text_h = s_app_h - FOOTER_H - TEXT_MARGIN_H;
 
-    /* Zero out state */
     memset(&s_reader, 0, sizeof(s_reader));
+    s_reader.font = book_font();
 
-    const theme_colors_t *clr = theme_get_colors();
-
-    /* Root container */
     s_reader.root = lv_obj_create(parent);
     lv_obj_set_size(s_reader.root, LV_PCT(100), LV_PCT(100));
     lv_obj_set_pos(s_reader.root, 0, 0);
@@ -573,76 +988,19 @@ esp_err_t reader_ui_create(lv_obj_t *parent)
     lv_obj_set_style_radius(s_reader.root, 0, LV_PART_MAIN);
     lv_obj_clear_flag(s_reader.root, LV_OBJ_FLAG_SCROLLABLE);
 
-    /* ----------------------------------------------------------------
-     * Library screen
-     * ---------------------------------------------------------------- */
-    s_reader.library_screen = lv_obj_create(s_reader.root);
-    lv_obj_set_size(s_reader.library_screen, s_app_w, s_app_h);
-    lv_obj_set_pos(s_reader.library_screen, 0, 0);
-    lv_obj_set_style_bg_color(s_reader.library_screen, clr->bg, LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(s_reader.library_screen, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_border_width(s_reader.library_screen, 0, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(s_reader.library_screen, 0, LV_PART_MAIN);
-    lv_obj_set_style_radius(s_reader.library_screen, 0, LV_PART_MAIN);
-    lv_obj_clear_flag(s_reader.library_screen, LV_OBJ_FLAG_SCROLLABLE);
-
-    /* Library keyboard events (ESC to quit to launcher) */
-    lv_obj_add_flag(s_reader.library_screen, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(s_reader.library_screen, library_key_cb, LV_EVENT_KEY, NULL);
-
-    /* Title bar */
-    lv_obj_t *title_bar = lv_obj_create(s_reader.library_screen);
-    lv_obj_set_pos(title_bar, 0, 0);
-    lv_obj_set_size(title_bar, s_app_w, TITLE_BAR_H);
-    lv_obj_set_style_bg_color(title_bar, clr->surface, LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(title_bar, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_radius(title_bar, 0, LV_PART_MAIN);
-    lv_obj_set_style_pad_left(title_bar, 8, LV_PART_MAIN);
-    lv_obj_set_style_pad_right(title_bar, 8, LV_PART_MAIN);
-    lv_obj_set_style_pad_top(title_bar, 0, LV_PART_MAIN);
-    lv_obj_set_style_pad_bottom(title_bar, 0, LV_PART_MAIN);
-    lv_obj_set_style_border_side(title_bar, LV_BORDER_SIDE_BOTTOM, LV_PART_MAIN);
-    lv_obj_set_style_border_color(title_bar, clr->text, LV_PART_MAIN);
-    lv_obj_set_style_border_width(title_bar, 1, LV_PART_MAIN);
-    lv_obj_clear_flag(title_bar, LV_OBJ_FLAG_SCROLLABLE);
-
-    lv_obj_t *title_lbl = lv_label_create(title_bar);
-    lv_label_set_text(title_lbl, "< Library");
-    lv_label_set_long_mode(title_lbl, LV_LABEL_LONG_CLIP);
-    lv_obj_set_style_text_font(title_lbl, &lv_font_montserrat_18, LV_PART_MAIN);
-    lv_obj_set_style_text_color(title_lbl, clr->text, LV_PART_MAIN);
-    lv_obj_align(title_lbl, LV_ALIGN_LEFT_MID, 0, 0);
-
-    /* Scrollable book list */
-    s_reader.lib_list = lv_obj_create(s_reader.library_screen);
-    lv_obj_set_pos(s_reader.lib_list, 0, TITLE_BAR_H);
-    lv_obj_set_size(s_reader.lib_list, s_app_w, s_app_h - TITLE_BAR_H);
-    lv_obj_set_style_bg_color(s_reader.lib_list, clr->bg, LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(s_reader.lib_list, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_border_width(s_reader.lib_list, 0, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(s_reader.lib_list, 0, LV_PART_MAIN);
-    lv_obj_set_style_radius(s_reader.lib_list, 0, LV_PART_MAIN);
-    lv_obj_set_flex_flow(s_reader.lib_list, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(s_reader.lib_list, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
-    lv_obj_set_scrollbar_mode(s_reader.lib_list, LV_SCROLLBAR_MODE_AUTO);
-    lv_obj_set_style_bg_color(s_reader.lib_list, clr->primary, LV_PART_SCROLLBAR);
-    lv_obj_set_style_bg_opa(s_reader.lib_list, LV_OPA_COVER, LV_PART_SCROLLBAR);
-    lv_obj_set_style_width(s_reader.lib_list, 2, LV_PART_SCROLLBAR);
-    lv_obj_set_style_radius(s_reader.lib_list, 0, LV_PART_SCROLLBAR);
-
-    /* Populate immediately */
+    s_reader.library_screen = create_list_screen("< Library", library_title_clicked_cb,
+                                                 &s_reader.lib_list);
+    create_reader_screen();
     populate_library();
-
-    /* Reader screen is created lazily when a book is opened */
-    s_reader.reader_screen = NULL;
-
     return ESP_OK;
 }
 
 void reader_ui_show(void)
 {
-    if (s_reader.root) {
-        lv_obj_clear_flag(s_reader.root, LV_OBJ_FLAG_HIDDEN);
+    if (!s_reader.root) return;
+    lv_obj_clear_flag(s_reader.root, LV_OBJ_FLAG_HIDDEN);
+    if (!lv_obj_has_flag(s_reader.reader_screen, LV_OBJ_FLAG_HIDDEN)) {
+        focus(s_reader.reader_screen);
     }
 }
 
@@ -655,15 +1013,9 @@ void reader_ui_hide(void)
 
 void reader_ui_destroy(void)
 {
-    /* Free heap-allocated book data */
-    if (s_reader.book_text) {
-        free(s_reader.book_text);
-        s_reader.book_text = NULL;
-    }
-    if (s_reader.page_offsets) {
-        free(s_reader.page_offsets);
-        s_reader.page_offsets = NULL;
-    }
+    close_book();
+    free(s_reader.books);
+    s_reader.books = NULL;
     if (s_reader.root) {
         lv_obj_delete(s_reader.root);
         s_reader.root = NULL;

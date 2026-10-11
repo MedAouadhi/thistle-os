@@ -132,6 +132,9 @@ jobs:
             -o /tmp/test_assistant_request
           /tmp/test_assistant_request
 
+      - name: Test Reader EPUB parsing and Arabic shaping under sanitizers
+        run: apps/reader/tests/run_tests.sh
+
       - name: Test secure signing-key generation
         run: |
           python3 -m pip install -r tools/requirements.txt

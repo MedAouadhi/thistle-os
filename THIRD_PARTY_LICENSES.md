@@ -1,6 +1,6 @@
 # Third-Party Licenses
 
-ThistleOS is BSD 3-Clause licensed and depends exclusively on Apache-2.0, MIT, BSD and zlib licensed components. No GPL or LGPL code is used.
+ThistleOS is BSD 3-Clause licensed and depends exclusively on Apache-2.0, MIT, BSD and zlib licensed components, and on DejaVu fonts under the permissive Bitstream Vera license. No GPL or LGPL code is used.
 
 ---
 
@@ -60,7 +60,7 @@ Full text: https://github.com/FreeRTOS/FreeRTOS-Kernel/blob/main/LICENSE.md
 **License:** MIT
 **Version:** 9.2
 **Source:** https://github.com/lvgl/lvgl
-**Used for:** UI rendering, widgets, animations, font rendering, touch input handling.
+**Used for:** UI rendering, widgets, animations, font rendering, touch input handling. The Reader's Arabic shaping, `apps/reader/reader/arabic_shape.c`, is a port of LVGL's `lv_text_ap.c`.
 
 ```
 MIT License
@@ -524,6 +524,121 @@ Full text: https://github.com/pfalcon/uzlib/blob/master/LICENSE
 
 ---
 
+## CrossPoint Reader
+
+**License:** MIT
+**Source:** https://github.com/crosspoint-reader/crosspoint-reader
+**Used for:** The Reader's EPUB support. `apps/reader/reader/epub_zip.c`, `epub.c` and `html_entities.c` are C ports of CrossPoint's ZipFile, InflateReader, ContainerParser, ContentOpfParser, TocNcxParser, TocNavParser, the text rules of ChapterHtmlSlimParser, FsHelpers::normalisePath and htmlEntities.
+
+```
+Copyright (c) 2025 Dave Allie
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+---
+
+## diy-esp32-epub-reader
+
+**License:** MIT
+**Source:** https://github.com/atomic14/diy-esp32-epub-reader
+**Used for:** The HTML entity table in `apps/reader/reader/html_entities.c`, by way of CrossPoint Reader.
+
+```
+Copyright (c) 2021 Chris Greening
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+---
+
+## DejaVu fonts
+
+**License:** Bitstream Vera Fonts license; DejaVu changes are in the public domain
+**Version:** 2.37
+**Source:** https://dejavu-fonts.github.io/
+**Used for:** `apps/reader/reader/reader_font_16.c` and `reader_font_16_mono.c`, the bitmap fonts the Reader sets books in on colour screens and on e-paper, made from DejaVu Sans by `apps/reader/tools/gen_reader_font.sh`. LVGL's `lv_font_dejavu_16_persian_hebrew` is made from the same font.
+
+```
+Copyright (c) 2003 by Bitstream, Inc. All Rights Reserved. Bitstream Vera is
+a trademark of Bitstream, Inc. DejaVu changes are in public domain.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of the fonts accompanying this license ("Fonts") and associated
+documentation files (the "Font Software"), to reproduce and distribute the
+Font Software, including without limitation the rights to use, copy, merge,
+publish, distribute, and/or sell copies of the Font Software, and to permit
+persons to whom the Font Software is furnished to do so, subject to the
+following conditions:
+
+The above copyright and trademark notices and this permission notice shall
+be included in all copies of one or more of the Font Software typefaces.
+
+The Font Software may be modified, altered, or added to, and in particular
+the designs of glyphs or characters in the Fonts may be modified and
+additional glyphs or characters may be added to the Fonts, only if the fonts
+are renamed to names not containing either the words "Bitstream" or the word
+"Vera".
+
+This License becomes null and void to the extent applicable to Fonts or Font
+Software that has been modified and is distributed under the "Bitstream
+Vera" names.
+
+The Font Software may be sold as part of a larger software package but no
+copy of one or more of the Font Software typefaces may be sold by itself.
+
+THE FONT SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF COPYRIGHT, PATENT,
+TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL BITSTREAM OR THE GNOME
+FOUNDATION BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, INCLUDING
+ANY GENERAL, SPECIAL, INDIRECT, INCIDENTAL, OR CONSEQUENTIAL DAMAGES,
+WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF
+THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM OTHER DEALINGS IN THE
+FONT SOFTWARE.
+
+Except as contained in this notice, the names of Gnome, the Gnome
+Foundation, and Bitstream Inc., shall not be used in advertising or
+otherwise to promote the sale, use or other dealings in this Font Software
+without prior written authorization from the Gnome Foundation or Bitstream
+Inc., respectively. For further information, contact: fonts at gnome dot
+org.
+```
+
+---
+
 ## License Compatibility Summary
 
 All dependencies are compatible with the ThistleOS BSD 3-Clause license:
@@ -531,10 +646,11 @@ All dependencies are compatible with the ThistleOS BSD 3-Clause license:
 | License | Compatible with BSD 3-Clause | Components |
 |---------|------------------------------|------------|
 | Apache-2.0 | Yes | ESP-IDF, esp_lvgl_port, esp_modem, esp_codec_dev, elf_loader, NimBLE, mbedTLS |
-| MIT | Yes | LVGL, FreeRTOS, RadioLib, libcurl, Unity, esp-rs crates, Expat |
+| MIT | Yes | LVGL, FreeRTOS, RadioLib, libcurl, Unity, esp-rs crates, Expat, CrossPoint Reader, diy-esp32-epub-reader |
 | BSD-3-Clause | Yes | Bosch BHI260AP firmware and BHY2 SensorAPI |
 | BSD-2-Clause | Yes | Monocypher |
 | zlib | Yes | SDL2, uzlib |
+| Bitstream Vera | Yes | DejaVu fonts (the Reader's font) |
 | MIT OR Apache-2.0 | Yes | argon2, serde_json, esp-idf-hal, esp-idf-svc, esp-idf-sys |
 
 No GPL, LGPL, AGPL, or other copyleft licenses are present in this project.

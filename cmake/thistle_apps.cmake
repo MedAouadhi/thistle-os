@@ -50,12 +50,22 @@ macro(thistle_collect_optional_apps)
             "${_root}/${_dir}/${_stem}_app.c"
             "${_root}/${_dir}/${_stem}_ui.c"
         )
+        # An app with more sources than those two names them in its
+        # sources.cmake, as THISTLE_<suffix>_SRCS relative to its root, which
+        # its own CMakeLists.txt reads too.
+        if(EXISTS "${_root}/sources.cmake")
+            include("${_root}/sources.cmake")
+            foreach(_src IN LISTS THISTLE_${_flag}_SRCS)
+                list(APPEND THISTLE_SRCS "${_root}/${_src}")
+            endforeach()
+        endif()
         # The apps include one another's headers as "<dir>/<file>.h", so the
         # component root goes on the include path.
         list(APPEND THISTLE_APP_INCLUDE_DIRS "${_root}")
     endforeach()
 
     unset(_entry)
+    unset(_src)
     unset(_parts)
     unset(_dir)
     unset(_flag)
