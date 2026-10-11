@@ -238,23 +238,23 @@ image and the stolen console — came from two agents pointed at one board.
 Not USB, but it wasted a flash cycle and a wrong conclusion, so it belongs
 here.
 
-`idf.py build` can report success while linking against a *previous* run's Rust
-objects. `build/esp-idf/kernel_rs/libkernel_rs.a` was found three hours older
-than the Rust staticlib it is built from: the POST_BUILD step that merges the
-Rust objects into the component archive only runs when CMake relinks that
-component, and the `stub.c` touch meant to force it happens too late in an
-incremental build.
+*Fixed; kept here because it explains old builds.* `idf.py build` used to
+report success while linking against a *previous* run's Rust objects.
+`build/esp-idf/kernel_rs/libkernel_rs.a` was found three hours older than the
+Rust staticlib it is built from: the POST_BUILD step that merges the Rust
+objects into the component archive only runs when CMake relinks that
+component, and the `stub.c` touch meant to force it came after Ninja had
+already read the timestamps, so it took effect only on the *next* build.
+Edits under `crates/thistle-tk/` never reached the image at all, because the
+Rust step watched only `components/kernel_rs/src/*.rs`.
 
 A firmware was flashed, and a conclusion drawn from it, that did not contain
 the fix under test.
 
-```sh
-touch components/kernel_rs/stub.c && idf.py build
-```
-
-If the result matters, verify with `ar p` and `cmp` on an archive member rather
-than trusting timestamps. The real fix — making the merge depend on the Rust
-library file — is still open.
+`components/kernel_rs/CMakeLists.txt` now runs cargo on every build and lets it
+decide what is stale, and makes `stub.c`'s object depend on the Rust library
+file, so a new library relinks the archive and reruns the merge in the same
+build. A single `idf.py build` after any Rust edit is enough.
 
 ---
 
@@ -265,7 +265,7 @@ library file — is still open.
 ```sh
 source ~/esp/v5.5.1/esp-idf/export.sh
 tools/check_serial_port.sh /dev/ttyACM0      # must say "is free"
-touch components/kernel_rs/stub.c && idf.py build
+idf.py build
 idf.py -p /dev/ttyACM0 flash monitor
 ```
 

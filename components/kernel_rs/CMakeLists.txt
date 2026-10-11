@@ -41,22 +41,29 @@ set(RUST_LIB "${RUST_BUILD_DIR}/libthistle_kernel.a")
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/build_rust.sh"
 "#!/bin/bash\nexport PATH=\"$ENV{HOME}/.cargo/bin:$PATH\"\nif [ -f \"$ENV{HOME}/export-esp.sh\" ]; then . \"$ENV{HOME}/export-esp.sh\" 2>/dev/null; fi\ncd \"${CMAKE_CURRENT_SOURCE_DIR}\"\nexport RUSTFLAGS=\"${RUST_TARGET_FEATURES}\"\ncargo +esp build --release --target ${RUST_TARGET} --features ${RUST_FEATURES} -Zbuild-std=std,panic_abort\n")
 
-file(GLOB_RECURSE RUST_SRCS "${CMAKE_CURRENT_SOURCE_DIR}/src/*.rs")
-
-add_custom_command(
-    OUTPUT ${RUST_LIB}
-    DEPENDS ${RUST_SRCS} "${CMAKE_CURRENT_SOURCE_DIR}/Cargo.toml"
+# Cargo runs on every build and decides for itself what is out of date. It
+# tracks every input, including thistle-tk under crates/, which the glob of
+# src/*.rs this replaced never saw, so an edit there never reached the
+# firmware. With nothing to do cargo takes a tenth of a second and leaves the
+# library's timestamp alone, and because the library is a BYPRODUCT, Ninja
+# restats it and nothing downstream reruns.
+add_custom_target(kernel_rs_build
     COMMAND bash "${CMAKE_CURRENT_BINARY_DIR}/build_rust.sh"
-    # Touch stub.c so CMake rebuilds the component lib and triggers the
-    # POST_BUILD merge of Rust objects. Without this, the component archive
-    # is never updated after an incremental Rust build.
-    COMMAND ${CMAKE_COMMAND} -E touch "${CMAKE_CURRENT_SOURCE_DIR}/stub.c"
+    BYPRODUCTS ${RUST_LIB}
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     COMMENT "Building Rust kernel (thistle-kernel)"
 )
-
-add_custom_target(kernel_rs_build DEPENDS ${RUST_LIB})
 add_dependencies(${COMPONENT_LIB} kernel_rs_build)
+
+# A new Rust library has to rebuild this component's archive, and with it
+# the merge below. Making stub.c's object depend on the library does that
+# in the same build. This used to touch stub.c after cargo ran instead, but
+# Ninja reads timestamps once, when it starts, so the touch counted only on
+# the next build: the first build after a Rust change linked the old Rust
+# code into the image.
+set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/stub.c"
+    PROPERTIES OBJECT_DEPENDS ${RUST_LIB})
+
 # Merge Rust staticlib objects into this component's .a archive so the
 # linker sees them as part of __idf_kernel_rs (inside ESP-IDF's
 # --start-group block). This avoids the INTERFACE/PUBLIC link propagation
