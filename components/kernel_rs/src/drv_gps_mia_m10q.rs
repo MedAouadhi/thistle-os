@@ -28,6 +28,15 @@ const RX_TASK_STACK_SIZE: u32 = 4096;
 const RX_TASK_PRIORITY: u32 = 5;
 const KNOTS_TO_KMH: f32 = 1.852;
 
+/// Bytes taken off the UART per read. A receiver talks in one burst a second,
+/// so the read returns on a full chunk mid-burst and on the timeout after it.
+const RX_CHUNK: usize = 64;
+/// pdMS_TO_TICKS(100) with configTICK_RATE_HZ=1000.
+const RX_TIMEOUT_TICKS: u32 = 100;
+/// How long the line may go without one good sentence before the driver says
+/// so. A receiver that is powered and at the right rate talks within a second.
+const SILENCE_WARN_TICKS: u32 = 5000;
+
 /// UBX-RXM-PMREQ: put the receiver into backup mode (indefinite).
 /// Sync chars (0xB5, 0x62) + class 0x02, id 0x41 + 8-byte payload + checksum.
 const UBX_RXM_PMREQ_BACKUP: [u8; 16] = [
@@ -67,6 +76,26 @@ extern "C" {
     ) -> i32;
     fn vTaskDelete(task: *mut c_void);
     fn vTaskDelay(ticks: u32);
+    fn xTaskGetTickCount() -> u32;
+    fn esp_log_write(level: i32, tag: *const u8, format: *const u8, ...);
+}
+
+const ESP_LOG_WARN: i32 = 2;
+const ESP_LOG_INFO: i32 = 3;
+
+/// One console line under the driver's own tag. esp_log_write adds neither the
+/// tag nor the newline, so the macro does.
+macro_rules! gps_log {
+    ($level:expr, $fmt:literal $(, $arg:expr)*) => {{
+        #[cfg(target_os = "espidf")]
+        unsafe {
+            esp_log_write($level, b"gps\0".as_ptr(), concat!("gps: ", $fmt, "\n\0").as_ptr() $(, $arg)*);
+        }
+        #[cfg(not(target_os = "espidf"))]
+        {
+            let _ = ($level, $($arg,)*);
+        }
+    }};
 }
 
 // ── Simulator / host stubs ───────────────────────────────────────────────────
@@ -130,6 +159,11 @@ unsafe fn vTaskDelete(_task: *mut c_void) {}
 #[cfg(not(target_os = "espidf"))]
 unsafe fn vTaskDelay(_ticks: u32) {}
 
+#[cfg(not(target_os = "espidf"))]
+unsafe fn xTaskGetTickCount() -> u32 {
+    0
+}
+
 // ── uart_config_t layout (must match ESP-IDF struct on Xtensa) ───────────────
 
 #[cfg(target_os = "espidf")]
@@ -191,6 +225,11 @@ struct GpsState {
     enabled: bool,
     nmea_buf: [u8; 256],
     nmea_idx: usize,
+    /// Bytes off the wire and sentences that passed their checksum, since the
+    /// last `enable`. Bytes with no sentences is a rate mismatch; no bytes at
+    /// all is an unpowered or unwired receiver.
+    bytes_seen: u32,
+    sentences_seen: u32,
 }
 
 // SAFETY: The driver state is only mutated during single-threaded board-init
@@ -225,6 +264,8 @@ impl GpsState {
             enabled: false,
             nmea_buf: [0u8; 256],
             nmea_idx: 0,
+            bytes_seen: 0,
+            sentences_seen: 0,
         }
     }
 }
@@ -448,20 +489,21 @@ unsafe fn process_gngga(fields: &[&str]) {
 
 /// Dispatch a complete NMEA sentence to the appropriate parser.
 ///
-/// Validates the checksum first; silently drops sentences that fail.
+/// Validates the checksum first; silently drops sentences that fail, and
+/// returns whether this one passed.
 /// After a valid `$GNRMC` update the registered callback is fired if the
 /// fix is valid, matching the C driver's behaviour exactly.
 ///
 /// # Safety
 /// May mutate `S_GPS` via `process_gnrmc` / `process_gngga`.
-unsafe fn nmea_process_sentence(sentence: &[u8]) {
+unsafe fn nmea_process_sentence(sentence: &[u8]) -> bool {
     if !nmea_verify_checksum(sentence) {
-        return;
+        return false;
     }
 
     let s = match core::str::from_utf8(sentence) {
         Ok(v) => v,
-        Err(_) => return,
+        Err(_) => return false,
     };
 
     // Strip trailing CR / LF / space
@@ -469,7 +511,7 @@ unsafe fn nmea_process_sentence(sentence: &[u8]) {
 
     let fields = nmea_split(s);
     if fields.is_empty() {
-        return;
+        return false;
     }
 
     match fields[0] {
@@ -490,44 +532,104 @@ unsafe fn nmea_process_sentence(sentence: &[u8]) {
         }
         _ => {}
     }
+    true
+}
+
+/// Take one byte off the wire, assembling NMEA sentences delimited by `$`
+/// (start) and `\n` (end) and dispatching each complete one to the parser.
+///
+/// # Safety
+/// Mutates `S_GPS`. Called only from the RX task, or a test.
+unsafe fn nmea_feed_byte(byte: u8) {
+    let gps = &mut *(&raw mut S_GPS);
+    gps.bytes_seen = gps.bytes_seen.saturating_add(1);
+
+    if byte == b'$' {
+        gps.nmea_idx = 0;
+    }
+
+    if gps.nmea_idx < gps.nmea_buf.len() - 1 {
+        gps.nmea_buf[gps.nmea_idx] = byte;
+        gps.nmea_idx += 1;
+    }
+
+    if byte == b'\n' {
+        // Copied out, so the parser's own writes to the driver state do not
+        // alias a borrow of the buffer it is reading.
+        let end = gps.nmea_idx;
+        let mut line = [0u8; 256];
+        line[..end].copy_from_slice(&gps.nmea_buf[..end]);
+        gps.nmea_idx = 0;
+
+        if nmea_process_sentence(&line[..end]) {
+            let gps = &mut *(&raw mut S_GPS);
+            gps.sentences_seen = gps.sentences_seen.saturating_add(1);
+        }
+    }
 }
 
 // ── UART RX task ─────────────────────────────────────────────────────────────
 
-/// Background FreeRTOS task: reads UART byte-by-byte, assembles NMEA sentences
-/// delimited by `$` (start) and `\n` (end), then dispatches to the parser.
+/// Background FreeRTOS task: feeds the UART to the sentence assembler, and
+/// reports once whether the receiver is talking.
+///
+/// Both outcomes get a line. Before it had either, a receiver that never spoke
+/// looked exactly like one still waiting for a fix.
 ///
 /// # Safety
 /// Accesses `S_GPS` directly. Must only be spawned via `xTaskCreate`.
 pub unsafe extern "C" fn gps_rx_task(_arg: *mut c_void) {
-    let mut byte: u8 = 0;
+    let mut chunk = [0u8; RX_CHUNK];
+    let started = xTaskGetTickCount();
+    let mut link_reported = false;
+    let mut fix_reported = false;
 
     loop {
         let len = uart_read_bytes(
             (*(&raw const S_GPS)).cfg.uart_num,
-            &mut byte as *mut u8,
-            1,
-            100, // pdMS_TO_TICKS(100) with configTICK_RATE_HZ=1000
+            chunk.as_mut_ptr(),
+            RX_CHUNK as u32,
+            RX_TIMEOUT_TICKS,
         );
 
         if len > 0 {
-            let gps = &mut *(&raw mut S_GPS);
-
-            if byte == b'$' {
-                gps.nmea_idx = 0;
+            for &byte in &chunk[..len as usize] {
+                nmea_feed_byte(byte);
             }
+        }
 
-            if gps.nmea_idx < gps.nmea_buf.len() - 1 {
-                gps.nmea_buf[gps.nmea_idx] = byte;
-                gps.nmea_idx += 1;
-            }
+        let gps = &*(&raw const S_GPS);
+        let elapsed = xTaskGetTickCount().wrapping_sub(started);
 
-            if byte == b'\n' {
-                let end = gps.nmea_idx;
-                let slice = &gps.nmea_buf[..end];
-                nmea_process_sentence(slice);
-                gps.nmea_idx = 0;
+        if !link_reported {
+            if gps.sentences_seen > 0 {
+                gps_log!(
+                    ESP_LOG_INFO,
+                    "receiver talking on UART%d at %u baud",
+                    gps.cfg.uart_num,
+                    gps.cfg.baud_rate
+                );
+                link_reported = true;
+            } else if elapsed >= SILENCE_WARN_TICKS {
+                gps_log!(
+                    ESP_LOG_WARN,
+                    "no NMEA on UART%d at %u baud after 5 s (%u bytes received)",
+                    gps.cfg.uart_num,
+                    gps.cfg.baud_rate,
+                    gps.bytes_seen
+                );
+                link_reported = true;
             }
+        }
+
+        if !fix_reported && gps.last_position.fix_valid {
+            gps_log!(
+                ESP_LOG_INFO,
+                "fix after %u s with %u satellites",
+                elapsed / 1000,
+                gps.last_position.satellites as u32
+            );
+            fix_reported = true;
         }
     }
 }
@@ -563,6 +665,7 @@ unsafe extern "C" fn mia_m10q_init(config: *const c_void) -> i32 {
     } else {
         gps.cfg.baud_rate
     };
+    gps.cfg.baud_rate = baud;
 
     #[cfg(target_os = "espidf")]
     {
@@ -675,6 +778,10 @@ unsafe extern "C" fn mia_m10q_enable() -> i32 {
         return ESP_OK;
     }
 
+    gps.nmea_idx = 0;
+    gps.bytes_seen = 0;
+    gps.sentences_seen = 0;
+
     let rc = xTaskCreatePinnedToCore(
         gps_rx_task,
         b"gps_rx\0".as_ptr(),
@@ -719,7 +826,11 @@ unsafe extern "C" fn mia_m10q_disable() -> i32 {
 
 /// Copy the last known GPS position into `*pos`.
 ///
-/// Returns `ESP_OK` when the fix is valid, `ESP_ERR_INVALID_STATE` otherwise.
+/// Returns `ESP_OK` whenever the receiver is being read, fix or not;
+/// `fix_valid` says which. Satellites in use are worth showing while a fix is
+/// still being acquired, and the callers — Navigator, Settings, the simulator's
+/// driver — all read the struct that way. `ESP_ERR_INVALID_STATE` means nobody
+/// is reading the receiver, so whatever is in the struct is stale.
 ///
 /// # Safety
 /// `pos` must be a writable `HalGpsPosition`.
@@ -731,7 +842,7 @@ unsafe extern "C" fn mia_m10q_get_position(pos: *mut HalGpsPosition) -> i32 {
     let gps = &*(&raw const S_GPS);
     *pos = gps.last_position;
 
-    if (*pos).fix_valid {
+    if gps.initialized && gps.enabled {
         ESP_OK
     } else {
         ESP_ERR_INVALID_STATE
@@ -1235,20 +1346,46 @@ mod tests {
         }
     }
 
+    fn empty_position() -> HalGpsPosition {
+        HalGpsPosition {
+            latitude: 0.0,
+            longitude: 0.0,
+            altitude_m: 0.0,
+            speed_kmh: 0.0,
+            heading_deg: 0.0,
+            satellites: 0,
+            fix_valid: false,
+            timestamp: 0,
+        }
+    }
+
+    /// Initialise and enable the driver, as the boot sequence does.
+    unsafe fn start_receiver() {
+        reset_state();
+        let cfg = GpsMiaM10qConfig {
+            uart_num: 2,
+            pin_tx: 16,
+            pin_rx: 2,
+            baud_rate: 38400,
+        };
+        assert_eq!(
+            mia_m10q_init(&cfg as *const GpsMiaM10qConfig as *const c_void),
+            ESP_OK
+        );
+        assert_eq!(mia_m10q_enable(), ESP_OK);
+    }
+
+    unsafe fn feed(bytes: &[u8]) {
+        for &b in bytes {
+            nmea_feed_byte(b);
+        }
+    }
+
     #[test]
-    fn test_get_position_no_fix_returns_invalid_state() {
+    fn test_get_position_not_reading_returns_invalid_state() {
         unsafe {
             reset_state();
-            let mut pos = HalGpsPosition {
-                latitude: 0.0,
-                longitude: 0.0,
-                altitude_m: 0.0,
-                speed_kmh: 0.0,
-                heading_deg: 0.0,
-                satellites: 0,
-                fix_valid: false,
-                timestamp: 0,
-            };
+            let mut pos = empty_position();
             assert_eq!(
                 mia_m10q_get_position(&mut pos as *mut HalGpsPosition),
                 ESP_ERR_INVALID_STATE,
@@ -1256,29 +1393,117 @@ mod tests {
         }
     }
 
+    /// Acquiring is not an error: the satellite count is what a user watches
+    /// while waiting for a fix, so it has to come back with ESP_OK.
+    #[test]
+    fn test_get_position_acquiring_returns_ok_without_fix() {
+        unsafe {
+            start_receiver();
+            (*(&raw mut S_GPS)).last_position.satellites = 3;
+
+            let mut pos = empty_position();
+            assert_eq!(
+                mia_m10q_get_position(&mut pos as *mut HalGpsPosition),
+                ESP_OK
+            );
+            assert!(!pos.fix_valid);
+            assert_eq!(pos.satellites, 3);
+            mia_m10q_deinit();
+        }
+    }
+
     #[test]
     fn test_get_position_valid_fix_returns_ok() {
         unsafe {
-            reset_state();
+            start_receiver();
             (*(&raw mut S_GPS)).last_position.fix_valid = true;
             (*(&raw mut S_GPS)).last_position.latitude = 53.36;
 
-            let mut pos = HalGpsPosition {
-                latitude: 0.0,
-                longitude: 0.0,
-                altitude_m: 0.0,
-                speed_kmh: 0.0,
-                heading_deg: 0.0,
-                satellites: 0,
-                fix_valid: false,
-                timestamp: 0,
-            };
+            let mut pos = empty_position();
             assert_eq!(
                 mia_m10q_get_position(&mut pos as *mut HalGpsPosition),
                 ESP_OK
             );
             assert!(pos.fix_valid);
             assert!((pos.latitude - 53.36).abs() < 1e-9);
+            mia_m10q_deinit();
+        }
+    }
+
+    #[test]
+    fn test_get_position_after_disable_returns_invalid_state() {
+        unsafe {
+            start_receiver();
+            assert_eq!(mia_m10q_disable(), ESP_OK);
+            let mut pos = empty_position();
+            assert_eq!(
+                mia_m10q_get_position(&mut pos as *mut HalGpsPosition),
+                ESP_ERR_INVALID_STATE,
+            );
+            mia_m10q_deinit();
+        }
+    }
+
+    // ── nmea_feed_byte ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_feed_assembles_a_fix_from_the_wire() {
+        unsafe {
+            start_receiver();
+            feed(b"$GNGGA,092751.000,5321.6802,N,00630.3372,W,1,08,1.03,61.7,M,55.3,M,,*58\r\n");
+            feed(b"$GNRMC,092751.000,A,5321.6802,N,00630.3372,W,0.06,31.66,280511,,,A*58\r\n");
+
+            let gps = &*(&raw const S_GPS);
+            assert_eq!(gps.sentences_seen, 2);
+            assert!(gps.last_position.fix_valid);
+            assert_eq!(gps.last_position.satellites, 8);
+            assert!((gps.last_position.latitude - (53.0 + 21.6802 / 60.0)).abs() < 1e-5);
+            mia_m10q_deinit();
+        }
+    }
+
+    /// What a receiver at the other baud rate looks like: bytes, never a
+    /// sentence. The counters tell that apart from an unpowered receiver.
+    #[test]
+    fn test_feed_counts_bytes_but_no_sentence_for_line_noise() {
+        unsafe {
+            start_receiver();
+            feed(&[0xF8, 0x80, 0x00, b'$', 0xE0, 0x1C, b'\n', 0xFE, b'\n']);
+
+            let gps = &*(&raw const S_GPS);
+            assert_eq!(gps.bytes_seen, 9);
+            assert_eq!(gps.sentences_seen, 0);
+            assert!(!gps.last_position.fix_valid);
+            mia_m10q_deinit();
+        }
+    }
+
+    #[test]
+    fn test_feed_resyncs_on_dollar_after_a_torn_sentence() {
+        unsafe {
+            start_receiver();
+            feed(b"$GNRMC,0927");
+            feed(b"$GNGGA,092751.000,5321.6802,N,00630.3372,W,1,08,1.03,61.7,M,55.3,M,,*58\r\n");
+
+            let gps = &*(&raw const S_GPS);
+            assert_eq!(gps.sentences_seen, 1);
+            assert_eq!(gps.last_position.satellites, 8);
+            mia_m10q_deinit();
+        }
+    }
+
+    #[test]
+    fn test_enable_resets_the_counters() {
+        unsafe {
+            start_receiver();
+            feed(b"$GNGGA,092751.000,5321.6802,N,00630.3372,W,1,08,1.03,61.7,M,55.3,M,,*58\r\n");
+            assert_eq!(mia_m10q_disable(), ESP_OK);
+            assert_eq!(mia_m10q_enable(), ESP_OK);
+
+            let gps = &*(&raw const S_GPS);
+            assert_eq!(gps.bytes_seen, 0);
+            assert_eq!(gps.sentences_seen, 0);
+            mia_m10q_deinit();
         }
     }
 

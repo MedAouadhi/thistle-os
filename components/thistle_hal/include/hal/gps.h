@@ -22,6 +22,9 @@ typedef struct {
     void (*deinit)(void);
     esp_err_t (*enable)(void);
     esp_err_t (*disable)(void);
+    /* ESP_OK whenever the receiver is being read, with or without a fix:
+     * fix_valid says which, and satellites is meaningful either way.
+     * An error means nothing is reading the receiver. */
     esp_err_t (*get_position)(hal_gps_position_t *pos);
     esp_err_t (*register_callback)(hal_gps_cb_t cb, void *user_data);
     esp_err_t (*sleep)(bool enter);

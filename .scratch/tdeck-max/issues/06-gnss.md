@@ -170,3 +170,27 @@ Noted, not acted on:
   implementation, with the whole `mia_m10q` vtable alongside it.
 
 Not verified: anything needing the board. No fix, no NMEA, no HAL read.
+
+### Nothing ever started the receiver (2026-10-11)
+
+Reported as "GPS not working". Two faults, neither in the wiring:
+
+- **No app enabled it.** "An app calls `enable`" turned out to mean only the
+  Settings toggle. Navigator just reads, so it never saw a sentence.
+  `hal_registry_start_all` now calls `enable` once `init` succeeds. The rail is
+  already up from the expander phase, so this only starts the reader task.
+- **No fix was reported as an error.** `get_position` returned
+  `ESP_ERR_INVALID_STATE` until a fix arrived, so Navigator showed "GPS error"
+  and Settings "Status: Error" while the receiver was still acquiring. It now
+  returns `ESP_OK` whenever the receiver is being read, with `fix_valid` telling
+  the two states apart, as the simulator's driver always did. The contract is
+  written down in `hal/gps.h`.
+
+The driver also logs, once per `enable`, whether the line is live
+(`gps: receiver talking on UART2 at 38400 baud`, or a warning with a byte count
+after 5 s of silence), and when the first fix arrives.
+
+On the bench, indoors: NMEA at 38400 on the first try, so the 9600 worry above
+did not come up. UTC time was valid. GSV showed one or two satellites at
+9–21 dB-Hz, never enough for a fix. The fix box stays open until someone takes
+the board outside.

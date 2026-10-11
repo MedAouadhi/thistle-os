@@ -1039,13 +1039,21 @@ pub extern "C" fn hal_registry_start_all() -> i32 {
         }
     }
 
-    // GPS — non-fatal
+    // GPS — non-fatal. Started as well as initialised: the board profile has
+    // already powered the receiver, so it is acquiring whether or not anything
+    // reads it, and `enable` only starts the task that does. Leaving that to
+    // an app meant no app ever did — Navigator only reads — and every board
+    // with GNSS showed no position until someone found Settings → GPS.
     if !reg.gps.is_null() {
         let drv = unsafe { &*reg.gps };
         if let Some(init_fn) = drv.init {
             hal_logi!(b"Starting GPS...\0");
             if unsafe { init_fn(reg.gps_config) } != ESP_OK {
                 hal_logw!(b"GPS init failed (non-fatal)\0");
+            } else if let Some(enable_fn) = drv.enable {
+                if unsafe { enable_fn() } != ESP_OK {
+                    hal_logw!(b"GPS enable failed (non-fatal)\0");
+                }
             }
         }
     }
@@ -1548,6 +1556,58 @@ mod tests {
         let rc = unsafe { hal_gps_register(&drv as *const HalGpsDriver, std::ptr::null()) };
         assert_eq!(rc, ESP_OK, "GPS registration must succeed");
         assert!(!registry().gps.is_null(), "gps pointer must be stored");
+    }
+
+    static GPS_ENABLED: AtomicI32 = AtomicI32::new(0);
+
+    unsafe extern "C" fn gps_init_ok(_config: *const c_void) -> i32 {
+        ESP_OK
+    }
+
+    unsafe extern "C" fn gps_init_fails(_config: *const c_void) -> i32 {
+        ESP_ERR_INVALID_ARG
+    }
+
+    unsafe extern "C" fn counting_gps_enable() -> i32 {
+        GPS_ENABLED.fetch_add(1, Ordering::Relaxed);
+        ESP_OK
+    }
+
+    fn gps_driver(init: unsafe extern "C" fn(*const c_void) -> i32) -> HalGpsDriver {
+        HalGpsDriver {
+            init: Some(init),
+            deinit: None,
+            enable: Some(counting_gps_enable),
+            disable: None,
+            get_position: None,
+            register_callback: None,
+            sleep: None,
+            name: b"test-gps\0".as_ptr() as *const c_char,
+        }
+    }
+
+    /// Nothing else enables the receiver: apps only read it. A board that
+    /// initialised GNSS without starting it never reported a position.
+    #[test]
+    fn start_all_starts_the_gps_receiver_it_initialised() {
+        reset_registry();
+        GPS_ENABLED.store(0, Ordering::Relaxed);
+        let drv = gps_driver(gps_init_ok);
+        unsafe { hal_gps_register(&drv as *const HalGpsDriver, std::ptr::null()) };
+
+        assert_eq!(hal_registry_start_all(), ESP_OK);
+        assert_eq!(GPS_ENABLED.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn start_all_does_not_start_a_gps_receiver_that_failed_init() {
+        reset_registry();
+        GPS_ENABLED.store(0, Ordering::Relaxed);
+        let drv = gps_driver(gps_init_fails);
+        unsafe { hal_gps_register(&drv as *const HalGpsDriver, std::ptr::null()) };
+
+        assert_eq!(hal_registry_start_all(), ESP_OK, "GPS failure is non-fatal");
+        assert_eq!(GPS_ENABLED.load(Ordering::Relaxed), 0);
     }
 
     // -----------------------------------------------------------------------

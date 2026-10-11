@@ -109,8 +109,9 @@ static lv_obj_t   *s_gps_sat_lbl    = NULL;
 static lv_timer_t *s_imu_timer = NULL;
 static lv_obj_t   *s_imu_lbl[IMU_AXES];
 
-/* GPS enabled state */
-static bool s_gps_enabled = false;
+/* GPS enabled state. The kernel starts the receiver at boot
+ * (hal_registry_start_all), so it is on until this page turns it off. */
+static bool s_gps_enabled = true;
 
 /* Main list dynamic value labels */
 static lv_obj_t *s_wifi_value_label = NULL;
@@ -1698,7 +1699,7 @@ static void gps_timer_cb(lv_timer_t *timer)
     char buf[48];
 
     if (err != ESP_OK) {
-        lv_label_set_text(s_gps_status_lbl, "Status: Error");
+        lv_label_set_text(s_gps_status_lbl, s_gps_enabled ? "Status: Error" : "Status: Off");
         lv_label_set_text(s_gps_lat_lbl,    "Lat: --");
         lv_label_set_text(s_gps_lon_lbl,    "Lon: --");
         lv_label_set_text(s_gps_sat_lbl,    "Satellites: --");
