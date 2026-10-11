@@ -214,24 +214,26 @@ static void tk_render_task(void *arg)
 }
 
 #ifdef THISTLE_LEGACY_C_APPS
+/* Runs on whichever task published the event (WiFi's: ESP-IDF's event task),
+ * never inside LVGL, so it posts its toasts rather than showing them. */
 static void system_event_toast(const event_t *event, void *user_data)
 {
     (void)user_data;
     switch (event->type) {
         case EVENT_WIFI_CONNECTED:
-            toast_show("WiFi connected", TOAST_SUCCESS, 3000);
+            toast_post("WiFi connected", TOAST_SUCCESS, 3000);
             break;
         case EVENT_WIFI_DISCONNECTED:
-            toast_info("WiFi disconnected");
+            toast_post("WiFi disconnected", TOAST_INFO, 3000);
             break;
         case EVENT_SD_MOUNTED:
-            toast_info("SD card mounted");
+            toast_post("SD card mounted", TOAST_INFO, 3000);
             break;
         case EVENT_SD_UNMOUNTED:
-            toast_warn("SD card removed");
+            toast_post("SD card removed", TOAST_WARNING, 4000);
             break;
         case EVENT_BATTERY_LOW:
-            toast_warn("Battery low!");
+            toast_post("Battery low!", TOAST_WARNING, 4000);
             break;
         default:
             break;
@@ -439,7 +441,8 @@ void app_main(void)
     if (ota_sd_update_available()) {
         ESP_LOGI(TAG, "Firmware update detected on SD card!");
 #ifdef THISTLE_LEGACY_C_APPS
-        toast_show("Update available! Settings > About to install", TOAST_INFO, 5000);
+        /* lvgl_task is running by now; post rather than show. */
+        toast_post("Update available! Settings > About to install", TOAST_INFO, 5000);
 #endif
     }
 

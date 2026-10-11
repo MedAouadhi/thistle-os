@@ -2,6 +2,7 @@
 #include "ui/theme.h"
 #include "ui/statusbar.h"
 #include "ui/epaper_refresh.h"
+#include "ui/toast.h"
 #include "hal/board.h"
 #include "hal/input.h"
 #include "thistle/app_manager.h"
@@ -451,6 +452,11 @@ esp_err_t ui_manager_init(ui_flush_fn_t flush_cb, bool use_deferred_refresh)
 
     /* 4b1. Act on a Home press from inside lv_timer_handler() */
     lv_timer_create(home_timer_cb, HOME_TIMER_PERIOD_MS, NULL);
+
+    /* 4b1a. Show toasts other tasks post, the same way */
+    if (toast_init() != ESP_OK) {
+        ESP_LOGW(TAG, "toast_init failed; posted toasts will not show");
+    }
 
     /* Touch stays in TIMER mode — LVGL polls at each lv_timer_handler call */
 

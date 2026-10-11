@@ -2,6 +2,9 @@
 #include "ui/manager.h"
 #include "lvgl.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include <stdbool.h>
 #include <string.h>
 
 static const char *TAG = "toast";
@@ -115,4 +118,54 @@ esp_err_t toast_info(const char *message)
 esp_err_t toast_warn(const char *message)
 {
     return toast_show(message, TOAST_WARNING, 4000);
+}
+
+/* Toasts posted from outside LVGL, shown by an LVGL timer. Event handlers run
+ * on whichever task published the event, and WiFi's come from ESP-IDF's event
+ * task. A toast built there raced lvgl_task through LVGL's heap and timer
+ * list, and a failed WiFi connect crashed the device a little later. */
+#define TOAST_POST_MSG_LEN      64
+#define TOAST_POST_QUEUE_LEN     4
+#define TOAST_POST_PERIOD_MS    50
+
+typedef struct {
+    char          message[TOAST_POST_MSG_LEN];
+    toast_level_t level;
+    uint32_t      duration_ms;
+} posted_toast_t;
+
+static QueueHandle_t s_posted = NULL;
+
+static void toast_post_timer_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    posted_toast_t t;
+    /* Several at once would only replace each other; show the latest. */
+    bool any = false;
+    while (xQueueReceive(s_posted, &t, 0) == pdTRUE) {
+        any = true;
+    }
+    if (any) {
+        toast_show(t.message, t.level, t.duration_ms);
+    }
+}
+
+esp_err_t toast_init(void)
+{
+    if (s_posted) return ESP_OK;
+    s_posted = xQueueCreate(TOAST_POST_QUEUE_LEN, sizeof(posted_toast_t));
+    if (!s_posted) return ESP_ERR_NO_MEM;
+    lv_timer_create(toast_post_timer_cb, TOAST_POST_PERIOD_MS, NULL);
+    return ESP_OK;
+}
+
+esp_err_t toast_post(const char *message, toast_level_t level, uint32_t duration_ms)
+{
+    if (!message) return ESP_ERR_INVALID_ARG;
+    if (!s_posted) return ESP_ERR_INVALID_STATE;
+
+    posted_toast_t t = { .level = level, .duration_ms = duration_ms };
+    strncpy(t.message, message, sizeof(t.message) - 1);
+    t.message[sizeof(t.message) - 1] = '\0';
+    return xQueueSend(s_posted, &t, 0) == pdTRUE ? ESP_OK : ESP_ERR_NO_MEM;
 }
