@@ -85,11 +85,13 @@ pub(crate) fn with_value(
     serde_json::to_string_pretty(&root).ok()
 }
 
+/// What a device that has no system.json yet starts one from.
+pub(crate) const FRESH: &str = r#"{ "thistle_os": {} }"#;
+
 /// A file holding nothing but this one setting, for a device that has no
 /// system.json yet.
 fn fresh_with_value(section: &str, key: &str, value: serde_json::Value) -> String {
-    with_value(r#"{ "thistle_os": {} }"#, section, key, value)
-        .expect("a fresh system.json always takes a setting")
+    with_value(FRESH, section, key, value).expect("a fresh system.json always takes a setting")
 }
 
 /// Store `value` at `section.key` in the system.json in use, creating the

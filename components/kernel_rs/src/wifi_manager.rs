@@ -881,16 +881,23 @@ fn is_leap(year: u64) -> bool {
 // WiFi credential persistence — save/load from system.json
 // ---------------------------------------------------------------------------
 
+/// `json` with the credentials stored in its wifi section, which is created if
+/// the file has none: a system.json that Settings started for some other
+/// setting has none, and refusing it meant a network that connected was never
+/// remembered. `None` for a file that does not parse, or whose wifi section is
+/// not an object; rewriting either would lose what else the file holds.
 fn update_wifi_object(json: &str, ssid: &str, password: &str, enabled: bool) -> Option<String> {
     let mut root: serde_json::Value = serde_json::from_str(json).ok()?;
-    let wifi = if root.get("thistle_os").is_some() {
+    let scope = if root.get("thistle_os").is_some() {
         root.get_mut("thistle_os")?
-            .as_object_mut()?
-            .get_mut("wifi")?
-            .as_object_mut()?
     } else {
-        root.get_mut("wifi")?.as_object_mut()?
+        &mut root
     };
+    let wifi = scope
+        .as_object_mut()?
+        .entry("wifi".to_string())
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()))
+        .as_object_mut()?;
 
     wifi.insert(
         "ssid".to_string(),
@@ -971,18 +978,8 @@ pub unsafe extern "C" fn wifi_manager_save_credentials(
     }
 
     let path = crate::system_json::path();
-    let json = match std::fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(_) => {
-            esp_log_write(
-                ESP_LOG_ERROR,
-                TAG.as_ptr(),
-                b"Cannot read %s for credential save\0".as_ptr(),
-                path.as_ptr(),
-            );
-            return ESP_ERR_NOT_FOUND;
-        }
-    };
+    let json = std::fs::read_to_string(path)
+        .unwrap_or_else(|_| crate::system_json::FRESH.to_string());
 
     let json = match update_wifi_object(&json, ssid_str, pass_str, true) {
         Some(updated) => updated,
@@ -990,9 +987,9 @@ pub unsafe extern "C" fn wifi_manager_save_credentials(
             esp_log_write(
                 ESP_LOG_ERROR,
                 TAG.as_ptr(),
-                b"system.json missing wifi object\0".as_ptr(),
+                b"system.json is not valid JSON; credentials not saved\0".as_ptr(),
             );
-            return ESP_ERR_NOT_FOUND;
+            return ESP_ERR_INVALID_STATE;
         }
     };
 
@@ -1363,6 +1360,39 @@ mod tests {
                 hostile_password.to_string(),
             )))
         );
+    }
+
+    /// What a device that had no system.json is left with once Settings has
+    /// saved its refresh mode: that one setting and no wifi section.
+    #[test]
+    fn test_update_wifi_object_adds_a_missing_wifi_section() {
+        let json = r#"{ "thistle_os": { "display": { "refresh_mode": "full" } } }"#;
+        let updated = update_wifi_object(json, "home", "12345678", true).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&updated).unwrap();
+        assert_eq!(
+            parsed["thistle_os"]["display"]["refresh_mode"].as_str(),
+            Some("full")
+        );
+        assert_eq!(
+            parse_wifi_credentials(&updated),
+            Ok(Some((true, "home".to_string(), "12345678".to_string())))
+        );
+    }
+
+    #[test]
+    fn test_update_wifi_object_fills_a_fresh_file() {
+        let updated =
+            update_wifi_object(crate::system_json::FRESH, "home", "12345678", true).unwrap();
+        assert_eq!(
+            parse_wifi_credentials(&updated),
+            Ok(Some((true, "home".to_string(), "12345678".to_string())))
+        );
+    }
+
+    #[test]
+    fn test_update_wifi_object_refuses_a_wifi_section_that_is_not_an_object() {
+        let json = r#"{ "thistle_os": { "wifi": "on" } }"#;
+        assert_eq!(update_wifi_object(json, "home", "12345678", true), None);
     }
 
     #[test]
