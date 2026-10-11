@@ -97,3 +97,10 @@ esp_err_t rs_mesh_send_advert(void);
  * returns false when there is none waiting. */
 bool rs_mesh_inbox_pop(mesh_message_t *out);
 bool rs_mesh_delivery_pop(uint32_t *out_id, uint8_t *out_state);
+
+/* Messages received that the user has not read: those still waiting, and
+ * those the app that took them reported unread. The app that takes messages
+ * reports how many of them it has still to show, again whenever that
+ * changes, and 0 when it closes. */
+uint32_t rs_mesh_unread_count(void);
+void rs_mesh_set_held_unread(uint32_t count);

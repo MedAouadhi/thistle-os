@@ -26,6 +26,8 @@ Requires SDL2 (`brew install sdl2` / `apt install libsdl2-dev`) and a prior ESP-
 | `--tap-hold MS` | How long each tap is held (default 100; `0` delivers press and release before LVGL next reads the pointer) |
 | `--type TEXT` | Type TEXT after the taps, every key pressed and released before LVGL next reads the keypad; prints `Focused text: "..."` on exit |
 | `--type-rollover` | With `--type`, press each key before releasing the one before it |
+| `--mesh-message "SENDER: TEXT"` | The mesh hears TEXT on its Public channel at startup, before any app opens; the simulator has no radio |
+| `--mesh-direct "SENDER: TEXT"` | The same, as a direct message from SENDER; up to 8 messages of either kind |
 | `--log-flushes` | Print every area the window manager flushes to the display |
 | `--launch-app ID` | Launch a registered app instead of the launcher |
 | `--wm NAME` | Window manager for this run, overriding `system.json`: `thistle-tk`, `lvgl-epaper-wm` or `lvgl-lcd-wm` |

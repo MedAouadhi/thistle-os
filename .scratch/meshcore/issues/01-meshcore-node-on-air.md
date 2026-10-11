@@ -20,6 +20,7 @@
 4. In the app, send a flood advert. Messenger → **+** on the T-Deck should list the Heltec under Contacts.
 5. Public channel: send from each side; each should show the other's message.
 6. Direct message: open the Heltec's contact on the T-Deck and send. The bubble reads `sending`, then a tick once the Heltec acknowledges it, or `failed` after three attempts. Reply from the app.
+7. Unread messages: go to the home screen on the T-Deck and send from the app, on the Public channel and directly. Within a second the status bar shows an envelope and how many are unread. Tapping it opens the Messenger, where each conversation shows its own count; opening a conversation takes its messages off the count.
 
 The serial console logs one line per packet (`meshcore: rx advert, flood, 112 bytes, -61 dBm`, `meshcore: tx message, direct, ...`), so a link can be checked from the console alone.
 
@@ -38,7 +39,7 @@ What stood between "compiled in" and a node another device could talk to, found 
 ### Follow-ups, not done here
 
 - The system clock is never set: `wifi_manager_ntp_sync()` is a stub. Timestamps this node sends start from MeshCore's baseline of May 2024 and only move forward, which peers accept, but a phone shows them as old.
-- New messages arrive while the Messenger is closed and wait for it (32 at most), with no indicator elsewhere.
+- New messages arrive while the Messenger is closed and wait for it, 32 at most: the oldest go when more arrive. The status bar counts them, and those the Messenger has taken but not shown; the simulator's `--mesh-message` and `--mesh-direct` hand it messages to count. Conversations now outlive the Messenger closing, which the app manager does whenever another app comes to the front, but not a reboot.
 - Adverts carry no position yet, though the board has GPS.
 - Repeaters and room servers are listed by the node but not offered in the Messenger: they want a login first.
 - The 915 MHz preset follows MeshCore's FAQ and is untested on hardware.

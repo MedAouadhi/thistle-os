@@ -2,6 +2,8 @@
 #include "ui/theme.h"
 #include "thistle/wifi_manager.h"
 #include "thistle/net_manager.h"
+#include "thistle/mesh.h"
+#include "thistle/app_manager.h"
 #include "hal/board.h"
 #include "esp_log.h"
 #include <stdio.h>
@@ -17,15 +19,32 @@ static const char *TAG = "statusbar";
  * nothing new costs no refresh. */
 #define STATUSBAR_UPDATE_MS 10000
 
+/* How often the unread-message count is checked. It is one number read from
+ * the kernel, and the label is only touched when it changes, so a message
+ * shows within a second at no cost while none arrive. */
+#define STATUSBAR_MESSAGES_MS 1000
+
+/* Where a tap on the unread-message count goes. */
+#define MESSENGER_APP_ID "com.thistle.messenger"
+
 static void statusbar_update_cb(lv_timer_t *timer);
-static lv_timer_t *s_update_timer = NULL;
+static void statusbar_messages_cb(lv_timer_t *timer);
+static lv_timer_t *s_update_timer   = NULL;
+static lv_timer_t *s_messages_timer = NULL;
 
 /* LVGL object handles */
 static lv_obj_t *s_container     = NULL;
 static lv_obj_t *s_title_label   = NULL;
 static lv_obj_t *s_time_label    = NULL;
+static lv_obj_t *s_messages_label = NULL;
 static lv_obj_t *s_battery_label = NULL;
 static lv_obj_t *s_wifi_label    = NULL;
+
+static void messages_tap_cb(lv_event_t *e)
+{
+    (void)e;
+    app_manager_launch(MESSENGER_APP_ID);
+}
 
 esp_err_t statusbar_create(lv_obj_t *parent)
 {
@@ -107,6 +126,17 @@ esp_err_t statusbar_create(lv_obj_t *parent)
     lv_obj_set_flex_align(right, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_column(right, 4, LV_PART_MAIN);
 
+    /* Unread messages: an envelope and how many, hidden while there are
+     * none. A tap opens the Messenger; the label is small, so the area that
+     * takes the tap reaches past it. */
+    s_messages_label = lv_label_create(right);
+    lv_label_set_text(s_messages_label, "");
+    lv_obj_set_style_text_color(s_messages_label, colors->text, LV_PART_MAIN);
+    lv_obj_add_flag(s_messages_label, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_messages_label, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_ext_click_area(s_messages_label, 6);
+    lv_obj_add_event_cb(s_messages_label, messages_tap_cb, LV_EVENT_CLICKED, NULL);
+
     s_wifi_label = lv_label_create(right);
     lv_label_set_text(s_wifi_label, "--");
     lv_obj_set_style_text_color(s_wifi_label, colors->text, LV_PART_MAIN);
@@ -121,6 +151,10 @@ esp_err_t statusbar_create(lv_obj_t *parent)
     if (s_update_timer == NULL) {
         s_update_timer = lv_timer_create(statusbar_update_cb, STATUSBAR_UPDATE_MS, NULL);
         lv_timer_ready(s_update_timer);
+    }
+    if (s_messages_timer == NULL) {
+        s_messages_timer = lv_timer_create(statusbar_messages_cb, STATUSBAR_MESSAGES_MS, NULL);
+        lv_timer_ready(s_messages_timer);
     }
 
     ESP_LOGI(TAG, "status bar created (%d px)", STATUSBAR_HEIGHT);
@@ -204,6 +238,7 @@ void statusbar_refresh_theme(void)
     }
     if (s_title_label)   lv_obj_set_style_text_color(s_title_label,   colors->text, LV_PART_MAIN);
     if (s_time_label)    lv_obj_set_style_text_color(s_time_label,    colors->text, LV_PART_MAIN);
+    if (s_messages_label) lv_obj_set_style_text_color(s_messages_label, colors->text, LV_PART_MAIN);
     if (s_battery_label) lv_obj_set_style_text_color(s_battery_label, colors->text, LV_PART_MAIN);
     if (s_wifi_label)    lv_obj_set_style_text_color(s_wifi_label,    colors->text, LV_PART_MAIN);
 }
@@ -236,6 +271,35 @@ static void update_battery(void)
     uint8_t pct = reg->power->get_battery_percent ? reg->power->get_battery_percent() : 0;
     bool charging = reg->power->is_charging ? reg->power->is_charging() : false;
     statusbar_set_battery(pct, charging);
+}
+
+/* Show how many messages are unread, or nothing when none are. */
+static void statusbar_messages_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    if (s_messages_label == NULL) {
+        return;
+    }
+
+    uint32_t unread = rs_mesh_unread_count();
+    bool hidden = lv_obj_has_flag(s_messages_label, LV_OBJ_FLAG_HIDDEN);
+    if (unread == 0) {
+        if (!hidden) {
+            lv_obj_add_flag(s_messages_label, LV_OBJ_FLAG_HIDDEN);
+        }
+        return;
+    }
+
+    char buf[16];
+    if (unread > 99) {
+        snprintf(buf, sizeof(buf), LV_SYMBOL_ENVELOPE " 99+");
+    } else {
+        snprintf(buf, sizeof(buf), LV_SYMBOL_ENVELOPE " %u", (unsigned)unread);
+    }
+    set_text_if_changed(s_messages_label, buf);
+    if (hidden) {
+        lv_obj_clear_flag(s_messages_label, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 static void statusbar_update_cb(lv_timer_t *timer)

@@ -8,7 +8,10 @@
  *     Scrollable list of conversations: each transport's own (the mesh's
  *     Public channel, the SMS inbox) and one per contact a direct message
  *     has gone to or come from. Each entry shows the transport icon, the
- *     conversation's name, and its last message.
+ *     conversation's name, how many messages in it are unread, and its last
+ *     message. A message is read once its conversation has been on screen;
+ *     the status bar counts the mesh's unread ones, here or still waiting in
+ *     the kernel.
  *     A [+] button in the header opens SCREEN_NEW_CONV.
  *
  *   SCREEN_NEW_CONV
@@ -90,6 +93,7 @@ typedef struct {
     int                  msg_count;
     char                 last_preview[48];  /* shown in conversation list */
     char                 last_time[8];
+    int                  unread;            /* received since it was last on screen */
 } conversation_t;
 
 /* A contact offered on the new-conversation screen. */
@@ -106,8 +110,9 @@ static struct {
     /* LVGL root */
     lv_obj_t   *root;
 
-    /* Active screen */
+    /* Active screen, and whether the Messenger is in front to show it */
     app_screen_t screen;
+    bool         visible;
 
     /* --- Conversation list screen --- */
     lv_obj_t   *conv_list_screen;
@@ -125,13 +130,17 @@ static struct {
     lv_obj_t   *input_ta;
     lv_obj_t   *send_btn;
 
-    /* Conversations, allocated as they start: each holds its history. */
-    conversation_t *convs[MAX_CONVS];
-    int             conv_count;
-    int             active_conv;         /* index into convs[] */
+    int             active_conv;         /* index into s_convs[] */
 
     picker_entry_t  picker[MAX_PICKER];
 } s_msg;
+
+/* Conversations, allocated as they start: each holds its history. They
+ * outlive the widgets above. The app manager destroys the Messenger whenever
+ * another app comes to the front, and messages taken from the mesh, read or
+ * not, must still be here when it is opened again. A reboot loses them. */
+static conversation_t *s_convs[MAX_CONVS];
+static int             s_conv_count;
 
 /* LVGL periodic timer for kernel tick integration */
 static lv_timer_t *s_tick_timer;
@@ -170,8 +179,8 @@ static const char *conv_title(const conversation_t *cv)
 static int find_conversation_index(msg_transport_t transport, const char *dest)
 {
     if (!dest) dest = "";
-    for (int i = 0; i < s_msg.conv_count; i++) {
-        if (s_msg.convs[i]->transport == transport && strcmp(s_msg.convs[i]->dest, dest) == 0) {
+    for (int i = 0; i < s_conv_count; i++) {
+        if (s_convs[i]->transport == transport && strcmp(s_convs[i]->dest, dest) == 0) {
             return i;
         }
     }
@@ -186,7 +195,7 @@ static int ensure_conversation(msg_transport_t transport, const char *dest, cons
     if (!dest) dest = "";
     int ci = find_conversation_index(transport, dest);
     if (ci < 0) {
-        if (s_msg.conv_count >= MAX_CONVS) {
+        if (s_conv_count >= MAX_CONVS) {
             ESP_LOGW(TAG, "no free conversation slots for transport %d", (int)transport);
             return -1;
         }
@@ -197,15 +206,42 @@ static int ensure_conversation(msg_transport_t transport, const char *dest, cons
         }
         cv->transport = transport;
         strncpy(cv->dest, dest, sizeof(cv->dest) - 1);
-        ci = s_msg.conv_count++;
-        s_msg.convs[ci] = cv;
+        ci = s_conv_count++;
+        s_convs[ci] = cv;
     }
     if (title && title[0] != '\0' && dest[0] != '\0') {
-        conversation_t *cv = s_msg.convs[ci];
+        conversation_t *cv = s_convs[ci];
         strncpy(cv->title, title, sizeof(cv->title) - 1);
         cv->title[sizeof(cv->title) - 1] = '\0';
     }
     return ci;
+}
+
+/* Whether the user is looking at the conversation. */
+static bool conversation_on_screen(int ci)
+{
+    return s_msg.visible && s_msg.screen == SCREEN_CHAT && s_msg.active_conv == ci;
+}
+
+/* Tell the kernel how many mesh messages the Messenger holds unread. The
+ * status bar adds those still waiting in the mesh's inbox. */
+static void report_unread(void)
+{
+    uint32_t held = 0;
+    for (int i = 0; i < s_conv_count; i++) {
+        if (s_convs[i]->transport == MSG_TRANSPORT_LORA) {
+            held += (uint32_t)s_convs[i]->unread;
+        }
+    }
+    rs_mesh_set_held_unread(held);
+}
+
+/* The user has seen everything in the conversation. */
+static void mark_read(int ci)
+{
+    if (ci < 0 || ci >= s_conv_count || s_convs[ci]->unread == 0) return;
+    s_convs[ci]->unread = 0;
+    report_unread();
 }
 
 /* ------------------------------------------------------------------ */
@@ -257,6 +293,14 @@ static void deliver_message(msg_transport_t transport, const char *conv,
     }
 
     add_message_to_conv(ci, display_name, final_text, false, 0, MSG_STATUS_NONE);
+
+    /* Unread unless it arrived in front of the user. No more can be unread
+     * than the history keeps. */
+    if (!conversation_on_screen(ci)) {
+        conversation_t *cv = s_convs[ci];
+        if (cv->unread < MSG_HISTORY) cv->unread++;
+        report_unread();
+    }
 
     if (s_msg.screen == SCREEN_CONV_LIST) {
         refresh_conv_list();
@@ -313,8 +357,8 @@ static void transport_rx_cb(msg_transport_t transport, const char *conv,
 static void transport_status_cb(msg_transport_t transport, uint32_t ref, msg_status_t status)
 {
     if (ref == 0) return;
-    for (int ci = 0; ci < s_msg.conv_count; ci++) {
-        conversation_t *cv = s_msg.convs[ci];
+    for (int ci = 0; ci < s_conv_count; ci++) {
+        conversation_t *cv = s_convs[ci];
         if (cv->transport != transport) continue;
         int count = cv->msg_count < MSG_HISTORY ? cv->msg_count : MSG_HISTORY;
         for (int i = 0; i < count; i++) {
@@ -464,8 +508,8 @@ static void refresh_conv_list(void)
     /* Remove all existing items */
     lv_obj_clean(s_msg.conv_list);
 
-    for (int i = 0; i < s_msg.conv_count; i++) {
-        conversation_t *cv = s_msg.convs[i];
+    for (int i = 0; i < s_conv_count; i++) {
+        conversation_t *cv = s_convs[i];
         const msg_transport_driver_t *drv = messenger_get_transport(cv->transport);
         if (!drv) continue;
 
@@ -493,10 +537,27 @@ static void refresh_conv_list(void)
                  drv->icon, conv_title(cv),
                  avail ? "" : " (unavailable)");
 
+        /* How many are unread, at the right of that line */
+        int name_w = DISP_W - 16;
+        if (cv->unread > 0) {
+            char count[12];
+            snprintf(count, sizeof(count), "%d", cv->unread);
+            lv_obj_t *badge = lv_label_create(item);
+            lv_label_set_text(badge, count);
+            lv_obj_set_style_text_font(badge, &lv_font_montserrat_14, LV_PART_MAIN);
+            lv_obj_set_style_text_color(badge, lv_color_white(), LV_PART_MAIN);
+            lv_obj_set_style_bg_color(badge, colors->primary, LV_PART_MAIN);
+            lv_obj_set_style_bg_opa(badge, LV_OPA_COVER, LV_PART_MAIN);
+            lv_obj_set_style_radius(badge, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+            lv_obj_set_style_pad_hor(badge, 5, LV_PART_MAIN);
+            lv_obj_align(badge, LV_ALIGN_TOP_RIGHT, 0, 0);
+            name_w -= 32;
+        }
+
         lv_obj_t *name_lbl = lv_label_create(item);
         lv_label_set_text(name_lbl, top_str);
         lv_label_set_long_mode(name_lbl, LV_LABEL_LONG_DOT);
-        lv_obj_set_width(name_lbl, DISP_W - 16);
+        lv_obj_set_width(name_lbl, name_w);
         lv_obj_set_style_text_font(name_lbl, &lv_font_montserrat_14, LV_PART_MAIN);
         lv_obj_set_style_text_color(name_lbl,
             avail ? colors->text : colors->text_secondary,
@@ -715,7 +776,7 @@ static void chat_back_cb(lv_event_t *e)
     /* Stop receiving on the current transport */
     if (s_msg.active_conv >= 0) {
         const msg_transport_driver_t *drv =
-            messenger_get_transport(s_msg.convs[s_msg.active_conv]->transport);
+            messenger_get_transport(s_convs[s_msg.active_conv]->transport);
         if (drv && drv->stop_receive) drv->stop_receive();
     }
     s_msg.active_conv = -1;
@@ -835,11 +896,12 @@ static uint32_t conv_text_limit(const conversation_t *cv)
 
 static void open_conversation(int conv_idx)
 {
-    if (conv_idx < 0 || conv_idx >= s_msg.conv_count) return;
+    if (conv_idx < 0 || conv_idx >= s_conv_count) return;
 
     s_msg.active_conv = conv_idx;
-    conversation_t *cv = s_msg.convs[conv_idx];
+    conversation_t *cv = s_convs[conv_idx];
     const msg_transport_driver_t *drv = messenger_get_transport(cv->transport);
+    mark_read(conv_idx);
 
     /* Update header label: "Public [MeshCore]" */
     if (s_msg.chat_header_label && drv) {
@@ -948,7 +1010,7 @@ static void create_message_bubble(const chat_message_t *msg)
 static void rebuild_bubbles(void)
 {
     if (!s_msg.msg_list || s_msg.active_conv < 0) return;
-    conversation_t *cv = s_msg.convs[s_msg.active_conv];
+    conversation_t *cv = s_convs[s_msg.active_conv];
 
     lv_obj_clean(s_msg.msg_list);
     int count = cv->msg_count;
@@ -966,9 +1028,9 @@ static void rebuild_bubbles(void)
 static void add_message_to_conv(int conv_idx, const char *sender, const char *text,
                                 bool is_self, uint32_t ref, msg_status_t status)
 {
-    if (conv_idx < 0 || conv_idx >= s_msg.conv_count) return;
+    if (conv_idx < 0 || conv_idx >= s_conv_count) return;
 
-    conversation_t *cv = s_msg.convs[conv_idx];
+    conversation_t *cv = s_convs[conv_idx];
     chat_message_t *m = &cv->messages[cv->msg_count % MSG_HISTORY];
 
     strncpy(m->sender, sender, sizeof(m->sender) - 1);
@@ -1013,7 +1075,7 @@ static void send_message(void)
     const char *text = lv_textarea_get_text(s_msg.input_ta);
     if (!text || text[0] == '\0') return;
 
-    conversation_t *cv = s_msg.convs[s_msg.active_conv];
+    conversation_t *cv = s_convs[s_msg.active_conv];
     const msg_transport_driver_t *drv = messenger_get_transport(cv->transport);
     const char *dest = cv->dest[0] ? cv->dest : NULL;
 
@@ -1119,8 +1181,8 @@ static void kernel_tick_cb(lv_timer_t *timer)
         uint8_t conv_id  = expired[i].conversation_id;
         uint8_t msg_idx  = expired[i].message_index;
 
-        if (conv_id < s_msg.conv_count) {
-            conversation_t *cv = s_msg.convs[conv_id];
+        if (conv_id < s_conv_count) {
+            conversation_t *cv = s_convs[conv_id];
             int slot = msg_idx % MSG_HISTORY;
             if (msg_idx < cv->msg_count) {
                 /* Wipe the burned message content */
@@ -1244,6 +1306,8 @@ void messenger_ui_show(void)
     if (s_tick_timer) {
         lv_timer_resume(s_tick_timer);
     }
+    s_msg.visible = true;
+    if (s_msg.screen == SCREEN_CHAT) mark_read(s_msg.active_conv);
     /* What arrived while hidden, before the first tick. */
     poll_transports();
     if (s_msg.screen == SCREEN_CONV_LIST) refresh_conv_list();
@@ -1251,13 +1315,14 @@ void messenger_ui_show(void)
 
 void messenger_ui_hide(void)
 {
+    s_msg.visible = false;
     if (s_msg.root) {
         lv_obj_add_flag(s_msg.root, LV_OBJ_FLAG_HIDDEN);
 
         /* Stop any active receive when hidden */
         if (s_msg.active_conv >= 0) {
             const msg_transport_driver_t *drv =
-                messenger_get_transport(s_msg.convs[s_msg.active_conv]->transport);
+                messenger_get_transport(s_convs[s_msg.active_conv]->transport);
             if (drv && drv->stop_receive) drv->stop_receive();
         }
     }
@@ -1269,8 +1334,10 @@ void messenger_ui_hide(void)
     rs_msg_queue_save();
 }
 
+/* The widgets go; the conversations stay for the next time it opens. */
 void messenger_ui_destroy(void)
 {
+    s_msg.visible = false;
     if (s_tick_timer) {
         lv_timer_delete(s_tick_timer);
         s_tick_timer = NULL;
@@ -1279,11 +1346,9 @@ void messenger_ui_destroy(void)
     rs_msg_queue_save();
     if (s_msg.root) {
         lv_obj_delete(s_msg.root);
-        s_msg.root = NULL;
     }
-    for (int i = 0; i < s_msg.conv_count; i++) {
-        free(s_msg.convs[i]);
-        s_msg.convs[i] = NULL;
-    }
-    s_msg.conv_count = 0;
+    /* Nothing may reach a deleted widget: a message still on its way from
+     * lv_async_call finds none and lands in its conversation unread. */
+    memset(&s_msg, 0, sizeof(s_msg));
+    s_msg.active_conv = -1;
 }

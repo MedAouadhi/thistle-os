@@ -59,6 +59,49 @@ static int s_tap_hold_ms = 100;
 static const char *s_type_text = NULL;
 /* Press each key before releasing the one before it, as fast typing does. */
 static bool s_type_rollover = false;
+/* Messages the mesh hears at startup, before any app opens, as "SENDER: TEXT".
+ * The simulator has no radio; these reach the kernel's inbox as the engine's
+ * would on a device. */
+#define SIM_MAX_MESH_MESSAGES 8
+static struct { const char *spec; bool direct; } s_mesh_messages[SIM_MAX_MESH_MESSAGES];
+static int s_mesh_message_count = 0;
+
+extern bool rs_mesh_sim_hear(const char *sender, const char *text, bool direct);
+
+static bool add_mesh_message(const char *spec, bool direct)
+{
+    if (s_mesh_message_count >= SIM_MAX_MESH_MESSAGES || strchr(spec, ':') == NULL) {
+        fprintf(stderr, "Invalid mesh message; expected \"SENDER: TEXT\" (at most %d)\n",
+                SIM_MAX_MESH_MESSAGES);
+        return false;
+    }
+    s_mesh_messages[s_mesh_message_count].spec = spec;
+    s_mesh_messages[s_mesh_message_count].direct = direct;
+    s_mesh_message_count++;
+    return true;
+}
+
+static void hear_mesh_messages(void)
+{
+    for (int i = 0; i < s_mesh_message_count; i++) {
+        const char *spec = s_mesh_messages[i].spec;
+        const char *colon = strchr(spec, ':');
+        char sender[32];
+        size_t n = (size_t)(colon - spec);
+        if (n >= sizeof(sender)) n = sizeof(sender) - 1;
+        memcpy(sender, spec, n);
+        sender[n] = '\0';
+        const char *text = colon + 1;
+        while (*text == ' ') text++;
+        rs_mesh_sim_hear(sender, text, s_mesh_messages[i].direct);
+    }
+    if (s_mesh_message_count > 0) {
+        char msg[64];
+        snprintf(msg, sizeof(msg), "Mesh heard: %d messages", s_mesh_message_count);
+        printf("%s\n", msg);
+        sim_assert_check_line(msg);
+    }
+}
 
 static bool add_tap(const char *spec)
 {
@@ -165,6 +208,10 @@ int main(int argc, char **argv)
             s_type_text = argv[++i];
         } else if (strcmp(argv[i], "--type-rollover") == 0) {
             s_type_rollover = true;
+        } else if (strcmp(argv[i], "--mesh-message") == 0 && i + 1 < argc) {
+            if (!add_mesh_message(argv[++i], false)) return 2;
+        } else if (strcmp(argv[i], "--mesh-direct") == 0 && i + 1 < argc) {
+            if (!add_mesh_message(argv[++i], true)) return 2;
         } else if (strcmp(argv[i], "--log-flushes") == 0) {
             sim_display_set_log_flushes(true);
         } else if (strcmp(argv[i], "--report-offscreen") == 0) {
@@ -186,6 +233,11 @@ int main(int argc, char **argv)
             printf("                      released before LVGL next reads the keypad;\n");
             printf("                      prints the focused text field on exit\n");
             printf("  --type-rollover     Press each typed key before releasing the last\n");
+            printf("  --mesh-message \"SENDER: TEXT\"\n");
+            printf("                      Hear TEXT on the mesh's Public channel at startup\n");
+            printf("  --mesh-direct \"SENDER: TEXT\"\n");
+            printf("                      Hear TEXT as a direct message from SENDER; up to\n");
+            printf("                      %d messages of either kind\n", SIM_MAX_MESH_MESSAGES);
             printf("  --log-flushes       Print every area flushed to the display\n");
             printf("  --report-offscreen  On exit, list every visible LVGL object that\n");
             printf("                      reaches past the left or right screen edge\n");
@@ -218,6 +270,7 @@ int main(int argc, char **argv)
     esp_err_t err = kernel_init();
     { char _msg[64]; snprintf(_msg, sizeof(_msg), "kernel_init: %d", err);
       printf("%s\n", _msg); sim_assert_check_line(_msg); }
+    hear_mesh_messages();
     fflush(stdout);
 
     /* Initialize display server and register the LVGL window manager */

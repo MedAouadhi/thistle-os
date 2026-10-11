@@ -414,6 +414,9 @@ struct MeshState {
     /// Most recently heard first.
     contacts: Vec<CMeshContact>,
     inbox: VecDeque<CMeshMessage>,
+    /// Messages an app has taken from the inbox and not yet shown the user,
+    /// as it last reported.
+    held_unread: u32,
     recent: VecDeque<Signature>,
     deliveries: VecDeque<(u32, u8)>,
 }
@@ -426,6 +429,7 @@ impl MeshState {
             self_name: [0u8; MESH_NAME_MAX],
             contacts: Vec::new(),
             inbox: VecDeque::new(),
+            held_unread: 0,
             recent: VecDeque::new(),
             deliveries: VecDeque::new(),
         }
@@ -884,6 +888,27 @@ pub unsafe extern "C" fn rs_mesh_inbox_pop(out: *mut CMeshMessage) -> bool {
     }
 }
 
+/// Messages received that the user has not read: those still in the inbox,
+/// which nothing has shown, and those an app took and has not shown yet. The
+/// status bar shows it.
+#[no_mangle]
+pub extern "C" fn rs_mesh_unread_count() -> u32 {
+    MESH_STATE
+        .lock()
+        .map(|s| s.inbox.len() as u32 + s.held_unread)
+        .unwrap_or(0)
+}
+
+/// How many of the messages it has taken from the inbox an app has still to
+/// show the user. It reports again whenever that changes, and 0 when it
+/// closes, since what it held goes with it.
+#[no_mangle]
+pub extern "C" fn rs_mesh_set_held_unread(count: u32) {
+    if let Ok(mut s) = MESH_STATE.lock() {
+        s.held_unread = count;
+    }
+}
+
 /// Take the oldest delivery report: a message id from rs_mesh_send_direct()
 /// or rs_mesh_send_channel(), and DELIVERY_SENT, _DELIVERED or _FAILED.
 #[no_mangle]
@@ -1095,6 +1120,46 @@ pub extern "C" fn rs_mesh_clear_inbox() -> i32 {
             ESP_OK
         }
         Err(_) => ESP_FAIL,
+    }
+}
+
+// ── The simulator ───────────────────────────────────────────────────────
+
+/// The simulator has no radio, so this hands the inbox a message as if the
+/// node had heard it: a direct one from `sender`, or one `sender` sent on the
+/// Public channel. Each call is a new message, even with the same words.
+#[cfg(not(target_os = "espidf"))]
+#[no_mangle]
+pub unsafe extern "C" fn rs_mesh_sim_hear(
+    sender: *const c_char,
+    text: *const c_char,
+    direct: bool,
+) -> bool {
+    static HEARD: AtomicU32 = AtomicU32::new(1);
+    if sender.is_null() || text.is_null() {
+        return false;
+    }
+    let sender = std::ffi::CStr::from_ptr(sender).to_string_lossy();
+    let text = std::ffi::CStr::from_ptr(text).to_string_lossy();
+    let mut key = [0u8; 32];
+    if direct {
+        // A key of its own per name, so each sender is its own conversation.
+        let hash = fnv1a(sender.as_bytes()).to_le_bytes();
+        for chunk in key.chunks_mut(hash.len()) {
+            chunk.copy_from_slice(&hash);
+        }
+    }
+    let heard = EngineMessage {
+        kind: if direct { MSG_DIRECT } else { MSG_CHANNEL },
+        channel: PUBLIC_CHANNEL,
+        sender_key: key,
+        sender_name: to_c_array(&sender),
+        timestamp: HEARD.fetch_add(1, Ordering::Relaxed),
+        text: to_c_array(&text),
+    };
+    match MESH_STATE.lock() {
+        Ok(mut s) => s.receive(message_from_engine(&heard)),
+        Err(_) => false,
     }
 }
 
@@ -1470,6 +1535,76 @@ mod tests {
         }
         assert_eq!(rs_mesh_get_inbox_count(), INBOX_SIZE as i32);
         assert_eq!(pop().unwrap().timestamp, 3);
+    }
+
+    #[test]
+    fn messages_nothing_has_shown_are_unread() {
+        running_as("me");
+        assert_eq!(rs_mesh_unread_count(), 0);
+        unsafe {
+            on_message(&engine_message(MSG_DIRECT, 1, "Heltec", 10, "hello"));
+            on_message(&engine_message(MSG_CHANNEL, 0, "Bob", 11, "hi all"));
+        }
+        assert_eq!(rs_mesh_unread_count(), 2);
+    }
+
+    #[test]
+    fn messages_an_app_took_stay_unread_until_it_shows_them() {
+        running_as("me");
+        unsafe {
+            on_message(&engine_message(MSG_DIRECT, 1, "Heltec", 10, "hello"));
+            on_message(&engine_message(MSG_CHANNEL, 0, "Bob", 11, "hi all"));
+        }
+        pop().unwrap();
+        rs_mesh_set_held_unread(1);
+        assert_eq!(rs_mesh_unread_count(), 2);
+        rs_mesh_set_held_unread(0);
+        assert_eq!(rs_mesh_unread_count(), 1);
+    }
+
+    #[test]
+    fn a_message_heard_twice_is_unread_once() {
+        running_as("me");
+        unsafe {
+            on_message(&engine_message(MSG_DIRECT, 1, "Heltec", 10, "hello"));
+            on_message(&engine_message(MSG_DIRECT, 1, "Heltec", 10, "hello"));
+        }
+        assert_eq!(rs_mesh_unread_count(), 1);
+    }
+
+    #[test]
+    fn a_message_a_full_inbox_dropped_is_not_counted() {
+        running_as("me");
+        for i in 0..(INBOX_SIZE as u32 + 3) {
+            unsafe { on_message(&engine_message(MSG_DIRECT, 1, "a", i, "x")) };
+        }
+        assert_eq!(rs_mesh_unread_count(), INBOX_SIZE as u32);
+    }
+
+    #[test]
+    fn the_simulator_hears_direct_and_channel_messages() {
+        running_as("me");
+        let bob = CString::new("Bob").unwrap();
+        let alice = CString::new("Alice").unwrap();
+        let hi = CString::new("hi").unwrap();
+        unsafe {
+            assert!(rs_mesh_sim_hear(bob.as_ptr(), hi.as_ptr(), true));
+            assert!(rs_mesh_sim_hear(bob.as_ptr(), hi.as_ptr(), true));
+            assert!(rs_mesh_sim_hear(alice.as_ptr(), hi.as_ptr(), false));
+            assert!(!rs_mesh_sim_hear(std::ptr::null(), hi.as_ptr(), false));
+        }
+        let first = pop().unwrap();
+        let second = pop().unwrap();
+        let third = pop().unwrap();
+        assert_eq!(first.kind, MSG_DIRECT);
+        assert_ne!(first.sender_key, [0; 32]);
+        assert_eq!(first.sender_key, second.sender_key);
+        assert_eq!(text_of(&second), "hi");
+        assert_eq!(third.kind, MSG_CHANNEL);
+        assert_eq!(third.channel, PUBLIC_CHANNEL);
+        assert_eq!(third.sender_key, [0; 32]);
+        assert_eq!(&third.sender_name[..third.sender_name_len as usize], b"Alice");
+        assert!(pop().is_none());
     }
 
     #[test]
