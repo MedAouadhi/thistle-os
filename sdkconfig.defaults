@@ -17,6 +17,12 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 # SD Card (SDMMC)
 CONFIG_SOC_SDMMC_HOST_SUPPORTED=y
 
+# Long filenames on the SD card. ESP-IDF's default is 8.3 only: FatFs then
+# rejects a name like themes/night-instrument.json and reads every name back in
+# capitals, so Reader found no ".txt" books on a card that had them.
+CONFIG_FATFS_LFN_HEAP=y
+CONFIG_FATFS_MAX_LFN=255
+
 # Logging
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 

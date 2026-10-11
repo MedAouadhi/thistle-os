@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 static const char *TAG = "reader_ui";
 
@@ -96,11 +97,12 @@ static void format_size(off_t size, char *buf, size_t buf_len)
         snprintf(buf, buf_len, "%.1f MB", size / (1024.0 * 1024.0));
 }
 
+/* Any case: a FAT short name, as written by older tools, is upper case. */
 static bool is_readable_ext(const char *name)
 {
     const char *dot = strrchr(name, '.');
     if (!dot) return false;
-    return (strcmp(dot, ".txt") == 0 || strcmp(dot, ".md") == 0);
+    return (strcasecmp(dot, ".txt") == 0 || strcasecmp(dot, ".md") == 0);
 }
 
 /* ------------------------------------------------------------------ */
