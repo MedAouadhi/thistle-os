@@ -10,6 +10,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define ESP_LOGI(tag, ...) ((void)(tag))
@@ -26,6 +27,8 @@ typedef enum {
     EV_CODEC_CLOSE,
     EV_CODEC_DESTROY,
     EV_CODEC_VOLUME,
+    EV_CODEC_READ,
+    EV_CODEC_MIC_GAIN,
     EV_AMP_ON,
     EV_AMP_OFF,
 } shim_event_kind_t;
@@ -50,6 +53,7 @@ static void shim_record(shim_event_kind_t kind, uint32_t arg)
 static esp_err_t s_codec_create_result;
 static esp_err_t s_expander_result;
 static void    (*s_during_write)(void);
+static void    (*s_during_read)(void);
 
 // ── IO expander setter ───────────────────────────────────────────────────────
 
@@ -95,11 +99,39 @@ static esp_err_t port_codec_write(const uint8_t *data, size_t len)
     return ESP_OK;
 }
 
+static esp_err_t port_codec_read(uint8_t *buf, size_t len)
+{
+    memset(buf, 0, len);
+    shim_record(EV_CODEC_READ, (uint32_t)len);
+    if (s_during_read) s_during_read();
+    return ESP_OK;
+}
+
 static esp_err_t port_codec_set_volume(uint8_t percent)
 {
     shim_record(EV_CODEC_VOLUME, percent);
     return ESP_OK;
 }
+
+static esp_err_t port_codec_set_mic_gain(uint8_t db)
+{
+    shim_record(EV_CODEC_MIC_GAIN, db);
+    return ESP_OK;
+}
+
+// ── Clock and heap ───────────────────────────────────────────────────────────
+
+static int64_t s_now_us;
+static int64_t esp_timer_get_time(void) { return s_now_us; }
+
+#define MALLOC_CAP_SPIRAM  (1 << 10)
+#define MALLOC_CAP_DEFAULT (1 << 12)
+static void *heap_caps_malloc_prefer(size_t size, size_t num, ...)
+{
+    (void)num;
+    return malloc(size);
+}
+static void heap_caps_free(void *p) { free(p); }
 
 // ── Mutex ────────────────────────────────────────────────────────────────────
 
@@ -108,12 +140,15 @@ typedef uint32_t TickType_t;
 #define portMAX_DELAY UINT32_MAX
 #define pdTRUE 1
 
-static int s_mutex_storage;
+// One cell per mutex the driver creates; non-zero while held.
+static int s_mutex_pool[4];
+static int s_mutex_count;
 
 static SemaphoreHandle_t xSemaphoreCreateMutex(void)
 {
-    s_mutex_storage = 0;
-    return &s_mutex_storage;
+    if (s_mutex_count == (int)(sizeof(s_mutex_pool) / sizeof(s_mutex_pool[0]))) return NULL;
+    s_mutex_pool[s_mutex_count] = 0;
+    return &s_mutex_pool[s_mutex_count++];
 }
 
 // Single-threaded: a take that would block is a take that fails, which is

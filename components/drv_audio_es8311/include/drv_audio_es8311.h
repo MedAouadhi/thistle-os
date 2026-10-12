@@ -10,11 +10,10 @@ extern "C" {
 #endif
 
 /*
- * Playback only. The codec's ADC is left unconfigured: the audio HAL has no
- * capture path, so its microphone input is unreachable.
- *
- * TODO: audio capture needs a HAL path before the microphone can be used —
- * the same shape of gap as haptics, a kernel ABI change of its own.
+ * Playback, and capture from the microphone on the codec's analog input when
+ * the board wires the codec's ASDOUT back to the SoC. Without that line
+ * (pin_din -1) the codec runs as a DAC alone and record() reports
+ * ESP_ERR_NOT_SUPPORTED.
  */
 typedef struct {
     int      i2s_num;           // I2S port number
@@ -24,6 +23,7 @@ typedef struct {
     int      pin_bclk;          // Bit clock
     int      pin_ws;            // Word select (LRCK)
     int      pin_dout;          // SoC data out, into the codec's DSDIN
+    int      pin_din;           // SoC data in, from the codec's ASDOUT; -1 if none
     int32_t  amp_expander;      // IO expander index of the amp enable, -1 if none
     int32_t  amp_expander_pin;  // Pin on that expander, high = amplifier on
 } audio_es8311_config_t;

@@ -1900,6 +1900,9 @@ mod tests {
         // The schematic's I2S_DSDIN, the SoC's data out. LilyGo's pinmap has
         // this as GPIO17, which is the codec's ASDOUT and would play nothing.
         assert_eq!(json_get_int(config, "i2s_data"), Some(40), "{config}");
+        // And the schematic's I2S_ASDOUT, the microphone coming back in.
+        // LilyGo's pinmap swaps this one too, to GPIO40.
+        assert_eq!(json_get_int(config, "i2s_din"), Some(17), "{config}");
     }
 
     #[test]

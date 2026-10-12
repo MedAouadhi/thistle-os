@@ -668,6 +668,9 @@ static AUDIO_DRIVER: HalAudioDriver = HalAudioDriver {
     set_volume: Some(pcm5102a_set_volume),
     configure: Some(pcm5102a_configure),
     name: b"PCM5102A\0".as_ptr() as *const c_char,
+    // A DAC with no input side.
+    record: None,
+    set_mic_gain: None,
 };
 
 /// Return the PCM5102A audio driver vtable.

@@ -209,6 +209,8 @@ pub struct HalAudioDriver {
     pub set_volume: Option<unsafe extern "C" fn(percent: u8) -> i32>,
     pub configure: Option<unsafe extern "C" fn(cfg: *const HalAudioConfig) -> i32>,
     pub name: *const c_char,
+    pub record: Option<unsafe extern "C" fn(buf: *mut u8, len: usize) -> i32>,
+    pub set_mic_gain: Option<unsafe extern "C" fn(db: u8) -> i32>,
 }
 
 unsafe impl Send for HalAudioDriver {}

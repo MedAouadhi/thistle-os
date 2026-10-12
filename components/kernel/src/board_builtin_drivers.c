@@ -331,9 +331,11 @@ esp_err_t board_builtin_driver_init(const char *id, const char *hal_type,
     }
 
     // ── Audio: ES8311 codec ─────────────────────────────────────────────────
-    // `i2s_data` is the SoC's data out, which lands on the codec's DSDIN. The
-    // amplifier enable is named separately because on the T-Deck Max it is an
-    // IO expander pin the driver gates around playback, not a static rail.
+    // `i2s_data` is the SoC's data out, which lands on the codec's DSDIN, and
+    // `i2s_din` the SoC's data in, from the codec's ASDOUT: the microphone.
+    // A profile without `i2s_din` gets playback alone. The amplifier enable is
+    // named separately because on the T-Deck Max it is an IO expander pin the
+    // driver gates around playback, not a static rail.
     if (strcmp(id, "com.thistle.drv.audio-es8311") == 0) {
         static audio_es8311_config_t cfg;
         int i2c_bus_idx = json_int(config_json, "i2c_bus", 0);
@@ -344,12 +346,14 @@ esp_err_t board_builtin_driver_init(const char *id, const char *hal_type,
         cfg.pin_bclk         = json_int(config_json, "i2s_bck",  -1);
         cfg.pin_ws           = json_int(config_json, "i2s_ws",   -1);
         cfg.pin_dout         = json_int(config_json, "i2s_data", -1);
+        cfg.pin_din          = json_int(config_json, "i2s_din",  -1);
         cfg.amp_expander     = json_int(config_json, "amp_expander", -1);
         cfg.amp_expander_pin = json_int(config_json, "amp_expander_pin", 0);
         ESP_LOGI(TAG, "audio-es8311: i2c_bus=%p addr=0x%02x i2s=%d mclk=%d bck=%d ws=%d "
-                      "data=%d amp_exp=%d/%d",
+                      "data=%d din=%d amp_exp=%d/%d",
                  cfg.i2c_bus, cfg.i2c_addr, cfg.i2s_num, cfg.pin_mclk, cfg.pin_bclk,
-                 cfg.pin_ws, cfg.pin_dout, (int)cfg.amp_expander, (int)cfg.amp_expander_pin);
+                 cfg.pin_ws, cfg.pin_dout, cfg.pin_din,
+                 (int)cfg.amp_expander, (int)cfg.amp_expander_pin);
         return hal_audio_register(drv_audio_es8311_get(), &cfg);
     }
 

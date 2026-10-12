@@ -52,6 +52,12 @@ static OPEN_APP_FILES: Mutex<[Option<AppFileOwner>; MAX_OPEN_APP_FILES]> =
 const UNSIGNED_APP_SYMBOLS: &[&str] = &["thistle_msg_recv", "thistle_msg_send"];
 
 const APP_VISIBLE_SYMBOLS: &[&str] = &[
+    "thistle_audio_configure",
+    "thistle_audio_play",
+    "thistle_audio_record",
+    "thistle_audio_set_mic_gain",
+    "thistle_audio_set_volume",
+    "thistle_audio_stop",
     "thistle_crypto_aes128_ecb_decrypt",
     "thistle_crypto_aes128_ecb_encrypt",
     "thistle_crypto_aes256_cbc_decrypt",
@@ -697,6 +703,102 @@ unsafe extern "C" fn thistle_power_get_battery_pct_impl() -> u8 {
         }
     }
     0
+}
+
+// ── Audio: the speaker and microphone, through whichever driver registered ─
+//
+// Every call returns an esp_err_t. A board with no audio driver, or a driver
+// with no input side, answers ESP_ERR_NOT_SUPPORTED, so an app can tell "no
+// microphone here" from a failure. The driver serialises each direction, so
+// two players take turns, while a player and a recorder run side by side.
+
+const ESP_ERR_INVALID_ARG: i32 = 0x102;
+const ESP_ERR_NOT_SUPPORTED: i32 = 0x106;
+
+/// The registered audio driver, if any.
+unsafe fn audio_driver() -> Option<&'static crate::hal_registry::HalAudioDriver> {
+    let reg = crate::hal_registry::registry();
+    if reg.audio.is_null() {
+        None
+    } else {
+        Some(&*reg.audio)
+    }
+}
+
+/// Both ends of an app's buffer must lie in memory an app may hand the
+/// kernel: checking the start alone would let a long `len` run on into
+/// internal RAM.
+unsafe fn audio_buffer_allowed(ptr: *const u8, len: usize) -> bool {
+    if ptr.is_null() || len == 0 {
+        return false;
+    }
+    let last = (ptr as usize).checked_add(len - 1);
+    match last {
+        Some(last) => {
+            syscall_is_ptr_allowed(ptr as *const c_void)
+                && syscall_is_ptr_allowed(last as *const c_void)
+        }
+        None => false,
+    }
+}
+
+unsafe extern "C" fn thistle_audio_play_impl(data: *const u8, len: usize) -> i32 {
+    if !audio_buffer_allowed(data, len) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    match audio_driver().and_then(|d| d.play) {
+        Some(play) => play(data, len),
+        None => ESP_ERR_NOT_SUPPORTED,
+    }
+}
+
+unsafe extern "C" fn thistle_audio_record_impl(buf: *mut u8, len: usize) -> i32 {
+    if !audio_buffer_allowed(buf, len) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    match audio_driver().and_then(|d| d.record) {
+        Some(record) => record(buf, len),
+        None => ESP_ERR_NOT_SUPPORTED,
+    }
+}
+
+unsafe extern "C" fn thistle_audio_stop_impl() -> i32 {
+    match audio_driver().and_then(|d| d.stop) {
+        Some(stop) => stop(),
+        None => ESP_ERR_NOT_SUPPORTED,
+    }
+}
+
+unsafe extern "C" fn thistle_audio_set_volume_impl(percent: u8) -> i32 {
+    match audio_driver().and_then(|d| d.set_volume) {
+        Some(set_volume) => set_volume(percent),
+        None => ESP_ERR_NOT_SUPPORTED,
+    }
+}
+
+unsafe extern "C" fn thistle_audio_set_mic_gain_impl(db: u8) -> i32 {
+    match audio_driver().and_then(|d| d.set_mic_gain) {
+        Some(set_mic_gain) => set_mic_gain(db),
+        None => ESP_ERR_NOT_SUPPORTED,
+    }
+}
+
+/// Takes the format as scalars rather than a struct, so an app need not
+/// place a three-field struct in memory the pointer check accepts.
+unsafe extern "C" fn thistle_audio_configure_impl(
+    sample_rate: u32,
+    bits_per_sample: u8,
+    channels: u8,
+) -> i32 {
+    let cfg = crate::hal_registry::HalAudioConfig {
+        sample_rate,
+        bits_per_sample,
+        channels,
+    };
+    match audio_driver().and_then(|d| d.configure) {
+        Some(configure) => configure(&cfg),
+        None => ESP_ERR_NOT_SUPPORTED,
+    }
 }
 
 // ── File I/O syscall wrappers ─────────────────────────────────────────
@@ -1654,6 +1756,36 @@ static SYSCALL_TABLE: &[SyscallEntry] = &[
         hal_storage_register as unsafe extern "C" fn(*const c_void, *const c_void) -> i32
     ),
     entry!(
+        "thistle_audio_configure",
+        thistle_audio_configure_impl as unsafe extern "C" fn(u32, u8, u8) -> i32,
+        PERM_AUDIO
+    ),
+    entry!(
+        "thistle_audio_play",
+        thistle_audio_play_impl as unsafe extern "C" fn(*const u8, usize) -> i32,
+        PERM_AUDIO
+    ),
+    entry!(
+        "thistle_audio_record",
+        thistle_audio_record_impl as unsafe extern "C" fn(*mut u8, usize) -> i32,
+        PERM_AUDIO
+    ),
+    entry!(
+        "thistle_audio_set_mic_gain",
+        thistle_audio_set_mic_gain_impl as unsafe extern "C" fn(u8) -> i32,
+        PERM_AUDIO
+    ),
+    entry!(
+        "thistle_audio_set_volume",
+        thistle_audio_set_volume_impl as unsafe extern "C" fn(u8) -> i32,
+        PERM_AUDIO
+    ),
+    entry!(
+        "thistle_audio_stop",
+        thistle_audio_stop_impl as unsafe extern "C" fn() -> i32,
+        PERM_AUDIO
+    ),
+    entry!(
         "thistle_crypto_aes128_ecb_decrypt",
         thistle_crypto_aes128_ecb_decrypt
             as unsafe extern "C" fn(*const u8, *const u8, usize, *mut u8) -> i32
@@ -2144,6 +2276,36 @@ static SYSCALL_TABLE: &[SyscallEntry] = &[
     entry!(
         "hal_storage_register",
         hal_storage_register as unsafe extern "C" fn(*const c_void, *const c_void) -> i32
+    ),
+    entry!(
+        "thistle_audio_configure",
+        thistle_audio_configure_impl as unsafe extern "C" fn(u32, u8, u8) -> i32,
+        PERM_AUDIO
+    ),
+    entry!(
+        "thistle_audio_play",
+        thistle_audio_play_impl as unsafe extern "C" fn(*const u8, usize) -> i32,
+        PERM_AUDIO
+    ),
+    entry!(
+        "thistle_audio_record",
+        thistle_audio_record_impl as unsafe extern "C" fn(*mut u8, usize) -> i32,
+        PERM_AUDIO
+    ),
+    entry!(
+        "thistle_audio_set_mic_gain",
+        thistle_audio_set_mic_gain_impl as unsafe extern "C" fn(u8) -> i32,
+        PERM_AUDIO
+    ),
+    entry!(
+        "thistle_audio_set_volume",
+        thistle_audio_set_volume_impl as unsafe extern "C" fn(u8) -> i32,
+        PERM_AUDIO
+    ),
+    entry!(
+        "thistle_audio_stop",
+        thistle_audio_stop_impl as unsafe extern "C" fn() -> i32,
+        PERM_AUDIO
     ),
     entry!(
         "thistle_crypto_aes128_ecb_decrypt",
@@ -2749,6 +2911,176 @@ mod tests {
         );
 
         unsafe { syscall_set_current_app(std::ptr::null(), -1) };
+    }
+
+    #[test]
+    fn test_audio_syscalls_resolve_only_with_the_audio_permission() {
+        permissions::init();
+        let app_id = std::ffi::CString::new("app.recorder").unwrap();
+        unsafe { syscall_set_current_app(app_id.as_ptr(), 0) };
+
+        let names = [
+            "thistle_audio_configure",
+            "thistle_audio_play",
+            "thistle_audio_record",
+            "thistle_audio_set_mic_gain",
+            "thistle_audio_set_volume",
+            "thistle_audio_stop",
+        ];
+        for name in names {
+            let sym = std::ffi::CString::new(name).unwrap();
+            assert!(
+                unsafe { syscall_resolve_signed_app(sym.as_ptr()) }.is_null(),
+                "{name} must be denied without the audio permission"
+            );
+        }
+
+        permissions::grant("app.recorder", PERM_AUDIO);
+        for name in names {
+            let sym = std::ffi::CString::new(name).unwrap();
+            assert!(
+                !unsafe { syscall_resolve_signed_app(sym.as_ptr()) }.is_null(),
+                "{name} must resolve once audio is granted"
+            );
+        }
+
+        unsafe { syscall_set_current_app(std::ptr::null(), -1) };
+    }
+
+    // A driver stand-in that records what reached it.
+    static AUDIO_CALLS: Mutex<Vec<(&'static str, usize)>> = Mutex::new(Vec::new());
+
+    unsafe extern "C" fn fake_audio_play(_data: *const u8, len: usize) -> i32 {
+        AUDIO_CALLS.lock().unwrap().push(("play", len));
+        0
+    }
+    unsafe extern "C" fn fake_audio_record(buf: *mut u8, len: usize) -> i32 {
+        std::ptr::write_bytes(buf, 0x5A, len);
+        AUDIO_CALLS.lock().unwrap().push(("record", len));
+        0
+    }
+    unsafe extern "C" fn fake_audio_configure(
+        cfg: *const crate::hal_registry::HalAudioConfig,
+    ) -> i32 {
+        let cfg = &*cfg;
+        AUDIO_CALLS
+            .lock()
+            .unwrap()
+            .push(("configure", cfg.sample_rate as usize));
+        AUDIO_CALLS
+            .lock()
+            .unwrap()
+            .push(("bits", cfg.bits_per_sample as usize));
+        AUDIO_CALLS
+            .lock()
+            .unwrap()
+            .push(("channels", cfg.channels as usize));
+        0
+    }
+
+    fn fake_audio_driver(with_input: bool) -> &'static crate::hal_registry::HalAudioDriver {
+        Box::leak(Box::new(crate::hal_registry::HalAudioDriver {
+            init: None,
+            deinit: None,
+            play: Some(fake_audio_play),
+            stop: None,
+            set_volume: None,
+            configure: Some(fake_audio_configure),
+            name: b"fake\0".as_ptr() as *const c_char,
+            record: if with_input {
+                Some(fake_audio_record)
+            } else {
+                None
+            },
+            set_mic_gain: None,
+        }))
+    }
+
+    fn with_audio_driver(
+        driver: Option<&'static crate::hal_registry::HalAudioDriver>,
+        f: impl FnOnce(),
+    ) {
+        let previous = crate::hal_registry::registry().audio;
+        crate::hal_registry::registry_mut().audio =
+            driver.map_or(std::ptr::null(), |d| d as *const _);
+        AUDIO_CALLS.lock().unwrap().clear();
+        f();
+        crate::hal_registry::registry_mut().audio = previous;
+    }
+
+    #[test]
+    fn test_audio_without_a_driver_answers_not_supported() {
+        let mut buf = vec![0u8; 64];
+        with_audio_driver(None, || unsafe {
+            assert_eq!(thistle_audio_play_impl(buf.as_ptr(), buf.len()), 0x106);
+            assert_eq!(
+                thistle_audio_record_impl(buf.as_mut_ptr(), buf.len()),
+                0x106
+            );
+            assert_eq!(thistle_audio_stop_impl(), 0x106);
+            assert_eq!(thistle_audio_set_volume_impl(50), 0x106);
+            assert_eq!(thistle_audio_set_mic_gain_impl(24), 0x106);
+            assert_eq!(thistle_audio_configure_impl(16000, 16, 1), 0x106);
+        });
+    }
+
+    #[test]
+    fn test_audio_record_on_an_output_only_driver_answers_not_supported() {
+        let mut buf = vec![0u8; 64];
+        with_audio_driver(Some(fake_audio_driver(false)), || unsafe {
+            assert_eq!(
+                thistle_audio_record_impl(buf.as_mut_ptr(), buf.len()),
+                0x106
+            );
+            assert_eq!(thistle_audio_set_mic_gain_impl(24), 0x106);
+            // Its output side still works.
+            assert_eq!(thistle_audio_play_impl(buf.as_ptr(), buf.len()), 0);
+        });
+    }
+
+    #[test]
+    fn test_audio_calls_reach_the_driver() {
+        let mut buf = vec![0u8; 64];
+        with_audio_driver(Some(fake_audio_driver(true)), || unsafe {
+            assert_eq!(thistle_audio_configure_impl(16000, 16, 1), 0);
+            assert_eq!(thistle_audio_record_impl(buf.as_mut_ptr(), buf.len()), 0);
+            assert_eq!(thistle_audio_play_impl(buf.as_ptr(), 32), 0);
+            assert_eq!(
+                *AUDIO_CALLS.lock().unwrap(),
+                vec![
+                    ("configure", 16000),
+                    ("bits", 16),
+                    ("channels", 1),
+                    ("record", 64),
+                    ("play", 32)
+                ]
+            );
+        });
+        assert!(
+            buf.iter().all(|&b| b == 0x5A),
+            "the recording lands in the app's buffer"
+        );
+    }
+
+    #[test]
+    fn test_audio_refuses_buffers_outside_app_memory() {
+        let mut buf = vec![0u8; 64];
+        with_audio_driver(Some(fake_audio_driver(true)), || unsafe {
+            assert_eq!(thistle_audio_record_impl(std::ptr::null_mut(), 64), 0x102);
+            assert_eq!(thistle_audio_play_impl(std::ptr::null(), 64), 0x102);
+            assert_eq!(thistle_audio_record_impl(buf.as_mut_ptr(), 0), 0x102);
+            // A start in app memory with a length that wraps the address space.
+            assert_eq!(
+                thistle_audio_record_impl(buf.as_mut_ptr(), usize::MAX),
+                0x102
+            );
+            // A start below what an app can own.
+            assert_eq!(thistle_audio_play_impl(1usize as *const u8, 64), 0x102);
+            assert!(
+                AUDIO_CALLS.lock().unwrap().is_empty(),
+                "nothing reached the driver"
+            );
+        });
     }
 
     #[test]

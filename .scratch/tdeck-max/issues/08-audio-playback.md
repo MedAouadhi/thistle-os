@@ -143,3 +143,7 @@ The two-axis review found three real defects. Each got a failing test first:
 The final build was flashed and boots with `es8311: initialized`. The
 re-verification is of init only: the tone probe was not re-run after these
 fixes, which touch the timeout and lifetime paths that the host tests cover.
+
+### Follow-up: capture and the app API, in ticket 12
+
+Both gaps above are closed in `12-audio-capture-and-app-api.md`. The HAL has `record` and `set_mic_gain`, the microphone's data line is GPIO17 (`i2s_din`), and apps reach audio through `thistle_audio_*` syscalls under the `audio` permission.

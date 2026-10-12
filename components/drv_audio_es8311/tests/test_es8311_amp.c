@@ -3,7 +3,9 @@
 // Host tests for the ES8311 driver's amplifier gating. The T-Deck Max's
 // speaker amplifier hisses and draws current whenever its enable line is high,
 // and that line floats high until something drives it, so these pin down that
-// the driver claims it at init and raises it only around playback.
+// the driver claims it at init and raises it only around playback. Recording
+// shares the codec with playback, so the capture tests pin down that a record
+// brings the codec up without ever raising the amplifier.
 
 #include <assert.h>
 #include <stdio.h>
@@ -20,7 +22,7 @@ static audio_es8311_config_t config(void)
 {
     return (audio_es8311_config_t){
         .i2s_num = 0, .i2c_bus = (void *)1, .i2c_addr = 0x18,
-        .pin_mclk = 38, .pin_bclk = 39, .pin_ws = 18, .pin_dout = 40,
+        .pin_mclk = 38, .pin_bclk = 39, .pin_ws = 18, .pin_dout = 40, .pin_din = 17,
         .amp_expander = AMP_EXPANDER, .amp_expander_pin = AMP_PIN,
     };
 }
@@ -33,7 +35,9 @@ static void reset(void)
     s_codec_create_result = ESP_OK;
     s_expander_result = ESP_OK;
     s_during_write = NULL;
+    s_during_read = NULL;
     s_expander_calls = 0;
+    s_now_us = 1000000;
 }
 
 static void init_with(audio_es8311_config_t cfg)
@@ -51,6 +55,26 @@ static size_t index_of(shim_event_kind_t kind)
     return 0;
 }
 
+static size_t last_index_of(shim_event_kind_t kind)
+{
+    for (size_t i = s_event_count; i-- > 0;) {
+        if (s_events[i].kind == kind) return i;
+    }
+    assert(!"event never happened");
+    return 0;
+}
+
+// Bytes read from the codec and thrown away before the caller's own read,
+// which is the last read in the log.
+static size_t dropped_bytes(void)
+{
+    size_t n = 0, last = last_index_of(EV_CODEC_READ);
+    for (size_t i = 0; i < last; i++) {
+        if (s_events[i].kind == EV_CODEC_READ) n += s_events[i].arg;
+    }
+    return n;
+}
+
 static size_t count_of(shim_event_kind_t kind)
 {
     size_t n = 0;
@@ -59,6 +83,7 @@ static size_t count_of(shim_event_kind_t kind)
 }
 
 static const uint8_t PCM[64];
+static uint8_t MIC[64];
 
 static void test_init_drives_the_amplifier_off_before_touching_the_codec(void)
 {
@@ -175,10 +200,10 @@ static void test_an_idle_timeout_that_finds_the_driver_busy_tries_again(void)
     // Not every holder of the lock is a play that will re-arm the timer — a
     // volume change is not. A timeout that just stood down would leave the
     // amplifier on for good.
-    s_mutex_storage = 1;
+    *s_audio.lock = 1;
     s_timer.armed = false;  // it has just fired
     s_timer.callback(s_timer.arg);
-    s_mutex_storage = 0;
+    *s_audio.lock = 0;
     assert(count_of(EV_AMP_OFF) == 0);
     assert(s_timer.armed);
 
@@ -279,6 +304,216 @@ static void test_play_refuses_nothing_to_play(void)
     assert(count_of(EV_AMP_ON) == 0);
 }
 
+static void test_record_opens_the_codec_and_leaves_the_amplifier_off(void)
+{
+    reset();
+    init_with(config());
+    assert(drv->record(MIC, sizeof(MIC)) == ESP_OK);
+
+    assert(index_of(EV_CODEC_OPEN) < index_of(EV_CODEC_READ));
+    assert(s_events[last_index_of(EV_CODEC_READ)].arg == sizeof(MIC));
+    assert(count_of(EV_AMP_ON) == 0);
+}
+
+static void test_record_applies_the_mic_gain_before_reading(void)
+{
+    reset();
+    init_with(config());
+    assert(drv->set_mic_gain(30) == ESP_OK);
+    assert(count_of(EV_CODEC_MIC_GAIN) == 0);
+
+    assert(drv->record(MIC, sizeof(MIC)) == ESP_OK);
+    assert(s_events[index_of(EV_CODEC_MIC_GAIN)].arg == 30);
+    assert(index_of(EV_CODEC_MIC_GAIN) < index_of(EV_CODEC_READ));
+
+    // Applied at once while open, and held to the preamp's 42 dB ceiling.
+    s_event_count = 0;
+    assert(drv->set_mic_gain(60) == ESP_OK);
+    assert(s_events[index_of(EV_CODEC_MIC_GAIN)].arg == 42);
+}
+
+static void test_play_while_recording_raises_the_amplifier_without_reopening(void)
+{
+    reset();
+    init_with(config());
+    assert(drv->record(MIC, sizeof(MIC)) == ESP_OK);
+    assert(drv->play(PCM, sizeof(PCM)) == ESP_OK);
+    assert(drv->record(MIC, sizeof(MIC)) == ESP_OK);
+
+    assert(count_of(EV_CODEC_OPEN) == 1);
+    assert(count_of(EV_AMP_ON) == 1);
+    size_t callers_reads = 0;
+    for (size_t i = 0; i < s_event_count; i++) {
+        callers_reads += s_events[i].kind == EV_CODEC_READ && s_events[i].arg == sizeof(MIC);
+    }
+    assert(callers_reads == 2);
+}
+
+static void test_a_recorder_that_stops_reading_has_the_codec_closed(void)
+{
+    reset();
+    init_with(config());
+    assert(drv->record(MIC, sizeof(MIC)) == ESP_OK);
+    assert(s_timer.armed);
+    s_event_count = 0;
+
+    assert(shim_fire_idle_timer());
+    assert(count_of(EV_CODEC_CLOSE) == 1);
+}
+
+static void test_a_board_without_a_mic_line_refuses_to_record(void)
+{
+    reset();
+    audio_es8311_config_t cfg = config();
+    cfg.pin_din = -1;
+    init_with(cfg);
+
+    assert(drv->record(MIC, sizeof(MIC)) == ESP_ERR_NOT_SUPPORTED);
+    assert(drv->set_mic_gain(24) == ESP_ERR_NOT_SUPPORTED);
+    assert(count_of(EV_CODEC_OPEN) == 0);
+
+    // Playback is unaffected, and never touches a gain it has no use for.
+    assert(drv->play(PCM, sizeof(PCM)) == ESP_OK);
+    assert(count_of(EV_CODEC_MIC_GAIN) == 0);
+}
+
+static void test_record_refuses_nowhere_to_put_it(void)
+{
+    reset();
+    init_with(config());
+    assert(drv->record(NULL, 4) == ESP_ERR_INVALID_ARG);
+    assert(drv->record(MIC, 0) == ESP_ERR_INVALID_ARG);
+    assert(count_of(EV_CODEC_OPEN) == 0);
+}
+
+// The microphone's bias network takes about 400 ms to settle after the codec
+// powers up: full-scale swings for the first ~75 ms, then a decaying DC
+// offset. Measured on a T-Deck Max at 8, 16, 44.1 and 48 kHz (ticket 12).
+#define FRAMES_44K_SETTLING (44100 * 400 / 1000)
+#define RING_FRAMES         (6 * 240)
+
+static void test_a_record_that_opens_the_codec_drops_the_settling_audio_first(void)
+{
+    reset();
+    init_with(config());
+    assert(drv->record(MIC, sizeof(MIC)) == ESP_OK);
+
+    // 44.1 kHz stereo 16-bit by default: four bytes a frame.
+    assert(dropped_bytes() == FRAMES_44K_SETTLING * 4);
+    assert(s_events[last_index_of(EV_CODEC_READ)].arg == sizeof(MIC));
+
+    // Once settled, the next take is the caller's alone.
+    s_event_count = 0;
+    assert(drv->record(MIC, sizeof(MIC)) == ESP_OK);
+    assert(count_of(EV_CODEC_READ) == 1);
+}
+
+static void test_the_settling_time_is_counted_at_the_recording_format(void)
+{
+    reset();
+    init_with(config());
+    hal_audio_config_t fs = { .sample_rate = 16000, .bits_per_sample = 16, .channels = 1 };
+    assert(drv->configure(&fs) == ESP_OK);
+    assert(drv->record(MIC, sizeof(MIC)) == ESP_OK);
+    assert(dropped_bytes() == 16000 * 400 / 1000 * 2);
+}
+
+static void test_a_record_long_after_playback_opened_the_codec_drops_nothing(void)
+{
+    reset();
+    init_with(config());
+    assert(drv->play(PCM, sizeof(PCM)) == ESP_OK);
+    s_now_us += 2000000;
+    s_event_count = 0;
+
+    assert(drv->record(MIC, sizeof(MIC)) == ESP_OK);
+    assert(count_of(EV_CODEC_READ) == 1);
+}
+
+static void test_a_record_soon_after_playback_opened_the_codec_drops_the_rest(void)
+{
+    reset();
+    init_with(config());
+    assert(drv->play(PCM, sizeof(PCM)) == ESP_OK);
+    // 100 ms on, the I2S ring holds only its last 1440 frames, captured
+    // between 67 and 100 ms; the settling runs on to 400 ms.
+    s_now_us += 100000;
+    s_event_count = 0;
+
+    assert(drv->record(MIC, sizeof(MIC)) == ESP_OK);
+    assert(dropped_bytes() == (size_t)(FRAMES_44K_SETTLING - (4410 - RING_FRAMES)) * 4);
+}
+
+static void test_a_codec_reopened_after_going_idle_settles_again(void)
+{
+    reset();
+    init_with(config());
+    assert(drv->record(MIC, sizeof(MIC)) == ESP_OK);
+    assert(shim_fire_idle_timer());
+    s_now_us += 5000000;
+    s_event_count = 0;
+
+    assert(drv->record(MIC, sizeof(MIC)) == ESP_OK);
+    assert(dropped_bytes() == FRAMES_44K_SETTLING * 4);
+}
+
+// ── Two directions at once ──────────────────────────────────────────────────
+// A player and a recorder in different tasks must not queue behind each
+// other's I/O: a write blocks for as long as its audio takes to play, and a
+// reader held off that long loses what overflowed the DMA ring meanwhile.
+
+static int s_io_checks;
+
+static void io_holds_only_its_own_direction_tx(void)
+{
+    assert(*s_audio.tx_lock == 1);
+    assert(*s_audio.rx_lock == 0);
+    assert(*s_audio.lock == 0);
+    s_io_checks++;
+}
+
+static void io_holds_only_its_own_direction_rx(void)
+{
+    assert(*s_audio.rx_lock == 1);
+    assert(*s_audio.tx_lock == 0);
+    assert(*s_audio.lock == 0);
+    s_io_checks++;
+}
+
+static void test_a_write_holds_only_the_playback_side(void)
+{
+    reset();
+    init_with(config());
+    s_io_checks = 0;
+    s_during_write = io_holds_only_its_own_direction_tx;
+    assert(drv->play(PCM, sizeof(PCM)) == ESP_OK);
+    assert(s_io_checks == 1);
+}
+
+static void test_a_read_and_its_settling_drop_hold_only_the_capture_side(void)
+{
+    reset();
+    init_with(config());
+    s_io_checks = 0;
+    s_during_read = io_holds_only_its_own_direction_rx;
+    assert(drv->record(MIC, sizeof(MIC)) == ESP_OK);
+    assert(s_io_checks > 1);  // the drop's reads and the caller's
+}
+
+static void test_an_idle_timeout_that_lands_during_a_read_is_ignored(void)
+{
+    reset();
+    init_with(config());
+    assert(drv->record(MIC, sizeof(MIC)) == ESP_OK);
+
+    s_during_read = fire_idle_timer_mid_write;
+    s_event_count = 0;
+    assert(drv->record(MIC, sizeof(MIC)) == ESP_OK);
+
+    assert(count_of(EV_CODEC_CLOSE) == 0);
+    assert(s_timer.armed);
+}
+
 int main(void)
 {
     test_init_drives_the_amplifier_off_before_touching_the_codec();
@@ -297,6 +532,20 @@ int main(void)
     test_deinit_while_playing_silences_before_tearing_down();
     test_a_board_without_an_amplifier_line_never_touches_an_expander();
     test_play_refuses_nothing_to_play();
-    puts("es8311 amplifier gating: all tests passed");
+    test_record_opens_the_codec_and_leaves_the_amplifier_off();
+    test_record_applies_the_mic_gain_before_reading();
+    test_play_while_recording_raises_the_amplifier_without_reopening();
+    test_a_recorder_that_stops_reading_has_the_codec_closed();
+    test_a_board_without_a_mic_line_refuses_to_record();
+    test_record_refuses_nowhere_to_put_it();
+    test_a_record_that_opens_the_codec_drops_the_settling_audio_first();
+    test_the_settling_time_is_counted_at_the_recording_format();
+    test_a_record_long_after_playback_opened_the_codec_drops_nothing();
+    test_a_record_soon_after_playback_opened_the_codec_drops_the_rest();
+    test_a_codec_reopened_after_going_idle_settles_again();
+    test_a_write_holds_only_the_playback_side();
+    test_a_read_and_its_settling_drop_hold_only_the_capture_side();
+    test_an_idle_timeout_that_lands_during_a_read_is_ignored();
+    puts("es8311 amplifier gating and capture: all tests passed");
     return 0;
 }

@@ -144,6 +144,7 @@
                 "i2s_bck": 39,
                 "i2s_ws": 18,
                 "i2s_data": 40,
+                "i2s_din": 17,
                 "amp_expander": 0,
                 "amp_expander_pin": 6
             }

@@ -56,6 +56,30 @@ extern void thistle_input_register_cb(thistle_input_cb_t cb);
 extern int thistle_radio_send(const uint8_t *data, size_t len);
 extern int thistle_radio_set_freq(uint32_t freq_hz);
 
+/* Audio (requires the "audio" permission). The speaker and the microphone
+ * share one format: a codec that plays and records runs both from one word
+ * clock. Samples are signed little-endian PCM, channels interleaved; the
+ * default is 44100 Hz, 16-bit, stereo. Buffers must come from
+ * thistle_malloc. Each call returns an esp_err_t: 0 on success,
+ * ESP_ERR_NOT_SUPPORTED (0x106) on a device with no speaker or no
+ * microphone, ESP_ERR_INVALID_ARG (0x102) for a buffer the kernel will not
+ * touch.
+ *
+ * play and record block until the data has gone out or come in. A task that
+ * plays and another that records run side by side; two players, or two
+ * recorders, take turns. The first record after the codec has been idle
+ * waits about 400 ms for the microphone to settle, and the audio from that
+ * time is dropped rather than returned. The speaker's amplifier is only on
+ * while sound is playing, and the device powers the codec down half a second
+ * after the last call, or at once on stop. In stereo the microphone, which
+ * is mono, is in both channels. */
+extern int thistle_audio_configure(uint32_t sample_rate, uint8_t bits_per_sample, uint8_t channels);
+extern int thistle_audio_play(const uint8_t *data, size_t len);
+extern int thistle_audio_record(uint8_t *buf, size_t len);
+extern int thistle_audio_stop(void);
+extern int thistle_audio_set_volume(uint8_t percent);      /* 0-100 */
+extern int thistle_audio_set_mic_gain(uint8_t db);         /* 0-42, in 6 dB steps */
+
 /* GPS */
 extern int thistle_gps_enable(void);
 extern int thistle_gps_get_lat_lon(double *lat, double *lon);

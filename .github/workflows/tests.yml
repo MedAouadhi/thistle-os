@@ -115,7 +115,7 @@ jobs:
             -o /tmp/test_sx1262_lifecycle
           /tmp/test_sx1262_lifecycle
 
-      - name: Test ES8311 amplifier gating
+      - name: Test ES8311 amplifier gating and capture
         run: |
           cc -std=c11 -Wall -Wextra -Werror \
             -fsanitize=address,undefined -fno-omit-frame-pointer \
