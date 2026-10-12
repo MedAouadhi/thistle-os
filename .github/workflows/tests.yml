@@ -133,15 +133,25 @@ jobs:
             -o /tmp/test_epaper_packed_blit
           /tmp/test_epaper_packed_blit
 
-      - name: Test assistant request bounds under sanitizers
+      - name: Test assistant requests, replies and config under sanitizers
         run: |
           cc -std=c11 -Wall -Wextra -Werror \
             -fsanitize=address,undefined -fno-omit-frame-pointer \
             -Icomponents/apps_builtin/assistant \
+            components/apps_builtin/assistant/assistant_json.c \
             components/apps_builtin/assistant/assistant_request.c \
             components/apps_builtin/assistant/tests/test_assistant_request.c \
             -o /tmp/test_assistant_request
           /tmp/test_assistant_request
+          cc -std=c11 -Wall -Wextra -Werror \
+            -fsanitize=address,undefined -fno-omit-frame-pointer \
+            -Icomponents/apps_builtin/assistant \
+            components/apps_builtin/assistant/assistant_json.c \
+            components/apps_builtin/assistant/assistant_request.c \
+            components/apps_builtin/assistant/assistant_config.c \
+            components/apps_builtin/assistant/tests/test_assistant_config.c \
+            -o /tmp/test_assistant_config
+          /tmp/test_assistant_config
 
       - name: Test Reader EPUB parsing and Arabic shaping under sanitizers
         run: apps/reader/tests/run_tests.sh
@@ -323,6 +333,10 @@ jobs:
       - name: Run e-paper partial flush regression tests
         working-directory: simulator
         run: python3 tests/test_epaper_partial_flush.py --sim build/thistle_sim
+
+      - name: Run Assistant chat and setup tests
+        working-directory: simulator
+        run: python3 tests/test_assistant_chat.py --sim build/thistle_sim
 
       - name: Upload launcher framebuffer failures
         if: failure()

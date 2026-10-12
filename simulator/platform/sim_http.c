@@ -16,6 +16,13 @@
 struct sim_http_client {
     char   url[512];
     int    timeout_ms;
+    bool   follow_redirects;
+    void  *event_handler;
+    void  *user_data;
+    char   method[8];
+    struct curl_slist *headers;
+    char  *post_data;
+    size_t post_len;
     char  *response_buf;
     size_t response_len;
     size_t response_cap;
@@ -57,6 +64,10 @@ sim_http_client_handle_t sim_http_client_init(const sim_http_client_config_t *co
 
     strncpy(c->url, config->url, sizeof(c->url) - 1);
     c->timeout_ms   = config->timeout_ms > 0 ? config->timeout_ms : 15000;
+    c->follow_redirects = !config->disable_auto_redirect;
+    c->event_handler = config->event_handler;
+    c->user_data     = config->user_data;
+    strcpy(c->method, "GET");
     c->response_cap = 4096;
     c->response_buf = malloc(c->response_cap);
     if (!c->response_buf) { free(c); return NULL; }
@@ -67,8 +78,58 @@ sim_http_client_handle_t sim_http_client_init(const sim_http_client_config_t *co
 void sim_http_client_cleanup(sim_http_client_handle_t client)
 {
     if (!client) return;
+    curl_slist_free_all(client->headers);
+    free(client->post_data);
     free(client->response_buf);
     free(client);
+}
+
+/* ── Request setup ────────────────────────────────────────────────── */
+
+esp_err_t sim_http_client_set_method(sim_http_client_handle_t client, const char *method)
+{
+    if (!client || !method || strlen(method) >= sizeof(client->method)) return ESP_FAIL;
+    strcpy(client->method, method);
+    return ESP_OK;
+}
+
+esp_err_t sim_http_client_set_header(sim_http_client_handle_t client,
+                                     const char *key, const char *value)
+{
+    if (!client || !key || !value) return ESP_FAIL;
+    size_t len = strlen(key) + strlen(value) + 3;
+    char *line = malloc(len);
+    if (!line) return ESP_FAIL;
+    snprintf(line, len, "%s: %s", key, value);
+    struct curl_slist *headers = curl_slist_append(client->headers, line);
+    free(line);
+    if (!headers) return ESP_FAIL;
+    client->headers = headers;
+    return ESP_OK;
+}
+
+esp_err_t sim_http_client_set_post_field(sim_http_client_handle_t client,
+                                         const char *data, int len)
+{
+    if (!client || len < 0 || (len > 0 && !data)) return ESP_FAIL;
+    char *copy = malloc((size_t)len + 1);
+    if (!copy) return ESP_FAIL;
+    if (len > 0) memcpy(copy, data, (size_t)len);
+    copy[len] = '\0';
+    free(client->post_data);
+    client->post_data = copy;
+    client->post_len  = (size_t)len;
+    return ESP_OK;
+}
+
+void *sim_http_client_get_event_handler(sim_http_client_handle_t client)
+{
+    return client ? client->event_handler : NULL;
+}
+
+void *sim_http_client_get_user_data(sim_http_client_handle_t client)
+{
+    return client ? client->user_data : NULL;
 }
 
 /* ── Buffered perform ─────────────────────────────────────────────── */
@@ -89,10 +150,36 @@ esp_err_t sim_http_client_perform(sim_http_client_handle_t client)
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,  write_callback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA,      client);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS,    (long)client->timeout_ms);
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, client->follow_redirects ? 1L : 0L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
 
+    /* An empty "Expect:" stops curl holding a large body back for a
+     * 100-continue that esp_http_client never waits for either. */
+    struct curl_slist *headers = client->headers;
+    struct curl_slist *with_expect = NULL;
+    if (client->post_data) {
+        with_expect = curl_slist_append(NULL, "Expect:");
+        for (struct curl_slist *h = client->headers; h && with_expect; h = h->next) {
+            struct curl_slist *next = curl_slist_append(with_expect, h->data);
+            if (!next) { curl_slist_free_all(with_expect); with_expect = NULL; break; }
+            with_expect = next;
+        }
+        headers = with_expect;
+    }
+    if (headers) curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    if (client->post_data) {
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS,    client->post_data);
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)client->post_len);
+    }
+    if (strcmp(client->method, "POST") == 0 && !client->post_data) {
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS,    "");
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, 0L);
+    } else if (strcmp(client->method, "GET") != 0 && strcmp(client->method, "POST") != 0) {
+        curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, client->method);
+    }
+
     CURLcode res = curl_easy_perform(curl);
+    curl_slist_free_all(with_expect);
 
     long http_code = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);

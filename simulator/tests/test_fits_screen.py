@@ -36,6 +36,10 @@ PASSWORD_DIALOG = ("120,69", "120,135", "120,166")
 # WiFi Scanner on a 240 px screen: Scan, the first network, then Connect,
 # which toasts that a secured network needs Settings.
 SCANNER_TOAST = ("162,38", "120,68", "46,218")
+# The Assistant's setup form, behind the gear at the right of its header.
+# Its URL field once scrolled a one-line URL sideways, off a 240 px panel.
+ASSISTANT_SETUP_240 = ("221,37",)
+ASSISTANT_SETUP_320 = ("301,37",)
 
 CASES = (
     Case("eink-max-password-dialog", "tdeck-max", "com.thistle.settings",
@@ -46,6 +50,12 @@ CASES = (
          PASSWORD_DIALOG, "attempting connect to"),
     Case("eink-max-toast", "tdeck-max", "com.thistle.wifiscanner",
          SCANNER_TOAST, "toast: Use Settings"),
+    Case("eink-max-assistant-setup", "tdeck-max", "com.thistle.assistant",
+         ASSISTANT_SETUP_240, "Setup open"),
+    Case("lcd-assistant-setup", "tdeck", "com.thistle.assistant",
+         ASSISTANT_SETUP_320, "Setup open"),
+    Case("cardputer-assistant-setup", "cardputer", "com.thistle.assistant",
+         ASSISTANT_SETUP_240, "Setup open"),
 )
 
 

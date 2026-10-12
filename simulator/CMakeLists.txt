@@ -49,7 +49,10 @@ set(THISTLE_SRCS
     ${THISTLE_DIR}/components/apps_builtin/messenger/messenger_ui.c
     ${THISTLE_DIR}/components/apps_builtin/messenger/messenger_transport.c
     ${THISTLE_DIR}/components/apps_builtin/assistant/assistant_app.c
+    ${THISTLE_DIR}/components/apps_builtin/assistant/assistant_config.c
+    ${THISTLE_DIR}/components/apps_builtin/assistant/assistant_json.c
     ${THISTLE_DIR}/components/apps_builtin/assistant/assistant_request.c
+    ${THISTLE_DIR}/components/apps_builtin/assistant/assistant_setup.c
     ${THISTLE_DIR}/components/apps_builtin/assistant/assistant_ui.c
     ${THISTLE_DIR}/components/apps_builtin/terminal/terminal_app.c
     ${THISTLE_DIR}/components/apps_builtin/terminal/terminal_ui.c

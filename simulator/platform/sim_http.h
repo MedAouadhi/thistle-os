@@ -6,6 +6,7 @@
  */
 
 #include "esp_err.h"
+#include <stdbool.h>
 #include <stddef.h>
 
 typedef struct sim_http_client *sim_http_client_handle_t;
@@ -13,6 +14,11 @@ typedef struct sim_http_client *sim_http_client_handle_t;
 typedef struct {
     const char *url;
     int timeout_ms;
+    bool disable_auto_redirect;
+    /* Kept for esp_http_client.h, which delivers the body to the handler
+     * once a request completes; sim_http itself never calls it. */
+    void *event_handler;
+    void *user_data;
 } sim_http_client_config_t;
 
 sim_http_client_handle_t sim_http_client_init(const sim_http_client_config_t *config);
@@ -26,3 +32,12 @@ int sim_http_client_fetch_headers(sim_http_client_handle_t client);
 int sim_http_client_read(sim_http_client_handle_t client, char *buf, int len);
 esp_err_t sim_http_client_close(sim_http_client_handle_t client);
 void sim_http_client_cleanup(sim_http_client_handle_t client);
+/* method is "GET", "POST", "PUT" or "DELETE". */
+esp_err_t sim_http_client_set_method(sim_http_client_handle_t client, const char *method);
+esp_err_t sim_http_client_set_header(sim_http_client_handle_t client,
+                                     const char *key, const char *value);
+/* Copies data; it is sent as the body of the next request. */
+esp_err_t sim_http_client_set_post_field(sim_http_client_handle_t client,
+                                         const char *data, int len);
+void *sim_http_client_get_event_handler(sim_http_client_handle_t client);
+void *sim_http_client_get_user_data(sim_http_client_handle_t client);
