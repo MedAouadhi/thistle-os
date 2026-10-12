@@ -30,6 +30,7 @@ set(THISTLE_SRCS
     ${THISTLE_DIR}/components/ui/src/app_switcher.c
     ${THISTLE_DIR}/components/ui/src/epaper_refresh.c
     ${THISTLE_DIR}/components/ui/src/toast.c
+    ${THISTLE_DIR}/components/ui/src/wm_select.c
     # Built-in apps
     ${THISTLE_DIR}/components/apps_builtin/lvgl_apps.c
     ${THISTLE_DIR}/components/apps_builtin/launcher/launcher_app.c
@@ -89,6 +90,7 @@ set(WASM_SRCS
     ${SIM_DIR}/drivers/sim_input.c
     ${SIM_DIR}/drivers/sim_storage.c
     ${SIM_DIR}/drivers/sim_network.c
+    ${SIM_DIR}/drivers/sim_cellular.c
     ${SIM_DIR}/drivers/sim_power.c
     ${SIM_DIR}/drivers/sim_gps.c
     ${SIM_DIR}/drivers/sim_imu.c
@@ -102,6 +104,7 @@ set(WASM_SRCS
     ${SIM_DIR}/devices/dev_qmi8658c.c
     ${SIM_DIR}/devices/dev_tca8418.c
     ${SIM_DIR}/devices/dev_cst328.c
+    ${SIM_DIR}/devices/dev_cst66xx.c
     ${SIM_DIR}/devices/dev_ltr553.c
     ${SIM_DIR}/devices/dev_xl9555.c
     ${SIM_DIR}/sim_assert.c
@@ -180,13 +183,15 @@ set(RUST_WASM_LIB "${KERNEL_RS_DIR}/target/${RUST_WASM_TARGET}/release/libthistl
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/build_rust_wasm.sh"
 "#!/bin/bash\nexport PATH=\"$ENV{HOME}/.cargo/bin:$PATH\"\ncd \"${KERNEL_RS_DIR}\"\ncargo build --release --target ${RUST_WASM_TARGET}\n")
 
-add_custom_command(
-    OUTPUT ${RUST_WASM_LIB}
+# Run cargo on every build; it does nothing when the Rust sources have not
+# changed. A custom command that only names the library as its output never
+# runs again once the library exists, and links one built from old sources.
+add_custom_target(kernel_rs_wasm_build
     COMMAND bash "${CMAKE_CURRENT_BINARY_DIR}/build_rust_wasm.sh"
+    BYPRODUCTS ${RUST_WASM_LIB}
     WORKING_DIRECTORY ${KERNEL_RS_DIR}
     COMMENT "Building Rust kernel for WASM (${RUST_WASM_TARGET})"
 )
-add_custom_target(kernel_rs_wasm_build DEPENDS ${RUST_WASM_LIB})
 add_dependencies(thistle_wasm kernel_rs_wasm_build)
 
 target_link_options(thistle_wasm PRIVATE
@@ -199,5 +204,8 @@ target_link_options(thistle_wasm PRIVATE
     --preload-file ${THISTLE_DIR}/simulator/sdcard@/thistle_sdcard
     --shell-file ${CMAKE_CURRENT_SOURCE_DIR}/shell.html
 )
+# The page is made at link time; relink when its template changes.
+set_property(TARGET thistle_wasm APPEND PROPERTY
+    LINK_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/shell.html)
 
 target_link_libraries(thistle_wasm PRIVATE ${RUST_WASM_LIB})

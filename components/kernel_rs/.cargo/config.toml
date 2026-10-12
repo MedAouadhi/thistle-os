@@ -4,5 +4,12 @@ target = "xtensa-esp32s3-espidf"
 [target.xtensa-esp32s3-espidf]
 linker = "ldproxy"
 
+# The browser simulator. Rust starts a thread inside catch_unwind, which on
+# Emscripten needs a WebAssembly exception tag (__cpp_exception) that the
+# simulator's link does not provide. Nothing in the kernel catches a panic,
+# so abort on one there instead of unwinding.
+[target.wasm32-unknown-emscripten]
+rustflags = ["-C", "panic=abort"]
+
 [unstable]
 build-std = ["std", "panic_abort"]

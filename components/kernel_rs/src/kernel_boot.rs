@@ -127,8 +127,10 @@ pub extern "C" fn kernel_init() -> i32 {
         *t = unsafe { esp_timer_get_time() };
     }
 
-    // The kernel worker, before any driver that runs jobs on it starts.
-    if !crate::kworker::start() {
+    // The kernel worker, before any driver that runs jobs on it starts. The
+    // browser simulator has no threads, so there the worker cannot start and
+    // its jobs never run, as the threads they replaced never started there.
+    if !crate::kworker::start() && !cfg!(target_os = "emscripten") {
         return ESP_FAIL;
     }
 
