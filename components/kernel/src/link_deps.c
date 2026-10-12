@@ -61,6 +61,21 @@ esp_err_t thistle_wifi_init(void)
     return ret;
 }
 
+// The FreeRTOS name of the threads the calling thread starts from now on, as
+// task lists and the debugger show them; NULL for esp_pthread's own,
+// "pthread". Rust's std::thread names a thread for Rust alone: esp_pthread
+// takes the task name from this per-thread setting. The string must outlive
+// the threads.
+#include "esp_pthread.h"
+esp_err_t thistle_pthread_name_next(const char *name)
+{
+    esp_pthread_cfg_t cfg = esp_pthread_get_default_config();
+    if (name) {
+        cfg.thread_name = name;
+    }
+    return esp_pthread_set_cfg(&cfg);
+}
+
 // wifi_manager.rs reads and writes these structs by byte offset. Its
 // constants must match the headers; when an ESP-IDF update moves a field,
 // the build stops here instead of the scan quietly reading the wrong bytes.
@@ -81,6 +96,22 @@ _Static_assert(offsetof(wifi_sta_config_t, password) == 32, "password at offset 
 _Static_assert(offsetof(wifi_sta_config_t, sae_pwe_h2e) == 136, "STA_SAE_PWE_H2E_OFFSET");
 _Static_assert(sizeof(((wifi_sta_config_t *)0)->sae_pwe_h2e) == 4, "sae_pwe_h2e is a u32");
 _Static_assert(WPA3_SAE_PWE_BOTH == 3, "WPA3_SAE_PWE_BOTH");
+
+// net_manager.rs and net_coordinator.rs mirror these as #[repr(C)] structs.
+#include "thistle/net_manager.h"
+_Static_assert(sizeof(hal_cell_info_t) == 40, "CCellInfo size");
+_Static_assert(offsetof(hal_cell_info_t, sim) == 4, "CCellInfo.sim");
+_Static_assert(offsetof(hal_cell_info_t, reg) == 8, "CCellInfo.reg");
+_Static_assert(offsetof(hal_cell_info_t, rssi_dbm) == 12, "CCellInfo.rssi_dbm");
+_Static_assert(offsetof(hal_cell_info_t, operator_name) == 14, "CCellInfo.operator_name");
+_Static_assert(sizeof(hal_net_state_t) == 4 && sizeof(hal_sim_state_t) == 4,
+               "C enums are read as u32");
+_Static_assert(offsetof(net_cellular_status_t, data) == 4, "CCellularStatus.data");
+_Static_assert(offsetof(net_cellular_status_t, sim_blocked) == 8, "CCellularStatus.sim_blocked");
+_Static_assert(offsetof(net_cellular_status_t, info) == 12, "CCellularStatus.info");
+_Static_assert(sizeof(net_cellular_status_t) == 52, "CCellularStatus size");
+_Static_assert(offsetof(hal_net_driver_t, get_cell_info) == 9 * sizeof(void *),
+               "HalNetDriver.get_cell_info");
 
 // Reference each symbol so the linker pulls it from the ESP-IDF archive.
 // This function is never called — it's dead code that exists only to

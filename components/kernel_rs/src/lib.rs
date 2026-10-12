@@ -68,6 +68,7 @@ pub mod manifest;
 pub mod mesh_manager;
 pub mod msg_crypto;
 pub mod msg_queue;
+pub mod net_coordinator;
 pub mod net_manager;
 pub mod notification;
 pub mod ota;

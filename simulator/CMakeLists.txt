@@ -87,6 +87,7 @@ set(SIM_SRCS
     drivers/sim_input.c
     drivers/sim_storage.c
     drivers/sim_network.c
+    drivers/sim_cellular.c
     drivers/sim_power.c
     drivers/sim_gps.c
     drivers/sim_imu.c

@@ -2224,6 +2224,48 @@ mod tests {
     }
 
     #[test]
+    fn the_tdeck_max_leaves_its_modem_to_the_driver() {
+        let mut rec = Recorder::default();
+        run_boot_sequence(TDECK_MAX_PROFILE, &mut rec);
+
+        // XL9555 P00 (6609_EN) switches the module's supply and P10
+        // (PWRKEY_EN) presses its power key through an NPN, so pressing is
+        // driving it high (T-Deck-MAX docs/pinmap.md section 10; schematic
+        // page 5, Q5). A running A7682E must be shut down before its supply
+        // goes, and AT+CPOF needs the key released or the module powers
+        // itself on again, so boot drives neither: only the driver, which
+        // knows the module's state, may.
+        const MODEM_SUPPLY_PIN: i32 = 0;
+        const MODEM_PWRKEY_PIN: i32 = 8;
+        let levels = expander_levels(&rec);
+        assert!(
+            levels
+                .iter()
+                .all(|(_, pin, _)| *pin != MODEM_SUPPLY_PIN && *pin != MODEM_PWRKEY_PIN),
+            "{levels:?}"
+        );
+
+        let config = rec
+            .loaded_config("com.thistle.drv.modem-a7682e")
+            .expect("the Max declares its modem");
+        assert_eq!(json_get_int(config, "power_expander"), Some(0), "{config}");
+        assert_eq!(json_get_int(config, "power_expander_pin"), Some(MODEM_SUPPLY_PIN as i64));
+        assert_eq!(json_get_int(config, "pwrkey_expander"), Some(0), "{config}");
+        assert_eq!(json_get_int(config, "pwrkey_expander_pin"), Some(MODEM_PWRKEY_PIN as i64));
+        assert_eq!(json_get_int(config, "pwrkey_press_level"), Some(1), "{config}");
+        // 7682_RXD is GPIO10 and 7682_TXD GPIO11, named from the module's
+        // side: the SoC transmits on 10 and receives on 11.
+        assert_eq!(json_get_int(config, "tx"), Some(10), "{config}");
+        assert_eq!(json_get_int(config, "rx"), Some(11), "{config}");
+        // The GPS has UART 2.
+        assert_eq!(json_get_int(config, "uart_num"), Some(1), "{config}");
+        // The module powers up at 115200 and is switched to 921600: 8 times
+        // the data rate, still slow enough for a link without RTS/CTS.
+        assert_eq!(json_get_int(config, "baud_rate"), Some(115200), "{config}");
+        assert_eq!(json_get_int(config, "fast_baud_rate"), Some(921600), "{config}");
+    }
+
+    #[test]
     fn the_tdeck_max_drives_its_touch_panel_as_the_cst66xx_it_is() {
         let mut rec = Recorder::default();
         run_boot_sequence(TDECK_MAX_PROFILE, &mut rec);

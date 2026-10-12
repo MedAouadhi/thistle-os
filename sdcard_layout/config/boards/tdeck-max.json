@@ -157,6 +157,24 @@
                 "pin_cs": 48,
                 "mount_point": "/sdcard"
             }
+        },
+        {
+            "id": "com.thistle.drv.modem-a7682e",
+            "hal": "network",
+            "entry": "modem-a7682e.drv.elf",
+            "config": {
+                "uart_num": 1,
+                "tx": 10,
+                "rx": 11,
+                "baud_rate": 115200,
+                "fast_baud_rate": 921600,
+                "dtr": 8,
+                "power_expander": 0,
+                "power_expander_pin": 0,
+                "pwrkey_expander": 0,
+                "pwrkey_expander_pin": 8,
+                "pwrkey_press_level": 1
+            }
         }
     ]
 }

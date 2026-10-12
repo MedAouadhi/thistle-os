@@ -90,7 +90,8 @@ static const char JSON_TDECK_MAX[] =
 "        {\"id\": \"com.thistle.drv.imu-bhi260ap\", \"hal\": \"imu\", \"entry\": \"imu-bhi260ap.drv.elf\", \"config\": {\"i2c_bus\": 0, \"i2c_addr\": \"0x28\", \"pin_int\": 21}},\n"
 "        {\"id\": \"com.thistle.drv.power-sy6970\", \"hal\": \"power\", \"entry\": \"power-sy6970.drv.elf\", \"config\": {\"i2c_bus\": 0, \"gauge_i2c_addr\": \"0x55\", \"battery_capacity_mah\": 1400}},\n"
 "        {\"id\": \"com.thistle.drv.audio-es8311\", \"hal\": \"audio\", \"entry\": \"audio-es8311.drv.elf\", \"config\": {\"i2c_bus\": 0, \"i2c_addr\": \"0x18\", \"i2s_num\": 0, \"i2s_mclk\": 38, \"i2s_bck\": 39, \"i2s_ws\": 18, \"i2s_data\": 40, \"amp_expander\": 0, \"amp_expander_pin\": 6}},\n"
-"        {\"id\": \"com.thistle.drv.sdcard\", \"hal\": \"storage\", \"entry\": \"sdcard.drv.elf\", \"config\": {\"spi_bus\": 0, \"pin_cs\": 48, \"mount_point\": \"/sdcard\"}}\n"
+"        {\"id\": \"com.thistle.drv.sdcard\", \"hal\": \"storage\", \"entry\": \"sdcard.drv.elf\", \"config\": {\"spi_bus\": 0, \"pin_cs\": 48, \"mount_point\": \"/sdcard\"}},\n"
+"        {\"id\": \"com.thistle.drv.modem-a7682e\", \"hal\": \"network\", \"entry\": \"modem-a7682e.drv.elf\", \"config\": {\"uart_num\": 1, \"tx\": 10, \"rx\": 11, \"baud_rate\": 115200, \"fast_baud_rate\": 921600, \"dtr\": 8, \"power_expander\": 0, \"power_expander_pin\": 0, \"pwrkey_expander\": 0, \"pwrkey_expander_pin\": 8, \"pwrkey_press_level\": 1}}\n"
 "    ]\n"
 "}\n";
 

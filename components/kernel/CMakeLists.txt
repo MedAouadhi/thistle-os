@@ -14,11 +14,25 @@ if(CONFIG_BT_ENABLED)
     list(APPEND KERNEL_SRCS "src/ble_security_shim.c")
 endif()
 
+set(KERNEL_PRIV_REQUIRES
+    drv_crypto_mbedtls esp_driver_i2c esp_driver_uart esp_driver_spi esp_driver_gpio
+    drv_epaper_gdeq031t10 drv_kbd_tca8418 drv_touch_cst328 drv_touch_cst66xx drv_sdcard
+    drv_gps_mia_m10q drv_radio_sx1262 drv_audio_es8311 drv_imu_bhi260ap
+    pthread
+)
+# The A7682E modem rides on esp_modem, which no board on another target
+# carries; main links the S3-only components the same way.
+if(IDF_TARGET STREQUAL "esp32s3")
+    list(APPEND KERNEL_PRIV_REQUIRES drv_modem_a7682e)
+endif()
+
 idf_component_register(
     SRCS ${KERNEL_SRCS}
     INCLUDE_DIRS "include"
     REQUIRES ${KERNEL_REQUIRES}
-    PRIV_REQUIRES drv_crypto_mbedtls esp_driver_i2c esp_driver_uart esp_driver_spi esp_driver_gpio
-                  drv_epaper_gdeq031t10 drv_kbd_tca8418 drv_touch_cst328 drv_touch_cst66xx drv_sdcard
-                  drv_gps_mia_m10q drv_radio_sx1262 drv_audio_es8311 drv_imu_bhi260ap
+    PRIV_REQUIRES ${KERNEL_PRIV_REQUIRES}
 )
+
+if(IDF_TARGET STREQUAL "esp32s3")
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE THISTLE_HAS_MODEM_A7682E=1)
+endif()

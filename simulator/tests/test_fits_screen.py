@@ -29,9 +29,10 @@ class Case:
     expected: str
 
 
-# Settings: the WiFi row, Scan Networks, then the first network. The rows sit
-# at the same height on every screen, so one set of taps serves all three.
-PASSWORD_DIALOG = ("120,69", "120,100", "120,131")
+# Settings: the WiFi row, Scan Networks (below the On/Off switch and the
+# status), then the first network. The rows sit at the same height on every
+# screen, so one set of taps serves all three.
+PASSWORD_DIALOG = ("120,69", "120,135", "120,166")
 # WiFi Scanner on a 240 px screen: Scan, the first network, then Connect,
 # which toasts that a secured network needs Settings.
 SCANNER_TOAST = ("162,38", "120,68", "46,218")

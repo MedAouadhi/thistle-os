@@ -6,6 +6,7 @@
 // On simulator builds all functions are stubs.
 
 use std::os::raw::{c_char, c_void};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex};
 
 use crate::event::{event_publish, CEvent, EventType};
@@ -103,6 +104,25 @@ impl WifiState {
 
 static WIFI_STATE: Mutex<WifiState> = Mutex::new(WifiState::new());
 static WIFI_STATE_CV: Condvar = Condvar::new();
+#[cfg(target_os = "espidf")]
+static CONNECT_LOCK: Mutex<()> = Mutex::new(());
+
+/// Whether WiFi is switched on. Off, the radio is stopped and nothing is
+/// joined, scanned for or rejoined.
+static RADIO_ON: AtomicBool = AtomicBool::new(true);
+
+/// Whether system.json has WiFi switched off: `wifi.radio_off`, off only if
+/// it says so. Apart from `wifi.enabled`, which says only whether the saved
+/// network is joined at boot and is false in a fresh system.json.
+pub(crate) fn radio_off_in(json: Option<&str>) -> bool {
+    json.and_then(|j| crate::system_json::get(j, "wifi", "radio_off"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+pub(crate) fn radio_on() -> bool {
+    RADIO_ON.load(Ordering::SeqCst)
+}
 
 // wifi_err_reason_t values for an attempt the AP did not answer.
 const WIFI_REASON_AUTH_EXPIRE: u8 = 2;
@@ -166,6 +186,7 @@ extern "C" {
     ) -> i32;
     fn esp_wifi_set_mode(mode: u32) -> i32;
     fn esp_wifi_start() -> i32;
+    fn esp_wifi_stop() -> i32;
     fn esp_wifi_connect() -> i32;
     fn esp_wifi_disconnect() -> i32;
     fn esp_wifi_set_config(iface: u32, cfg: *const c_void) -> i32;
@@ -282,6 +303,8 @@ pub extern "C" fn wifi_manager_init() -> i32 {
     if already_init {
         return ESP_OK;
     }
+    let off = radio_off_in(std::fs::read_to_string(crate::system_json::path()).ok().as_deref());
+    RADIO_ON.store(!off, Ordering::SeqCst);
 
     #[cfg(target_os = "espidf")]
     unsafe {
@@ -349,15 +372,19 @@ pub extern "C" fn wifi_manager_init() -> i32 {
                 return ret;
             }
 
-            let ret = esp_wifi_start();
-            if ret != ESP_OK && ret != ESP_ERR_INVALID_STATE {
-                esp_log_write(
-                    ESP_LOG_ERROR,
-                    TAG.as_ptr(),
-                    b"esp_wifi_start failed: %d\0".as_ptr(),
-                    ret,
-                );
-                return ret;
+            // Switched off in Settings: the driver is made ready, and the
+            // radio is left off until WiFi is switched on.
+            if radio_on() {
+                let ret = esp_wifi_start();
+                if ret != ESP_OK && ret != ESP_ERR_INVALID_STATE {
+                    esp_log_write(
+                        ESP_LOG_ERROR,
+                        TAG.as_ptr(),
+                        b"esp_wifi_start failed: %d\0".as_ptr(),
+                        ret,
+                    );
+                    return ret;
+                }
             }
 
             S_WIFI_HW_INITIALIZED = true;
@@ -407,11 +434,80 @@ pub extern "C" fn wifi_manager_init() -> i32 {
         esp_log_write(
             ESP_LOG_INFO,
             TAG.as_ptr(),
-            b"WiFi manager initialized\0".as_ptr(),
+            if off {
+                b"WiFi manager initialized; WiFi is switched off\0".as_ptr()
+            } else {
+                b"WiFi manager initialized\0".as_ptr()
+            },
         );
     }
 
     ESP_OK
+}
+
+/// Switch WiFi on or off, and remember the choice in system.json.
+///
+/// Off stops the radio, which ends any connection and any attempt in
+/// progress; nothing is joined, scanned for or rejoined until WiFi is switched
+/// on again. On starts it, and the network coordinator rejoins the saved
+/// network. The choice applies even if it could not be saved, which the
+/// return says.
+#[no_mangle]
+pub extern "C" fn wifi_manager_set_enabled(on: bool) -> i32 {
+    let initialized = WIFI_STATE.lock().map(|s| s.initialized).unwrap_or(false);
+    if !initialized {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if RADIO_ON.swap(on, Ordering::SeqCst) != on {
+        #[cfg(target_os = "espidf")]
+        unsafe {
+            if on {
+                let ret = esp_wifi_start();
+                if ret != ESP_OK && ret != ESP_ERR_INVALID_STATE {
+                    esp_log_write(
+                        ESP_LOG_ERROR,
+                        TAG.as_ptr(),
+                        b"esp_wifi_start failed: %d\0".as_ptr(),
+                        ret,
+                    );
+                    RADIO_ON.store(false, Ordering::SeqCst);
+                    return ret;
+                }
+            } else {
+                // An attempt in progress sees the disconnect and gives up.
+                esp_wifi_disconnect();
+                esp_wifi_stop();
+            }
+        }
+        if !on {
+            if let Ok(mut s) = WIFI_STATE.lock() {
+                s.state = WIFI_STATE_DISCONNECTED;
+                s.ip = [0u8; 16];
+            }
+            WIFI_STATE_CV.notify_all();
+        }
+        unsafe {
+            esp_log_write(
+                ESP_LOG_INFO,
+                TAG.as_ptr(),
+                if on {
+                    b"WiFi switched on\0".as_ptr()
+                } else {
+                    b"WiFi switched off\0".as_ptr()
+                },
+            );
+        }
+        crate::net_coordinator::poke();
+    }
+
+    crate::system_json::save("wifi", "radio_off", serde_json::Value::Bool(!on))
+}
+
+/// Whether WiFi is switched on, as it is unless switched off in Settings.
+#[no_mangle]
+pub extern "C" fn wifi_manager_is_enabled() -> bool {
+    radio_on()
 }
 
 /// Scan for available WiFi networks.
@@ -433,12 +529,22 @@ pub unsafe extern "C" fn wifi_manager_scan(
     *out_count = 0;
 
     let initialized = WIFI_STATE.lock().map(|s| s.initialized).unwrap_or(false);
-    if !initialized {
+    if !initialized || !radio_on() {
         return ESP_ERR_INVALID_STATE;
     }
 
     #[cfg(target_os = "espidf")]
     {
+        // A scan fails while the driver is joining a network, which the
+        // network coordinator may be doing in the background. Waiting for
+        // it would freeze the screen that asked for up to ten seconds, so
+        // the caller is told to try again.
+        let _attempt = match CONNECT_LOCK.try_lock() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::Poisoned(poison)) => poison.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return ESP_ERR_TIMEOUT,
+        };
+
         // NULL scans with ESP-IDF's defaults. A zeroed 40-byte array used to
         // stand in for the 44-byte wifi_scan_config_t, so the driver read
         // coex_background_scan from whatever followed it on the stack.
@@ -572,12 +678,20 @@ pub unsafe extern "C" fn wifi_manager_connect(
     }
 
     let initialized = WIFI_STATE.lock().map(|s| s.initialized).unwrap_or(false);
-    if !initialized {
+    if !initialized || !radio_on() {
         return ESP_ERR_INVALID_STATE;
     }
 
     #[cfg(target_os = "espidf")]
     {
+        // One attempt at a time, and no scan during one: Settings joins and
+        // scans from the UI task while the network coordinator may be
+        // rejoining the saved network, and either fails the other.
+        let _attempt = CONNECT_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+        if !radio_on() {
+            return ESP_ERR_INVALID_STATE; // switched off while waiting
+        }
+
         // Build wifi_config_t on the stack (256 bytes, zeroed)
         let mut wifi_cfg = [0u8; 256];
 
@@ -1024,6 +1138,18 @@ fn parse_wifi_credentials(json: &str) -> Result<Option<(bool, String, String)>, 
     Ok(Some((true, ssid, password)))
 }
 
+/// Whether system.json holds a network to join and has WiFi enabled: what
+/// wifi_manager_auto_connect() would act on. `None` for a file that does not
+/// parse, as one read while it is being rewritten may not; no file at all
+/// holds no network.
+pub(crate) fn saved_network_enabled(json: Option<&str>) -> Option<bool> {
+    match json.map(parse_wifi_credentials) {
+        None | Some(Ok(None)) => Some(false),
+        Some(Ok(Some((enabled, _, _)))) => Some(enabled),
+        Some(Err(())) => None,
+    }
+}
+
 /// Save WiFi credentials to system.json for auto-connect on boot.
 ///
 /// # Safety
@@ -1099,6 +1225,14 @@ const ESP_ERR_NOT_FOUND: i32 = 0x105;
 /// May be called from C.
 #[no_mangle]
 pub unsafe extern "C" fn wifi_manager_auto_connect() -> i32 {
+    if !radio_on() {
+        esp_log_write(
+            ESP_LOG_INFO,
+            TAG.as_ptr(),
+            b"WiFi is switched off; not joining\0".as_ptr(),
+        );
+        return ESP_OK;
+    }
     let path = crate::system_json::path();
     let json = match std::fs::read_to_string(path) {
         Ok(s) => s,
@@ -1494,6 +1628,45 @@ mod tests {
             "network",
             &"p".repeat(WIFI_PASSWORD_MAX_LEN + 1)
         ));
+    }
+
+    #[test]
+    fn test_saved_network_enabled() {
+        assert_eq!(saved_network_enabled(None), Some(false));
+        assert_eq!(saved_network_enabled(Some(r#"{ "thistle_os": {} }"#)), Some(false));
+        assert_eq!(
+            saved_network_enabled(Some(r#"{ "wifi": { "enabled": false, "ssid": "home" } }"#)),
+            Some(false)
+        );
+        assert_eq!(
+            saved_network_enabled(Some(
+                r#"{ "wifi": { "enabled": true, "ssid": "home", "password": "pw" } }"#
+            )),
+            Some(true)
+        );
+        // Caught half-written.
+        assert_eq!(saved_network_enabled(Some(r#"{ "thistle_os": { "wi"#)), None);
+    }
+
+    #[test]
+    fn wifi_is_on_unless_switched_off() {
+        assert!(!radio_off_in(None));
+        // A fresh system.json joins nothing at boot, but WiFi is on.
+        assert!(!radio_off_in(Some(
+            r#"{ "thistle_os": { "wifi": { "enabled": false, "ssid": "", "password": "" } } }"#
+        )));
+        assert!(radio_off_in(Some(
+            r#"{ "thistle_os": { "wifi": { "enabled": true, "ssid": "home", "radio_off": true } } }"#
+        )));
+        assert!(!radio_off_in(Some(r#"{ "wifi": { "radio_off": false } }"#)));
+        assert!(!radio_off_in(Some(r#"{ "wifi": { "radio_off": "yes" } }"#)));
+    }
+
+    #[test]
+    fn saving_credentials_keeps_wifi_switched_off() {
+        let json = r#"{ "thistle_os": { "wifi": { "enabled": false, "radio_off": true } } }"#;
+        let updated = update_wifi_object(json, "home", "pw", true).unwrap();
+        assert!(radio_off_in(Some(&updated)));
     }
 
     #[test]

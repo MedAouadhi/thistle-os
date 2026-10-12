@@ -2,6 +2,8 @@
  * settings_ui.c — ThistleOS Settings application UI
  *
  * Navigation: main list -> WiFi
+ *                       -> Mobile data (boards with a modem)
+ *                       -> Bluetooth, Appearance
  *                       -> Drivers -> per-driver detail
  *                       -> About
  *             Back button returns up one level.
@@ -18,6 +20,7 @@
 #include "esp_heap_caps.h"
 
 #include "thistle/wifi_manager.h"
+#include "thistle/net_manager.h"
 #include "thistle/ble_manager.h"
 #include "thistle/kernel.h"
 #include "thistle/signing.h"
@@ -63,6 +66,7 @@ static int s_app_h = 296;
 typedef enum {
     SETTINGS_MAIN,
     SETTINGS_WIFI,
+    SETTINGS_MOBILE,
     SETTINGS_BLUETOOTH,
     SETTINGS_APPEARANCE,
     SETTINGS_ABOUT,
@@ -82,6 +86,17 @@ static bool s_wifi_inited = false;
 /* WiFi sub-screen state */
 static lv_obj_t *s_wifi_status_label = NULL;
 static lv_obj_t *s_wifi_scan_list    = NULL;
+
+/* Mobile data sub-screen state */
+static lv_timer_t *s_cell_timer      = NULL;
+static lv_obj_t   *s_cell_status_lbl = NULL;
+static lv_obj_t   *s_cell_sim_lbl    = NULL;
+static lv_obj_t   *s_cell_net_lbl    = NULL;
+static lv_obj_t   *s_cell_signal_lbl = NULL;
+static lv_obj_t   *s_cell_ip_lbl     = NULL;
+static lv_obj_t   *s_cell_route_lbl  = NULL;
+static lv_obj_t   *s_cell_apn_lbl    = NULL;
+static lv_obj_t   *s_cell_apn_ta     = NULL;
 
 /* BLE init guard — only call ble_manager_init() once */
 static bool s_ble_inited = false;
@@ -117,12 +132,22 @@ static bool s_gps_enabled = true;
 
 /* Main list dynamic value labels */
 static lv_obj_t *s_wifi_value_label = NULL;
+static lv_obj_t *s_cell_value_label = NULL;
 static lv_obj_t *s_bt_value_label   = NULL;
 
 /* Main list live-update timer */
 static lv_timer_t *s_main_timer = NULL;
 
 static void ble_update_labels(void);
+static void wifi_update_status_label(void);
+static const char *wifi_main_value(void);
+static const char *cell_main_value(void);
+static void set_label_if_changed(lv_obj_t *label, const char *text);
+static void choice_check_only(lv_obj_t *btn);
+static lv_obj_t *create_choice_row(lv_obj_t *content);
+static void create_choice_button(lv_obj_t *row, const char *text,
+                                 lv_event_cb_t cb, uintptr_t value,
+                                 bool checked);
 
 /* ------------------------------------------------------------------ */
 /* Driver type enum                                                     */
@@ -159,6 +184,7 @@ typedef struct {
 
 static const settings_item_t s_items[] = {
     { "WiFi",        "Off" },
+    { "Mobile data", "Off" },  /* only on a board with a modem */
     { "Bluetooth",   "Off" },
     { "Appearance",  NULL  },
     { "Drivers",     NULL  },
@@ -270,13 +296,17 @@ static void settings_main_update_timer(lv_timer_t *t)
         ble_update_labels();
         return;
     }
+    if (s_current_screen == SETTINGS_WIFI) {
+        wifi_update_status_label();
+        return;
+    }
     if (s_current_screen != SETTINGS_MAIN) return;
 
     if (s_wifi_value_label) {
-        wifi_state_t ws = (wifi_state_t)wifi_manager_get_state();
-        const char *wifi_val = (ws == WIFI_STATE_CONNECTED)  ? "Connected"    :
-                               (ws == WIFI_STATE_CONNECTING) ? "Connecting..." : "Off";
-        lv_label_set_text(s_wifi_value_label, wifi_val);
+        set_label_if_changed(s_wifi_value_label, wifi_main_value());
+    }
+    if (s_cell_value_label) {
+        set_label_if_changed(s_cell_value_label, cell_main_value());
     }
     if (s_bt_value_label) {
         ble_state_t bs = ble_manager_get_state();
@@ -327,10 +357,27 @@ static void back_to_drivers(lv_event_t *e)
     s_current_screen = SETTINGS_DRIVERS;
 }
 
-/* Drivers / WiFi / Bluetooth / About -> Main */
+static void cell_forget_screen(void)
+{
+    if (s_cell_timer) {
+        lv_timer_delete(s_cell_timer);
+        s_cell_timer = NULL;
+    }
+    s_cell_status_lbl = NULL;
+    s_cell_sim_lbl    = NULL;
+    s_cell_net_lbl    = NULL;
+    s_cell_signal_lbl = NULL;
+    s_cell_ip_lbl     = NULL;
+    s_cell_route_lbl  = NULL;
+    s_cell_apn_lbl    = NULL;
+    s_cell_apn_ta     = NULL;
+}
+
+/* Drivers / WiFi / Mobile data / Bluetooth / About -> Main */
 static void back_to_main(lv_event_t *e)
 {
     (void)e;
+    cell_forget_screen();
     if (s_sub_screen) {
         lv_obj_delete(s_sub_screen);
         s_sub_screen = NULL;
@@ -423,9 +470,27 @@ static lv_obj_t *create_sub_screen(const char *title)
 /* WiFi sub-screen                                                      */
 /* ------------------------------------------------------------------ */
 
+/* WiFi's value on the main list. */
+static const char *wifi_main_value(void)
+{
+    if (!wifi_manager_is_enabled()) {
+        return "Off";
+    }
+    switch ((wifi_state_t)wifi_manager_get_state()) {
+    case WIFI_STATE_CONNECTED:  return "Connected";
+    case WIFI_STATE_CONNECTING: return "Connecting...";
+    default:                    return "Not connected";
+    }
+}
+
 static void wifi_update_status_label(void)
 {
     if (!s_wifi_status_label) return;
+
+    if (!wifi_manager_is_enabled()) {
+        set_label_if_changed(s_wifi_status_label, "Status: Off");
+        return;
+    }
 
     wifi_state_t state = (wifi_state_t)wifi_manager_get_state();
     char buf[64];
@@ -448,11 +513,29 @@ static void wifi_update_status_label(void)
         break;
     case WIFI_STATE_DISCONNECTED:
     default:
-        snprintf(buf, sizeof(buf), "Status: Disconnected");
+        snprintf(buf, sizeof(buf), "Status: Not connected");
         break;
     }
 
-    lv_label_set_text(s_wifi_status_label, buf);
+    set_label_if_changed(s_wifi_status_label, buf);
+}
+
+static void wifi_switch_cb(lv_event_t *e)
+{
+    bool on = (bool)(uintptr_t)lv_event_get_user_data(e);
+    esp_err_t err = wifi_manager_set_enabled(on);
+    if (wifi_manager_is_enabled() != on) {
+        toast_warn(on ? "WiFi did not start" : "WiFi is not available");
+        return;
+    }
+    choice_check_only(lv_event_get_current_target(e));
+    if (!on && s_wifi_scan_list) {
+        lv_obj_clean(s_wifi_scan_list);
+    }
+    if (err != ESP_OK) {
+        toast_warn("Not saved for next boot");
+    }
+    wifi_update_status_label();
 }
 
 /* ------------------------------------------------------------------ */
@@ -668,6 +751,10 @@ static uint8_t             s_scan_count = 0;
 static void wifi_scan_clicked_cb(lv_event_t *e)
 {
     (void)e;
+    if (!wifi_manager_is_enabled()) {
+        toast_info("Switch WiFi on to scan");
+        return;
+    }
     ESP_LOGI(TAG, "WiFi: scanning...");
 
     if (s_wifi_status_label) {
@@ -701,6 +788,9 @@ static void wifi_scan_clicked_cb(lv_event_t *e)
 
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "WiFi: scan failed: 0x%x", err);
+        /* Busy rejoining the saved network in the background. */
+        toast_warn(err == ESP_ERR_TIMEOUT ? "WiFi is busy; scan again shortly"
+                                          : "Scan failed");
         wifi_update_status_label();
         return;
     }
@@ -785,6 +875,13 @@ static void open_wifi_screen(void)
 
     const theme_colors_t *tc_wifi = theme_get_colors();
 
+    /* Off stops the radio; the saved network is kept for when it is on. */
+    bool on = wifi_manager_is_enabled();
+    lv_obj_t *switch_row = create_choice_row(content);
+    create_choice_button(switch_row, "On", wifi_switch_cb, 1, on);
+    create_choice_button(switch_row, "Off", wifi_switch_cb, 0, !on);
+    create_separator(content);
+
     /* Status row */
     lv_obj_t *status_row = lv_obj_create(content);
     lv_obj_set_size(status_row, LV_PCT(100), ITEM_H);
@@ -850,6 +947,242 @@ static void open_wifi_screen(void)
                           LV_FLEX_ALIGN_START,
                           LV_FLEX_ALIGN_START);
     lv_obj_clear_flag(s_wifi_scan_list, LV_OBJ_FLAG_SCROLLABLE);
+}
+
+/* ------------------------------------------------------------------ */
+/* Mobile data sub-screen                                               */
+/* ------------------------------------------------------------------ */
+
+/* The e-paper redraws whatever is set, changed or not. */
+static void set_label_if_changed(lv_obj_t *label, const char *text)
+{
+    if (label && strcmp(lv_label_get_text(label), text) != 0) {
+        lv_label_set_text(label, text);
+    }
+}
+
+static const char *cell_sim_text(hal_sim_state_t sim)
+{
+    switch (sim) {
+    case HAL_SIM_READY:        return "Ready";
+    case HAL_SIM_ABSENT:       return "Not inserted";
+    case HAL_SIM_PIN_REQUIRED: return "Locked by its PIN";
+    case HAL_SIM_PUK_REQUIRED: return "Blocked (needs PUK)";
+    case HAL_SIM_ERROR:        return "Not usable";
+    default:                   return "--";
+    }
+}
+
+static const char *cell_reg_text(hal_cell_reg_t reg)
+{
+    switch (reg) {
+    case HAL_CELL_REG_HOME:           return "Registered";
+    case HAL_CELL_REG_ROAMING:        return "Roaming";
+    case HAL_CELL_REG_SEARCHING:      return "Searching...";
+    case HAL_CELL_REG_DENIED:         return "Refused";
+    case HAL_CELL_REG_NOT_REGISTERED: return "Not registered";
+    default:                          return "--";
+    }
+}
+
+/* Why mobile data is not carrying data, or that it is. */
+static const char *cell_status_text(const net_cellular_status_t *st)
+{
+    if (!st->enabled) {
+        return "Off";
+    }
+    if (st->sim_blocked) {
+        switch (st->info.sim) {
+        case HAL_SIM_ABSENT:       return "No SIM card";
+        case HAL_SIM_PIN_REQUIRED: return "SIM has a PIN";
+        case HAL_SIM_PUK_REQUIRED: return "SIM blocked";
+        default:                   return "SIM not usable";
+        }
+    }
+    switch (st->data) {
+    case HAL_NET_STATE_CONNECTED:  return "Connected";
+    case HAL_NET_STATE_CONNECTING: return "Connecting...";
+    /* An attempt failed, or the session dropped: the coordinator tries
+     * again, after 10 s and up to 2 min. */
+    default:                       return "Waiting to retry";
+    }
+}
+
+static const char *cell_main_value(void)
+{
+    net_cellular_status_t st;
+    if (net_cellular_get_status(&st) != ESP_OK || !st.present) {
+        return "--";
+    }
+    return cell_status_text(&st);
+}
+
+static void cell_update_labels(void)
+{
+    net_cellular_status_t st;
+    if (net_cellular_get_status(&st) != ESP_OK) {
+        return;
+    }
+    char buf[64];
+
+    snprintf(buf, sizeof(buf), "Status: %s", cell_status_text(&st));
+    set_label_if_changed(s_cell_status_lbl, buf);
+
+    bool live = st.enabled && (st.info.powered || st.sim_blocked);
+    snprintf(buf, sizeof(buf), "SIM: %s", live ? cell_sim_text(st.info.sim) : "--");
+    set_label_if_changed(s_cell_sim_lbl, buf);
+
+    if (live && st.info.operator_name[0]) {
+        snprintf(buf, sizeof(buf), "Network: %.23s%s", st.info.operator_name,
+                 st.info.reg == HAL_CELL_REG_ROAMING ? " (roaming)" : "");
+    } else {
+        snprintf(buf, sizeof(buf), "Network: %s",
+                 live ? cell_reg_text(st.info.reg) : "--");
+    }
+    set_label_if_changed(s_cell_net_lbl, buf);
+
+    /* Read before the data session began: a modem carrying data over PPP
+     * answers no questions. */
+    if (live && st.info.rssi_dbm != 0) {
+        snprintf(buf, sizeof(buf), "Signal: %d dBm", (int)st.info.rssi_dbm);
+    } else {
+        snprintf(buf, sizeof(buf), "Signal: --");
+    }
+    set_label_if_changed(s_cell_signal_lbl, buf);
+
+    const hal_net_driver_t *active = net_get_active_underlay();
+    const char *ip = NULL;
+    if (st.data == HAL_NET_STATE_CONNECTED) {
+        const hal_net_driver_t *list[4];
+        int n = net_list_transports(list, 4);
+        for (int i = 0; i < n; i++) {
+            if (list[i]->type == HAL_NET_CELLULAR && list[i]->get_ip) {
+                ip = list[i]->get_ip();
+            }
+        }
+    }
+    snprintf(buf, sizeof(buf), "IP: %s", ip && ip[0] ? ip : "--");
+    set_label_if_changed(s_cell_ip_lbl, buf);
+
+    /* Which link traffic takes: WiFi whenever it is connected. */
+    snprintf(buf, sizeof(buf), "In use: %s",
+             active && active->name ? active->name : "nothing");
+    set_label_if_changed(s_cell_route_lbl, buf);
+}
+
+static void cell_timer_cb(lv_timer_t *t)
+{
+    (void)t;
+    if (s_current_screen == SETTINGS_MOBILE) {
+        cell_update_labels();
+    }
+}
+
+static void cell_switch_cb(lv_event_t *e)
+{
+    bool on = (bool)(uintptr_t)lv_event_get_user_data(e);
+    esp_err_t err = net_cellular_set_enabled(on);
+    if (err == ESP_ERR_NOT_SUPPORTED) {
+        toast_warn("No modem on this board");
+        return;
+    }
+    choice_check_only(lv_event_get_current_target(e));
+    if (err != ESP_OK) {
+        toast_warn("Not saved for next boot");
+    } else if (on) {
+        /* Starting the modem and finding a network takes a while. */
+        toast_info("Starting the modem");
+    }
+    cell_update_labels();
+    net_cellular_status_t st;
+    if (on && net_cellular_get_status(&st) == ESP_OK && !st.sim_blocked
+        && st.data == HAL_NET_STATE_DISCONNECTED) {
+        /* The coordinator has yet to start the attempt. */
+        set_label_if_changed(s_cell_status_lbl, "Status: Connecting...");
+    }
+}
+
+static void cell_show_apn(void)
+{
+    if (!s_cell_apn_lbl) return;
+    char apn[64] = "";
+    net_cellular_get_apn(apn, sizeof(apn));
+    char buf[80];
+    snprintf(buf, sizeof(buf), "APN: %s", apn[0] ? apn : "automatic");
+    set_label_if_changed(s_cell_apn_lbl, buf);
+}
+
+static void cell_apn_set_cb(lv_event_t *e)
+{
+    (void)e;
+    if (!s_cell_apn_ta) return;
+
+    esp_err_t err = net_cellular_set_apn(lv_textarea_get_text(s_cell_apn_ta));
+    if (err == ESP_ERR_INVALID_ARG) {
+        toast_warn("Letters, digits, . - _ only");
+        return;
+    }
+    if (err != ESP_OK) {
+        toast_warn("APN not saved");
+        return;
+    }
+    lv_textarea_set_text(s_cell_apn_ta, "");
+    cell_show_apn();
+    net_cellular_status_t st;
+    if (net_cellular_get_status(&st) == ESP_OK && st.enabled) {
+        toast_info("APN saved; reconnecting");
+    } else {
+        toast_info("APN saved");
+    }
+}
+
+/* A row whose label is cut with "..." rather than run off the screen. */
+static lv_obj_t *create_cell_row(lv_obj_t *content)
+{
+    lv_obj_t *lbl = create_live_row(content, "");
+    lv_obj_set_width(lbl, LV_PCT(100));
+    lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
+    return lbl;
+}
+
+static void open_mobile_screen(void)
+{
+    lv_obj_t *content = create_sub_screen("Mobile data");
+    s_current_screen = SETTINGS_MOBILE;
+
+    net_cellular_status_t st;
+    bool enabled = net_cellular_get_status(&st) == ESP_OK && st.enabled;
+
+    lv_obj_t *row = create_choice_row(content);
+    create_choice_button(row, "On", cell_switch_cb, 1, enabled);
+    create_choice_button(row, "Off", cell_switch_cb, 0, !enabled);
+    create_separator(content);
+
+    s_cell_status_lbl = create_cell_row(content);
+    s_cell_sim_lbl    = create_cell_row(content);
+    s_cell_net_lbl    = create_cell_row(content);
+    s_cell_signal_lbl = create_cell_row(content);
+    s_cell_ip_lbl     = create_cell_row(content);
+    create_separator(content);
+    s_cell_route_lbl  = create_cell_row(content);
+    create_separator(content);
+
+    /* Most networks hand the modem an APN; some SIMs need theirs typed. */
+    s_cell_apn_lbl = create_cell_row(content);
+    cell_show_apn();
+    lv_obj_t *apn_row = create_choice_row(content);
+    s_cell_apn_ta = lv_textarea_create(apn_row);
+    lv_textarea_set_one_line(s_cell_apn_ta, true);
+    lv_textarea_set_max_length(s_cell_apn_ta, 63);
+    lv_textarea_set_placeholder_text(s_cell_apn_ta, "APN, empty = auto");
+    lv_obj_set_flex_grow(s_cell_apn_ta, 1);
+    lv_obj_set_height(s_cell_apn_ta, ITEM_H - 4);
+    lv_obj_set_style_text_font(s_cell_apn_ta, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_pad_ver(s_cell_apn_ta, 2, LV_PART_MAIN);
+    create_choice_button(apn_row, "Set", cell_apn_set_cb, 0, false);
+
+    cell_update_labels();
+    s_cell_timer = lv_timer_create(cell_timer_cb, 2000, NULL);
 }
 
 /* ------------------------------------------------------------------ */
@@ -2410,6 +2743,9 @@ static void item_clicked_cb(lv_event_t *e)
     if (strcmp(name, "WiFi") == 0) {
         lv_obj_add_flag(s_main_list, LV_OBJ_FLAG_HIDDEN);
         open_wifi_screen();
+    } else if (strcmp(name, "Mobile data") == 0) {
+        lv_obj_add_flag(s_main_list, LV_OBJ_FLAG_HIDDEN);
+        open_mobile_screen();
     } else if (strcmp(name, "Bluetooth") == 0) {
         lv_obj_add_flag(s_main_list, LV_OBJ_FLAG_HIDDEN);
         open_bluetooth_screen();
@@ -2474,6 +2810,10 @@ static void create_list_item(lv_obj_t *list, const settings_item_t *item)
         /* Store references for live-update timer */
         if (strcmp(item->name, "WiFi") == 0) {
             s_wifi_value_label = lbl_val;
+            lv_label_set_text(lbl_val, wifi_main_value());
+        } else if (strcmp(item->name, "Mobile data") == 0) {
+            s_cell_value_label = lbl_val;
+            lv_label_set_text(lbl_val, cell_main_value());
         } else if (strcmp(item->name, "Bluetooth") == 0) {
             s_bt_value_label = lbl_val;
         }
@@ -2557,9 +2897,14 @@ esp_err_t settings_ui_create(lv_obj_t *parent)
 
     /* Reset value label pointers before rebuilding */
     s_wifi_value_label = NULL;
+    s_cell_value_label = NULL;
     s_bt_value_label   = NULL;
 
+    bool has_modem = net_cellular_present();
     for (size_t i = 0; i < ITEMS_COUNT; i++) {
+        if (!has_modem && strcmp(s_items[i].name, "Mobile data") == 0) {
+            continue;
+        }
         create_list_item(s_main_list, &s_items[i]);
     }
 
@@ -2618,8 +2963,11 @@ void settings_ui_destroy(void)
         memset(s_imu_lbl, 0, sizeof(s_imu_lbl));
     }
 
+    cell_forget_screen();
+
     /* Nullify label pointers — LVGL will clean up widgets when s_root is deleted */
     s_wifi_value_label   = NULL;
+    s_cell_value_label   = NULL;
     s_bt_value_label     = NULL;
     s_wifi_status_label  = NULL;
     s_wifi_scan_list     = NULL;

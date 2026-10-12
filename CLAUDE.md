@@ -74,6 +74,17 @@ T-Deck Max exactly as on any other board: a full 2.4MB app flashes in about
 including the `cpu_start` region. The chunked flasher in the T-Deck-MAX
 vendor checkout is not needed. See `docs/tdeck-max-usb-serial-jtag.md`.
 
+### A changed board profile does not reach a board that has one
+
+A board writes its profile to `/spiffs/config/board.json` once, from the
+embedded copy in `components/kernel/src/board_fingerprint.c`, and reads that
+file from then on. The firmware build makes no SPIFFS image, so flashing a
+changed profile changes nothing on a board that already holds one: tickets 03,
+06, 09 and 10 all met this. Erasing the storage partition fixes it but also
+wipes `system.json` (WiFi credentials, settings) and the mesh identity.
+Rewriting only `board.json`, for instance by a build that calls
+`board_detect_and_write()` once, keeps them.
+
 ### Rust toolchains
 
 Two toolchains, for two different jobs:
@@ -126,6 +137,7 @@ The kernel is **100% Rust and hardware-independent**. It never calls ESP-IDF har
 ### Key components
 - **HAL** (`components/thistle_hal/`): Pure vtable interfaces. Bus handle sharing (SPI/I2C). 11 HAL interfaces: display, input, radio, GPS, audio, power, IMU, storage, network, crypto, RTC.
 - **Drivers** (`components/drv_*/`): 16 drivers (13 Rust + 3 C, compiled-in + standalone `.drv.elf`): e-paper, LCD, OLED, keyboard, touch (×2), GPS, accelerometer, power, audio, RTC (PCF8563), SD card, IMU (QMI8658C), light sensor. C drivers for modem (esp_modem), radio (RadioLib) and the ES8311 audio codec (esp_codec_dev).
+- **Networking** (`components/kernel_rs/src/net_manager.rs`, `net_coordinator.rs`): WiFi and LTE (the A7682E driver) register as `hal_net_driver_t` transports. esp_netif routes over WiFi whenever it is up and LTE otherwise, with DNS following the route (ADR-0003). The coordinator keeps mobile data up while Settings has it on, and rejoins the saved WiFi network after a drop unless WiFi is switched off in Settings (`wifi.radio_off`, which stops the radio).
 - **Board config**: Per-board `board.json` files in `sdcard_layout/config/boards/` define pins, buses, and which drivers to load. Replaces compiled `board_*` components. 10 boards supported.
 - **Kernel (Rust)** (`components/kernel_rs/`): 100% Rust. 57 modules: manifest parser, permissions, IPC, events, app manager, version, crypto, HAL registry, driver manager, WM, app store, wifi/ble/net managers, OTA, and more. 1231 tests.
 - **Display Server** (`components/kernel/src/display_server.c`): Surface management, compositor, WM vtable interface.

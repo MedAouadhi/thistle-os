@@ -5,6 +5,7 @@
 #include "esp_err.h"
 #include "driver/uart.h"
 #include "driver/gpio.h"
+#include "hal/network.h"
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
@@ -17,14 +18,31 @@ extern "C" {
  * @brief A7682E hardware and UART configuration.
  *
  * Pass this to drv_a7682e_init().  baud_rate defaults to 115200 if set to 0.
+ *
+ * PWRKEY is reached either through a SoC GPIO (pin_pwrkey) or through an IO
+ * expander pin (pwrkey_expander >= 0), and on some boards through a
+ * transistor that inverts it: pwrkey_press_level is the level that presses
+ * the key. The module's own PWRKEY is active-low, so a GPIO wired straight to
+ * it presses at 0; the T-Deck Max's XL9555 P10 drives an NPN that pulls
+ * PWRKEY low, so it presses at 1.
  */
 typedef struct {
     uart_port_t uart_num;
-    gpio_num_t  pin_tx;
-    gpio_num_t  pin_rx;
-    gpio_num_t  pin_pwrkey;  ///< Power key — pulse low to toggle power state
-    gpio_num_t  pin_reset;   ///< Hardware reset — active-low
-    uint32_t    baud_rate;   ///< UART baud rate; 0 → use default (115200)
+    gpio_num_t  pin_tx;      ///< SoC TX, wired to the module's RXD
+    gpio_num_t  pin_rx;      ///< SoC RX, wired to the module's TXD
+    gpio_num_t  pin_pwrkey;  ///< Power key on a SoC GPIO, or -1
+    gpio_num_t  pin_reset;   ///< Hardware reset — active-low, or -1
+    gpio_num_t  pin_dtr;     ///< DTR, held low to keep the module awake, or -1
+    uint32_t    baud_rate;   ///< The module's power-up rate; 0 → its default, 115200
+    /** Rate both ends switch to (AT+IPR) once the module answers, or 0 to stay
+     *  at baud_rate. One the module lists: up to 3686400. With no RTS/CTS, a
+     *  rate the SoC cannot keep up with loses bytes. */
+    uint32_t    fast_baud_rate;
+    int         pwrkey_expander;      ///< Expander carrying PWRKEY, or -1
+    int         pwrkey_expander_pin;
+    int         pwrkey_press_level;   ///< Level that presses PWRKEY
+    int         power_expander;       ///< Expander switching the supply, or -1
+    int         power_expander_pin;   ///< Driven high to power the module
 } a7682e_config_t;
 
 /**
@@ -68,12 +86,17 @@ void drv_a7682e_deinit(void);
  * ---------------------------------------------------------------------- */
 
 /**
- * @brief Power the modem on or off via PWRKEY pulse.
+ * @brief Power the modem on or off.
  *
- * Power-on: pulls PWRKEY low for 1500 ms, then waits up to 10 s for the
- * modem to emit "RDY", followed by ATE0 (echo off) and an AT ping.
+ * Power-on switches the supply on (where the board can), then waits for the
+ * module to answer AT. A module the SoC left running across its own reset
+ * answers at once, or once a stale data session is escaped; only a module
+ * that does neither gets a 100 ms PWRKEY press, and then has 15 s to answer.
+ * Echo is turned off and errors made verbose.
  *
- * Power-off: sends AT+CPOF, then pulses PWRKEY low for 3 s as fallback.
+ * Power-off shuts a module that answers down with AT+CPOF, waits for it to
+ * finish, and only then switches the supply off: cutting the supply of a
+ * running A7682E can corrupt its flash.
  *
  * @param on  true → power on, false → power off.
  * @return ESP_OK, ESP_ERR_TIMEOUT, or an ESP-IDF error.
@@ -239,6 +262,21 @@ esp_err_t drv_a7682e_delete_sms(int index);
  */
 typedef void (*a7682e_sms_cb_t)(int index, void *user_data);
 void drv_a7682e_register_sms_cb(a7682e_sms_cb_t cb, void *user_data);
+
+/* -------------------------------------------------------------------------
+ * Network transport
+ * ---------------------------------------------------------------------- */
+
+/**
+ * @brief The modem as a cellular network transport, for net_manager_register().
+ *
+ * connect(apn, NULL, timeout_ms) powers the module, waits for a ready SIM and
+ * a registration, and opens a PPP data session on the APN — the one the
+ * network assigns when apn is NULL or empty. It fails fast on a SIM that is
+ * missing or locked. disconnect() powers the module off. get_cell_info()
+ * reports what the last attempt saw of the SIM and the network.
+ */
+const hal_net_driver_t *drv_a7682e_net_driver(void);
 
 #ifdef __cplusplus
 }

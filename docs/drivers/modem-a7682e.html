@@ -62,14 +62,14 @@
       <p class="lead">Cellular modem driver for the SIMCOM A7682E (4G LTE Cat-1). C driver wrapping the Espressif esp_modem component.</p>
     </div>
 
-    <h2>Overview <span class="badge badge-green">Proven</span></h2>
+    <h2>Overview <span class="badge badge-yellow">Partial</span></h2>
     <div class="table-wrap">
       <table>
         <tbody>
-          <tr><td><strong>HAL Type</strong></td><td>Modem</td></tr>
+          <tr><td><strong>HAL Type</strong></td><td>Network (<code>hal_net_driver_t</code>, <code>HAL_NET_CELLULAR</code>)</td></tr>
           <tr><td><strong>Chip</strong></td><td>A7682E</td></tr>
           <tr><td><strong>Interface</strong></td><td>UART</td></tr>
-          <tr><td><strong>Description</strong></td><td>Handles AT commands, PPP data mode for IP connectivity, and SMS send/receive. One of two non-Rust (C) drivers. SIM card required.</td></tr>
+          <tr><td><strong>Description</strong></td><td>Mobile data: powers the module, waits for a ready SIM and a registration, and opens a PPP session that the whole TCP/IP stack can use. Also AT commands and SMS. Registered with the net manager as the LTE transport; the kernel's network coordinator switches it on and off from Settings &rarr; Mobile data.</td></tr>
         </tbody>
       </table>
     </div>
@@ -80,7 +80,7 @@
         <tbody>
           <tr><td><strong>Source</strong></td><td><code>components/drv_modem_a7682e/</code> (C)</td></tr>
           <tr><td><strong>Wraps</strong></td><td>ESP-IDF <code>esp_modem</code> managed component</td></tr>
-          <tr><td><strong>Tests</strong></td><td>Hardware-tested on T-Deck Pro</td></tr>
+          <tr><td><strong>Tests</strong></td><td>Answer parsers: host tests (<code>tests/test_parse.c</code>). On a T-Deck Max with a SIM: power-on through the expander, SIM detection, registration, a PPP session switched on at boot and from Settings, HTTP over LTE with WiFi switched off, and AT+CPOF power-down. Throughput at 115200 and 921600 baud, 17-minute soaks of transfers and idle periods at 921600, and 26 starts from power-off, each connected on the first dial. APN parsing: host tests.</td></tr>
         </tbody>
       </table>
     </div>
@@ -91,16 +91,41 @@
       <table>
         <thead><tr><th>Device</th><th>Status</th></tr></thead>
         <tbody>
-          <tr><td><a href="../devices/tdeck-pro.html">T-Deck Pro</a></td><td><span class="badge badge-green">Proven</span></td></tr>
+          <tr><td>T-Deck Pro Max</td><td><span class="badge badge-yellow">Partial</span></td></tr>
         </tbody>
       </table>
     </div>
 
     <h2>Configuration</h2>
-    <p>Configured via <code>board.json</code>: UART pins (<code>pin_tx</code>, <code>pin_rx</code>), baud rate, <code>pin_pwrkey</code>, <code>pin_rst</code>.</p>
+    <p>A driver entry in the board profile, id <code>com.thistle.drv.modem-a7682e</code>, <code>"hal": "network"</code>:</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Key</th><th>Meaning</th></tr></thead>
+        <tbody>
+          <tr><td><code>uart_num</code>, <code>tx</code>, <code>rx</code>, <code>baud_rate</code></td><td>The UART, from the SoC's side: <code>tx</code> drives the module's RXD. <code>baud_rate</code> is the rate the module powers up at, 115200 unless <code>AT+IPREX</code> changed it.</td></tr>
+          <tr><td><code>fast_baud_rate</code></td><td>The rate both ends switch to (<code>AT+IPR</code>) once the module answers, or absent to stay at <code>baud_rate</code>. The module goes back to its power-up rate when it powers down; one left running by a reset of the SoC is looked for at both. The T-Deck Max uses 921600: with no RTS/CTS wired, a rate the SoC cannot keep up with loses bytes.</td></tr>
+          <tr><td><code>pwrkey</code></td><td>PWRKEY on a SoC GPIO, if it is wired to one.</td></tr>
+          <tr><td><code>pwrkey_expander</code>, <code>pwrkey_expander_pin</code></td><td>PWRKEY on an IO expander pin instead.</td></tr>
+          <tr><td><code>pwrkey_press_level</code></td><td>The level that presses the key: 0 for a line wired straight to the module's active-low PWRKEY, 1 behind an inverting transistor (the T-Deck Max's Q5).</td></tr>
+          <tr><td><code>power_expander</code>, <code>power_expander_pin</code></td><td>The expander pin that switches the module's supply, driven high for on. The driver cuts it only after AT+CPOF.</td></tr>
+          <tr><td><code>dtr</code>, <code>rst</code></td><td>DTR, held low so the module never sleeps; RESET, held de-asserted.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>The user's settings live in <code>system.json</code>: <code>thistle_os.cellular.enabled</code> (default off) and <code>thistle_os.cellular.apn</code> (default empty, the APN the network assigns).</p>
 
     <h2>Known Issues</h2>
-    <p>No known issues. C driver &mdash; esp_modem provides AT command handling and PPP mode.</p>
+    <ul>
+      <li>The data session is plain PPP, not CMUX, so a modem carrying data answers no commands. Signal and operator are those read before dialling, and sending an SMS interrupts the session briefly.</li>
+      <li>Incoming SMS are not received. With mobile data off the modem is powered down, and with it on the SMS poll waits for a session to end, which it does not. CMUX would fix this.</li>
+      <li>A SIM with a PIN is reported, not unlocked. Turn the PIN off in a phone.</li>
+      <li>The UART runs at 921600 baud on the T-Deck Max. Measured over LTE: about 50 KB/s each way (42&ndash;57 KB/s over 28 transfers), against 9.8 KB/s down and 10.7 KB/s up at 115200. A PPP trace over about 6 MB found no corrupted frame.</li>
+      <li>A module that kept its data session through a reset of the SoC (a crash, a restart, flashing) is shut down with <code>AT+CPOF</code> and started again, not taken over. Dialled again in place, it stopped answering for 10 to 30 s at a time, at 115200 as at 921600, and took up to two minutes to carry data. Restarted, it had LTE up 27 s after the coordinator started.</li>
+      <li>With no APN set, the driver writes back the APN the network gave the default bearer (context 1), as the module reports it, before dialling. Rewritten with an empty APN, the first session after each power-on was ended by the module or went silent, eight times in nine. <code>AT+CGDCONT</code> is saved, so from then on the module asks for that APN at attach, and an empty APN written while attached does not change what it reports. A SIM from another network may therefore need its APN set in Settings. That is untested.</li>
+      <li>Each power-on creates esp_modem's UART task (4 KB of internal RAM) again, and esp_modem aborts, rebooting the board, if it cannot (<code>create uart event task failed</code>). That happened once in 13 off/on cycles when a T-Deck Max had 14 KB of internal RAM left; it now has about 180 KB.</li>
+      <li>Attempts run on the network coordinator's thread, one at a time, so a WiFi network lost meanwhile is rejoined once the attempt ends, up to two minutes later. Switching mobile data off ends an attempt through the transport's <code>cancel</code>, as soon as the step under way finishes: powering the module up, or one AT exchange.</li>
+    </ul>
+    <p>Routing between WiFi and mobile data is described in <code>docs/adr/0003-wifi-first-routing-left-to-esp-netif.md</code>.</p>
 
     <div class="page-footer">
       <span>ThistleOS &mdash; BSD 3-Clause</span>

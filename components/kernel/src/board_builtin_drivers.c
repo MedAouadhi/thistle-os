@@ -28,6 +28,10 @@
 #include "drv_radio_sx1262.h"
 #include "drv_audio_es8311.h"
 #include "drv_imu_bhi260ap.h"
+#ifdef THISTLE_HAS_MODEM_A7682E
+#include "drv_modem_a7682e.h"
+#include "thistle/net_manager.h"
+#endif
 #endif
 
 #ifndef THISTLE_BUS_INIT_HOST_TEST
@@ -356,6 +360,35 @@ esp_err_t board_builtin_driver_init(const char *id, const char *hal_type,
         ESP_LOGI(TAG, "imu-bhi260ap: %s", config_json);
         return drv_imu_bhi260ap_register(config_json);
     }
+
+#ifdef THISTLE_HAS_MODEM_A7682E
+    // ── Cellular: Simcom A7682E ─────────────────────────────────────────────
+    // A network transport, not a HAL registry slot: it registers with the
+    // net manager, whose coordinator powers it when mobile data is on. The
+    // module's supply and PWRKEY may sit on an IO expander, PWRKEY behind a
+    // transistor that inverts it, so the profile says which level presses it.
+    if (strcmp(id, "com.thistle.drv.modem-a7682e") == 0) {
+        static a7682e_config_t cfg;
+        cfg.uart_num            = (uart_port_t)json_int(config_json, "uart_num", 1);
+        cfg.pin_tx              = (gpio_num_t)json_int(config_json, "tx", -1);
+        cfg.pin_rx              = (gpio_num_t)json_int(config_json, "rx", -1);
+        cfg.baud_rate           = (uint32_t)json_int(config_json, "baud_rate", 115200);
+        cfg.fast_baud_rate      = (uint32_t)json_int(config_json, "fast_baud_rate", 0);
+        cfg.pin_pwrkey          = (gpio_num_t)json_int(config_json, "pwrkey", -1);
+        cfg.pin_reset           = (gpio_num_t)json_int(config_json, "rst", -1);
+        cfg.pin_dtr             = (gpio_num_t)json_int(config_json, "dtr", -1);
+        cfg.pwrkey_expander     = json_int(config_json, "pwrkey_expander", -1);
+        cfg.pwrkey_expander_pin = json_int(config_json, "pwrkey_expander_pin", 0);
+        cfg.pwrkey_press_level  = json_int(config_json, "pwrkey_press_level", 0);
+        cfg.power_expander      = json_int(config_json, "power_expander", -1);
+        cfg.power_expander_pin  = json_int(config_json, "power_expander_pin", 0);
+        esp_err_t ret = drv_a7682e_init(&cfg);
+        if (ret != ESP_OK) {
+            return ret;
+        }
+        return net_manager_register(drv_a7682e_net_driver());
+    }
+#endif
 
     ESP_LOGW(TAG, "no builtin for driver id=%s — skipping", id);
     return ESP_OK;

@@ -18,6 +18,7 @@
 
 /* Forward declaration — defined in sim_network.c */
 esp_err_t sim_network_register(void);
+esp_err_t sim_cellular_register(void);
 
 /* Selected device — set by main() via sim_board_set_device() before board_init() */
 static const char *s_device = "tdeck";
@@ -47,6 +48,8 @@ typedef struct {
      * simulator honest about what an app can detect there. */
     bool        has_rtc;
     bool        has_light_sensor;
+    /* A cellular modem: the A7682E of the Max's profile. */
+    bool        has_modem;
 } sim_device_t;
 
 /* Every device has an RTC and a light sensor unless it says otherwise, which
@@ -68,7 +71,7 @@ static const sim_device_t DEVICES[] = {
     { .name = "tdeck-max",  .board_name = "T-Deck Pro Max (Simulator)", .width = 240, .height = 320,
       .has_keyboard = true, .has_touch = true, .touch_is_cst66xx = true,
       .has_radio = true, .has_gps = true,
-      .is_epaper = true, .has_io_expander = true },
+      .is_epaper = true, .has_io_expander = true, .has_modem = true },
     { .name = "tdisplay",   .board_name = "T-Display-S3 (Simulator)",  .width = 320, .height = 170,
       .has_touch = true,  SIM_DEVICE_DEFAULTS },
     { .name = "heltec-v3",  .board_name = "Heltec V3 (Simulator)",     .width = 128, .height = 64,
@@ -109,6 +112,7 @@ esp_err_t board_init(void)
      * by kernel_init() before driver_manager_init(), so the manager is
      * already initialized when board_init() runs. */
     sim_network_register();
+    if (dev->has_modem) sim_cellular_register();
 
     /* Register fake HAL drivers so apps never see NULL vtables */
     hal_power_register(sim_power_get(), NULL);

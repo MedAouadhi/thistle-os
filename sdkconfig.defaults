@@ -50,6 +50,14 @@ CONFIG_LV_USE_BIDI=y
 # PPP for cellular data (required by drv_modem_a7682e esp_modem backend)
 CONFIG_LWIP_PPP_SUPPORT=y
 CONFIG_LWIP_PPP_PAP_SUPPORT=y
+# Keepalive between the SoC and the modem (it never goes on air), so a modem
+# that resets under a data session ends the session instead of hanging it.
+CONFIG_LWIP_ENABLE_LCP_ECHO=y
+# WiFi and the cellular link are up together; esp_netif routes over the one
+# with the higher priority (WiFi). Without this, DNS servers are global and
+# belong to whichever link connected last: the carrier's resolvers, often
+# unreachable from WiFi, or the router's, unreachable from the carrier.
+CONFIG_ESP_NETIF_SET_DNS_PER_DEFAULT_NETIF=y
 
 # Uncomment to run ThistleOS unit tests on boot instead of normal boot sequence
 # CONFIG_THISTLE_RUN_TESTS=y

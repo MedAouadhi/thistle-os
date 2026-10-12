@@ -25,8 +25,12 @@ const HAL_NET_STATE_DISCONNECTED: u32 = 0;
 const HAL_NET_STATE_CONNECTING: u32 = 1;
 const HAL_NET_STATE_CONNECTED: u32 = 2;
 
-// hal_net_type_t values — must match hal/net.h
-const HAL_NET_WIFI: u32 = 0;
+// hal_net_transport_t values — must match hal/network.h
+pub(crate) const HAL_NET_WIFI: u32 = 0;
+pub(crate) const HAL_NET_CELLULAR: u32 = 1;
+const HAL_NET_BLE: u32 = 2;
+const HAL_NET_ETHERNET: u32 = 3;
+const HAL_NET_HOST: u32 = 4;
 const HAL_NET_VPN: u32 = 5;
 
 const MAX_NET_TRANSPORTS: usize = 4;
@@ -45,9 +49,23 @@ const ESP_LOG_INFO: i32 = 3;
 const ESP_LOG_WARN: i32 = 2;
 
 // ---------------------------------------------------------------------------
-// hal_net_driver_t vtable — mirrors the C struct exactly.
+// hal_cell_info_t and hal_net_driver_t — mirror the C structs exactly
+// (hal/network.h; components/kernel/src/link_deps.c asserts the layout).
 // All function-pointer fields are optional (may be NULL).
 // ---------------------------------------------------------------------------
+
+/// hal_cell_info_t: what a cellular transport last read from its modem.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CCellInfo {
+    pub powered: bool,
+    /// hal_sim_state_t
+    pub sim: u32,
+    /// hal_cell_reg_t
+    pub reg: u32,
+    pub rssi_dbm: i16,
+    pub operator_name: [u8; 24],
+}
 
 #[repr(C)]
 pub struct HalNetDriver {
@@ -60,6 +78,8 @@ pub struct HalNetDriver {
     pub get_ip: Option<unsafe extern "C" fn() -> *const c_char>,
     pub get_rssi: Option<unsafe extern "C" fn() -> i8>,
     pub is_connected: Option<unsafe extern "C" fn() -> bool>,
+    pub get_cell_info: Option<unsafe extern "C" fn(*mut CCellInfo) -> i32>,
+    pub cancel: Option<unsafe extern "C" fn()>,
 }
 
 // SAFETY: All fields are immutable once registered.
@@ -113,6 +133,8 @@ static WIFI_NET_DRIVER: HalNetDriver = HalNetDriver {
     get_ip: Some(wifi_manager_get_ip),
     get_rssi: Some(wifi_manager_get_rssi),
     is_connected: Some(wifi_net_is_connected),
+    get_cell_info: None,
+    cancel: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -157,19 +179,53 @@ unsafe fn driver_is_connected(driver: *const HalNetDriver) -> bool {
     }
 }
 
-fn find_connected_transport(state: &NetManagerState, vpn_overlay: bool) -> *const HalNetDriver {
-    for i in 0..state.count {
-        let drv = state.transports[i];
-        if drv.is_null() || is_vpn_transport(drv) != vpn_overlay {
-            continue;
-        }
-        unsafe {
-            if driver_is_connected(drv) {
-                return drv;
-            }
-        }
+/// Which transport carries traffic when several are connected, lowest first.
+///
+/// This has to agree with esp_netif, which routes everything through the
+/// connected interface of highest route priority: WiFi station 100, Ethernet
+/// 50, PPP 20 (esp_netif_defaults.h). A disagreement would name one transport
+/// in the status bar while traffic went over another. The simulator's host
+/// network stands where WiFi would.
+fn transport_rank(transport_type: u32) -> u8 {
+    match transport_type {
+        HAL_NET_WIFI | HAL_NET_HOST => 0,
+        HAL_NET_ETHERNET => 1,
+        HAL_NET_CELLULAR => 2,
+        HAL_NET_BLE => 3,
+        _ => 4,
     }
-    std::ptr::null()
+}
+
+/// The registered transports of one kind (overlays, or underlays) in the
+/// order traffic prefers them; registration order breaks ties.
+fn by_preference(state: &NetManagerState, vpn_overlay: bool) -> Vec<*const HalNetDriver> {
+    let mut drivers: Vec<*const HalNetDriver> = state.transports[..state.count]
+        .iter()
+        .copied()
+        .filter(|&drv| !drv.is_null() && is_vpn_transport(drv) == vpn_overlay)
+        .collect();
+    drivers.sort_by_key(|&drv| unsafe { transport_rank((*drv).transport_type) });
+    drivers
+}
+
+fn find_connected_transport(state: &NetManagerState, vpn_overlay: bool) -> *const HalNetDriver {
+    by_preference(state, vpn_overlay)
+        .into_iter()
+        .find(|&drv| unsafe { driver_is_connected(drv) })
+        .unwrap_or(std::ptr::null())
+}
+
+/// The first registered transport of `transport_type`, or NULL.
+pub(crate) fn find_transport(transport_type: u32) -> *const HalNetDriver {
+    let state = match STATE.lock() {
+        Ok(s) => s,
+        Err(_) => return std::ptr::null(),
+    };
+    state.transports[..state.count]
+        .iter()
+        .copied()
+        .find(|&drv| !drv.is_null() && unsafe { (*drv).transport_type } == transport_type)
+        .unwrap_or(std::ptr::null())
 }
 
 // ---------------------------------------------------------------------------
@@ -264,7 +320,8 @@ pub extern "C" fn net_is_connected() -> bool {
     false
 }
 
-/// Return a pointer to the first connected transport vtable, or NULL.
+/// Return the transport traffic goes over: a connected VPN, else the
+/// connected underlay esp_netif routes through (see transport_rank), or NULL.
 ///
 /// # Safety
 /// Returns a pointer to static vtable data. Do not free.
@@ -283,7 +340,7 @@ pub extern "C" fn net_get_active() -> *const HalNetDriver {
     find_connected_transport(&state, false)
 }
 
-/// Return a pointer to the first connected non-VPN underlay transport, or NULL.
+/// Return the connected non-VPN underlay traffic goes over, or NULL.
 ///
 /// # Safety
 /// Returns a pointer to static vtable data. Do not free.
@@ -385,7 +442,7 @@ pub extern "C" fn net_get_transport_name() -> *const c_char {
     b"None\0".as_ptr() as *const c_char
 }
 
-/// Try to connect using the first available transport.
+/// Try to connect using the transports in order of preference.
 ///
 /// `timeout_ms` is passed through to the transport's connect function.
 ///
@@ -393,8 +450,8 @@ pub extern "C" fn net_get_transport_name() -> *const c_char {
 /// May be called from C.
 #[no_mangle]
 pub unsafe extern "C" fn net_connect_best(timeout_ms: u32) -> i32 {
-    let (transports, count) = match STATE.lock() {
-        Ok(s) => (s.transports, s.count),
+    let (overlays, underlays) = match STATE.lock() {
+        Ok(s) => (by_preference(&s, true), by_preference(&s, false)),
         Err(_) => return ESP_FAIL,
     };
 
@@ -404,12 +461,7 @@ pub unsafe extern "C" fn net_connect_best(timeout_ms: u32) -> i32 {
     }
 
     if net_has_underlay_connection() {
-        for i in 0..count {
-            let drv = transports[i];
-            if drv.is_null() || !is_vpn_transport(drv) {
-                continue;
-            }
-
+        for &drv in &overlays {
             if driver_is_connected(drv) {
                 return ESP_OK;
             }
@@ -433,15 +485,7 @@ pub unsafe extern "C" fn net_connect_best(timeout_ms: u32) -> i32 {
         }
     }
 
-    for i in 0..count {
-        let drv = transports[i];
-        if drv.is_null() {
-            continue;
-        }
-        if is_vpn_transport(drv) {
-            continue;
-        }
-
+    for &drv in &underlays {
         if driver_is_connected(drv) {
             return ESP_OK;
         }
@@ -572,6 +616,8 @@ mod tests {
         get_ip: None,
         get_rssi: Some(mock_get_rssi),
         is_connected: Some(mock_not_connected),
+        get_cell_info: None,
+        cancel: None,
     };
 
     static MOCK_CONNECTED: HalNetDriver = HalNetDriver {
@@ -584,6 +630,8 @@ mod tests {
         get_ip: Some(mock_get_ip),
         get_rssi: Some(mock_get_rssi),
         is_connected: Some(mock_is_connected),
+        get_cell_info: None,
+        cancel: None,
     };
 
     static MOCK_VPN_CONNECTED: HalNetDriver = HalNetDriver {
@@ -596,6 +644,8 @@ mod tests {
         get_ip: Some(mock_vpn_get_ip),
         get_rssi: None,
         is_connected: Some(mock_is_connected),
+        get_cell_info: None,
+        cancel: None,
     };
 
     // -----------------------------------------------------------------------
@@ -808,6 +858,89 @@ mod tests {
         assert!(local_is_connected(&s));
         let active = local_get_active(&s);
         assert_eq!(active, &MOCK_CONNECTED as *const HalNetDriver);
+    }
+
+    static MOCK_CELLULAR_CONNECTED: HalNetDriver = HalNetDriver {
+        transport_type: HAL_NET_CELLULAR,
+        name: b"MockLTE\0".as_ptr() as *const c_char,
+        init: None,
+        connect: None,
+        disconnect: None,
+        get_state: Some(mock_state_connected),
+        get_ip: Some(mock_get_ip),
+        get_rssi: Some(mock_get_rssi),
+        is_connected: Some(mock_is_connected),
+        get_cell_info: None,
+        cancel: None,
+    };
+
+    static MOCK_WIFI_CONNECTED: HalNetDriver = HalNetDriver {
+        transport_type: HAL_NET_WIFI,
+        name: b"MockWiFi\0".as_ptr() as *const c_char,
+        init: None,
+        connect: None,
+        disconnect: None,
+        get_state: Some(mock_state_connected),
+        get_ip: Some(mock_get_ip),
+        get_rssi: Some(mock_get_rssi),
+        is_connected: Some(mock_is_connected),
+        get_cell_info: None,
+        cancel: None,
+    };
+
+    static MOCK_WIFI_DISCONNECTED: HalNetDriver = HalNetDriver {
+        transport_type: HAL_NET_WIFI,
+        name: b"MockWiFiDown\0".as_ptr() as *const c_char,
+        init: None,
+        connect: None,
+        disconnect: None,
+        get_state: Some(mock_state_disconnected),
+        get_ip: None,
+        get_rssi: None,
+        is_connected: Some(mock_not_connected),
+        get_cell_info: None,
+        cancel: None,
+    };
+
+    /// The modem registers while the drivers load, before WiFi does; WiFi
+    /// still carries traffic whenever it is up, as esp_netif routes it.
+    #[test]
+    fn test_wifi_is_preferred_over_cellular_registered_first() {
+        let s = make_state_with(&[
+            &MOCK_CELLULAR_CONNECTED as *const HalNetDriver,
+            &MOCK_WIFI_CONNECTED as *const HalNetDriver,
+        ]);
+        assert_eq!(local_get_active(&s), &MOCK_WIFI_CONNECTED as *const HalNetDriver);
+        let name = unsafe { std::ffi::CStr::from_ptr(local_get_transport_name(&s)) };
+        assert_eq!(name.to_str().unwrap(), "MockWiFi");
+    }
+
+    #[test]
+    fn test_cellular_carries_traffic_when_wifi_is_down() {
+        let s = make_state_with(&[
+            &MOCK_CELLULAR_CONNECTED as *const HalNetDriver,
+            &MOCK_WIFI_DISCONNECTED as *const HalNetDriver,
+        ]);
+        assert_eq!(local_get_active(&s), &MOCK_CELLULAR_CONNECTED as *const HalNetDriver);
+        assert!(local_is_connected(&s));
+    }
+
+    #[test]
+    fn test_rank_agrees_with_esp_netif_route_priorities() {
+        // WiFi station 100 > Ethernet 50 > PPP 20.
+        assert!(transport_rank(HAL_NET_WIFI) < transport_rank(HAL_NET_ETHERNET));
+        assert!(transport_rank(HAL_NET_ETHERNET) < transport_rank(HAL_NET_CELLULAR));
+        assert_eq!(transport_rank(HAL_NET_HOST), transport_rank(HAL_NET_WIFI));
+    }
+
+    #[test]
+    fn test_cell_info_matches_the_c_layout() {
+        // bool, pad to 4, two enums, int16_t, char[24], pad to 4.
+        assert_eq!(std::mem::size_of::<CCellInfo>(), 40);
+        assert_eq!(std::mem::offset_of!(CCellInfo, sim), 4);
+        assert_eq!(std::mem::offset_of!(CCellInfo, reg), 8);
+        assert_eq!(std::mem::offset_of!(CCellInfo, rssi_dbm), 12);
+        assert_eq!(std::mem::offset_of!(CCellInfo, operator_name), 14);
     }
 
     #[test]

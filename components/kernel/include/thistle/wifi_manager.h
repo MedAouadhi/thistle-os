@@ -26,6 +26,8 @@ typedef enum {
 esp_err_t wifi_manager_init(void);
 
 /* Scan for available networks. Results written to results[], count to out_count. */
+/* ESP_ERR_TIMEOUT while a connection attempt is under way, which the network
+ * coordinator may be making in the background: try again shortly. */
 esp_err_t wifi_manager_scan(wifi_scan_result_t *results, uint8_t max_results, uint8_t *out_count);
 
 /* Connect to a WiFi network. Blocks up to timeout_ms (0 = 10s default). */
@@ -33,6 +35,15 @@ esp_err_t wifi_manager_connect(const char *ssid, const char *password, uint32_t 
 
 /* Disconnect from current network */
 esp_err_t wifi_manager_disconnect(void);
+
+/* Switch WiFi on or off, and remember it in system.json. Off stops the radio:
+ * scan and connect return ESP_ERR_INVALID_STATE, and the saved network is not
+ * rejoined, until WiFi is switched on again. The choice applies even if it
+ * could not be saved; the return says whether it was. */
+esp_err_t wifi_manager_set_enabled(bool on);
+
+/* Whether WiFi is switched on, as it is unless switched off in Settings. */
+bool wifi_manager_is_enabled(void);
 
 /* Get current WiFi state */
 wifi_state_t wifi_manager_get_state(void);
