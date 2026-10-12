@@ -18,6 +18,7 @@
  * on app pause and loaded on app create.
  */
 #include "assistant/assistant_app.h"
+#include "esp_attr.h"
 #include "assistant/assistant_request.h"
 
 #include "lvgl.h"
@@ -70,7 +71,9 @@ typedef struct {
 /* Module state                                                         */
 /* ------------------------------------------------------------------ */
 
-static struct {
+/* The conversation is 16 KB; it lives in PSRAM, with the other app state
+ * that only the UI task touches. */
+static EXT_RAM_BSS_ATTR struct {
     lv_obj_t *root;
     lv_obj_t *msg_list;
     lv_obj_t *input_ta;
@@ -521,7 +524,7 @@ static void send_to_ai(const char *user_msg)
 
     /* Check network connectivity */
     if (!net_is_connected()) {
-        add_message("AI", "No network connection. Connect to WiFi first.", false);
+        add_message("AI", "No network connection. Connect to WiFi or turn on mobile data.", false);
         if (s_ai.status_label) {
             lv_label_set_text(s_ai.status_label, "Offline");
         }

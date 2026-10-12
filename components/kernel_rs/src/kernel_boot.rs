@@ -6,6 +6,7 @@ use std::os::raw::c_char;
 use std::sync::Mutex;
 
 const ESP_OK: i32 = 0;
+const ESP_FAIL: i32 = -1;
 
 // ── ESP-IDF error codes needed for boot ──────────────────────────────
 const ESP_ERR_NVS_NO_FREE_PAGES: i32 = 0x1101;
@@ -118,12 +119,17 @@ extern "C" {
 
 static BOOT_TIME_US: Mutex<i64> = Mutex::new(0);
 
-// kernel_init, kernel_run, kernel_uptime_ms — same names as C
+// kernel_init, kernel_uptime_ms — same names as C
 
 #[no_mangle]
 pub extern "C" fn kernel_init() -> i32 {
     if let Ok(mut t) = BOOT_TIME_US.lock() {
         *t = unsafe { esp_timer_get_time() };
+    }
+
+    // The kernel worker, before any driver that runs jobs on it starts.
+    if !crate::kworker::start() {
+        return ESP_FAIL;
     }
 
     // NVS flash — required by WiFi, BLE, and other ESP-IDF subsystems
@@ -258,11 +264,6 @@ pub extern "C" fn kernel_init() -> i32 {
     ESP_OK
 }
 
-#[cfg(not(test))]
-extern "C" {
-    fn vTaskDelay(ticks: u32);
-}
-
 /// Register the thistle-tk App Store and Flashlight. Call this only when
 /// thistle-tk is the window manager.
 ///
@@ -278,19 +279,6 @@ pub extern "C" fn tk_native_apps_register() -> i32 {
         rc
     } else {
         fl
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn kernel_run() {
-    // LVGL tick is driven by ui component. This is the kernel heartbeat.
-    loop {
-        #[cfg(target_os = "espidf")]
-        unsafe {
-            vTaskDelay(1);
-        } // 1 tick = 1ms at 1000Hz FreeRTOS
-        #[cfg(not(target_os = "espidf"))]
-        std::thread::sleep(std::time::Duration::from_millis(10));
     }
 }
 

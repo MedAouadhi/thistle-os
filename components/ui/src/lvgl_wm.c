@@ -12,6 +12,7 @@
  */
 
 #include "thistle/display_server.h"
+#include "esp_attr.h"
 #include "ui/manager.h"
 #include "ui/theme.h"
 #include "esp_log.h"
@@ -22,7 +23,7 @@
 /* ── Handle registry ─────────────────────────────────────────────────── */
 
 #define LVGL_WIDGET_HANDLE_MAX 256
-static lv_obj_t *s_widget_handles[LVGL_WIDGET_HANDLE_MAX];
+static EXT_RAM_BSS_ATTR lv_obj_t *s_widget_handles[LVGL_WIDGET_HANDLE_MAX];
 
 static lv_obj_t *h2obj(uint32_t handle)
 {

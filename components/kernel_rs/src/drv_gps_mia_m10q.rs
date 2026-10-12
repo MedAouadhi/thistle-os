@@ -3,13 +3,14 @@
 //
 // Rust port of components/drv_gps_mia_m10q/src/drv_gps_mia_m10q.c.
 //
-// Communicates with the U-blox MIA-M10Q via UART. A background FreeRTOS task
+// Communicates with the U-blox MIA-M10Q via UART. A job on the kernel worker
 // reads NMEA sentences byte-by-byte, parses $GNRMC and $GNGGA, and fires the
 // registered callback on a valid fix. Supports UBX-RXM-PMREQ sleep/wake.
 
 #![allow(non_upper_case_globals)]
 
 use std::os::raw::{c_char, c_void};
+use std::time::Duration;
 
 use crate::hal_registry::{HalGpsCb, HalGpsDriver, HalGpsPosition};
 
@@ -19,20 +20,19 @@ const ESP_OK: i32 = 0;
 const ESP_FAIL: i32 = -1;
 const ESP_ERR_INVALID_ARG: i32 = 0x102;
 const ESP_ERR_INVALID_STATE: i32 = 0x103;
-const ESP_ERR_NO_MEM: i32 = 0x101;
 
 // ── Driver constants ─────────────────────────────────────────────────────────
 
-const UART_RX_BUF_SIZE: i32 = 1024;
-const RX_TASK_STACK_SIZE: u32 = 4096;
-const RX_TASK_PRIORITY: u32 = 5;
+/// The UART's receive buffer: about two seconds at 38400 baud, so the reader
+/// loses nothing while another job holds the kernel worker, a LoRa send for
+/// one. Over 4 KB, the UART driver takes it from PSRAM.
+const UART_RX_BUF_SIZE: i32 = 8192;
 const KNOTS_TO_KMH: f32 = 1.852;
 
-/// Bytes taken off the UART per read. A receiver talks in one burst a second,
-/// so the read returns on a full chunk mid-burst and on the timeout after it.
-const RX_CHUNK: usize = 64;
-/// pdMS_TO_TICKS(100) with configTICK_RATE_HZ=1000.
-const RX_TIMEOUT_TICKS: u32 = 100;
+/// How often the reader takes what the UART has buffered.
+const RX_POLL: Duration = Duration::from_millis(100);
+/// Bytes taken off the UART per read.
+const RX_CHUNK: usize = 128;
 /// How long the line may go without one good sentence before the driver says
 /// so. A receiver that is powered and at the right rate talks within a second.
 const SILENCE_WARN_TICKS: u32 = 5000;
@@ -65,16 +65,6 @@ extern "C" {
     fn uart_driver_delete(port: i32) -> i32;
     fn uart_read_bytes(port: i32, buf: *mut u8, len: u32, timeout: u32) -> i32;
     fn uart_write_bytes(port: i32, buf: *const u8, len: usize) -> i32;
-    fn xTaskCreatePinnedToCore(
-        task_fn: unsafe extern "C" fn(*mut c_void),
-        name: *const u8,
-        stack: u32,
-        param: *mut c_void,
-        prio: u32,
-        handle: *mut *mut c_void,
-        core_id: i32,
-    ) -> i32;
-    fn vTaskDelete(task: *mut c_void);
     fn vTaskDelay(ticks: u32);
     fn xTaskGetTickCount() -> u32;
     fn esp_log_write(level: i32, tag: *const u8, format: *const u8, ...);
@@ -129,7 +119,6 @@ unsafe fn uart_driver_delete(_port: i32) -> i32 {
 
 #[cfg(not(target_os = "espidf"))]
 unsafe fn uart_read_bytes(_port: i32, _buf: *mut u8, _len: u32, _timeout: u32) -> i32 {
-    // Never returns data; the RX task would spin until vTaskDelete is called.
     0
 }
 
@@ -137,24 +126,6 @@ unsafe fn uart_read_bytes(_port: i32, _buf: *mut u8, _len: u32, _timeout: u32) -
 unsafe fn uart_write_bytes(_port: i32, _buf: *const u8, _len: usize) -> i32 {
     0
 }
-
-#[cfg(not(target_os = "espidf"))]
-unsafe fn xTaskCreatePinnedToCore(
-    _task_fn: unsafe extern "C" fn(*mut c_void),
-    _name: *const u8,
-    _stack: u32,
-    _param: *mut c_void,
-    _prio: u32,
-    handle: *mut *mut c_void,
-    _core_id: i32,
-) -> i32 {
-    // Return a non-null sentinel handle so callers can tell it "worked".
-    *handle = 1usize as *mut c_void;
-    1 // pdPASS
-}
-
-#[cfg(not(target_os = "espidf"))]
-unsafe fn vTaskDelete(_task: *mut c_void) {}
 
 #[cfg(not(target_os = "espidf"))]
 unsafe fn vTaskDelay(_ticks: u32) {}
@@ -220,7 +191,12 @@ struct GpsState {
     cb: Option<unsafe extern "C" fn(*const HalGpsPosition, *mut c_void)>,
     cb_data: *mut c_void,
     last_position: HalGpsPosition,
-    rx_task: *mut c_void,
+    /// The reader's kernel worker job, or 0.
+    rx_job: u32,
+    /// When the reader started, in ticks, and what it has said since.
+    rx_started: u32,
+    link_reported: bool,
+    fix_reported: bool,
     initialized: bool,
     enabled: bool,
     nmea_buf: [u8; 256],
@@ -233,7 +209,7 @@ struct GpsState {
 }
 
 // SAFETY: The driver state is only mutated during single-threaded board-init
-// and from the single RX task; last_position updates mirror C portENTER_CRITICAL
+// and from the reader job; last_position updates mirror C portENTER_CRITICAL
 // semantics via the static_mut + unsafe convention used throughout this crate.
 unsafe impl Send for GpsState {}
 unsafe impl Sync for GpsState {}
@@ -259,7 +235,10 @@ impl GpsState {
                 fix_valid: false,
                 timestamp: 0,
             },
-            rx_task: std::ptr::null_mut(),
+            rx_job: 0,
+            rx_started: 0,
+            link_reported: false,
+            fix_reported: false,
             initialized: false,
             enabled: false,
             nmea_buf: [0u8; 256],
@@ -568,40 +547,41 @@ unsafe fn nmea_feed_byte(byte: u8) {
     }
 }
 
-// ── UART RX task ─────────────────────────────────────────────────────────────
+// ── UART reader ──────────────────────────────────────────────────────────────
 
-/// Background FreeRTOS task: feeds the UART to the sentence assembler, and
-/// reports once whether the receiver is talking.
+/// The reader, a job on the kernel worker every `RX_POLL`: feeds what the UART
+/// has buffered to the sentence assembler, and reports once whether the
+/// receiver is talking.
 ///
 /// Both outcomes get a line. Before it had either, a receiver that never spoke
 /// looked exactly like one still waiting for a fix.
 ///
 /// # Safety
-/// Accesses `S_GPS` directly. Must only be spawned via `xTaskCreate`.
-pub unsafe extern "C" fn gps_rx_task(_arg: *mut c_void) {
-    let mut chunk = [0u8; RX_CHUNK];
-    let started = xTaskGetTickCount();
-    let mut link_reported = false;
-    let mut fix_reported = false;
-
-    loop {
-        let len = uart_read_bytes(
-            (*(&raw const S_GPS)).cfg.uart_num,
-            chunk.as_mut_ptr(),
-            RX_CHUNK as u32,
-            RX_TIMEOUT_TICKS,
-        );
-
-        if len > 0 {
+/// Accesses `S_GPS` directly. Runs only as the job `mia_m10q_enable` starts.
+pub unsafe extern "C" fn gps_rx_job(_arg: *mut c_void) {
+    // Host builds have no UART, and the tests own `S_GPS`.
+    #[cfg(target_os = "espidf")]
+    {
+        let mut chunk = [0u8; RX_CHUNK];
+        loop {
+            let len = uart_read_bytes(
+                (*(&raw const S_GPS)).cfg.uart_num,
+                chunk.as_mut_ptr(),
+                RX_CHUNK as u32,
+                0,
+            );
+            if len <= 0 {
+                break;
+            }
             for &byte in &chunk[..len as usize] {
                 nmea_feed_byte(byte);
             }
         }
 
-        let gps = &*(&raw const S_GPS);
-        let elapsed = xTaskGetTickCount().wrapping_sub(started);
+        let gps = &mut *(&raw mut S_GPS);
+        let elapsed = xTaskGetTickCount().wrapping_sub(gps.rx_started);
 
-        if !link_reported {
+        if !gps.link_reported {
             if gps.sentences_seen > 0 {
                 gps_log!(
                     ESP_LOG_INFO,
@@ -609,7 +589,7 @@ pub unsafe extern "C" fn gps_rx_task(_arg: *mut c_void) {
                     gps.cfg.uart_num,
                     gps.cfg.baud_rate
                 );
-                link_reported = true;
+                gps.link_reported = true;
             } else if elapsed >= SILENCE_WARN_TICKS {
                 gps_log!(
                     ESP_LOG_WARN,
@@ -618,18 +598,18 @@ pub unsafe extern "C" fn gps_rx_task(_arg: *mut c_void) {
                     gps.cfg.baud_rate,
                     gps.bytes_seen
                 );
-                link_reported = true;
+                gps.link_reported = true;
             }
         }
 
-        if !fix_reported && gps.last_position.fix_valid {
+        if !gps.fix_reported && gps.last_position.fix_valid {
             gps_log!(
                 ESP_LOG_INFO,
                 "fix after %u s with %u satellites",
                 elapsed / 1000,
                 gps.last_position.satellites as u32
             );
-            fix_reported = true;
+            gps.fix_reported = true;
         }
     }
 }
@@ -733,7 +713,7 @@ unsafe extern "C" fn mia_m10q_init(config: *const c_void) -> i32 {
         timestamp: 0,
     };
     gps.nmea_idx = 0;
-    gps.rx_task = std::ptr::null_mut();
+    gps.rx_job = 0;
     gps.enabled = false;
     gps.initialized = true;
 
@@ -742,7 +722,7 @@ unsafe extern "C" fn mia_m10q_init(config: *const c_void) -> i32 {
 
 /// De-initialise the driver.
 ///
-/// Stops the RX task if running and removes the UART driver.
+/// Stops the reader if running and removes the UART driver.
 ///
 /// # Safety
 /// Must be called from the same context as `mia_m10q_init`.
@@ -753,10 +733,7 @@ unsafe extern "C" fn mia_m10q_deinit() {
         return;
     }
 
-    if !gps.rx_task.is_null() {
-        vTaskDelete(gps.rx_task);
-        gps.rx_task = std::ptr::null_mut();
-    }
+    stop_reader(gps);
 
     uart_driver_delete(gps.cfg.uart_num);
 
@@ -764,7 +741,7 @@ unsafe extern "C" fn mia_m10q_deinit() {
     gps.enabled = false;
 }
 
-/// Start the background UART RX task.
+/// Start the reader.
 ///
 /// # Safety
 /// Driver must be initialised.
@@ -781,27 +758,24 @@ unsafe extern "C" fn mia_m10q_enable() -> i32 {
     gps.nmea_idx = 0;
     gps.bytes_seen = 0;
     gps.sentences_seen = 0;
-
-    let rc = xTaskCreatePinnedToCore(
-        gps_rx_task,
-        b"gps_rx\0".as_ptr(),
-        RX_TASK_STACK_SIZE,
-        std::ptr::null_mut(),
-        RX_TASK_PRIORITY,
-        &mut gps.rx_task as *mut *mut c_void,
-        1, // pin to core 1 (app core)
-    );
-
-    if rc != 1 {
-        // pdPASS = 1
-        return ESP_ERR_NO_MEM;
-    }
+    gps.rx_started = xTaskGetTickCount();
+    gps.link_reported = false;
+    gps.fix_reported = false;
+    gps.rx_job = crate::kworker::every(gps_rx_job, std::ptr::null_mut(), RX_POLL);
 
     gps.enabled = true;
     ESP_OK
 }
 
-/// Stop the background RX task.
+/// Stop the reader. Once this returns it is not running and will not run.
+unsafe fn stop_reader(gps: &mut GpsState) {
+    if gps.rx_job != 0 {
+        crate::kworker::cancel(gps.rx_job);
+        gps.rx_job = 0;
+    }
+}
+
+/// Stop the reader.
 ///
 /// # Safety
 /// Driver must be initialised.
@@ -815,10 +789,7 @@ unsafe extern "C" fn mia_m10q_disable() -> i32 {
         return ESP_OK;
     }
 
-    if !gps.rx_task.is_null() {
-        vTaskDelete(gps.rx_task);
-        gps.rx_task = std::ptr::null_mut();
-    }
+    stop_reader(gps);
 
     gps.enabled = false;
     ESP_OK

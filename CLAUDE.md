@@ -85,6 +85,36 @@ wipes `system.json` (WiFi credentials, settings) and the mesh identity.
 Rewriting only `board.json`, for instance by a build that calls
 `board_detect_and_write()` once, keeps them.
 
+### Internal RAM runs out first; keep stacks there and buffers out
+
+An S3 has about 340 KB of internal RAM, shared with any code placed in IRAM,
+against 8 MB of PSRAM. A T-Deck Max once booted with 14 KB of internal RAM
+left, where a 4 KB task could not be created (ticket 11); it now has about
+180 KB. Every boot logs `ThistleOS ready; internal RAM N KB free, largest
+block M KB`. To keep it that way:
+
+- **Buffers that only tasks touch go to PSRAM**: `EXT_RAM_BSS_ATTR` on a big
+  zeroed static (the App Store, Assistant and Terminal state), or
+  `heap_caps_malloc(..., MALLOC_CAP_SPIRAM)`. A plain `malloc` under 4 KB lands
+  in internal RAM (`CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL`). Not for DMA buffers,
+  anything an interrupt or code running while flash is written reads, or
+  secrets: the Vault's entries and key, and `msg_crypto`'s state, stay
+  internal. `MALLOC_CAP_SPIRAM` is `1 << 10`; `1 << 9` is a capability no heap
+  has.
+- **Stacks stay in internal RAM.** A PSRAM stack cannot be read while flash is
+  written, so its thread could never read or write SPIFFS, NVS (which the WiFi
+  driver writes) or OTA, which is too easy to break.
+- **Do not start a thread for a loop that mostly waits.** Make it a job on the
+  kernel worker (`thistle/kworker.h`, `kworker.rs`): one 16 KB stack that runs
+  jobs one at a time, so it fits the deepest job rather than all of them.
+  MeshCore's loop and the GPS reader run there. A job must return promptly,
+  since nothing else runs meanwhile; a LoRa send, a second or two, is about the
+  longest. Work that waits on a network or a modem has a thread of its own, as
+  `net_coordinator`'s does, and UI work polls from an `lv_timer`, as the
+  Terminal's UART reader does.
+- A Rust `std::thread` shows as `pthread` in task lists unless the spawning
+  thread calls `thistle_pthread_name_next()` (`link_deps.c`) first.
+
 ### Rust toolchains
 
 Two toolchains, for two different jobs:

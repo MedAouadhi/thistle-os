@@ -2,7 +2,7 @@
 // ThistleOS Kernel — mesh_manager module
 //
 // The kernel's side of the MeshCore mesh. The engine (components/meshcore)
-// runs the node on its own task and hears everything; this owns what apps see
+// runs the node on the kernel worker and hears everything; this owns what apps see
 // of it: who this node is, the contacts it has heard from, messages waiting for
 // an app to read them, and what became of each message an app sent.
 //
@@ -569,7 +569,7 @@ pub(crate) fn message_from_engine(m: &EngineMessage) -> CMeshMessage {
 }
 
 // ---------------------------------------------------------------------------
-// Callbacks from the engine, on its task
+// Callbacks from the engine, on the kernel worker
 // ---------------------------------------------------------------------------
 
 #[cfg_attr(not(target_os = "espidf"), allow(dead_code))]

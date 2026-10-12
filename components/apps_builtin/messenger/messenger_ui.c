@@ -27,6 +27,7 @@
  */
 
 #include "messenger/messenger_app.h"
+#include "esp_attr.h"
 #include "messenger/messenger_transport.h"
 #include "messenger/messenger_kernel.h"
 
@@ -106,7 +107,7 @@ typedef struct {
 /* Module state                                                         */
 /* ------------------------------------------------------------------ */
 
-static struct {
+static EXT_RAM_BSS_ATTR struct {
     /* LVGL root */
     lv_obj_t   *root;
 

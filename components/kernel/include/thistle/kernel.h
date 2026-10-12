@@ -16,8 +16,5 @@ esp_err_t kernel_init(void);
  * first registration of an ID is the one that is kept. */
 esp_err_t tk_native_apps_register(void);
 
-/* Enter the kernel main loop (never returns). Runs LVGL tick, processes events. */
-void kernel_run(void);
-
 /* Get kernel uptime in milliseconds */
 uint32_t kernel_uptime_ms(void);

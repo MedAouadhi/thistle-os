@@ -28,6 +28,9 @@ static const char *TAG = "epaper";
 #define EPD_WIDTH       240
 #define EPD_HEIGHT      320
 #define EPD_FB_BYTES    (EPD_WIDTH * EPD_HEIGHT / 8)   /* 9600 bytes */
+/* Data goes to the panel through a DMA buffer this size, in internal RAM:
+ * the frames are in PSRAM where there is any, which this DMA does not read. */
+#define EPD_SPI_CHUNK   2048
 
 /* ── UC8253 commands (matching GxEPD2_310_GDEQ031T10) ────────────────── */
 #define CMD_PSR             0x00  /* Panel Setting */
@@ -73,6 +76,7 @@ static struct {
     hal_display_refresh_mode_t refresh_mode;
     uint8_t                   *fb;          /* current frame to send via 0x13 */
     uint8_t                   *fb_old;      /* previous frame to send via 0x10 */
+    uint8_t                   *spi_buf;     /* EPD_SPI_CHUNK bytes, DMA-capable */
     bool                       initialised;
     bool                       init_seq_done;     /* PSR sent since last refresh */
     bool                       power_on;
@@ -147,8 +151,9 @@ static esp_err_t epaper_send_data(const uint8_t *data, size_t len)
     size_t sent = 0;
     while (sent < len && ret == ESP_OK) {
         size_t chunk = len - sent;
-        if (chunk > 4096) chunk = 4096;
-        spi_transaction_t t = { .length = chunk * 8, .tx_buffer = data + sent };
+        if (chunk > EPD_SPI_CHUNK) chunk = EPD_SPI_CHUNK;
+        memcpy(s_epd.spi_buf, data + sent, chunk);
+        spi_transaction_t t = { .length = chunk * 8, .tx_buffer = s_epd.spi_buf };
         ret = spi_device_polling_transmit(s_epd.spi, &t);
         sent += chunk;
     }
@@ -282,13 +287,18 @@ static esp_err_t gdeq031t10_init(const void *config)
     memcpy(&s_epd.cfg, config, sizeof(epaper_gdeq031t10_config_t));
     s_epd.refresh_mode = HAL_DISPLAY_REFRESH_FULL;
 
-    /* Allocate framebuffers */
-    s_epd.fb     = heap_caps_malloc(EPD_FB_BYTES, MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
-    s_epd.fb_old = heap_caps_malloc(EPD_FB_BYTES, MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
-    if (!s_epd.fb || !s_epd.fb_old) {
+    /* Allocate framebuffers. Only the CPU touches them, so they go to PSRAM
+     * where there is any: in internal RAM they took 19 KB of it. */
+    const uint32_t fb_caps_psram = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
+    const uint32_t fb_caps_internal = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+    s_epd.fb      = heap_caps_malloc_prefer(EPD_FB_BYTES, 2, fb_caps_psram, fb_caps_internal);
+    s_epd.fb_old  = heap_caps_malloc_prefer(EPD_FB_BYTES, 2, fb_caps_psram, fb_caps_internal);
+    s_epd.spi_buf = heap_caps_malloc(EPD_SPI_CHUNK, MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+    if (!s_epd.fb || !s_epd.fb_old || !s_epd.spi_buf) {
         ESP_LOGE(TAG, "FB alloc failed");
-        free(s_epd.fb);     s_epd.fb = NULL;
-        free(s_epd.fb_old); s_epd.fb_old = NULL;
+        free(s_epd.fb);      s_epd.fb = NULL;
+        free(s_epd.fb_old);  s_epd.fb_old = NULL;
+        free(s_epd.spi_buf); s_epd.spi_buf = NULL;
         return ESP_ERR_NO_MEM;
     }
     memset(s_epd.fb,     0xFF, EPD_FB_BYTES);   /* white */
@@ -361,6 +371,7 @@ fail:
     if (s_epd.spi) { spi_bus_remove_device(s_epd.spi); s_epd.spi = NULL; }
     free(s_epd.fb);     s_epd.fb = NULL;
     free(s_epd.fb_old); s_epd.fb_old = NULL;
+    free(s_epd.spi_buf); s_epd.spi_buf = NULL;
     return ret != ESP_OK ? ret : ESP_FAIL;
 }
 
@@ -373,6 +384,7 @@ static void gdeq031t10_deinit(void)
     if (s_epd.spi) { spi_bus_remove_device(s_epd.spi); s_epd.spi = NULL; }
     free(s_epd.fb);     s_epd.fb = NULL;
     free(s_epd.fb_old); s_epd.fb_old = NULL;
+    free(s_epd.spi_buf); s_epd.spi_buf = NULL;
     s_epd.initialised = false;
     ESP_LOGI(TAG, "deinit complete");
 }

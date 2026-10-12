@@ -12,6 +12,30 @@ CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096
 CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
 CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=y
 
+# Internal RAM is what runs out: task stacks, DMA and anything used while the
+# flash cache is off must be there, and it is about 330 KB in all, against
+# 8 MB of PSRAM. So the big buffers that need none of that go to PSRAM: the
+# WiFi and lwIP buffers, TLS sessions (about 40 KB each), the NimBLE host's
+# pools and NVS's page cache.
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+# That makes WiFi's TX buffers static, and with the RX ones they take internal
+# RAM for DMA, about 1.6 KB each, from the start: the defaults it brings, 16
+# and 16, took 35 KB more than WiFi had used. A frame that finds no TX buffer
+# waits in a queue in PSRAM (ESP_WIFI_CACHE_TX_BUFFER_NUM).
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=10
+CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM=8
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL=y
+CONFIG_NVS_ALLOCATE_CACHE_IN_SPIRAM=y
+# Code placed in internal RAM for speed takes from the same memory. These run
+# from flash instead: WiFi a little slower, and the BLE controller, which is
+# off unless Bluetooth is switched on in Settings, can drop a connection while
+# flash is erased.
+CONFIG_ESP_WIFI_IRAM_OPT=n
+CONFIG_ESP_WIFI_RX_IRAM_OPT=n
+CONFIG_BT_CTRL_RUN_IN_FLASH_ONLY=y
+CONFIG_RINGBUF_PLACE_FUNCTIONS_INTO_FLASH=y
+
 CONFIG_BT_ENABLED=y
 CONFIG_BT_NIMBLE_ENABLED=y
 CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=y

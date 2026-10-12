@@ -189,8 +189,9 @@ mod sim_loader {
     }
 }
 
-// MALLOC_CAP_SPIRAM = BIT(9) = 0x200
-const MALLOC_CAP_SPIRAM: u32 = 1 << 9;
+// MALLOC_CAP_SPIRAM = BIT(10) (esp_heap_caps.h). BIT(9) is MALLOC_CAP_PID7,
+// which no heap has, so every allocation asking for it failed.
+const MALLOC_CAP_SPIRAM: u32 = 1 << 10;
 
 // ESP log levels
 const ESP_LOG_INFO: i32 = 3;

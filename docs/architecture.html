@@ -233,6 +233,7 @@
      &#x2514;&#x2500; ota_1 missing / invalid &#x2500;&#x25BA; [Recovery OS]   &#x25BC;
                                              kernel_init()
                                               &#x2502;
+                                              &#x251c;&#x2500; kworker_start()  (the kernel worker)
                                               &#x251c;&#x2500; syscall_table_init()
                                               &#x251c;&#x2500; permissions_init()
                                               &#x251c;&#x2500; driver_manager_init()
@@ -245,7 +246,7 @@
                                               &#x251c;&#x2500; ui_init()  (LVGL)
                                               &#x251c;&#x2500; load SD card .drv.elf files
                                               &#x251c;&#x2500; launch launcher_app
-                                              &#x2514;&#x2500; kernel_run()  (never returns)</div>
+                                              &#x2514;&#x2500; app_main() returns; its stack is freed</div>
 
     <h2>Driver loading: compiled-in vs SD card</h2>
     <p>ThistleOS supports two driver deployment modes:</p>

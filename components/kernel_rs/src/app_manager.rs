@@ -26,7 +26,7 @@ const ESP_ERR_NOT_FOUND: i32 = 0x105;
 /// Maximum number of simultaneously-tracked app slots.
 pub const APP_SLOTS_MAX: usize = 20;
 
-/// Free-heap threshold below which LRU eviction is attempted before a launch.
+/// Free internal RAM below which LRU eviction is attempted before a launch.
 pub const APP_MEMORY_THRESHOLD_BYTES: usize = 50 * 1024;
 
 /// Sentinel handle for "no app".
@@ -70,7 +70,12 @@ const EVENT_APP_SWITCHED: u32 = 4;
 // Heap caps (from esp_heap_caps.h)
 // ---------------------------------------------------------------------------
 
-const MALLOC_CAP_DEFAULT: u32 = 1 << 3;
+// Internal RAM is what runs short; PSRAM, where there is any, has megabytes.
+// This was MALLOC_CAP_DEFAULT by name and BIT(3), MALLOC_CAP_DMA, by value,
+// which is internal RAM as well.
+const MALLOC_CAP_8BIT: u32 = 1 << 2;
+const MALLOC_CAP_INTERNAL: u32 = 1 << 11;
+const FREE_MEMORY_CAPS: u32 = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
 
 // ---------------------------------------------------------------------------
 // External C functions
@@ -477,7 +482,7 @@ impl AppManager {
         // Evict LRU if heap is low.
         #[cfg(not(test))]
         {
-            let free = unsafe { heap_caps_get_free_size(MALLOC_CAP_DEFAULT) };
+            let free = unsafe { heap_caps_get_free_size(FREE_MEMORY_CAPS) };
             if free < APP_MEMORY_THRESHOLD_BYTES {
                 self.evict_lru();
             }
@@ -857,12 +862,12 @@ pub fn evict_lru() -> i32 {
     }
 }
 
-/// Return the current free heap in bytes (MALLOC_CAP_DEFAULT region).
+/// Return the internal RAM free, in bytes.
 ///
 /// # Safety
 /// Calls the ESP-IDF `heap_caps_get_free_size` C function.
 pub unsafe fn get_free_memory() -> usize {
-    heap_caps_get_free_size(MALLOC_CAP_DEFAULT)
+    heap_caps_get_free_size(FREE_MEMORY_CAPS)
 }
 
 // ---------------------------------------------------------------------------
@@ -946,7 +951,7 @@ pub unsafe extern "C" fn app_manager_evict_lru() -> i32 {
     evict_lru()
 }
 
-/// Return free heap bytes (MALLOC_CAP_DEFAULT).
+/// Return the internal RAM free, in bytes.
 ///
 /// # Safety
 /// Calls the ESP-IDF `heap_caps_get_free_size` C function.

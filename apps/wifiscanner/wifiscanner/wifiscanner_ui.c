@@ -17,6 +17,7 @@
  *   └─────────────────────────────┘
  */
 #include "wifiscanner/wifiscanner_app.h"
+#include "esp_attr.h"
 
 #include "hal/sdcard_path.h"
 #include "ui/theme.h"
@@ -64,7 +65,7 @@ typedef struct {
 /* State                                                                */
 /* ------------------------------------------------------------------ */
 
-static struct {
+static EXT_RAM_BSS_ATTR struct {
     lv_obj_t  *root;
 
     /* List screen */

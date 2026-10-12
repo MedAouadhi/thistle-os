@@ -16,6 +16,7 @@
  *   +--------------------------------+
  */
 #include "terminal/terminal_app.h"
+#include "esp_attr.h"
 
 #include "ui/theme.h"
 #include "ui/manager.h"
@@ -33,8 +34,6 @@
 #ifdef ESP_PLATFORM
 #include "soc/soc_caps.h"
 #endif
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
 
 static const char *TAG = "terminal_ui";
 
@@ -70,7 +69,7 @@ static int s_app_h = 296;
 #define HISTORY_MAX  16
 #define HISTORY_LEN  128
 
-static struct {
+static EXT_RAM_BSS_ATTR struct {
     lv_obj_t    *root;
     lv_obj_t    *output_ta;     /* read-only monospace textarea */
     lv_obj_t    *input_ta;      /* one-line input */
@@ -80,7 +79,7 @@ static struct {
     int          baud_rate;
     bool         local_echo;
     bool         uart_running;
-    TaskHandle_t rx_task_handle;
+    lv_timer_t  *rx_timer;      /* reads the UART in UART mode */
     /* Command history ring buffer */
     char         history[HISTORY_MAX][HISTORY_LEN];
     int          history_count;
@@ -188,7 +187,8 @@ static void terminal_uart_init(void)
     };
     uart_param_config(s_term.uart_num, &cfg);
     uart_set_pin(s_term.uart_num, 1, 2, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
-    uart_driver_install(s_term.uart_num, 1024, 0, 0, NULL, 0);
+    /* 8 KB: over half a second at 115200 baud. Past 4 KB it is in PSRAM. */
+    uart_driver_install(s_term.uart_num, 8192, 0, 0, NULL, 0);
     s_term.uart_running = true;
 }
 
@@ -199,46 +199,38 @@ static void terminal_uart_reinit(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* RX task                                                              */
+/* UART reader                                                          */
 /* ------------------------------------------------------------------ */
 
-#ifndef SIMULATOR_BUILD
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#else
-#define portTICK_PERIOD_MS 1
-#endif
+/* UART mode reads the port from an LVGL timer: what it reads goes straight
+ * into LVGL, which the timer runs inside, and it costs no thread. The
+ * driver's buffer holds what arrives while LVGL is busy with a refresh. */
+#define RX_POLL_MS  50
 
-static void terminal_rx_task(void *arg)
+static void terminal_rx_poll(lv_timer_t *timer)
 {
-    (void)arg;
+    (void)timer;
+    if (!s_term.uart_running) return;
     uint8_t buf[128];
-    while (s_term.uart_running) {
-        int len = uart_read_bytes(s_term.uart_num, buf, sizeof(buf) - 1,
-                                  100 / portTICK_PERIOD_MS);
-        if (len > 0) {
-            buf[len] = '\0';
-            ui_manager_lock();
-            term_print_raw((const char *)buf);
-            ui_manager_unlock();
-        }
+    int len;
+    while ((len = uart_read_bytes(s_term.uart_num, buf, sizeof(buf) - 1, 0)) > 0) {
+        buf[len] = '\0';
+        term_print_raw((const char *)buf);
     }
-    vTaskDelete(NULL);
 }
 
-static void terminal_rx_task_start(void)
+static void terminal_rx_start(void)
 {
-    if (s_term.rx_task_handle) return;
-    s_term.uart_running = true;
-    xTaskCreate(terminal_rx_task, "term_rx", 4096, NULL, 5,
-                &s_term.rx_task_handle);
+    if (s_term.rx_timer) return;
+    s_term.rx_timer = lv_timer_create(terminal_rx_poll, RX_POLL_MS, NULL);
 }
 
-static void terminal_rx_task_stop(void)
+static void terminal_rx_stop(void)
 {
-    s_term.uart_running = false;
-    /* Task will self-delete on next loop iteration */
-    s_term.rx_task_handle = NULL;
+    if (s_term.rx_timer) {
+        lv_timer_delete(s_term.rx_timer);
+        s_term.rx_timer = NULL;
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -270,9 +262,9 @@ static void cmd_baud(const char *arg)
         return;
     }
     s_term.baud_rate = rate;
-    terminal_rx_task_stop();
+    terminal_rx_stop();
     terminal_uart_reinit();
-    terminal_rx_task_start();
+    terminal_rx_start();
     update_mode_label();
     char buf[48];
     snprintf(buf, sizeof(buf), "[Terminal] Baud rate set to %d", rate);
@@ -331,7 +323,7 @@ static void dispatch_slash_command(const char *raw)
         term_print_line(buf);
     } else if (strcmp(raw, "mode local") == 0 || strcmp(raw, "mode shell") == 0) {
         if (s_term.mode != TERM_MODE_LOCAL) {
-            terminal_rx_task_stop();
+            terminal_rx_stop();
             s_term.mode = TERM_MODE_LOCAL;
             update_mode_label();
             term_print_line("[Terminal] Switched to Local shell mode");
@@ -340,7 +332,7 @@ static void dispatch_slash_command(const char *raw)
         if (s_term.mode != TERM_MODE_UART) {
             s_term.mode = TERM_MODE_UART;
             terminal_uart_init();
-            terminal_rx_task_start();
+            terminal_rx_start();
             update_mode_label();
             term_print_line("[Terminal] Switched to UART mode");
         }
@@ -585,7 +577,7 @@ esp_err_t terminal_ui_create(lv_obj_t *parent)
     /* Initialize UART only if starting in UART mode */
     if (s_term.mode == TERM_MODE_UART) {
         terminal_uart_init();
-        terminal_rx_task_start();
+        terminal_rx_start();
     }
 
     /* Startup banner */
@@ -612,7 +604,7 @@ void terminal_ui_hide(void)
 
 void terminal_uart_stop(void)
 {
-    terminal_rx_task_stop();
+    terminal_rx_stop();
     if (s_term.uart_running) {
         uart_driver_delete(s_term.uart_num);
         s_term.uart_running = false;
@@ -623,14 +615,14 @@ void terminal_uart_start(void)
 {
     if (!s_term.uart_running) {
         terminal_uart_init();
-        terminal_rx_task_start();
+        terminal_rx_start();
     }
 }
 
 void terminal_ui_destroy(void)
 {
-    /* Stop UART RX task before deleting widgets */
-    terminal_rx_task_stop();
+    /* Stop reading the UART before deleting widgets */
+    terminal_rx_stop();
     if (s_term.root) {
         lv_obj_delete(s_term.root);
         s_term.root = NULL;

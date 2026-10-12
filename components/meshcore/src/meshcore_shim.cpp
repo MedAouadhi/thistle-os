@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // ThistleOS — MeshCore engine
 //
-// A MeshCore chat node (BaseChatMesh) on its own task, on whatever radio the
-// HAL has registered. Everything that touches the mesh happens on that task:
-// commands arrive on a queue, and what the node hears goes out through the
-// callbacks the kernel registered. Nothing else ever holds the mesh, so it
-// needs no lock.
+// A MeshCore chat node (BaseChatMesh), run by a job on the kernel worker, on
+// whatever radio the HAL has registered. Everything that touches the mesh
+// happens in that job: commands arrive on a queue, and what the node hears
+// goes out through the callbacks the kernel registered. Nothing else ever
+// holds the mesh, so it needs no lock.
 //
 // What a MeshCore node keeps across a reboot, this keeps too: its identity, or
 // every peer would see a stranger after each boot, and its contacts with their
@@ -18,12 +18,17 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#include <new>
+#include <utility>
+#include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <esp_random.h>
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <freertos/task.h>
+
+#include "thistle/kworker.h"
 
 // Keep SimpleMeshTables from reaching for the Arduino filesystem.
 #undef ESP32
@@ -53,8 +58,6 @@ FakeSerial Serial;
 // A clock that has never been set starts here, as MeshCore's own do.
 #define CLOCK_BASELINE        1715770351u   // 15 May 2024
 
-#define TASK_STACK            20480   // the crypto self-check alone used 10.7 KB
-#define TASK_PRIORITY         5
 #define LOOP_PERIOD_MS        10
 #define CMD_QUEUE_DEPTH       8
 #define PACKET_POOL           16
@@ -78,10 +81,21 @@ static void copy_str(char* dest, size_t size, const char* src) {
 
 static bool clock_is_set(time_t t) { return t >= (time_t)CLOCK_BASELINE; }
 
+// The engine's objects are buffers that only tasks touch, never an interrupt
+// or code running while flash is written: the radio's receive slots, the hash
+// tables, the contacts. So they go to PSRAM where there is any. They are made
+// once and kept.
+template <typename T, typename... Args>
+static T* new_in_psram(Args&&... args) {
+    void* mem = heap_caps_aligned_alloc(alignof(T), sizeof(T), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!mem) mem = heap_caps_aligned_alloc(alignof(T), sizeof(T), MALLOC_CAP_DEFAULT);
+    return mem ? new (mem) T(std::forward<Args>(args)...) : nullptr;
+}
+
 // ── Radio ──────────────────────────────────────────────────────────────
 //
 // The HAL radio hands over each packet from its own interrupt task, while
-// MeshCore polls recvRaw() from the mesh task. A few slots between them keep
+// MeshCore polls recvRaw() from the mesh job. A few slots between them keep
 // packets that arrive close together, where a single buffer kept only the last.
 
 class HalRadio : public mesh::Radio {
@@ -741,7 +755,7 @@ public:
     }
 };
 
-// ── Task ───────────────────────────────────────────────────────────────
+// ── Job ────────────────────────────────────────────────────────────────
 
 static HalRadio* s_radio;
 static MillisClock s_millis;
@@ -751,15 +765,17 @@ static StaticPoolPacketManager* s_packets;
 static SimpleMeshTables* s_tables;
 static ThistleMesh* s_mesh;
 static QueueHandle_t s_commands;
-static TaskHandle_t s_task;
+static uint32_t s_job;
 static meshcore_config_t s_config;
 static const meshcore_callbacks_t* s_callbacks;
 static volatile bool s_running;
 
-static void mesh_task(void*) {
+// The worker's stack is sized for this: the crypto self-check is the deepest
+// MeshCore goes, at 10.7 KB.
+static void start_node() {
     const char* broken = s_mesh->crypto_self_check();
     if (!broken) {
-        ESP_LOGI(TAG, "crypto checked; %u bytes of stack to spare",
+        ESP_LOGI(TAG, "crypto checked; %u bytes of the worker's stack to spare",
                  (unsigned)uxTaskGetStackHighWaterMark(nullptr));
     } else {
         ESP_LOGE(TAG, "%s self-check failed: no peer will be able to read this node", broken);
@@ -782,16 +798,18 @@ static void mesh_task(void*) {
     s_running = true;
 
     s_mesh->advertise(BOOT_ADVERT_DELAY_MS);
+}
 
-    Command cmd;
-    for (;;) {
-        while (xQueueReceive(s_commands, &cmd, 0) == pdTRUE) s_mesh->handle(cmd);
-        s_mesh->loop();
-        s_mesh->tick();
-        if (xQueueReceive(s_commands, &cmd, pdMS_TO_TICKS(LOOP_PERIOD_MS)) == pdTRUE) {
-            s_mesh->handle(cmd);
-        }
+// Every LOOP_PERIOD_MS. The first run starts the node.
+static void mesh_job(void*) {
+    if (!s_running) {
+        start_node();
+        return;
     }
+    Command cmd;
+    while (xQueueReceive(s_commands, &cmd, 0) == pdTRUE) s_mesh->handle(cmd);
+    s_mesh->loop();
+    s_mesh->tick();
 }
 
 static esp_err_t post(const Command& cmd) {
@@ -805,7 +823,7 @@ extern "C" {
 
 esp_err_t meshcore_start(const meshcore_config_t* config, const meshcore_callbacks_t* callbacks) {
     if (!config || !callbacks) return ESP_ERR_INVALID_ARG;
-    if (s_task) return ESP_ERR_INVALID_STATE;
+    if (s_job) return ESP_ERR_INVALID_STATE;
 
     const hal_registry_t* reg = hal_get_registry();
     if (!reg || !reg->radio) return ESP_ERR_NOT_FOUND;
@@ -813,27 +831,29 @@ esp_err_t meshcore_start(const meshcore_config_t* config, const meshcore_callbac
     s_config = *config;
     s_callbacks = callbacks;
 
-    if (!s_radio) s_radio = new HalRadio();
+    if (!s_radio) s_radio = new_in_psram<HalRadio>();
+    if (!s_radio) return ESP_ERR_NO_MEM;
     esp_err_t err = s_radio->configure(reg->radio, s_config);
     if (err != ESP_OK) return err;
 
+    if (!s_commands) {
+        s_commands = xQueueCreateWithCaps(CMD_QUEUE_DEPTH, sizeof(Command),
+                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    }
     if (!s_commands) s_commands = xQueueCreate(CMD_QUEUE_DEPTH, sizeof(Command));
     if (!s_clock) s_clock = new ForwardClock();
     if (!s_packets) s_packets = new StaticPoolPacketManager(PACKET_POOL);
-    if (!s_tables) s_tables = new SimpleMeshTables();
+    if (!s_tables) s_tables = new_in_psram<SimpleMeshTables>();
     if (!s_mesh) {
-        s_mesh = new ThistleMesh(*s_radio, s_millis, s_rng, *s_clock, *s_packets, *s_tables,
-                                 s_config.state_dir, s_callbacks);
+        s_mesh = new_in_psram<ThistleMesh>(*s_radio, s_millis, s_rng, *s_clock, *s_packets,
+                                           *s_tables, s_config.state_dir, s_callbacks);
     }
     if (!s_commands || !s_clock || !s_packets || !s_tables || !s_mesh) return ESP_ERR_NO_MEM;
 
     if (!s_mesh->load_identity()) return ESP_FAIL;
 
-    if (xTaskCreate(mesh_task, "meshcore", TASK_STACK, nullptr, TASK_PRIORITY, &s_task) != pdPASS) {
-        s_task = nullptr;
-        return ESP_ERR_NO_MEM;
-    }
-    return ESP_OK;
+    s_job = kworker_every(mesh_job, nullptr, LOOP_PERIOD_MS);
+    return s_job ? ESP_OK : ESP_FAIL;
 }
 
 bool meshcore_running(void) { return s_running; }

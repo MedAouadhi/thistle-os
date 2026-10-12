@@ -519,8 +519,13 @@ void app_main(void)
         }
     }
 
-    ESP_LOGI(TAG, "ThistleOS ready");
+    /* Internal RAM is what runs out, so every boot says what is left of it,
+     * this task's 16 KB stack still counted. */
+    ESP_LOGI(TAG, "ThistleOS ready; internal RAM %u KB free, largest block %u KB",
+             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) / 1024),
+             (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) / 1024));
 
-    /* Enter the kernel main loop — does not return */
-    kernel_run();
+    /* Returning ends this task and frees its stack, which only booting
+     * needed: from here on everything runs on tasks of its own or as jobs on
+     * the kernel worker (thistle/kworker.h). */
 }

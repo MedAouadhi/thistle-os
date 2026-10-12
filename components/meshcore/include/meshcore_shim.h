@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // ThistleOS — MeshCore engine, C interface
 //
-// The engine runs a MeshCore chat node on its own task, on whatever radio the
-// HAL has registered. Its only caller is the kernel's mesh_manager, which owns
-// everything apps see: the inbox, the contact list, delivery states. Commands
-// are queued to the engine's task; what it hears comes back through the
-// callbacks, made on that task.
+// The engine runs a MeshCore chat node as a job on the kernel worker
+// (thistle/kworker.h), on whatever radio the HAL has registered. Its only
+// caller is the kernel's mesh_manager, which owns everything apps see: the
+// inbox, the contact list, delivery states. Commands are queued to the
+// engine's job; what it hears comes back through the callbacks, made from
+// that job.
 #pragma once
 
 #include <stdint.h>

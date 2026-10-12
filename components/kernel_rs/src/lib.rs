@@ -63,6 +63,7 @@ pub mod gps_track;
 pub mod hal_registry;
 pub mod ipc;
 pub mod kernel_boot;
+pub mod kworker;
 pub mod light_prefs;
 pub mod manifest;
 pub mod mesh_manager;

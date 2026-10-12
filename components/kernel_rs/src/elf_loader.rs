@@ -31,8 +31,9 @@ const ELF_MAX_SIZE_BYTES: usize = 1024 * 1024; // 1 MB
 const ELF_APP_TASK_STACK: u32 = 8192;
 const ELF_APP_TASK_PRIO: u32 = 5;
 
-// MALLOC_CAP_SPIRAM = BIT(9)
-const MALLOC_CAP_SPIRAM: u32 = 1 << 9;
+// MALLOC_CAP_SPIRAM = BIT(10) (esp_heap_caps.h). BIT(9) is MALLOC_CAP_PID7,
+// which no heap has, so every allocation asking for it failed.
+const MALLOC_CAP_SPIRAM: u32 = 1 << 10;
 
 // Permission flags (must match permissions.h)
 const PERM_ALL: u32 = 0x7F;
