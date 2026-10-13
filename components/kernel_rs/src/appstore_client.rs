@@ -1286,6 +1286,7 @@ pub unsafe extern "C" fn appstore_download_file(
     progress_cb: Option<DownloadProgressCb>,
     user_data: *mut c_void,
 ) -> i32 {
+    let _awake = crate::power_manager::HoldGuard::new(b"a download is running\0");
     if url.is_null() || dest_path.is_null() {
         return ESP_ERR_INVALID_ARG;
     }
@@ -1450,6 +1451,7 @@ pub unsafe extern "C" fn appstore_install_entry(
     progress_cb: Option<DownloadProgressCb>,
     user_data: *mut c_void,
 ) -> i32 {
+    let _awake = crate::power_manager::HoldGuard::new(b"an app is installing\0");
     if entry.is_null() {
         return ESP_ERR_INVALID_ARG;
     }

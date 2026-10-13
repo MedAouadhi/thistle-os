@@ -74,6 +74,8 @@ pub mod net_manager;
 pub mod notification;
 pub mod ota;
 pub mod permissions;
+pub mod power_manager;
+pub mod power_policy;
 pub mod radio_antenna;
 pub mod refresh_prefs;
 pub mod secure_wipe;

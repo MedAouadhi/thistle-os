@@ -433,6 +433,7 @@ static FT3X68_DRIVER: HalInputDriver = HalInputDriver {
     name: b"FT3x68/FT3168 Touch\0".as_ptr() as *const c_char,
     is_touch: true,
     set_backlight: None,
+    sleep: None,
 };
 
 #[no_mangle]

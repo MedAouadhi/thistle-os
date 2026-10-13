@@ -504,6 +504,40 @@ pub extern "C" fn wifi_manager_set_enabled(on: bool) -> i32 {
     crate::system_json::save("wifi", "radio_off", serde_json::Value::Bool(!on))
 }
 
+/// Stop the radio while the device sleeps, or start it again, leaving the
+/// setting alone. WiFi switched off in Settings is already stopped; the
+/// network coordinator rejoins the saved network once it is started again.
+pub(crate) fn suspend(stop: bool) {
+    let initialized = WIFI_STATE.lock().map(|s| s.initialized).unwrap_or(false);
+    if !initialized || !radio_on() {
+        return;
+    }
+    #[cfg(target_os = "espidf")]
+    unsafe {
+        if stop {
+            esp_wifi_disconnect();
+            esp_wifi_stop();
+        } else {
+            let ret = esp_wifi_start();
+            if ret != ESP_OK && ret != ESP_ERR_INVALID_STATE {
+                esp_log_write(
+                    ESP_LOG_ERROR,
+                    TAG.as_ptr(),
+                    b"esp_wifi_start after sleep failed: %d\0".as_ptr(),
+                    ret,
+                );
+            }
+        }
+    }
+    if stop {
+        if let Ok(mut s) = WIFI_STATE.lock() {
+            s.state = WIFI_STATE_DISCONNECTED;
+            s.ip = [0u8; 16];
+        }
+        WIFI_STATE_CV.notify_all();
+    }
+}
+
 /// Whether WiFi is switched on, as it is unless switched off in Settings.
 #[no_mangle]
 pub extern "C" fn wifi_manager_is_enabled() -> bool {

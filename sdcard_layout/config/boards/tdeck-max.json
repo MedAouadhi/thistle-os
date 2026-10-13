@@ -43,6 +43,21 @@
         {"expander": 0, "pin": 10, "direction": "output", "level": 0, "delay_ms": 0}
     ],
     "radio_antenna_switch": {"expander": 0, "pin": 4, "internal_level": 1},
+    "power": {
+        "key": {"gpio": 0, "active_level": 0},
+        "wake": [
+            {"source": "keyboard", "gpio": 15, "active_level": 0},
+            {"source": "modem", "gpio": 7, "active_level": 0},
+            {"source": "radio", "gpio": 5, "active_level": 1}
+        ],
+        "deep_sleep_off": [
+            {"expander": 0, "pin": 1},
+            {"expander": 0, "pin": 2},
+            {"expander": 0, "pin": 3},
+            {"expander": 0, "pin": 5},
+            {"expander": 0, "pin": 6}
+        ]
+    },
     "drivers": [
         {
             "id": "com.thistle.drv.epaper-gdeq031t10",

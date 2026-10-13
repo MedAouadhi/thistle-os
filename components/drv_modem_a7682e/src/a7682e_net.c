@@ -481,6 +481,21 @@ static esp_err_t net_get_cell_info(hal_cell_info_t *out)
     return ESP_OK;
 }
 
+/* The data session ends for sleep; connect() starts it again after. */
+static esp_err_t net_sleep(bool enter)
+{
+    if (!a7682e_lifecycle_begin_operation()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    esp_err_t ret = a7682e_sleep_locked(enter);
+    a7682e_lifecycle_finish_operation();
+    if (enter && ret == ESP_OK) {
+        atomic_store(&s_had_session, false);
+        atomic_store(&s_state, HAL_NET_STATE_DISCONNECTED);
+    }
+    return ret;
+}
+
 static const hal_net_driver_t s_net_driver = {
     .type          = HAL_NET_CELLULAR,
     .name          = "LTE",
@@ -493,6 +508,7 @@ static const hal_net_driver_t s_net_driver = {
     .is_connected  = net_is_connected,
     .get_cell_info = net_get_cell_info,
     .cancel        = net_cancel,
+    .sleep         = net_sleep,
 };
 
 const hal_net_driver_t *drv_a7682e_net_driver(void)

@@ -642,6 +642,31 @@ fn load_config(config_path: &str) -> i32 {
         }
     }
 
+    // A board that saved its profile before profiles had a power section
+    // never sleeps until it gets one; it gets only that.
+    #[cfg(target_os = "espidf")]
+    {
+        let board_id = extract_object(&json, "board").and_then(|b| json_get_string(&b, "board_id"));
+        let updated = board_id
+            .and_then(|id| embedded_profile(&id))
+            .and_then(|embedded| with_power_section_from(&json, &embedded));
+        if let Some(updated) = updated {
+            if updated.len() <= MAX_CONFIG_SIZE && fs::write(config_path, &updated).is_ok() {
+                extern "C" {
+                    fn esp_log_write(level: i32, tag: *const u8, format: *const u8, ...);
+                }
+                unsafe {
+                    esp_log_write(
+                        3,
+                        b"board_config\0".as_ptr(),
+                        b"added the built-in power section to board.json\0".as_ptr(),
+                    );
+                }
+                json = updated;
+            }
+        }
+    }
+
     // Parse board metadata
     if let Some(board_section) = extract_object(&json, "board") {
         if let Some(name) = json_get_string(&board_section, "name") {
@@ -667,6 +692,10 @@ fn load_config(config_path: &str) -> i32 {
             gpio_deep_sleep_hold_dis();
         }
     }
+
+    // The pins that woke the board from deep sleep are still routed to the
+    // RTC domain; the power manager hands them back before drivers use them.
+    crate::power_manager::declare_board(power_section(&json).as_ref());
 
     // Run the sequence the board profile describes: GPIO outputs, buses,
     // IO expanders, expander pins, drivers.
@@ -749,6 +778,51 @@ fn append_json_fields(config: &str, fields: &str) -> String {
         fields,
         &trimmed[insert_at..]
     )
+}
+
+/// The profile's `power` section: which pins wake the board and which rails
+/// deep sleep turns off. Read with a real parser, as the text search below
+/// would find the power driver's `"hal": "power"` first.
+pub(crate) fn power_section(profile: &str) -> Option<serde_json::Value> {
+    let root: serde_json::Value = serde_json::from_str(profile).ok()?;
+    root.get("power").filter(|p| p.is_object()).cloned()
+}
+
+/// `stored` with the `power` section of `embedded` added, for a board that
+/// saved its profile before the profile had one. Nothing else in the stored
+/// profile changes: it may have been edited, to a LoRa frequency for another
+/// region, say. `None` if there is nothing to add.
+///
+/// The section goes in as text at the top, since re-serialising the whole
+/// profile would sort its keys and lose that it was written by hand.
+fn with_power_section_from(stored: &str, embedded: &str) -> Option<String> {
+    if power_section(stored).is_some() {
+        return None;
+    }
+    let section = power_section(embedded)?;
+    let open = stored.find('{')?;
+    let updated = format!(
+        "{}\n    \"power\": {},{}",
+        &stored[..=open],
+        serde_json::to_string(&section).ok()?,
+        &stored[open + 1..]
+    );
+    // Only a result that still parses, and now has the section, is kept.
+    power_section(&updated).map(|_| updated)
+}
+
+#[cfg(target_os = "espidf")]
+fn embedded_profile(board_id: &str) -> Option<String> {
+    extern "C" {
+        // components/kernel/src/board_fingerprint.c
+        fn board_fingerprint_profile_json(board_id: *const c_char) -> *const c_char;
+    }
+    let id = CString::new(board_id).ok()?;
+    let json = unsafe { board_fingerprint_profile_json(id.as_ptr()) };
+    if json.is_null() {
+        return None;
+    }
+    unsafe { CStr::from_ptr(json) }.to_str().ok().map(str::to_string)
 }
 
 // Simple JSON array/object extraction helpers
@@ -2659,4 +2733,55 @@ mod tests {
         let cstr2 = CStr::from_bytes_until_nul(&buf2[..]).unwrap();
         assert_eq!(cstr2.to_str().unwrap(), "second");
     }
+
+    // ── The power section ───────────────────────────────────────────────
+
+    const STORED_WITHOUT_POWER: &str = r#"{
+    "board": {"name": "Max", "board_id": "tdeck-max"},
+    "drivers": [
+        {"id": "com.thistle.drv.power-sy6970", "hal": "power", "entry": "power-sy6970.drv.elf"},
+        {"id": "com.thistle.drv.radio-sx1262", "hal": "radio", "config": {"freq_hz": 915000000}}
+    ]
+}"#;
+
+    const EMBEDDED_WITH_POWER: &str = r#"{
+    "board": {"name": "Max", "board_id": "tdeck-max"},
+    "drivers": [{"id": "com.thistle.drv.power-sy6970", "hal": "power"}],
+    "power": {"key": {"gpio": 0, "active_level": 0}}
+}"#;
+
+    #[test]
+    fn a_power_driver_is_not_a_power_section() {
+        assert_eq!(power_section(STORED_WITHOUT_POWER), None);
+        assert!(power_section(EMBEDDED_WITH_POWER).is_some());
+    }
+
+    #[test]
+    fn a_stored_profile_gets_the_power_section_and_keeps_everything_else() {
+        let updated = with_power_section_from(STORED_WITHOUT_POWER, EMBEDDED_WITH_POWER).unwrap();
+        assert_eq!(power_section(&updated), power_section(EMBEDDED_WITH_POWER));
+        // The edited frequency, and the rest of the text, are untouched.
+        assert!(updated.ends_with(&STORED_WITHOUT_POWER[1..]));
+        assert!(updated.contains("915000000"));
+        // The section is found by the boot code's own search, too.
+        assert!(extract_object(&updated, "power").is_some());
+    }
+
+    #[test]
+    fn a_profile_that_has_a_power_section_is_left_alone() {
+        assert_eq!(with_power_section_from(EMBEDDED_WITH_POWER, EMBEDDED_WITH_POWER), None);
+    }
+
+    #[test]
+    fn with_no_built_in_power_section_there_is_nothing_to_add() {
+        assert_eq!(with_power_section_from(STORED_WITHOUT_POWER, STORED_WITHOUT_POWER), None);
+    }
+
+    #[test]
+    fn the_shipped_max_profile_has_a_power_section() {
+        let shipped = include_str!("../../../sdcard_layout/config/boards/tdeck-max.json");
+        let power = power_section(shipped).expect("tdeck-max.json declares power");
+        assert_eq!(power["key"]["gpio"], 0);
+    }
 }
+

@@ -30,6 +30,7 @@
 #include "es8311_test_shim.h"
 #else
 #include "thistle_expander.h"
+#include "thistle_power.h"
 #include "driver/i2s_std.h"
 #include "esp_codec_dev.h"
 #include "esp_codec_dev_defaults.h"
@@ -292,6 +293,9 @@ static esp_err_t amp_set(bool on)
     return ESP_OK;
 }
 
+// The power manager's hold while the codec is open, or 0.
+static uint32_t s_awake;
+
 // Silence the board: the amplifier goes first, so the speaker never hears the
 // codec's output stage being shut down. Called with all three locks held.
 static void go_quiet(void)
@@ -301,6 +305,8 @@ static void go_quiet(void)
         port_codec_close();
         s_audio.open = false;
     }
+    power_manager_release(s_awake);
+    s_awake = 0;
 }
 
 static bool has_mic(void) { return s_audio.cfg.pin_din >= 0; }
@@ -314,6 +320,8 @@ static esp_err_t ensure_open(void)
     esp_err_t ret = port_codec_open(&s_audio.fs);
     if (ret != ESP_OK) return ret;
     s_audio.open = true;
+    /* Sleep would stop the I2S clocks under whatever is playing or listening. */
+    if (!s_awake) s_awake = power_manager_hold("audio is in use");
     s_audio.opened_us = esp_timer_get_time();
     s_audio.settled = false;
     ret = port_codec_set_volume(s_audio.volume);

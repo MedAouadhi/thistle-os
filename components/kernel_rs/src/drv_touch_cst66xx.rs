@@ -60,6 +60,10 @@ const CST66_CMD_WAKE: u32 = 0xD000_0400;
 const CST66_CMD_NORMAL: [u32; 3] = [0xD000_0000, 0xD000_0C00, 0xD000_0100];
 /// Release the report buffer, so the chip may produce the next one.
 const CST66_CMD_RELEASE: u32 = 0xD000_02AB;
+/// Deep sleep. Only a reset brings the part back, and until then it does not
+/// acknowledge its address (LilyGo's hyn_cst66xx.c, cst66xx_supend and
+/// cst66xx_resum).
+const CST66_CMD_DEEP_SLEEP: u32 = 0xD000_22AB;
 
 /// Header length: checksum, report type, point counts, and the first point.
 const CST66_HEADER_LEN: usize = 9;
@@ -201,6 +205,10 @@ unsafe fn i2c_master_bus_rm_device(_handle: *mut c_void) -> i32 {
     ESP_OK
 }
 
+/// Writes the host fake has seen, so a test can tell the part was left alone.
+#[cfg(all(not(target_os = "espidf"), not(feature = "sim-bus")))]
+static TRANSMITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 #[cfg(all(not(target_os = "espidf"), not(feature = "sim-bus")))]
 unsafe fn i2c_master_transmit(
     _handle: *mut c_void,
@@ -208,6 +216,7 @@ unsafe fn i2c_master_transmit(
     _len: usize,
     _timeout_ms: i32,
 ) -> i32 {
+    TRANSMITS.fetch_add(1, Ordering::Relaxed);
     ESP_OK
 }
 
@@ -407,6 +416,9 @@ struct TouchState {
     /// The touch key held down, if any.
     key_down: Option<u8>,
     initialized: bool,
+    /// In deep sleep: the part answers nothing until a reset, so nothing is
+    /// sent to it.
+    asleep: bool,
 }
 
 // SAFETY: guarded by the single-threaded init / poll contract the HAL registry
@@ -437,6 +449,7 @@ impl TouchState {
             last_y: 0,
             key_down: None,
             initialized: false,
+            asleep: false,
         }
     }
 }
@@ -911,6 +924,47 @@ unsafe extern "C" fn cst66xx_deinit() {
     S_TOUCH.touching = false;
     S_TOUCH.key_down = None;
     S_TOUCH.initialized = false;
+    S_TOUCH.asleep = false;
+}
+
+/// Put the panel in deep sleep, or reset it out. Asleep it draws next to
+/// nothing and wakes nobody: the device does not wake on a touch.
+///
+/// # Safety
+/// Called from C via the HAL vtable.
+unsafe extern "C" fn cst66xx_sleep(enter: bool) -> i32 {
+    if !S_TOUCH.initialized {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if enter {
+        if S_TOUCH.asleep {
+            return ESP_OK;
+        }
+        // Out of its low-power I2C mode first, as for any command.
+        let mut ret = cst66_command(CST66_CMD_WAKE);
+        vTaskDelay(ms_to_ticks(1));
+        ret |= cst66_command(CST66_CMD_WAKE);
+        ret |= cst66_command(CST66_CMD_DEEP_SLEEP);
+        // Whatever it answered, it is left alone until woken by a reset.
+        S_TOUCH.asleep = true;
+        S_TOUCH.touching = false;
+        S_TOUCH.key_down = None;
+        S_TOUCH.irq_pending.store(false, Ordering::Relaxed);
+        return ret;
+    }
+    if !S_TOUCH.asleep {
+        return ESP_OK;
+    }
+    cst66_hw_reset();
+    let Some(waited_ms) = cst66_wait_for_ack() else {
+        // Still asleep as far as anything here can tell.
+        log_no_ack();
+        return ESP_FAIL;
+    };
+    log_ack(waited_ms);
+    S_TOUCH.asleep = false;
+    S_TOUCH.irq_pending.store(false, Ordering::Relaxed);
+    cst66_set_normal_mode()
 }
 
 /// # Safety
@@ -1000,6 +1054,9 @@ unsafe extern "C" fn cst66xx_poll() -> i32 {
     if !S_TOUCH.initialized {
         return ESP_ERR_INVALID_STATE;
     }
+    if S_TOUCH.asleep {
+        return ESP_OK;
+    }
 
     // Interrupt-driven optimisation: skip I2C when no edge was seen and we are
     // not mid-touch, since lift-off may not raise a second interrupt.
@@ -1088,6 +1145,7 @@ static TOUCH_DRIVER: HalInputDriver = HalInputDriver {
     name: b"CST66xx\0".as_ptr() as *const c_char,
     is_touch: true,
     set_backlight: None,
+    sleep: Some(cst66xx_sleep),
 };
 
 /// Return a pointer to the CST66xx HAL input driver vtable.
@@ -1384,4 +1442,35 @@ mod tests {
             assert!(!S_TOUCH.initialized);
         }
     }
+
+    #[test]
+    fn sleep_is_refused_before_init() {
+        unsafe {
+            S_TOUCH.initialized = false;
+            assert_eq!(cst66xx_sleep(true), ESP_ERR_INVALID_STATE);
+        }
+    }
+
+    #[test]
+    fn asleep_the_panel_is_left_alone_until_a_reset_wakes_it() {
+        unsafe {
+            S_TOUCH = TouchState::new();
+            S_TOUCH.initialized = true;
+            S_TOUCH.dev = 1usize as *mut c_void;
+            S_TOUCH.cfg.pin_int = 12;
+            assert_eq!(cst66xx_sleep(true), ESP_OK);
+            assert!(S_TOUCH.asleep);
+
+            // Even an interrupt does not send it anything.
+            let before = TRANSMITS.load(Ordering::Relaxed);
+            S_TOUCH.irq_pending.store(true, Ordering::Relaxed);
+            assert_eq!(cst66xx_poll(), ESP_OK);
+            assert_eq!(TRANSMITS.load(Ordering::Relaxed), before);
+
+            assert_eq!(cst66xx_sleep(false), ESP_OK);
+            assert!(!S_TOUCH.asleep);
+            S_TOUCH = TouchState::new();
+        }
+    }
 }
+

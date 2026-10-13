@@ -78,4 +78,10 @@ typedef struct {
     /* Optional: make a connect() under way on another thread give up soon,
      * without waiting for it. disconnect() still powers the transport down. */
     void (*cancel)(void);
+    /* Cellular only, optional, for the power manager. enter: end any data
+     * session and let the modem sleep where it still hears calls and SMS,
+     * and raises RI for them. ESP_OK if it now does; ESP_ERR_INVALID_STATE if
+     * the modem is off and there is nothing to listen with. !enter: wake it
+     * to answer commands; connect() then starts data again. */
+    esp_err_t (*sleep)(bool enter);
 } hal_net_driver_t;

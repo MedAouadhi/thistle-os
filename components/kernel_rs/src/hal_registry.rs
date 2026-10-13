@@ -126,6 +126,9 @@ pub struct HalInputDriver {
     /// Set the key backlight, 0-100 percent. `None` on a device whose keys are
     /// not lit. Mirrors `set_brightness` on the display.
     pub set_backlight: Option<unsafe extern "C" fn(percent: u8) -> i32>,
+    /// Stop reporting and drop to the lowest power that still lets the part
+    /// wake the device, or come back. `None` where there is nothing to do.
+    pub sleep: Option<unsafe extern "C" fn(enter: bool) -> i32>,
 }
 
 unsafe impl Send for HalInputDriver {}
@@ -1665,6 +1668,7 @@ mod tests {
             name: b"wedged-touch\0".as_ptr() as *const c_char,
             is_touch: true,
             set_backlight: None,
+            sleep: None,
         };
         let power = HalPowerDriver {
             init: Some(counting_power_init),
@@ -1726,6 +1730,7 @@ mod tests {
             name: b"kbd\0".as_ptr() as *const c_char,
             is_touch: false,
             set_backlight: None,
+            sleep: None,
         };
         let drv1 = HalInputDriver {
             init: None,
@@ -1735,6 +1740,7 @@ mod tests {
             name: b"touch\0".as_ptr() as *const c_char,
             is_touch: true,
             set_backlight: None,
+            sleep: None,
         };
 
         assert_eq!(

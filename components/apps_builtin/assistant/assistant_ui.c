@@ -40,6 +40,7 @@
 
 #include "hal/sdcard_path.h"
 #include "thistle/app_manager.h"
+#include "thistle/power_manager.h"
 #include "thistle/net_manager.h"
 #include "thistle/wifi_manager.h"
 #include "ui/theme.h"
@@ -537,7 +538,10 @@ static void run_request(assistant_job_t *job)
 static void request_task(void *arg)
 {
     assistant_job_t *job = (assistant_job_t *)arg;
+    /* An answer can take a minute; sleep would drop the connection. */
+    uint32_t awake = power_manager_hold("the assistant is answering");
     run_request(job);
+    power_manager_release(awake);
     free(job->body);
     job->body = NULL;
     free(job->response);

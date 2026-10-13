@@ -928,6 +928,45 @@ unsafe extern "C" fn tca8418_deinit() {
     kbd.initialized = false;
 }
 
+/// Read the FIFO empty without reporting what was in it, and acknowledge it,
+/// so INT goes high.
+///
+/// # Safety
+/// Must be called with S_KBD.dev valid.
+unsafe fn tca8418_discard_events() -> i32 {
+    for _ in 0..TCA8418_FIFO_DEPTH {
+        let mut ev: u8 = 0;
+        let ret = tca8418_read_reg(TCA8418_REG_KEY_EVENT_A, &mut ev);
+        if ret != ESP_OK {
+            return ret;
+        }
+        if ev == 0 {
+            break;
+        }
+    }
+    tca8418_write_reg(TCA8418_REG_INT_STAT, TCA8418_INT_STAT_K_INT)
+}
+
+/// The chip goes on scanning while the device sleeps, and that is how a key
+/// wakes it: the press pulls INT low. So going to sleep is leaving INT high,
+/// with nothing queued to hold it low, and waking is throwing away the key
+/// that woke the device. It was pressed to wake it, not to type.
+unsafe extern "C" fn tca8418_sleep(enter: bool) -> i32 {
+    let kbd = &mut *(&raw mut S_KBD);
+    if !kbd.initialized {
+        return ESP_ERR_INVALID_STATE;
+    }
+    let ret = tca8418_discard_events();
+    kbd.shift = Modifier::new();
+    kbd.symbol = Modifier::new();
+    kbd.down_code = [0; KEY_POSITIONS];
+    if !enter {
+        // A key pressed since the drain sits behind INT; look at the next poll.
+        kbd.irq_pending.store(true, Ordering::Release);
+    }
+    ret
+}
+
 /// Register the input event callback.
 unsafe extern "C" fn tca8418_register_callback(cb: HalInputCb, user_data: *mut c_void) -> i32 {
     let kbd = &mut *(&raw mut S_KBD);
@@ -1049,6 +1088,7 @@ static KEYBOARD_DRIVER: HalInputDriver = HalInputDriver {
     name: b"TCA8418\0".as_ptr() as *const c_char,
     is_touch: false,
     set_backlight: Some(tca8418_set_backlight),
+    sleep: Some(tca8418_sleep),
 };
 
 /// Return the TCA8418 driver vtable.
@@ -1703,4 +1743,90 @@ mod tests {
             assert!(!(*(&raw const S_KBD)).initialized);
         }
     }
+
+    // ── Sleep ───────────────────────────────────────────────────────────
+
+    /// A keyboard at rest on a scripted chip, holding `events` in its FIFO.
+    unsafe fn asleep_with(events: &[u8]) {
+        use esp_ffi::{ChipScript, SCRIPT};
+        esp_ffi::reset_chip();
+        reset_state();
+        let mut script = ChipScript::default();
+        script
+            .registers
+            .insert(TCA8418_REG_INT_STAT, TCA8418_INT_STAT_K_INT);
+        script.events.extend(events.iter().copied());
+        *SCRIPT.lock().unwrap() = Some(script);
+        let kbd = &mut *(&raw mut S_KBD);
+        kbd.initialized = true;
+        kbd.dev = 1usize as *mut c_void;
+        kbd.cb = Some(hear);
+        HEARD.lock().unwrap().clear();
+    }
+
+    fn event_for((row, col, pressed): (u8, u8, bool)) -> u8 {
+        let code = row * 10 + (9 - col) + 1;
+        if pressed {
+            KEY_EVENT_PRESS | code
+        } else {
+            code
+        }
+    }
+
+    #[test]
+    fn sleep_is_refused_before_the_keyboard_is_up() {
+        unsafe {
+            reset_state();
+            assert_eq!(tca8418_sleep(true), ESP_ERR_INVALID_STATE);
+        }
+    }
+
+    #[test]
+    fn going_to_sleep_empties_the_fifo_and_then_lets_int_go_high() {
+        use esp_ffi::{RegOp, TRACE};
+        unsafe {
+            asleep_with(&[event_for(down(Q))]);
+            assert_eq!(tca8418_sleep(true), ESP_OK);
+            let trace = TRACE.lock().unwrap().clone();
+            assert_eq!(trace.last(), Some(&RegOp::Write(TCA8418_REG_INT_STAT)));
+            assert!(trace.contains(&RegOp::Read(TCA8418_REG_KEY_EVENT_A)));
+            *(&raw mut S_KBD) = KbdState::new();
+        }
+    }
+
+    #[test]
+    fn the_key_that_wakes_the_device_is_not_typed() {
+        use esp_ffi::SCRIPT;
+        unsafe {
+            asleep_with(&[event_for(down(Q))]);
+            assert_eq!(tca8418_sleep(false), ESP_OK);
+            assert_eq!(tca8418_poll(), ESP_OK);
+            // Its release arrives later, and is no key either.
+            SCRIPT.lock().unwrap().as_mut().unwrap().events.push_back(event_for(up(Q)));
+            (*(&raw mut S_KBD)).irq_pending.store(true, Ordering::Release);
+            assert_eq!(tca8418_poll(), ESP_OK);
+            assert!(HEARD.lock().unwrap().is_empty());
+            // The next key types.
+            SCRIPT.lock().unwrap().as_mut().unwrap().events.extend([event_for(down(Q)), event_for(up(Q))]);
+            (*(&raw mut S_KBD)).irq_pending.store(true, Ordering::Release);
+            assert_eq!(tca8418_poll(), ESP_OK);
+            assert_eq!(HEARD.lock().unwrap().len(), 2);
+            *(&raw mut S_KBD) = KbdState::new();
+            esp_ffi::reset_chip();
+        }
+    }
+
+    #[test]
+    fn a_shift_held_before_sleep_is_forgotten_after_it() {
+        unsafe {
+            asleep_with(&[event_for(down(LEFT_SHIFT))]);
+            assert_eq!(tca8418_poll(), ESP_OK);
+            assert!((*(&raw const S_KBD)).shift.active());
+            assert_eq!(tca8418_sleep(true), ESP_OK);
+            assert!(!(*(&raw const S_KBD)).shift.active());
+            *(&raw mut S_KBD) = KbdState::new();
+            esp_ffi::reset_chip();
+        }
+    }
 }
+

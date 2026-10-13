@@ -858,6 +858,10 @@ esp_err_t meshcore_start(const meshcore_config_t* config, const meshcore_callbac
 
 bool meshcore_running(void) { return s_running; }
 
+/* Packets queued to go out: an acknowledgement waiting out its delay, a
+ * flood being relayed. Read from the kernel worker, as the mesh job is. */
+int meshcore_outbound_pending(void) { return s_packets ? s_packets->getOutboundTotal() : 0; }
+
 esp_err_t meshcore_send_direct(const uint8_t* pub_key, const char* text, uint32_t message_id) {
     if (!pub_key || !text) return ESP_ERR_INVALID_ARG;
     if (strlen(text) > MAX_TEXT_LEN) return ESP_ERR_INVALID_SIZE;

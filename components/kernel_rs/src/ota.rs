@@ -183,6 +183,8 @@ pub unsafe extern "C" fn ota_apply_from_sd(
     progress_cb: Option<OtaProgressCb>,
     user_data: *mut c_void,
 ) -> i32 {
+    // A sleep halfway through would leave half an image in the partition.
+    let _awake = crate::power_manager::HoldGuard::new(b"an update is installing\0");
     let update_path = OTA_SD_UPDATE_PATH.trim_end_matches('\0');
 
     // Keep one file-description boundary from signature verification through

@@ -245,6 +245,21 @@ extern "C" {
     fn meshcore_send_advert() -> i32;
     fn meshcore_set_name(name: *const c_char) -> i32;
     fn meshcore_get_stats(out: *mut EngineStats) -> i32;
+    fn meshcore_outbound_pending() -> i32;
+}
+
+/// Whether the engine has packets queued to go out, an acknowledgement or a
+/// relay. The power manager keeps the CPU up for them after a packet wakes
+/// it. Call from the kernel worker, where the engine runs.
+pub(crate) fn outbound_pending() -> bool {
+    #[cfg(target_os = "espidf")]
+    {
+        unsafe { meshcore_outbound_pending() > 0 }
+    }
+    #[cfg(not(target_os = "espidf"))]
+    {
+        false
+    }
 }
 
 // ---------------------------------------------------------------------------

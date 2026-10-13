@@ -884,6 +884,7 @@ static TOUCH_DRIVER: HalInputDriver = HalInputDriver {
     name: b"XPT2046\0".as_ptr() as *const c_char,
     is_touch: true,
     set_backlight: None,
+    sleep: None,
 };
 
 /// Return a pointer to the XPT2046 HAL input driver vtable.

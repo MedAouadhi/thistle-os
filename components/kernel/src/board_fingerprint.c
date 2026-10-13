@@ -12,6 +12,7 @@
 #include "thistle/board_fingerprint.h"
 
 #include <stddef.h>
+#include <string.h>
 
 /* ── Embedded fallback profiles ───────────────────────────────────────────── */
 
@@ -81,6 +82,18 @@ static const char JSON_TDECK_MAX[] =
 "        {\"expander\": 0, \"pin\": 10, \"direction\": \"output\", \"level\": 0, \"delay_ms\": 0}\n"
 "    ],\n"
 "    \"radio_antenna_switch\": {\"expander\": 0, \"pin\": 4, \"internal_level\": 1},\n"
+"    \"power\": {\n"
+"        \"key\": {\"gpio\": 0, \"active_level\": 0},\n"
+"        \"wake\": [\n"
+"            {\"source\": \"keyboard\", \"gpio\": 15, \"active_level\": 0},\n"
+"            {\"source\": \"modem\", \"gpio\": 7, \"active_level\": 0},\n"
+"            {\"source\": \"radio\", \"gpio\": 5, \"active_level\": 1}\n"
+"        ],\n"
+"        \"deep_sleep_off\": [\n"
+"            {\"expander\": 0, \"pin\": 1}, {\"expander\": 0, \"pin\": 2}, {\"expander\": 0, \"pin\": 3},\n"
+"            {\"expander\": 0, \"pin\": 5}, {\"expander\": 0, \"pin\": 6}\n"
+"        ]\n"
+"    },\n"
 "    \"drivers\": [\n"
 "        {\"id\": \"com.thistle.drv.epaper-gdeq031t10\", \"hal\": \"display\", \"entry\": \"epaper-gdeq031t10.drv.elf\", \"config\": {\"spi_bus\": 0, \"cs\": 34, \"dc\": 35, \"rst\": 9, \"busy\": 37, \"bl\": 41, \"spi_clock_hz\": 2000000, \"rotation\": 180}},\n"
 "        {\"id\": \"com.thistle.drv.kbd-tca8418\", \"hal\": \"input\", \"entry\": \"kbd-tca8418.drv.elf\", \"config\": {\"i2c_bus\": 0, \"i2c_addr\": \"0x34\", \"pin_int\": 15, \"pin_backlight\": 42}},\n"
@@ -269,4 +282,21 @@ const board_profile_t *board_fingerprint_match(const board_scan_t *scan)
 const board_profile_t *board_fingerprint_headless(void)
 {
     return &PROFILE_RAK3312;
+}
+
+const char *board_fingerprint_profile_json(const char *board_id)
+{
+    static const board_profile_t *const ALL[] = {
+        &PROFILE_TDECK, &PROFILE_TDECK_PRO, &PROFILE_TDECK_MAX, &PROFILE_TDISPLAY,
+        &PROFILE_CARDPUTER, &PROFILE_HELTEC_V3, &PROFILE_T3_S3, &PROFILE_RAK3312,
+    };
+    if (!board_id) {
+        return NULL;
+    }
+    for (size_t i = 0; i < sizeof(ALL) / sizeof(ALL[0]); i++) {
+        if (strcmp(ALL[i]->board_id, board_id) == 0) {
+            return ALL[i]->json;
+        }
+    }
+    return NULL;
 }

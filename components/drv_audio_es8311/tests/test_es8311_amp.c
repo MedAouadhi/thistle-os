@@ -127,6 +127,18 @@ static void test_play_opens_the_codec_then_raises_the_amplifier_then_writes(void
     assert(index_of(EV_AMP_ON) < index_of(EV_CODEC_WRITE));
 }
 
+static void test_the_device_stays_awake_while_the_codec_is_open(void)
+{
+    reset();
+    init_with(config());
+    int before = s_power_holds;
+    assert(drv->play(PCM, sizeof(PCM)) == ESP_OK);
+    assert(drv->play(PCM, sizeof(PCM)) == ESP_OK);
+    assert(s_power_holds == before + 1);
+    assert(drv->stop() == ESP_OK);
+    assert(s_power_holds == before);
+}
+
 static void test_a_stream_of_plays_raises_the_amplifier_once(void)
 {
     reset();
@@ -521,6 +533,7 @@ int main(void)
     test_an_amplifier_line_that_cannot_be_driven_fails_init();
     test_play_opens_the_codec_then_raises_the_amplifier_then_writes();
     test_a_stream_of_plays_raises_the_amplifier_once();
+    test_the_device_stays_awake_while_the_codec_is_open();
     test_stop_drops_the_amplifier_before_closing_the_codec();
     test_a_caller_that_never_stops_is_silenced_once_it_goes_idle();
     test_an_idle_timeout_that_lands_during_a_write_is_ignored();

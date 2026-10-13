@@ -18,6 +18,7 @@
 #include "lvgl.h"
 #include "esp_log.h"
 #include "hal/board.h"
+#include "thistle/power_manager.h"
 #include "ui/theme.h"
 
 #include <stdio.h>
@@ -62,6 +63,7 @@ static struct {
     double  total_distance_m;
     double  last_lat, last_lon;
     int     fix_count;
+    uint32_t awake;           /* power manager hold while recording, or 0 */
 } s_track;
 
 /* ------------------------------------------------------------------ */
@@ -351,6 +353,8 @@ static void record_btn_cb(lv_event_t *e)
 
     if (open_gpx_file()) {
         s_track.recording        = true;
+        /* Fixes are taken by an LVGL timer, and sleep would stop it. */
+        s_track.awake            = power_manager_hold("a track is recording");
         s_track.start_time_ms    = lv_tick_get();
         s_track.total_distance_m = 0.0;
         s_track.fix_count        = 0;
@@ -372,6 +376,8 @@ static void stop_btn_cb(lv_event_t *e)
 
     close_gpx_file();
     s_track.recording = false;
+    power_manager_release(s_track.awake);
+    s_track.awake = 0;
 
     /* Reset visual state */
     const theme_colors_t *colors = theme_get_colors();
@@ -666,6 +672,13 @@ void navigator_ui_hide(void)
 
 void navigator_ui_destroy(void)
 {
+    /* Nothing takes fixes once the timer goes: end the track where it is. */
+    if (s_track.recording) {
+        close_gpx_file();
+        s_track.recording = false;
+        power_manager_release(s_track.awake);
+        s_track.awake = 0;
+    }
     if (s_ui.update_timer) {
         lv_timer_delete(s_ui.update_timer);
         s_ui.update_timer = NULL;

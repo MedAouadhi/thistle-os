@@ -39,4 +39,11 @@ typedef struct {
      * not lit, and ESP_ERR_NOT_SUPPORTED on one where the board left the
      * backlight pin unwired. Mirrors set_brightness on the display. */
     esp_err_t (*set_backlight)(uint8_t percent);
+    /* Optional, for the power manager. enter: stop reporting and drop to the
+     * part's lowest power, leaving it able to wake the device if it is a
+     * wake source: a keyboard's interrupt line idle, so the next key pressed
+     * pulls it. !enter: report again, dropping whatever woke the device, so
+     * the key pressed to wake it is not typed. NULL where there is nothing
+     * to do. */
+    esp_err_t (*sleep)(bool enter);
 } hal_input_driver_t;

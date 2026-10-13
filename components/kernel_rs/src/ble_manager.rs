@@ -502,6 +502,13 @@ impl BleState {
 
 static BLE_STATE: Mutex<BleState> = Mutex::new(BleState::new());
 
+/// Whether Bluetooth was started. Nothing stops it again, and light sleep
+/// would leave a phone connected to a controller that has stopped answering,
+/// so the power manager keeps the device awake while it runs.
+pub(crate) fn running() -> bool {
+    BLE_STATE.lock().map(|s| s.initialized).unwrap_or(false)
+}
+
 // ---------------------------------------------------------------------------
 // NimBLE host task (hardware only)
 // ---------------------------------------------------------------------------

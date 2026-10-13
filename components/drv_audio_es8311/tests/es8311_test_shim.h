@@ -71,6 +71,22 @@ int thistle_expander_set_level(int expander, int pin, int level)
     return ESP_OK;
 }
 
+// ── Power manager ────────────────────────────────────────────────────────────
+
+static int s_power_holds;
+
+static uint32_t power_manager_hold(const char *why)
+{
+    (void)why;
+    s_power_holds++;
+    return (uint32_t)s_power_holds;
+}
+
+static void power_manager_release(uint32_t token)
+{
+    if (token) s_power_holds--;
+}
+
 // ── Codec port ───────────────────────────────────────────────────────────────
 
 static esp_err_t port_codec_create(const audio_es8311_config_t *cfg)

@@ -3,6 +3,8 @@
 #include "ui/statusbar.h"
 #include "ui/epaper_refresh.h"
 #include "ui/toast.h"
+#include "ui/power_ui.h"
+#include "thistle/power_manager.h"
 #include "hal/board.h"
 #include "hal/input.h"
 #include "thistle/app_manager.h"
@@ -133,6 +135,7 @@ static void kbd_queue_push(kbd_event_t ev)
 static void ui_input_hal_cb(const hal_input_event_t *event, void *user_data)
 {
     (void)user_data;
+    power_manager_note_activity();
     switch (event->type) {
         case HAL_INPUT_EVENT_TOUCH_DOWN:
         case HAL_INPUT_EVENT_TOUCH_MOVE:
@@ -321,6 +324,17 @@ static void lvgl_tick_cb(void *arg)
     lv_tick_inc(1);
 }
 
+/* Whether this task may stop for sleep: the sleep screen is up, and the
+ * panel is not still waiting to show it. Stopped earlier, the device would
+ * sleep showing whatever was there before. */
+static bool ready_to_sleep(void)
+{
+    if (!power_ui_sleep_screen_shown()) {
+        return false;
+    }
+    return !(s_use_deferred_refresh && (epaper_refresh_is_dirty() || s_last_flush_time > 0));
+}
+
 /* -------------------------------------------------------------------------
  * LVGL timer handler task — runs lv_timer_handler() every 10 ms
  * ------------------------------------------------------------------------- */
@@ -328,7 +342,12 @@ static void lvgl_task(void *arg)
 {
     (void)arg;
     const hal_registry_t *reg = hal_get_registry();
+    /* It reads the input drivers and draws: before the device sleeps, it
+     * stops at the checkpoint, so sleep never lands mid-transfer. */
+    power_ui_join();
     while (1) {
+        power_ui_checkpoint(ready_to_sleep());
+
         /* Poll all registered input drivers so they fire HAL callbacks */
         if (reg) {
             for (int i = 0; i < reg->input_count; i++) {
@@ -462,6 +481,9 @@ esp_err_t ui_manager_init(ui_flush_fn_t flush_cb, bool use_deferred_refresh)
     if (toast_init() != ESP_OK) {
         ESP_LOGW(TAG, "toast_init failed; posted toasts will not show");
     }
+
+    /* 4b1b. The sleep screen and the power menu, when the power manager asks */
+    power_ui_init();
 
     /* Touch stays in TIMER mode — LVGL polls at each lv_timer_handler call */
 

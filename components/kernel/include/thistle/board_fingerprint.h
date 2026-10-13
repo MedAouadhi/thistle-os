@@ -52,3 +52,8 @@ const board_profile_t *board_fingerprint_match(const board_scan_t *scan);
 
 /* The profile to assume when nothing answered on any pin pair. */
 const board_profile_t *board_fingerprint_headless(void);
+
+/* The embedded profile for `board_id`, or NULL if none is built in. A board
+ * that saved its profile before a section was added to it gets the section
+ * from here (board_config.rs). */
+const char *board_fingerprint_profile_json(const char *board_id);

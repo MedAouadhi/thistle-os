@@ -53,6 +53,7 @@ static struct {
     atomic_bool      ppp_connected;
     char             ppp_ip[16];
     bool             known_off;   ///< Shut down by this driver since boot
+    bool             asleep;      ///< Sleeping by AT+CSCLK=1 with DTR held high
     bool             resumed;     ///< resumed_at holds when data mode was last restored
     TickType_t       resumed_at;
     uint32_t         dte_baud;    ///< The rate the SoC's UART runs at
@@ -440,6 +441,7 @@ void a7682e_configure_locked(void)
 
 esp_err_t a7682e_power_on_locked(void)
 {
+    a7682e_sleep_locked(false);
     if (s_modem.powered_on && s_modem.dce) {
         return ESP_OK;
     }
@@ -501,6 +503,8 @@ esp_err_t a7682e_power_on_locked(void)
 
 esp_err_t a7682e_power_off_locked(void)
 {
+    /* A sleeping module answers nothing until DTR wakes it. */
+    a7682e_sleep_locked(false);
     sms_poll_stop();
 
     if (!s_modem.dce && s_modem.known_off) {
@@ -554,6 +558,58 @@ esp_err_t a7682e_power_off_locked(void)
     s_modem.powered_on = false;
     s_modem.known_off = true;
     return ESP_OK;
+}
+
+/* AT+CSCLK=1 lets the module sleep whenever DTR is high and it has nothing to
+ * do, still paging the network: an SMS pulls RI low for 120 ms, a call holds
+ * it low while it rings (A76XX Series Sleep Mode Application Note V1.03,
+ * 2.1 and 3.2; LTE sleep, typ. 2 mA against 12 mA idle, A7682E Hardware
+ * Design V1.05, table 35). A data session keeps it awake, so it ends first.
+ * DTR is held, so it stays high through the SoC's own sleep, deep or light. */
+esp_err_t a7682e_sleep_locked(bool enter)
+{
+    gpio_num_t dtr = s_modem.cfg.pin_dtr;
+    if (dtr < 0) {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    if (enter) {
+        if (s_modem.asleep) {
+            return ESP_OK;
+        }
+        if (!s_modem.powered_on || !s_modem.dce) {
+            return ESP_ERR_INVALID_STATE;
+        }
+        sms_poll_stop();
+        a7682e_enter_command_locked();
+        char resp[A7682E_AT_BUF];
+        if (esp_modem_at(s_modem.dce, "AT+CSCLK=1", resp, 2000) != ESP_OK) {
+            ESP_LOGW(TAG, "sleep: AT+CSCLK=1 refused; the module stays awake");
+            sms_poll_start_if_needed();
+            return ESP_FAIL;
+        }
+        gpio_set_level(dtr, 1);
+        gpio_hold_en(dtr);
+        s_modem.asleep = true;
+        ESP_LOGI(TAG, "sleep: module asleep, RI raised for calls and SMS");
+        return ESP_OK;
+    }
+
+    if (!s_modem.asleep) {
+        return ESP_OK;
+    }
+    gpio_hold_dis(dtr);
+    gpio_set_level(dtr, 0);
+    s_modem.asleep = false;
+    bool alive = s_modem.dce && answers_within(A7682E_ANSWER_MS);
+    if (alive) {
+        char resp[A7682E_AT_BUF];
+        esp_modem_at(s_modem.dce, "AT+CSCLK=0", resp, 1000);
+        ESP_LOGI(TAG, "sleep: module awake");
+    } else {
+        ESP_LOGW(TAG, "sleep: module not answering after DTR went low");
+    }
+    sms_poll_start_if_needed();
+    return alive ? ESP_OK : ESP_ERR_TIMEOUT;
 }
 
 bool a7682e_enter_command_locked(void)
@@ -627,9 +683,13 @@ esp_err_t drv_a7682e_init(const a7682e_config_t *config)
         gpio_set_level(s_modem.cfg.pin_reset, 1);
     }
     if (s_modem.cfg.pin_dtr >= 0) {
+        /* Held high through a deep sleep the module slept in: let go, or the
+         * pin would not move, and low wakes the module. */
+        gpio_hold_dis(s_modem.cfg.pin_dtr);
         gpio_set_direction(s_modem.cfg.pin_dtr, GPIO_MODE_OUTPUT);
         gpio_set_level(s_modem.cfg.pin_dtr, 0);
     }
+    s_modem.asleep = false;
 
     atomic_store(&s_modem.ppp_connected, false);
     ESP_LOGI(TAG, "driver initialised (esp_modem backend, UART%d, %lu baud then %lu, "
@@ -705,7 +765,7 @@ static void sms_poll_task(void *arg)
             vTaskDelete(NULL);
         }
         if (!s_modem.sms_cb || !s_modem.sms_initialized || !s_modem.powered_on || !s_modem.dce
-            || esp_modem_get_mode(s_modem.dce) == ESP_MODEM_MODE_DATA) {
+            || s_modem.asleep || esp_modem_get_mode(s_modem.dce) == ESP_MODEM_MODE_DATA) {
             a7682e_lifecycle_finish_operation();
             vTaskDelay(pdMS_TO_TICKS(A7682E_SMS_POLL_MS));
             continue;
@@ -740,7 +800,8 @@ static void sms_poll_task(void *arg)
 
 static void sms_poll_start_if_needed(void)
 {
-    if (!s_modem.sms_cb || !s_modem.sms_initialized || !s_modem.powered_on || !s_modem.dce) {
+    if (!s_modem.sms_cb || !s_modem.sms_initialized || !s_modem.powered_on || !s_modem.dce
+        || s_modem.asleep) {
         return;
     }
     if (s_modem.sms_poll_task) {

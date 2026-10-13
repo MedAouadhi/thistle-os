@@ -40,6 +40,11 @@ esp_err_t a7682e_exchange_locked(const char *cmd, char *resp, size_t resp_size,
 esp_err_t a7682e_power_on_locked(void);
 esp_err_t a7682e_power_off_locked(void);
 
+/** Let a running module sleep listening for calls and SMS, with RI raised
+ *  for them, or wake it to answer commands. ESP_ERR_INVALID_STATE to sleep a
+ *  module that is off; ESP_ERR_NOT_SUPPORTED without a DTR line. */
+esp_err_t a7682e_sleep_locked(bool enter);
+
 /** Echo off, verbose errors, long operator names: lost when the module
  *  resets itself, so set again before each connection. */
 void a7682e_configure_locked(void);

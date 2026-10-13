@@ -118,6 +118,39 @@ pub extern "C" fn light_prefs_restore() {
     }
 }
 
+/// The level to give the screen on waking: the saved one, or, on an emissive
+/// screen that never had one saved, full. Sleep put its light out, and with
+/// no light an LCD shows nothing at all.
+fn display_level_after_sleep(saved: Option<u8>, display_type: HalDisplayType) -> Option<u8> {
+    match display_level_to_restore(saved, display_type) {
+        None if display_type == HalDisplayType::Lcd => Some(100),
+        level => level,
+    }
+}
+
+/// Put back the lights sleep turned off: the saved levels, or the screen of
+/// an LCD at full and the keys dark when nothing was saved.
+pub(crate) fn restore_after_sleep() {
+    let json = std::fs::read_to_string(system_json::path()).unwrap_or_default();
+    let reg = registry();
+    if !reg.display.is_null() {
+        let drv = unsafe { &*reg.display };
+        let level = display_level_after_sleep(read_level(&json, DISPLAY_SECTION), drv.display_type);
+        if let (Some(level), Some(set)) = (level, drv.set_brightness) {
+            unsafe { set(level) };
+        }
+    }
+    let keys = read_level(&json, KEYBOARD_SECTION).unwrap_or(0);
+    for i in 0..(reg.input_count as usize) {
+        if reg.inputs[i].is_null() {
+            continue;
+        }
+        if let Some(set) = unsafe { (*reg.inputs[i]).set_backlight } {
+            unsafe { set(keys) };
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,5 +217,18 @@ mod tests {
         assert_eq!(display_level_to_restore(Some(0), HalDisplayType::Epaper), Some(0));
         assert_eq!(display_level_to_restore(Some(60), HalDisplayType::Epaper), Some(60));
         assert_eq!(display_level_to_restore(None, HalDisplayType::Epaper), None);
+    }
+
+    #[test]
+    fn after_sleep_an_lcd_with_nothing_saved_comes_back_lit() {
+        assert_eq!(display_level_after_sleep(None, HalDisplayType::Lcd), Some(100));
+        assert_eq!(display_level_after_sleep(Some(30), HalDisplayType::Lcd), Some(30));
+        assert_eq!(display_level_after_sleep(Some(0), HalDisplayType::Lcd), Some(100));
+    }
+
+    #[test]
+    fn after_sleep_epaper_with_nothing_saved_stays_dark() {
+        assert_eq!(display_level_after_sleep(None, HalDisplayType::Epaper), None);
+        assert_eq!(display_level_after_sleep(Some(40), HalDisplayType::Epaper), Some(40));
     }
 }

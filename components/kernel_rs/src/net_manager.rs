@@ -80,6 +80,7 @@ pub struct HalNetDriver {
     pub is_connected: Option<unsafe extern "C" fn() -> bool>,
     pub get_cell_info: Option<unsafe extern "C" fn(*mut CCellInfo) -> i32>,
     pub cancel: Option<unsafe extern "C" fn()>,
+    pub sleep: Option<unsafe extern "C" fn(enter: bool) -> i32>,
 }
 
 // SAFETY: All fields are immutable once registered.
@@ -135,6 +136,7 @@ static WIFI_NET_DRIVER: HalNetDriver = HalNetDriver {
     is_connected: Some(wifi_net_is_connected),
     get_cell_info: None,
     cancel: None,
+    sleep: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -618,6 +620,7 @@ mod tests {
         is_connected: Some(mock_not_connected),
         get_cell_info: None,
         cancel: None,
+        sleep: None,
     };
 
     static MOCK_CONNECTED: HalNetDriver = HalNetDriver {
@@ -632,6 +635,7 @@ mod tests {
         is_connected: Some(mock_is_connected),
         get_cell_info: None,
         cancel: None,
+        sleep: None,
     };
 
     static MOCK_VPN_CONNECTED: HalNetDriver = HalNetDriver {
@@ -646,6 +650,7 @@ mod tests {
         is_connected: Some(mock_is_connected),
         get_cell_info: None,
         cancel: None,
+        sleep: None,
     };
 
     // -----------------------------------------------------------------------
@@ -872,6 +877,7 @@ mod tests {
         is_connected: Some(mock_is_connected),
         get_cell_info: None,
         cancel: None,
+        sleep: None,
     };
 
     static MOCK_WIFI_CONNECTED: HalNetDriver = HalNetDriver {
@@ -886,6 +892,7 @@ mod tests {
         is_connected: Some(mock_is_connected),
         get_cell_info: None,
         cancel: None,
+        sleep: None,
     };
 
     static MOCK_WIFI_DISCONNECTED: HalNetDriver = HalNetDriver {
@@ -900,6 +907,7 @@ mod tests {
         is_connected: Some(mock_not_connected),
         get_cell_info: None,
         cancel: None,
+        sleep: None,
     };
 
     /// The modem registers while the drivers load, before WiFi does; WiFi

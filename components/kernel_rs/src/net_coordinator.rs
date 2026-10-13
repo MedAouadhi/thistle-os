@@ -27,6 +27,12 @@
 //! `thistle_os.cellular.apn` (default "", the APN the network assigns) in
 //! system.json.
 //!
+//! While the device sleeps the network **rests** (`rest`): WiFi stops, and a
+//! modem that is on ends its data session and sleeps listening for calls and
+//! SMS, raising RI for them. Before deep sleep without "wake on calls and
+//! SMS", the modem is powered down instead. Back at `Rest::Normal`, the
+//! modem is woken, WiFi is started, and both reconnect at once.
+//!
 //! All of it happens on the coordinator's one thread, started at boot with
 //! its stack in internal RAM: powering the modem down, rejoining WiFi, and
 //! cellular attempts, one at a time. So WiFi waits to be rejoined while an
@@ -34,7 +40,7 @@
 //! Mobile data switched off cancels an attempt at once, through the driver.
 
 use std::os::raw::c_char;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -256,6 +262,12 @@ impl CellPolicy {
     pub(crate) fn blocked(&self) -> bool {
         self.blocked
     }
+
+    /// The device woke: a session ended for sleep is redialled at once, not
+    /// after whatever backoff came before.
+    pub(crate) fn woke(&mut self) {
+        self.retry.reset();
+    }
 }
 
 /// Whether to rejoin the saved WiFi network now.
@@ -317,6 +329,33 @@ static CELL_WANTED: AtomicBool = AtomicBool::new(false);
 static CELL_CONNECTING: AtomicBool = AtomicBool::new(false);
 static CELL_POWERING_OFF: AtomicBool = AtomicBool::new(false);
 
+/// How much of the network to keep while the device sleeps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Rest {
+    /// Awake: everything the settings ask for.
+    Normal = 0,
+    /// Asleep: WiFi stopped, the modem asleep but listening, if it is on.
+    Sleep = 1,
+    /// About to go into deep sleep without the modem: WiFi stopped and the
+    /// modem powered down. Only a restart comes back from this.
+    Off = 2,
+}
+
+impl Rest {
+    fn from_u8(v: u8) -> Rest {
+        match v {
+            1 => Rest::Sleep,
+            2 => Rest::Off,
+            _ => Rest::Normal,
+        }
+    }
+}
+
+static REST_WANTED: AtomicU8 = AtomicU8::new(Rest::Normal as u8);
+static REST_REACHED: AtomicU8 = AtomicU8::new(Rest::Normal as u8);
+/// The modem was put to sleep listening, and has not been woken since.
+static MODEM_LISTENING: AtomicBool = AtomicBool::new(false);
+
 fn cellular() -> Option<&'static HalNetDriver> {
     let drv = find_transport(HAL_NET_CELLULAR);
     // SAFETY: registered vtables are static and never unregistered.
@@ -347,6 +386,89 @@ pub(crate) fn poke() {
     WAKE.notify_all();
 }
 
+/// Rest the network for sleep, or bring it back. Returns at once; the
+/// coordinator does it on its thread, and `rested` says when it is done.
+pub(crate) fn rest(to: Rest) {
+    REST_WANTED.store(to as u8, Ordering::SeqCst);
+    let running = COORD.lock().map(|c| c.is_some()).unwrap_or(false);
+    if !running {
+        // Nothing to rest.
+        REST_REACHED.store(to as u8, Ordering::SeqCst);
+        return;
+    }
+    if to != Rest::Normal && CELL_CONNECTING.load(Ordering::SeqCst) {
+        // An attempt can take two minutes; sleep does not wait for it.
+        if let Some(cancel) = cellular().and_then(|d| d.cancel) {
+            unsafe { cancel() };
+        }
+    }
+    poke();
+}
+
+/// Whether the network has reached `to`, and nothing else was asked since.
+pub(crate) fn rested(to: Rest) -> bool {
+    REST_WANTED.load(Ordering::SeqCst) == to as u8 && REST_REACHED.load(Ordering::SeqCst) == to as u8
+}
+
+/// Whether the modem sleeps listening, so its RI line can wake the device.
+pub(crate) fn modem_listening() -> bool {
+    MODEM_LISTENING.load(Ordering::SeqCst)
+}
+
+fn modem_sleep(drv: Option<&'static HalNetDriver>, enter: bool) -> bool {
+    match drv.and_then(|d| d.sleep) {
+        Some(sleep) => unsafe { sleep(enter) == ESP_OK },
+        None => false,
+    }
+}
+
+/// Move the network from one rest to another, on the coordinator's thread.
+fn change_rest(from: Rest, to: Rest) {
+    let drv = cellular();
+    if from == Rest::Normal {
+        crate::wifi_manager::suspend(true);
+    }
+    match to {
+        Rest::Normal => {
+            if MODEM_LISTENING.swap(false, Ordering::SeqCst) {
+                modem_sleep(drv, false);
+            }
+            crate::wifi_manager::suspend(false);
+            if let Ok(mut c) = COORD.lock() {
+                if let Some(c) = c.as_mut() {
+                    c.wifi = WifiPolicy::default();
+                    c.cell.woke();
+                }
+            }
+            log!(ESP_LOG_INFO, b"network back from sleep\0");
+        }
+        Rest::Sleep => {
+            if from == Rest::Normal && drv.is_some() {
+                let listening = modem_sleep(drv, true);
+                MODEM_LISTENING.store(listening, Ordering::SeqCst);
+                log!(
+                    ESP_LOG_INFO,
+                    b"network resting; modem %s\0",
+                    if listening {
+                        b"asleep, listening\0".as_ptr()
+                    } else {
+                        b"off\0".as_ptr()
+                    }
+                );
+            }
+        }
+        Rest::Off => {
+            if let Some(drv) = drv {
+                if MODEM_LISTENING.swap(false, Ordering::SeqCst) {
+                    modem_sleep(Some(drv), false);
+                }
+                power_off(drv);
+            }
+        }
+    }
+    REST_REACHED.store(to as u8, Ordering::SeqCst);
+}
+
 #[cfg(target_os = "espidf")]
 extern "C" {
     // components/kernel/src/link_deps.c
@@ -364,6 +486,7 @@ enum Work {
     PowerOff(&'static HalNetDriver),
     RejoinWifi,
     Connect(&'static HalNetDriver, u32),
+    Rest(Rest, Rest),
 }
 
 /// One cellular attempt: starting the modem, the SIM, a registration and the
@@ -466,6 +589,17 @@ fn rejoin_wifi() {
 fn evaluate(c: &mut Coordinator) -> Work {
     let now = Instant::now();
 
+    // Sleep comes before anything the settings ask for, and while the device
+    // sleeps nothing else is done.
+    let wanted = Rest::from_u8(REST_WANTED.load(Ordering::SeqCst));
+    let reached = Rest::from_u8(REST_REACHED.load(Ordering::SeqCst));
+    if wanted != reached {
+        return Work::Rest(reached, wanted);
+    }
+    if wanted != Rest::Normal {
+        return Work::None;
+    }
+
     let mut cell = Work::None;
     if let Some(drv) = cellular() {
         match c.cell.decide(
@@ -521,6 +655,11 @@ fn run() {
             Work::Connect(drv, epoch) => {
                 drop(guard);
                 connect(drv, epoch);
+                continue;
+            }
+            Work::Rest(from, to) => {
+                drop(guard);
+                change_rest(from, to);
                 continue;
             }
         }

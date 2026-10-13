@@ -30,6 +30,7 @@ set(THISTLE_SRCS
     ${THISTLE_DIR}/components/ui/src/app_switcher.c
     ${THISTLE_DIR}/components/ui/src/epaper_refresh.c
     ${THISTLE_DIR}/components/ui/src/toast.c
+    ${THISTLE_DIR}/components/ui/src/power_ui.c
     ${THISTLE_DIR}/components/ui/src/wm_select.c
     # Built-in apps
     ${THISTLE_DIR}/components/apps_builtin/lvgl_apps.c

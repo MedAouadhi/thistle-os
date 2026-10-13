@@ -16,6 +16,7 @@
 #include "thistle/display_server.h"
 #include "thistle/elf_loader.h"
 #include "thistle/board_config.h"
+#include "thistle/power_manager.h"
 #include "hal/board.h"
 #include "hal/input.h"
 #ifdef THISTLE_LEGACY_C_APPS
@@ -109,6 +110,7 @@ static uint32_t s_tk_input_dropped;
 static void tk_input_hal_cb(const hal_input_event_t *event, void *user_data)
 {
     (void)user_data;
+    power_manager_note_activity();
     if (!s_tk_input_queue) return;
 
     if (xQueueSend(s_tk_input_queue, event, 0) != pdTRUE) {
@@ -173,7 +175,9 @@ static void tk_input_task(void *arg)
 {
     (void)arg;
     ESP_LOGI(TAG, "tk_input_task: started");
+    power_ui_join();
     for (;;) {
+        power_ui_checkpoint(true);
         tk_poll_inputs();
         vTaskDelay(pdMS_TO_TICKS(TK_INPUT_POLL_MS));
     }
@@ -199,7 +203,9 @@ static void tk_render_task(void *arg)
      * Refresh is invoked at this shallow call depth (not from inside the
      * deep render chain) to avoid Xtensa CALL8 register-window overflow. */
     bool watermark_logged = false;
+    power_ui_join();
     for (;;) {
+        power_ui_checkpoint(true);
         tk_drain_input_queue();
         tk_launcher_tick();
         display_server_tick();
@@ -518,6 +524,11 @@ void app_main(void)
                      esp_err_to_name(battery_ret));
         }
     }
+
+    /* Sleep by the clock and by the power key from here on. Not before:
+     * waking from deep sleep restarts the device, and a restart before
+     * ota_mark_valid() above would roll a new image back. */
+    power_manager_start();
 
     /* Internal RAM is what runs out, so every boot says what is left of it,
      * this task's 16 KB stack still counted. */

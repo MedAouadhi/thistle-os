@@ -30,6 +30,7 @@
 #include "thistle/mesh.h"
 #include "thistle/radio_antenna.h"
 #include "thistle/refresh_prefs.h"
+#include "thistle/power_manager.h"
 #include "hal/board.h"
 #include "hal/sdcard_path.h"
 #include "ui/theme.h"
@@ -69,6 +70,7 @@ typedef enum {
     SETTINGS_MOBILE,
     SETTINGS_BLUETOOTH,
     SETTINGS_APPEARANCE,
+    SETTINGS_POWER,
     SETTINGS_ABOUT,
     SETTINGS_DRIVERS,
     SETTINGS_DRIVER_DETAIL,
@@ -187,6 +189,7 @@ static const settings_item_t s_items[] = {
     { "Mobile data", "Off" },  /* only on a board with a modem */
     { "Bluetooth",   "Off" },
     { "Appearance",  NULL  },
+    { "Power",       NULL  },
     { "Drivers",     NULL  },
     { "About",       NULL  },
 };
@@ -2735,6 +2738,175 @@ static void open_drivers_screen(void)
 /* Main list — category row creation                                   */
 /* ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ */
+/* Power sub-screen                                                     */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    uint32_t seconds;  /* 0: never */
+    const char *label;
+} power_choice_t;
+
+static const power_choice_t SLEEP_AFTER[] = {
+    {60, "1 min"}, {120, "2 min"}, {300, "5 min"},
+    {600, "10 min"}, {1800, "30 min"}, {0, "Never"},
+};
+
+static const power_choice_t DEEP_SLEEP_AFTER[] = {
+    {1800, "30 min"}, {3600, "1 h"}, {7200, "2 h"},
+    {21600, "6 h"}, {86400, "24 h"}, {0, "Never"},
+};
+
+/* A choice row that wraps onto a second line: six choices do not fit across
+ * a 240 px panel. Still one row to choice_check_only(), so one is checked. */
+static lv_obj_t *create_wrapping_choice_row(lv_obj_t *content)
+{
+    lv_obj_t *row = create_choice_row(content);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_height(row, LV_SIZE_CONTENT);
+    lv_obj_set_style_pad_row(row, 4, LV_PART_MAIN);
+    return row;
+}
+
+/* A line of explanation, wrapped to the width of the screen. */
+static void create_note(lv_obj_t *content, const char *text)
+{
+    const theme_colors_t *tc = theme_get_colors();
+    lv_obj_t *lbl = lv_label_create(content);
+    lv_label_set_text(lbl, text);
+    lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(lbl, LV_PCT(100));
+    lv_obj_set_style_pad_left(lbl, ITEM_PAD_LEFT, LV_PART_MAIN);
+    lv_obj_set_style_pad_right(lbl, ITEM_PAD_RIGHT, LV_PART_MAIN);
+    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_color(lbl, tc->text, LV_PART_MAIN);
+}
+
+static void power_saved_or_warn(esp_err_t err)
+{
+    if (err != ESP_OK) {
+        toast_warn("Not saved for next boot");
+    }
+}
+
+static void power_sleep_after_cb(lv_event_t *e)
+{
+    choice_check_only(lv_event_get_current_target(e));
+    power_saved_or_warn(power_manager_set_sleep_after(
+        (uint32_t)(uintptr_t)lv_event_get_user_data(e)));
+}
+
+static void power_deep_sleep_after_cb(lv_event_t *e)
+{
+    choice_check_only(lv_event_get_current_target(e));
+    power_saved_or_warn(power_manager_set_deep_sleep_after(
+        (uint32_t)(uintptr_t)lv_event_get_user_data(e)));
+}
+
+static void power_wake_on_modem_cb(lv_event_t *e)
+{
+    choice_check_only(lv_event_get_current_target(e));
+    power_saved_or_warn(power_manager_set_wake_on_modem(
+        (bool)(uintptr_t)lv_event_get_user_data(e)));
+}
+
+static void power_stay_awake_cb(lv_event_t *e)
+{
+    choice_check_only(lv_event_get_current_target(e));
+    power_saved_or_warn(power_manager_set_stay_awake_on_usb(
+        (bool)(uintptr_t)lv_event_get_user_data(e)));
+}
+
+static void power_request_or_warn(power_request_t request)
+{
+    if (power_manager_request(request) != ESP_OK) {
+        toast_warn("Not available on this device");
+    }
+}
+
+static void power_sleep_now_cb(lv_event_t *e)
+{
+    (void)e;
+    power_request_or_warn(POWER_REQUEST_SLEEP);
+}
+
+static void power_deep_sleep_now_cb(lv_event_t *e)
+{
+    (void)e;
+    power_request_or_warn(POWER_REQUEST_DEEP_SLEEP);
+}
+
+static void power_restart_cb(lv_event_t *e)
+{
+    (void)e;
+    power_request_or_warn(POWER_REQUEST_RESTART);
+}
+
+static void create_power_choices(lv_obj_t *content, const power_choice_t *choices,
+                                 size_t count, uint32_t current, lv_event_cb_t cb)
+{
+    lv_obj_t *row = create_wrapping_choice_row(content);
+    for (size_t i = 0; i < count; i++) {
+        create_choice_button(row, choices[i].label, cb, choices[i].seconds,
+                             choices[i].seconds == current);
+    }
+}
+
+static void create_on_off(lv_obj_t *content, bool on, lv_event_cb_t cb)
+{
+    lv_obj_t *row = create_choice_row(content);
+    create_choice_button(row, "On", cb, 1, on);
+    create_choice_button(row, "Off", cb, 0, !on);
+}
+
+static void open_power_screen(void)
+{
+    lv_obj_t *content = create_sub_screen("Power");
+    s_current_screen = SETTINGS_POWER;
+
+    power_caps_t caps;
+    power_manager_get_caps(&caps);
+    power_settings_t ps;
+    power_manager_get_settings(&ps);
+
+    if (!caps.can_sleep) {
+        create_note(content, "Nothing on this board can wake it, so it does not sleep.");
+    } else {
+        create_info_row(content, "Sleep after");
+        create_power_choices(content, SLEEP_AFTER, sizeof(SLEEP_AFTER) / sizeof(SLEEP_AFTER[0]),
+                             ps.sleep_after_s, power_sleep_after_cb);
+        create_note(content, "Asleep, the screen stays as it is and LoRa keeps listening.");
+        create_separator(content);
+
+        if (caps.can_deep_sleep) {
+            create_info_row(content, "Deep sleep after");
+            create_power_choices(content, DEEP_SLEEP_AFTER,
+                                 sizeof(DEEP_SLEEP_AFTER) / sizeof(DEEP_SLEEP_AFTER[0]),
+                                 ps.deep_sleep_after_s, power_deep_sleep_after_cb);
+            create_note(content, "Deep sleep turns nearly everything off. Waking from it restarts the device.");
+            if (caps.can_wake_on_modem) {
+                create_info_row(content, "Calls and SMS wake it");
+                create_on_off(content, ps.wake_on_modem, power_wake_on_modem_cb);
+                create_note(content, "Keeps the modem on in deep sleep, about 2 mA.");
+            }
+            create_separator(content);
+        }
+
+        create_info_row(content, "Stay awake when plugged in");
+        create_on_off(content, ps.stay_awake_on_usb, power_stay_awake_cb);
+        create_separator(content);
+
+        create_action_row(content, "Sleep now", power_sleep_now_cb);
+        if (caps.can_deep_sleep) {
+            create_action_row(content, "Deep sleep now", power_deep_sleep_now_cb);
+        }
+    }
+    create_action_row(content, "Restart", power_restart_cb);
+    if (caps.has_key) {
+        create_note(content, "Power key: press to sleep, hold for the power menu.");
+    }
+}
+
 static void item_clicked_cb(lv_event_t *e)
 {
     const char *name = (const char *)lv_event_get_user_data(e);
@@ -2752,6 +2924,9 @@ static void item_clicked_cb(lv_event_t *e)
     } else if (strcmp(name, "Appearance") == 0) {
         lv_obj_add_flag(s_main_list, LV_OBJ_FLAG_HIDDEN);
         open_appearance_screen();
+    } else if (strcmp(name, "Power") == 0) {
+        lv_obj_add_flag(s_main_list, LV_OBJ_FLAG_HIDDEN);
+        open_power_screen();
     } else if (strcmp(name, "Drivers") == 0) {
         lv_obj_add_flag(s_main_list, LV_OBJ_FLAG_HIDDEN);
         open_drivers_screen();

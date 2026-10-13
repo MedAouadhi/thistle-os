@@ -93,6 +93,9 @@ esp_err_t meshcore_start(const meshcore_config_t *config, const meshcore_callbac
 
 bool meshcore_running(void);
 
+/* Packets queued to go out. Call from the kernel worker only. */
+int meshcore_outbound_pending(void);
+
 /* Queue a direct message to a known contact. Its delivery is reported against
  * `message_id`. ESP_ERR_INVALID_SIZE for text over MESHCORE_TEXT_MAX. */
 esp_err_t meshcore_send_direct(const uint8_t *pub_key, const char *text, uint32_t message_id);

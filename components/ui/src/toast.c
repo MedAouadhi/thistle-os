@@ -1,5 +1,6 @@
 #include "ui/toast.h"
 #include "ui/manager.h"
+#include "ui/power_ui.h"
 #include "lvgl.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -37,6 +38,11 @@ void toast_dismiss(void)
 esp_err_t toast_show(const char *message, toast_level_t level, uint32_t duration_ms)
 {
     if (!message) return ESP_ERR_INVALID_ARG;
+
+    /* Nobody reads a toast on a sleeping device, and on e-paper it would stay
+     * over the sleep screen until it woke: "WiFi disconnected", say, which
+     * stopping WiFi for sleep posts itself. */
+    if (power_ui_sleep_screen_shown()) return ESP_OK;
 
     /* Dismiss any existing toast first */
     toast_dismiss();

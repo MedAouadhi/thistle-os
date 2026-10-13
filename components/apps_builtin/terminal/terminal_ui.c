@@ -22,6 +22,7 @@
 #include "ui/manager.h"
 
 #include "lvgl.h"
+#include "thistle/power_manager.h"
 #include "esp_log.h"
 
 #include <stdio.h>
@@ -175,6 +176,21 @@ static void shell_output_cb(const char *line, void *ctx)
 /* UART setup                                                           */
 /* ------------------------------------------------------------------ */
 
+/* While a serial session is open the device stays awake: the UART stops in
+ * sleep, and whatever arrives meanwhile is lost. */
+static uint32_t s_awake;
+
+static void terminal_update_hold(void)
+{
+    bool session = s_term.mode == TERM_MODE_UART && s_term.uart_running;
+    if (session && !s_awake) {
+        s_awake = power_manager_hold("the terminal is reading a serial port");
+    } else if (!session && s_awake) {
+        power_manager_release(s_awake);
+        s_awake = 0;
+    }
+}
+
 static void terminal_uart_init(void)
 {
     uart_config_t cfg = {
@@ -190,6 +206,7 @@ static void terminal_uart_init(void)
     /* 8 KB: over half a second at 115200 baud. Past 4 KB it is in PSRAM. */
     uart_driver_install(s_term.uart_num, 8192, 0, 0, NULL, 0);
     s_term.uart_running = true;
+    terminal_update_hold();
 }
 
 static void terminal_uart_reinit(void)
@@ -325,6 +342,7 @@ static void dispatch_slash_command(const char *raw)
         if (s_term.mode != TERM_MODE_LOCAL) {
             terminal_rx_stop();
             s_term.mode = TERM_MODE_LOCAL;
+            terminal_update_hold();
             update_mode_label();
             term_print_line("[Terminal] Switched to Local shell mode");
         }
@@ -609,6 +627,7 @@ void terminal_uart_stop(void)
         uart_driver_delete(s_term.uart_num);
         s_term.uart_running = false;
     }
+    terminal_update_hold();
 }
 
 void terminal_uart_start(void)

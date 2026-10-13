@@ -90,7 +90,8 @@ Rewriting only `board.json`, for instance by a build that calls
 An S3 has about 340 KB of internal RAM, shared with any code placed in IRAM,
 against 8 MB of PSRAM. A T-Deck Max once booted with 14 KB of internal RAM
 left, where a 4 KB task could not be created (ticket 11); it now has about
-180 KB. Every boot logs `ThistleOS ready; internal RAM N KB free, largest
+150 KB, 9 KB of which went to keeping the CPU's state through light sleep
+(ticket 13). Every boot logs `ThistleOS ready; internal RAM N KB free, largest
 block M KB`. To keep it that way:
 
 - **Buffers that only tasks touch go to PSRAM**: `EXT_RAM_BSS_ATTR` on a big
@@ -114,6 +115,32 @@ block M KB`. To keep it that way:
   Terminal's UART reader does.
 - A Rust `std::thread` shows as `pthread` in task lists unless the spawning
   thread calls `thistle_pthread_name_next()` (`link_deps.c`) first.
+
+### Sleep, deep sleep and the power key
+
+The power manager sleeps the device after an idle time and deep-sleeps it
+after a longer one, both set in Settings → Power (`thistle_os.power` in
+system.json). Decisions are in `power_policy.rs`, tested on the host; the
+running of them in `power_manager.rs`; every ESP-IDF sleep call in
+`components/kernel/src/power_platform.c`; the sleep screen and power menu in
+`components/ui/src/power_ui.c`. Ticket 13 has the hardware and the reasons.
+
+- **A board sleeps only if its profile's `power` section names a wake pin.**
+  On the T-Deck Max: the power key is the BOOT button, **IO0**; the keyboard's
+  INT is IO15; the modem's RI is IO7; LoRa DIO1 (IO5) wakes light sleep only.
+- **Light sleep takes the USB-Serial-JTAG down.** A sleeping board is not on
+  USB: `idf.py flash` and captures fail until a key wakes it. "Stay awake when
+  plugged in" (default on) stops the idle timers on USB power, but the power
+  key and Settings' "Sleep now" still sleep a plugged-in board. Deep sleep
+  takes it off USB too, and waking from it is a restart.
+- **Anything sleep would break holds the device awake**:
+  `power_manager_hold()` / `power_manager_release()` (`thistle/power_manager.h`,
+  `thistle_power.h` for drivers), or `HoldGuard` in Rust. An update, audio,
+  a download, an assistant request, a GPS track and a serial session do.
+- **A task that draws or reads input** calls `power_ui_join()` once and
+  `power_ui_checkpoint()` at the top of each pass, so sleep never lands in
+  the middle of a bus transfer.
+- **The log's timestamps stop during light sleep**; they count FreeRTOS ticks.
 
 ### Rust toolchains
 
