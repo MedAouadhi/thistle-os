@@ -31,6 +31,7 @@
 #include "third_party/minimp3/minimp3.h"
 
 #include "hal/board.h"
+#include "thistle/call.h"
 #include "thistle/power_manager.h"
 
 #include "esp_attr.h"
@@ -476,6 +477,7 @@ static void decode_task(void *arg)
     int64_t skip = 0;
     uint32_t format_hz = 0;
     int format_channels = 0;
+    bool was_paused = false;
     bool ok = window && pcm && silence && dec && audio && audio->play;
     if (!ok) finish(me, POD_PLAYER_FAILED, audio ? "Out of memory" : "This device has no audio output");
 
@@ -502,6 +504,25 @@ static void decode_task(void *arg)
         char why[80];
         pod_text_copy(why, sizeof why, s.source_error);
         pthread_mutex_unlock(&s_lock);
+
+        /* A call has the audio: pause as the user would, keeping the place,
+         * and stay paused after it; the speaker is the modem's meanwhile. */
+        if (!paused && rs_call_in_progress()) {
+            ESP_LOGI(TAG, "a call is up; pausing");
+            pod_player_pause();
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
+
+        /* Whatever played meanwhile (a call's ringtone sets 16 kHz mono) may
+         * have changed the codec's format: set ours again after a pause. */
+        if (paused) {
+            was_paused = true;
+        } else if (was_paused) {
+            was_paused = false;
+            format_hz = 0;
+            format_channels = 0;
+        }
 
         if (paused) {
             if (now_us() - paused_at >= PARK_AFTER_US) {

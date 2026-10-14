@@ -1017,9 +1017,9 @@ static const char *cell_status_text(const net_cellular_status_t *st)
         }
     }
     if (!st->enabled) {
-        /* The modem is kept registered for SMS alone. */
-        return st->info.powered && st->info.sim == HAL_SIM_READY ? "SMS only"
-                                                                 : "Starting for SMS";
+        /* The modem is kept registered for calls and SMS alone. */
+        return st->info.powered && st->info.sim == HAL_SIM_READY ? "Calls & SMS"
+                                                                 : "Starting";
     }
     switch (st->data) {
     case HAL_NET_STATE_CONNECTED:  return "Connected";
@@ -1197,8 +1197,8 @@ static void open_mobile_screen(void)
     create_choice_button(row, "Off", cell_switch_cb, 0, !enabled);
 
     /* With mobile data off, this keeps the modem registered, without data,
-     * so SMS still arrive. */
-    create_info_row(content, "Receive SMS");
+     * so calls and SMS still arrive. */
+    create_info_row(content, "Calls and SMS");
     row = create_choice_row(content);
     create_choice_button(row, "On", cell_sms_switch_cb, 1, sms);
     create_choice_button(row, "Off", cell_sms_switch_cb, 0, !sms);

@@ -1971,6 +1971,17 @@ mod tests {
             .expect("the Max declares its codec");
         assert_eq!(json_get_int(config, "amp_expander"), Some(0), "{config}");
         assert_eq!(json_get_int(config, "amp_expander_pin"), Some(AMP_EN_PIN as i64), "{config}");
+        // And the speaker mux, which it hands to the modem for a call. High
+        // picks the A7682E (T-Deck-MAX docs/pinmap.md section 2; schematic
+        // page 8, U27/U28), the opposite of the level boot leaves it at.
+        assert_eq!(json_get_int(config, "voice_route_expander"), Some(0), "{config}");
+        assert_eq!(
+            json_get_int(config, "voice_route_expander_pin"),
+            Some(AUDIO_SEL_PIN as i64),
+            "{config}"
+        );
+        assert_eq!(json_get_int(config, "voice_route_level"), Some(1), "{config}");
+        assert_ne!(json_get_int(config, "voice_route_level"), Some(AUDIO_ROUTE_CODEC as i64));
         // The schematic's I2S_DSDIN, the SoC's data out. LilyGo's pinmap has
         // this as GPIO17, which is the codec's ASDOUT and would play nothing.
         assert_eq!(json_get_int(config, "i2s_data"), Some(40), "{config}");

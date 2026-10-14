@@ -342,7 +342,9 @@ esp_err_t board_builtin_driver_init(const char *id, const char *hal_type,
     // `i2s_din` the SoC's data in, from the codec's ASDOUT: the microphone.
     // A profile without `i2s_din` gets playback alone. The amplifier enable is
     // named separately because on the T-Deck Max it is an IO expander pin the
-    // driver gates around playback, not a static rail.
+    // driver gates around playback, not a static rail. So is the select of a
+    // switch that hands the speaker to the modem for a call, `voice_route_*`,
+    // with the level of it that picks the modem (1 unless the entry says).
     if (strcmp(id, "com.thistle.drv.audio-es8311") == 0) {
         static audio_es8311_config_t cfg;
         int i2c_bus_idx = json_int(config_json, "i2c_bus", 0);
@@ -356,11 +358,16 @@ esp_err_t board_builtin_driver_init(const char *id, const char *hal_type,
         cfg.pin_din          = json_int(config_json, "i2s_din",  -1);
         cfg.amp_expander     = json_int(config_json, "amp_expander", -1);
         cfg.amp_expander_pin = json_int(config_json, "amp_expander_pin", 0);
+        cfg.voice_route_expander     = json_int(config_json, "voice_route_expander", -1);
+        cfg.voice_route_expander_pin = json_int(config_json, "voice_route_expander_pin", 0);
+        cfg.voice_route_level        = json_int(config_json, "voice_route_level", 1);
         ESP_LOGI(TAG, "audio-es8311: i2c_bus=%p addr=0x%02x i2s=%d mclk=%d bck=%d ws=%d "
-                      "data=%d din=%d amp_exp=%d/%d",
+                      "data=%d din=%d amp_exp=%d/%d voice_route=%d/%d@%d",
                  cfg.i2c_bus, cfg.i2c_addr, cfg.i2s_num, cfg.pin_mclk, cfg.pin_bclk,
                  cfg.pin_ws, cfg.pin_dout, cfg.pin_din,
-                 (int)cfg.amp_expander, (int)cfg.amp_expander_pin);
+                 (int)cfg.amp_expander, (int)cfg.amp_expander_pin,
+                 (int)cfg.voice_route_expander, (int)cfg.voice_route_expander_pin,
+                 (int)cfg.voice_route_level);
         return hal_audio_register(drv_audio_es8311_get(), &cfg);
     }
 

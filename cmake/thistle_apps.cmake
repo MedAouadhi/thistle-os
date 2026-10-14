@@ -16,6 +16,7 @@ set(THISTLE_OPTIONAL_APPS
     "flashlight|FLASHLIGHT|flashlight"
     "navigator|NAVIGATOR|navigator"
     "notes|NOTES|notes"
+    "phone|PHONE|phone"
     "podcasts|PODCASTS|podcasts"
     "reader|READER|reader"
     "vault|VAULT|vault"

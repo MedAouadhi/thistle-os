@@ -31,6 +31,7 @@ typedef enum {
     EV_CODEC_MIC_GAIN,
     EV_AMP_ON,
     EV_AMP_OFF,
+    EV_ROUTE,       // the audio switch's select driven; arg the level
 } shim_event_kind_t;
 
 typedef struct {
@@ -52,14 +53,17 @@ static void shim_record(shim_event_kind_t kind, uint32_t arg)
 
 static esp_err_t s_codec_create_result;
 static esp_err_t s_expander_result;
+static esp_err_t s_route_result;    // the select alone
 static void    (*s_during_write)(void);
 static void    (*s_during_read)(void);
 
 // ── IO expander setter ───────────────────────────────────────────────────────
+// Every pin but s_route_pin is taken for the amplifier's enable.
 
 static int s_expander_calls;
 static int s_last_expander;
 static int s_last_expander_pin;
+static int s_route_pin = -1;
 
 int thistle_expander_set_level(int expander, int pin, int level)
 {
@@ -67,6 +71,11 @@ int thistle_expander_set_level(int expander, int pin, int level)
     s_last_expander     = expander;
     s_last_expander_pin = pin;
     if (s_expander_result != ESP_OK) return s_expander_result;
+    if (pin == s_route_pin) {
+        if (s_route_result != ESP_OK) return s_route_result;
+        shim_record(EV_ROUTE, (uint32_t)level);
+        return ESP_OK;
+    }
     shim_record(level ? EV_AMP_ON : EV_AMP_OFF, (uint32_t)pin);
     return ESP_OK;
 }

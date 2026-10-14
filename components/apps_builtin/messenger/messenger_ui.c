@@ -45,6 +45,7 @@
 
 #include "thistle/mesh.h"
 #include "thistle/msg_log.h"
+#include "thistle/phonebook.h"
 #include "thistle/sms.h"
 #include "thistle/msg_alert.h"
 #include "thistle/wifi_manager.h"
@@ -293,6 +294,41 @@ static void mark_read(int ci)
 }
 
 /* ------------------------------------------------------------------ */
+/* Names                                                                */
+/* ------------------------------------------------------------------ */
+
+/* `src` into `dst`, cut at a whole UTF-8 character if it is too long:
+ * phonebook names are not all ASCII. */
+static void copy_utf8(char *dst, size_t size, const char *src)
+{
+    size_t n = strlen(src);
+    if (n >= size) {
+        n = size - 1;
+        while (n > 0 && ((unsigned char)src[n] & 0xC0) == 0x80) n--;
+    }
+    memcpy(dst, src, n);
+    dst[n] = '\0';
+}
+
+/* Who an SMS conversation is with: the phonebook's name for the number, the
+ * older contact manager's, or the number itself. */
+static void sms_name_for(const char *number, char *out, size_t size)
+{
+    char name[PB_NAME_MAX];
+    CContactInfo contact;
+    if (rs_phonebook_name_for(number, name, sizeof(name)) && name[0] != '\0') {
+        copy_utf8(out, size, name);
+    } else if (rs_contact_find_by_phone(number, &contact) == 0 && contact.name[0] != '\0') {
+        char older[sizeof(contact.name) + 1];
+        memcpy(older, contact.name, sizeof(contact.name));
+        older[sizeof(contact.name)] = '\0';
+        copy_utf8(out, size, older);
+    } else {
+        copy_utf8(out, size, number);
+    }
+}
+
+/* ------------------------------------------------------------------ */
 /* Receiving                                                            */
 /* ------------------------------------------------------------------ */
 
@@ -305,20 +341,18 @@ static void deliver_message(msg_transport_t transport, const char *conv,
     if (!text) text = "";
 
     /* Contact resolution: an SMS sender is a phone number, which the
-     * kernel contact manager may know a name for. */
+     * phonebook, or the older contact manager, may know a name for. The
+     * contact manager's entry also says whether the chat is encrypted. */
     const char *display_name = sender;
-    char resolved_name[64];
+    char resolved_name[CONV_NAME_MAX];
     CContactInfo contact;
     memset(&contact, 0, sizeof(contact));
     bool have_contact = false;
 
     if (transport == MSG_TRANSPORT_SMS) {
         have_contact = (rs_contact_find_by_phone(sender, &contact) == 0);
-        if (have_contact && contact.name[0] != '\0') {
-            strncpy(resolved_name, (const char *)contact.name, sizeof(resolved_name) - 1);
-            resolved_name[sizeof(resolved_name) - 1] = '\0';
-            display_name = resolved_name;
-        }
+        sms_name_for(sender, resolved_name, sizeof(resolved_name));
+        display_name = resolved_name;
     }
 
     int ci = ensure_conversation(transport, conv, display_name);
@@ -858,13 +892,7 @@ static void sms_start_cb(lv_event_t *e)
     }
 
     char title[CONV_NAME_MAX];
-    CContactInfo contact;
-    if (rs_contact_find_by_phone(number, &contact) == 0 && contact.name[0] != '\0') {
-        snprintf(title, sizeof(title), "%.*s", (int)sizeof(title) - 1,
-                 (const char *)contact.name);
-    } else {
-        snprintf(title, sizeof(title), "%s", number);
-    }
+    sms_name_for(number, title, sizeof(title));
     start_conversation(MSG_TRANSPORT_SMS, number, title);
 }
 
@@ -1481,11 +1509,84 @@ static void poll_transports(void)
     }
 }
 
+/* The digits of a phone number, '+', spaces, dashes and brackets dropped. */
+static size_t number_digits(const char *number, char *out, size_t size)
+{
+    size_t n = 0;
+    for (; *number && n < size - 1; number++) {
+        if (*number >= '0' && *number <= '9') out[n++] = *number;
+    }
+    out[n] = '\0';
+    return n;
+}
+
+/* Whether two numbers are one: by their last 9 digits when both have that
+ * many, so "+49 176 12345678" is "0176 12345678"; else by all of them. */
+static bool sms_numbers_match(const char *a, const char *b)
+{
+    char da[PB_NUMBER_MAX], db[PB_NUMBER_MAX];
+    size_t na = number_digits(a, da, sizeof(da));
+    size_t nb = number_digits(b, db, sizeof(db));
+    if (na == 0 || nb == 0) return false;
+    if (na >= 9 && nb >= 9) return strcmp(da + na - 9, db + nb - 9) == 0;
+    return strcmp(da, db) == 0;
+}
+
+/* The SMS conversation already open with `number`, written any way; -1 for
+ * none. */
+static int find_sms_conversation(const char *number)
+{
+    for (int i = 0; i < s_conv_count; i++) {
+        if (s_convs[i]->transport == MSG_TRANSPORT_SMS &&
+            sms_numbers_match(s_convs[i]->dest, number)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/* Another app asked for an SMS conversation (rs_sms_request_compose) and
+ * brought the Messenger forward: open it, named as the request says or, if
+ * it names no one, as the phonebook does. Asked when the Messenger comes
+ * forward, and each second while it is in front, since launching the app
+ * already in front does nothing. */
+static void take_compose_request(void)
+{
+    char asked[PB_NUMBER_MAX];
+    char name[PB_NAME_MAX];
+    if (!s_msg.root || !rs_sms_take_compose(asked, sizeof(asked), name, sizeof(name))) {
+        return;
+    }
+    /* As the card writes it, "+49 176 1234567": the modem takes it, and an
+     * SMS from it arrives, without the spaces. */
+    char number[PB_NUMBER_MAX];
+    size_t n = 0;
+    for (const char *c = asked; *c && n < sizeof(number) - 1; c++) {
+        if (*c == ' ' || *c == '-' || *c == '.' || *c == '(' || *c == ')' || *c == '/') continue;
+        number[n++] = *c;
+    }
+    number[n] = '\0';
+    if (number[0] == '\0') return;
+    char title[CONV_NAME_MAX];
+    if (name[0] != '\0') {
+        copy_utf8(title, sizeof(title), name);
+    } else {
+        sms_name_for(number, title, sizeof(title));
+    }
+    /* The conversation with that number if there is one, however its
+     * messages wrote the number; otherwise a new one under it as asked. */
+    int ci = find_sms_conversation(number);
+    const char *dest = ci >= 0 ? s_convs[ci]->dest : number;
+    ESP_LOGI(TAG, "compose %s: %s%s", dest, title, ci >= 0 ? " (existing)" : "");
+    start_conversation(MSG_TRANSPORT_SMS, dest, title);
+}
+
 static void kernel_tick_cb(lv_timer_t *timer)
 {
     (void)timer;
     uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
 
+    take_compose_request();
     poll_transports();
 
     /* Advance burn timers and check for expired messages */
@@ -1632,6 +1733,7 @@ void messenger_ui_show(void)
     /* What arrived while hidden, before the first tick. */
     poll_transports();
     if (s_msg.screen == SCREEN_CONV_LIST) refresh_conv_list();
+    take_compose_request();
 }
 
 void messenger_ui_hide(void)

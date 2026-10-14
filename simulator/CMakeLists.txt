@@ -43,6 +43,7 @@ set(THISTLE_SRCS
     ${THISTLE_DIR}/components/ui/src/pull_gesture.c
     ${THISTLE_DIR}/components/ui/src/quick_panel.c
     ${THISTLE_DIR}/components/ui/src/quick_panel_tiles.c
+    ${THISTLE_DIR}/components/ui/src/call_ui.c
     # Built-in apps
     ${THISTLE_DIR}/components/apps_builtin/lvgl_apps.c
     ${THISTLE_DIR}/components/apps_builtin/launcher/launcher_app.c

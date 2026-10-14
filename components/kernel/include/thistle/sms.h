@@ -2,6 +2,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include "esp_err.h"
 
@@ -37,3 +38,13 @@ uint32_t rs_sms_inbox_count(void);
  * many it has still to show, again whenever that changes. */
 uint32_t rs_sms_unread_count(void);
 void rs_sms_set_held_unread(uint32_t count);
+
+/* Ask the Messenger to open its SMS conversation with `number`, titled
+ * `name` (NULL or "" for the number itself), the next time it comes
+ * forward: another app sets this and then launches the Messenger. A later
+ * request replaces one not yet taken. */
+void rs_sms_request_compose(const char *number, const char *name);
+
+/* The request, if one waits, into the buffers given; false, and nothing
+ * written, if none does. Taking it clears it. */
+bool rs_sms_take_compose(char *number, size_t number_size, char *name, size_t name_size);

@@ -13,6 +13,9 @@
 typedef enum {
     HAL_HAPTIC_CLICK,     /* one short, firm click */
     HAL_HAPTIC_MESSAGE,   /* a message arrived: two buzzes */
+    HAL_HAPTIC_RING,      /* a call is ringing: one long buzz, played again
+                             for as long as it rings. A driver that does not
+                             know it refuses it with ESP_ERR_INVALID_ARG. */
 } hal_haptic_effect_t;
 
 typedef struct {

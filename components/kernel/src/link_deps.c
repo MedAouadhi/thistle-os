@@ -117,10 +117,42 @@ _Static_assert(offsetof(hal_net_driver_t, sms_fetch) == 15 * sizeof(void *),
                "HalNetDriver.sms_fetch");
 _Static_assert(offsetof(hal_net_driver_t, get_network_time) == 16 * sizeof(void *),
                "HalNetDriver.get_network_time");
+_Static_assert(offsetof(hal_net_driver_t, call_dial) == 17 * sizeof(void *),
+               "HalNetDriver.call_dial");
+_Static_assert(offsetof(hal_net_driver_t, call_set_speaker) == 25 * sizeof(void *),
+               "HalNetDriver.call_set_speaker");
+_Static_assert(sizeof(hal_call_state_t) == 4, "CHalCall.state is read as a u32");
+_Static_assert(offsetof(hal_call_t, incoming) == 1, "CHalCall.incoming");
+_Static_assert(offsetof(hal_call_t, state) == 4, "CHalCall.state");
+_Static_assert(offsetof(hal_call_t, number) == 8, "CHalCall.number");
+_Static_assert(sizeof(hal_call_t) == 44, "CHalCall size");
 _Static_assert(offsetof(hal_net_time_t, age_ms) == 8, "CNetTime.age_ms");
 _Static_assert(offsetof(hal_net_time_t, utc_offset_min) == 12, "CNetTime.utc_offset_min");
 _Static_assert(offsetof(hal_net_time_t, offset_known) == 14, "CNetTime.offset_known");
 _Static_assert(sizeof(hal_net_time_t) == 16, "CNetTime size");
+
+// hal_registry.rs mirrors hal_audio_driver_t as HalAudioDriver.
+#include "hal/audio.h"
+_Static_assert(offsetof(hal_audio_driver_t, set_route) == 9 * sizeof(void *),
+               "HalAudioDriver.set_route");
+_Static_assert(sizeof(hal_audio_route_t) == 4, "set_route's route is passed as a u32");
+
+// call_manager.rs, call_log.rs and phonebook.rs fill these in place.
+#include "thistle/call.h"
+#include "thistle/phonebook.h"
+_Static_assert(sizeof(call_state_t) == 4 && sizeof(call_end_t) == 4,
+               "CCallStatus enums are read as u32");
+_Static_assert(offsetof(call_status_t, incoming) == 8, "CCallStatus.incoming");
+_Static_assert(offsetof(call_status_t, name) == 42, "CCallStatus.name");
+_Static_assert(offsetof(call_status_t, duration_s) == 108, "CCallStatus.duration_s");
+_Static_assert(offsetof(call_status_t, seq) == 116, "CCallStatus.seq");
+_Static_assert(sizeof(call_status_t) == 120, "CCallStatus size");
+_Static_assert(offsetof(call_log_entry_t, kind) == 33, "CCallLogEntry.kind");
+_Static_assert(offsetof(call_log_entry_t, time) == 36, "CCallLogEntry.time");
+_Static_assert(sizeof(call_log_entry_t) == 44, "CCallLogEntry size");
+_Static_assert(offsetof(pb_contact_t, starred) == 64, "CPbContact.starred");
+_Static_assert(offsetof(pb_contact_t, numbers) == 66, "CPbContact.numbers");
+_Static_assert(sizeof(pb_contact_t) == 336, "CPbContact size");
 
 // hal_registry.rs mirrors hal_power_driver_t as HalPowerDriver.
 #include "hal/power.h"

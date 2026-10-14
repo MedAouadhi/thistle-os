@@ -223,7 +223,15 @@ pub struct HalAudioDriver {
     pub name: *const c_char,
     pub record: Option<unsafe extern "C" fn(buf: *mut u8, len: usize) -> i32>,
     pub set_mic_gain: Option<unsafe extern "C" fn(db: u8) -> i32>,
+    /// Hand the speaker and headphone output to a hal_audio_route_t; with
+    /// HAL_AUDIO_ROUTE_VOICE, the amplifier on if `speaker`. NULL on a board
+    /// with no audio switch. Appended last, so no field above moves.
+    pub set_route: Option<unsafe extern "C" fn(route: u32, speaker: bool) -> i32>,
 }
+
+/// hal_audio_route_t
+pub const HAL_AUDIO_ROUTE_CODEC: u32 = 0;
+pub const HAL_AUDIO_ROUTE_VOICE: u32 = 1;
 
 unsafe impl Send for HalAudioDriver {}
 unsafe impl Sync for HalAudioDriver {}
@@ -410,6 +418,8 @@ unsafe impl Sync for HalRtcDriver {}
 /// hal_haptic_effect_t
 pub const HAL_HAPTIC_CLICK: u32 = 0;
 pub const HAL_HAPTIC_MESSAGE: u32 = 1;
+/// A call ringing: one long buzz, which the caller plays again while it rings.
+pub const HAL_HAPTIC_RING: u32 = 2;
 
 #[repr(C)]
 pub struct HalHapticDriver {
@@ -1713,6 +1723,19 @@ mod tests {
         let ptr = std::mem::size_of::<*const c_void>();
         assert_eq!(std::mem::offset_of!(HalPowerDriver, name), 7 * ptr);
         assert_eq!(std::mem::offset_of!(HalPowerDriver, is_plugged_in), 8 * ptr);
+    }
+
+    #[test]
+    fn test_audio_driver_set_route_is_appended_last() {
+        // hal_audio_driver_t: six function pointers, name, record,
+        // set_mic_gain, then set_route.
+        let ptr = std::mem::size_of::<*const c_void>();
+        assert_eq!(std::mem::offset_of!(HalAudioDriver, name), 6 * ptr);
+        assert_eq!(std::mem::offset_of!(HalAudioDriver, set_mic_gain), 8 * ptr);
+        assert_eq!(std::mem::offset_of!(HalAudioDriver, set_route), 9 * ptr);
+        assert_eq!(std::mem::size_of::<HalAudioDriver>(), 10 * ptr);
+        assert_eq!((HAL_AUDIO_ROUTE_CODEC, HAL_AUDIO_ROUTE_VOICE), (0, 1));
+        assert_eq!((HAL_HAPTIC_CLICK, HAL_HAPTIC_MESSAGE, HAL_HAPTIC_RING), (0, 1, 2));
     }
 
     #[test]

@@ -163,8 +163,9 @@ pub(crate) fn file_name(conv: &str) -> String {
     name
 }
 
-/// The device's clock, or None while it has not been set.
-fn now() -> Option<u64> {
+/// The device's clock, or None while it has not been set. The call log
+/// (call_log.rs) dates calls by the same rule.
+pub(crate) fn now() -> Option<u64> {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?

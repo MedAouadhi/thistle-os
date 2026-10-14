@@ -2994,6 +2994,7 @@ mod tests {
                 None
             },
             set_mic_gain: None,
+            set_route: None,
         }))
     }
 

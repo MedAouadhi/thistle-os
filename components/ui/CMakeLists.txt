@@ -10,6 +10,7 @@ idf_component_register(
         "src/pull_gesture.c"
         "src/quick_panel.c"
         "src/quick_panel_tiles.c"
+        "src/call_ui.c"
         "src/lvgl_wm.c"
         "src/lvgl_wm_epaper.c"
         "src/lvgl_wm_lcd.c"

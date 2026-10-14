@@ -671,6 +671,8 @@ static AUDIO_DRIVER: HalAudioDriver = HalAudioDriver {
     // A DAC with no input side.
     record: None,
     set_mic_gain: None,
+    // No audio switch to hand the output over with.
+    set_route: None,
 };
 
 /// Return the PCM5102A audio driver vtable.

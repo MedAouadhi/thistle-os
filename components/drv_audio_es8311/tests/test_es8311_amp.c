@@ -5,7 +5,9 @@
 // and that line floats high until something drives it, so these pin down that
 // the driver claims it at init and raises it only around playback. Recording
 // shares the codec with playback, so the capture tests pin down that a record
-// brings the codec up without ever raising the amplifier.
+// brings the codec up without ever raising the amplifier. The route tests pin
+// down that a call handed the speaker keeps the amplifier as it asked, with
+// nothing here dropping it or playing over it.
 
 #include <assert.h>
 #include <stdio.h>
@@ -16,6 +18,11 @@
 #define AMP_EXPANDER 0
 #define AMP_PIN      6
 
+// The T-Deck Max's AUDIO_SEL: XL9555 P12, expander pin 10, high = A7682E.
+#define ROUTE_EXPANDER 0
+#define ROUTE_PIN      10
+#define ROUTE_VOICE    1
+
 static const hal_audio_driver_t *drv;
 
 static audio_es8311_config_t config(void)
@@ -24,7 +31,17 @@ static audio_es8311_config_t config(void)
         .i2s_num = 0, .i2c_bus = (void *)1, .i2c_addr = 0x18,
         .pin_mclk = 38, .pin_bclk = 39, .pin_ws = 18, .pin_dout = 40, .pin_din = 17,
         .amp_expander = AMP_EXPANDER, .amp_expander_pin = AMP_PIN,
+        .voice_route_expander = -1,
     };
+}
+
+static audio_es8311_config_t route_config(void)
+{
+    audio_es8311_config_t cfg = config();
+    cfg.voice_route_expander     = ROUTE_EXPANDER;
+    cfg.voice_route_expander_pin = ROUTE_PIN;
+    cfg.voice_route_level        = ROUTE_VOICE;
+    return cfg;
 }
 
 static void reset(void)
@@ -34,6 +51,8 @@ static void reset(void)
     s_event_count = 0;
     s_codec_create_result = ESP_OK;
     s_expander_result = ESP_OK;
+    s_route_result = ESP_OK;
+    s_route_pin = ROUTE_PIN;
     s_during_write = NULL;
     s_during_read = NULL;
     s_expander_calls = 0;
@@ -526,6 +545,213 @@ static void test_an_idle_timeout_that_lands_during_a_read_is_ignored(void)
     assert(s_timer.armed);
 }
 
+// ── The voice route ─────────────────────────────────────────────────────────
+// The T-Deck Max's speaker hears the codec or the A7682E through a switch
+// (schematic page 8, U27/U28). While a call has it, the amplifier is the
+// call's: on for the loudspeaker, off for headphones.
+
+static void test_init_puts_the_switch_on_the_codec_once_the_amplifier_is_off(void)
+{
+    reset();
+    audio_es8311_config_t cfg = route_config();
+    assert(drv->init(&cfg) == ESP_OK);
+
+    assert(count_of(EV_ROUTE) == 1);
+    assert(s_events[index_of(EV_ROUTE)].arg == !ROUTE_VOICE);
+    assert(index_of(EV_AMP_OFF) < index_of(EV_ROUTE));
+    assert(index_of(EV_ROUTE) < index_of(EV_CODEC_CREATE));
+    assert(count_of(EV_AMP_ON) == 0);
+}
+
+static void test_a_switch_that_cannot_be_driven_fails_init(void)
+{
+    reset();
+    s_route_result = ESP_ERR_NOT_FOUND;
+    audio_es8311_config_t cfg = route_config();
+    assert(drv->init(&cfg) == ESP_ERR_NOT_FOUND);
+    assert(count_of(EV_CODEC_CREATE) == 0);
+}
+
+static void test_the_voice_route_stops_playback_then_switches_then_raises_the_amplifier(void)
+{
+    reset();
+    init_with(route_config());
+    int before = s_power_holds;
+    assert(drv->play(PCM, sizeof(PCM)) == ESP_OK);
+    s_event_count = 0;
+
+    assert(drv->set_route(HAL_AUDIO_ROUTE_VOICE, true) == ESP_OK);
+    // Quiet first, so neither the codec stopping nor the switch is heard.
+    assert(index_of(EV_AMP_OFF) < index_of(EV_CODEC_CLOSE));
+    assert(index_of(EV_CODEC_CLOSE) < index_of(EV_ROUTE));
+    assert(s_events[index_of(EV_ROUTE)].arg == ROUTE_VOICE);
+    assert(index_of(EV_ROUTE) < last_index_of(EV_AMP_ON));
+    assert(s_audio.amp_on);
+    // Nothing of playback's is left to drop the amplifier later.
+    assert(!s_timer.armed);
+    assert(s_power_holds == before);
+}
+
+static void test_the_voice_route_holds_the_amplifier_against_everything_else(void)
+{
+    reset();
+    init_with(route_config());
+    assert(drv->set_route(HAL_AUDIO_ROUTE_VOICE, true) == ESP_OK);
+    s_event_count = 0;
+
+    // A ringtone that plays on is refused, and touches nothing.
+    assert(drv->play(PCM, sizeof(PCM)) == ESP_ERR_INVALID_STATE);
+    assert(s_event_count == 0);
+    assert(!s_timer.armed);
+
+    // A recorder still runs, and its idle timeout closes the codec alone.
+    assert(drv->record(MIC, sizeof(MIC)) == ESP_OK);
+    assert(s_timer.armed);
+    assert(shim_fire_idle_timer());
+    assert(count_of(EV_CODEC_CLOSE) == 1);
+
+    // A ringtone player's stop, or a new format, likewise.
+    assert(drv->stop() == ESP_OK);
+    hal_audio_config_t fs = { .sample_rate = 8000, .bits_per_sample = 16, .channels = 1 };
+    assert(drv->configure(&fs) == ESP_OK);
+
+    assert(count_of(EV_AMP_OFF) == 0);
+    assert(count_of(EV_ROUTE) == 0);
+    assert(s_audio.amp_on);
+}
+
+static void test_headphones_take_the_voice_route_with_the_amplifier_off(void)
+{
+    reset();
+    init_with(route_config());
+    assert(drv->set_route(HAL_AUDIO_ROUTE_VOICE, false) == ESP_OK);
+
+    assert(s_events[index_of(EV_ROUTE)].arg == ROUTE_VOICE);
+    assert(count_of(EV_AMP_ON) == 0);
+    assert(!s_audio.amp_on);
+    assert(drv->play(PCM, sizeof(PCM)) == ESP_ERR_INVALID_STATE);
+    assert(count_of(EV_AMP_ON) == 0);
+}
+
+static void test_the_voice_route_asked_again_changes_only_the_amplifier(void)
+{
+    reset();
+    init_with(route_config());
+    assert(drv->set_route(HAL_AUDIO_ROUTE_VOICE, true) == ESP_OK);
+    s_event_count = 0;
+
+    assert(drv->set_route(HAL_AUDIO_ROUTE_VOICE, false) == ESP_OK);
+    assert(count_of(EV_AMP_OFF) == 1 && count_of(EV_ROUTE) == 0);
+    assert(drv->set_route(HAL_AUDIO_ROUTE_VOICE, false) == ESP_OK);
+    assert(count_of(EV_AMP_OFF) == 1);
+    assert(drv->set_route(HAL_AUDIO_ROUTE_VOICE, true) == ESP_OK);
+    assert(count_of(EV_AMP_ON) == 1 && count_of(EV_ROUTE) == 0);
+    assert(count_of(EV_CODEC_OPEN) == 0 && count_of(EV_CODEC_CLOSE) == 0);
+}
+
+static void test_back_to_the_codec_drops_the_amplifier_then_switches_and_gating_resumes(void)
+{
+    reset();
+    init_with(route_config());
+    assert(drv->set_route(HAL_AUDIO_ROUTE_VOICE, true) == ESP_OK);
+    s_event_count = 0;
+
+    assert(drv->set_route(HAL_AUDIO_ROUTE_CODEC, true) == ESP_OK);
+    assert(index_of(EV_AMP_OFF) < index_of(EV_ROUTE));
+    assert(s_events[index_of(EV_ROUTE)].arg == !ROUTE_VOICE);
+    assert(count_of(EV_AMP_ON) == 0);
+
+    // Playback has the amplifier again, around itself only.
+    s_event_count = 0;
+    assert(drv->play(PCM, sizeof(PCM)) == ESP_OK);
+    assert(index_of(EV_CODEC_OPEN) < index_of(EV_AMP_ON));
+    assert(index_of(EV_AMP_ON) < index_of(EV_CODEC_WRITE));
+    assert(shim_fire_idle_timer());
+    assert(index_of(EV_AMP_OFF) < index_of(EV_CODEC_CLOSE));
+}
+
+static void test_the_codec_route_when_already_there_leaves_playback_alone(void)
+{
+    reset();
+    init_with(route_config());
+    assert(drv->play(PCM, sizeof(PCM)) == ESP_OK);
+    s_event_count = 0;
+
+    assert(drv->set_route(HAL_AUDIO_ROUTE_CODEC, false) == ESP_OK);
+    assert(s_event_count == 0);
+    assert(s_audio.amp_on && s_timer.armed);
+}
+
+static void test_a_switch_that_will_not_move_leaves_the_route_where_it_was(void)
+{
+    reset();
+    init_with(route_config());
+    s_route_result = ESP_FAIL;
+    assert(drv->set_route(HAL_AUDIO_ROUTE_VOICE, true) == ESP_FAIL);
+    assert(count_of(EV_AMP_ON) == 0);
+    s_route_result = ESP_OK;
+    assert(drv->play(PCM, sizeof(PCM)) == ESP_OK);
+
+    // And on the way back: still the call's until the switch has moved.
+    assert(drv->set_route(HAL_AUDIO_ROUTE_VOICE, true) == ESP_OK);
+    s_route_result = ESP_FAIL;
+    assert(drv->set_route(HAL_AUDIO_ROUTE_CODEC, false) == ESP_FAIL);
+    assert(drv->play(PCM, sizeof(PCM)) == ESP_ERR_INVALID_STATE);
+    s_route_result = ESP_OK;
+    assert(drv->set_route(HAL_AUDIO_ROUTE_CODEC, false) == ESP_OK);
+    assert(drv->play(PCM, sizeof(PCM)) == ESP_OK);
+}
+
+static void test_a_switch_that_selects_the_voice_channel_low(void)
+{
+    reset();
+    audio_es8311_config_t cfg = route_config();
+    cfg.voice_route_level = 0;
+    assert(drv->init(&cfg) == ESP_OK);
+    assert(s_events[index_of(EV_ROUTE)].arg == 1);
+
+    s_event_count = 0;
+    assert(drv->set_route(HAL_AUDIO_ROUTE_VOICE, true) == ESP_OK);
+    assert(s_events[index_of(EV_ROUTE)].arg == 0);
+}
+
+static void test_deinit_in_the_voice_route_leaves_the_board_quiet_on_the_codec(void)
+{
+    reset();
+    init_with(route_config());
+    assert(drv->set_route(HAL_AUDIO_ROUTE_VOICE, true) == ESP_OK);
+    s_event_count = 0;
+
+    drv->deinit();
+    assert(index_of(EV_AMP_OFF) < index_of(EV_ROUTE));
+    assert(s_events[index_of(EV_ROUTE)].arg == !ROUTE_VOICE);
+
+    // And the driver comes back up on the codec, playing.
+    init_with(route_config());
+    assert(drv->play(PCM, sizeof(PCM)) == ESP_OK);
+    assert(count_of(EV_AMP_ON) == 1);
+}
+
+static void test_a_board_without_an_audio_switch_has_no_voice_route(void)
+{
+    reset();
+    init_with(config());
+    int calls = s_expander_calls;
+    assert(drv->set_route(HAL_AUDIO_ROUTE_VOICE, true) == ESP_ERR_NOT_SUPPORTED);
+    assert(drv->set_route(HAL_AUDIO_ROUTE_CODEC, false) == ESP_ERR_NOT_SUPPORTED);
+    assert(s_expander_calls == calls);
+    assert(drv->play(PCM, sizeof(PCM)) == ESP_OK);
+}
+
+static void test_set_route_refuses_before_init_and_a_route_it_does_not_know(void)
+{
+    reset();
+    assert(drv->set_route(HAL_AUDIO_ROUTE_VOICE, true) == ESP_ERR_INVALID_STATE);
+    init_with(route_config());
+    assert(drv->set_route((hal_audio_route_t)7, true) == ESP_ERR_INVALID_ARG);
+    assert(s_event_count == 0);
+}
+
 int main(void)
 {
     test_init_drives_the_amplifier_off_before_touching_the_codec();
@@ -559,6 +785,19 @@ int main(void)
     test_a_write_holds_only_the_playback_side();
     test_a_read_and_its_settling_drop_hold_only_the_capture_side();
     test_an_idle_timeout_that_lands_during_a_read_is_ignored();
+    test_init_puts_the_switch_on_the_codec_once_the_amplifier_is_off();
+    test_a_switch_that_cannot_be_driven_fails_init();
+    test_the_voice_route_stops_playback_then_switches_then_raises_the_amplifier();
+    test_the_voice_route_holds_the_amplifier_against_everything_else();
+    test_headphones_take_the_voice_route_with_the_amplifier_off();
+    test_the_voice_route_asked_again_changes_only_the_amplifier();
+    test_back_to_the_codec_drops_the_amplifier_then_switches_and_gating_resumes();
+    test_the_codec_route_when_already_there_leaves_playback_alone();
+    test_a_switch_that_will_not_move_leaves_the_route_where_it_was();
+    test_a_switch_that_selects_the_voice_channel_low();
+    test_deinit_in_the_voice_route_leaves_the_board_quiet_on_the_codec();
+    test_a_board_without_an_audio_switch_has_no_voice_route();
+    test_set_route_refuses_before_init_and_a_route_it_does_not_know();
     puts("es8311 amplifier gating and capture: all tests passed");
     return 0;
 }

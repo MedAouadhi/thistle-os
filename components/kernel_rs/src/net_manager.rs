@@ -88,6 +88,35 @@ pub struct HalNetDriver {
         unsafe extern "C" fn(cb: Option<SmsReceiver>, user_data: *mut c_void, kept: *mut i32) -> i32,
     >,
     pub get_network_time: Option<unsafe extern "C" fn(out: *mut CNetTime) -> i32>,
+    // Voice calls: all or none, appended after get_network_time so no field
+    // above moves (call_manager.rs).
+    pub call_dial: Option<unsafe extern "C" fn(number: *const c_char) -> i32>,
+    pub call_answer: Option<unsafe extern "C" fn() -> i32>,
+    pub call_hangup: Option<unsafe extern "C" fn() -> i32>,
+    pub call_list: Option<unsafe extern "C" fn(calls: *mut CHalCall, max: i32, count: *mut i32) -> i32>,
+    pub call_ringing: Option<unsafe extern "C" fn() -> bool>,
+    pub call_dtmf: Option<unsafe extern "C" fn(digit: c_char) -> i32>,
+    pub call_set_mute: Option<unsafe extern "C" fn(mute: bool) -> i32>,
+    pub call_set_volume: Option<unsafe extern "C" fn(percent: u8) -> i32>,
+    pub call_set_speaker: Option<unsafe extern "C" fn(speaker: bool) -> i32>,
+}
+
+/// hal_call_t: one voice call the modem has.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct CHalCall {
+    /// The modem's index for it, from 1.
+    pub id: u8,
+    /// Mobile terminated.
+    pub incoming: bool,
+    /// hal_call_state_t: <stat> of +CLCC.
+    pub state: u32,
+    /// "+4917612345678"; "" when withheld. NUL-terminated.
+    pub number: [u8; 33],
+}
+
+impl CHalCall {
+    pub const EMPTY: CHalCall = CHalCall { id: 0, incoming: false, state: 0, number: [0; 33] };
 }
 
 /// hal_net_time_t: the modem's clock, which the mobile network sets.
@@ -174,6 +203,15 @@ static WIFI_NET_DRIVER: HalNetDriver = HalNetDriver {
     sms_due: None,
     sms_fetch: None,
     get_network_time: None,
+    call_dial: None,
+    call_answer: None,
+    call_hangup: None,
+    call_list: None,
+    call_ringing: None,
+    call_dtmf: None,
+    call_set_mute: None,
+    call_set_volume: None,
+    call_set_speaker: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -651,6 +689,15 @@ mod tests {
         sms_due: None,
         sms_fetch: None,
         get_network_time: None,
+        call_dial: None,
+        call_answer: None,
+        call_hangup: None,
+        call_list: None,
+        call_ringing: None,
+        call_dtmf: None,
+        call_set_mute: None,
+        call_set_volume: None,
+        call_set_speaker: None,
     };
 
     static MOCK_CONNECTED: HalNetDriver = HalNetDriver {
@@ -671,6 +718,15 @@ mod tests {
         sms_due: None,
         sms_fetch: None,
         get_network_time: None,
+        call_dial: None,
+        call_answer: None,
+        call_hangup: None,
+        call_list: None,
+        call_ringing: None,
+        call_dtmf: None,
+        call_set_mute: None,
+        call_set_volume: None,
+        call_set_speaker: None,
     };
 
     static MOCK_VPN_CONNECTED: HalNetDriver = HalNetDriver {
@@ -691,6 +747,15 @@ mod tests {
         sms_due: None,
         sms_fetch: None,
         get_network_time: None,
+        call_dial: None,
+        call_answer: None,
+        call_hangup: None,
+        call_list: None,
+        call_ringing: None,
+        call_dtmf: None,
+        call_set_mute: None,
+        call_set_volume: None,
+        call_set_speaker: None,
     };
 
     // -----------------------------------------------------------------------
@@ -923,6 +988,15 @@ mod tests {
         sms_due: None,
         sms_fetch: None,
         get_network_time: None,
+        call_dial: None,
+        call_answer: None,
+        call_hangup: None,
+        call_list: None,
+        call_ringing: None,
+        call_dtmf: None,
+        call_set_mute: None,
+        call_set_volume: None,
+        call_set_speaker: None,
     };
 
     static MOCK_WIFI_CONNECTED: HalNetDriver = HalNetDriver {
@@ -943,6 +1017,15 @@ mod tests {
         sms_due: None,
         sms_fetch: None,
         get_network_time: None,
+        call_dial: None,
+        call_answer: None,
+        call_hangup: None,
+        call_list: None,
+        call_ringing: None,
+        call_dtmf: None,
+        call_set_mute: None,
+        call_set_volume: None,
+        call_set_speaker: None,
     };
 
     static MOCK_WIFI_DISCONNECTED: HalNetDriver = HalNetDriver {
@@ -963,6 +1046,15 @@ mod tests {
         sms_due: None,
         sms_fetch: None,
         get_network_time: None,
+        call_dial: None,
+        call_answer: None,
+        call_hangup: None,
+        call_list: None,
+        call_ringing: None,
+        call_dtmf: None,
+        call_set_mute: None,
+        call_set_volume: None,
+        call_set_speaker: None,
     };
 
     /// The modem registers while the drivers load, before WiFi does; WiFi
@@ -1015,6 +1107,33 @@ mod tests {
         assert_eq!(std::mem::offset_of!(CNetTime, offset_known), 14);
         let ptr = std::mem::size_of::<*const c_void>();
         assert_eq!(std::mem::offset_of!(HalNetDriver, get_network_time), 16 * ptr);
+    }
+
+    #[test]
+    fn test_call_functions_follow_get_network_time_in_c_order() {
+        let ptr = std::mem::size_of::<*const c_void>();
+        assert_eq!(std::mem::offset_of!(HalNetDriver, call_dial), 17 * ptr);
+        assert_eq!(std::mem::offset_of!(HalNetDriver, call_answer), 18 * ptr);
+        assert_eq!(std::mem::offset_of!(HalNetDriver, call_hangup), 19 * ptr);
+        assert_eq!(std::mem::offset_of!(HalNetDriver, call_list), 20 * ptr);
+        assert_eq!(std::mem::offset_of!(HalNetDriver, call_ringing), 21 * ptr);
+        assert_eq!(std::mem::offset_of!(HalNetDriver, call_dtmf), 22 * ptr);
+        assert_eq!(std::mem::offset_of!(HalNetDriver, call_set_mute), 23 * ptr);
+        assert_eq!(std::mem::offset_of!(HalNetDriver, call_set_volume), 24 * ptr);
+        assert_eq!(std::mem::offset_of!(HalNetDriver, call_set_speaker), 25 * ptr);
+        assert_eq!(std::mem::size_of::<HalNetDriver>(), 26 * ptr);
+    }
+
+    #[test]
+    fn test_hal_call_matches_the_c_layout() {
+        // uint8_t, bool, then the enum (4 bytes, align 4) at 4, char[33] at 8,
+        // padded to 44. The same on Xtensa and x86_64: neither packs enums.
+        assert_eq!(std::mem::offset_of!(CHalCall, id), 0);
+        assert_eq!(std::mem::offset_of!(CHalCall, incoming), 1);
+        assert_eq!(std::mem::offset_of!(CHalCall, state), 4);
+        assert_eq!(std::mem::offset_of!(CHalCall, number), 8);
+        assert_eq!(std::mem::size_of::<CHalCall>(), 44);
+        assert_eq!(std::mem::align_of::<CHalCall>(), 4);
     }
 
     #[test]

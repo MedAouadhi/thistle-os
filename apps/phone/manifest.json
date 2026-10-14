@@ -1,0 +1,7 @@
+{
+  "id": "com.thistle.phone",
+  "name": "Phone",
+  "version": "0.1.0",
+  "allow_background": false,
+  "permissions": ["storage"]
+}

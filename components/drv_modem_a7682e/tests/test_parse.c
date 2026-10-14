@@ -25,6 +25,133 @@ static void test_final_result(void)
            == 0);
     assert(a7682e_final_result("") == 0);
     assert(a7682e_final_result(NULL) == 0);
+
+    // The result codes of a call that failed end no other command: the
+    // module sends NO CARRIER unasked when a call ends.
+    assert(a7682e_final_result("\r\nNO CARRIER\r\n") == 0);
+    assert(a7682e_final_result("\r\nBUSY\r\n") == 0);
+    assert(a7682e_final_result("\r\nNO CARRIER\r\n+CLCC: 1,0,0,0,0\r\n\r\nOK\r\n") == 1);
+}
+
+static void test_call_final_result(void)
+{
+    // ATD and ATA: OK, then the call follows unasked.
+    assert(a7682e_call_final_result("\r\nOK\r\n") == 1);
+    assert(a7682e_call_final_result("\r\nOK\r\n\r\nVOICE CALL: BEGIN\r\n") == 1);
+
+    // A call that did not happen (manual 28.1), and ATA with nothing ringing.
+    assert(a7682e_call_final_result("\r\nNO CARRIER\r\n") == -1);
+    assert(a7682e_call_final_result("\r\nBUSY\r\n") == -1);
+    assert(a7682e_call_final_result("\r\nNO ANSWER\r\n") == -1);
+    assert(a7682e_call_final_result("\r\nNO DIALTONE\r\n") == -1);
+    assert(a7682e_call_final_result("\r\nERROR\r\n") == -1);
+    assert(a7682e_call_final_result("\r\n+CME ERROR: no network service\r\n") == -1);
+
+    // Only whole lines, as for the others.
+    assert(a7682e_call_final_result("\r\nNO CARRIER") == 0);
+    assert(a7682e_call_final_result("\r\nNO CARRIERS\r\n") == 0);
+    assert(a7682e_call_final_result("\r\nVOICE CALL: BEGIN\r\n") == 0);
+    assert(a7682e_call_final_result("\r\nRING\r\n") == 0);
+    assert(a7682e_call_final_result(NULL) == 0);
+}
+
+static void test_clcc(void)
+{
+    hal_call_t calls[4];
+
+    // No calls: the module sends only OK.
+    assert(a7682e_parse_clcc("\r\nOK\r\n", calls, 4) == 0);
+    assert(a7682e_parse_clcc("", calls, 4) == 0);
+
+    // The manual's 2G and 4G examples, with a space after every comma.
+    memset(calls, 0xAA, sizeof(calls));
+    assert(a7682e_parse_clcc("\r\n+CLCC: 1, 0, 0, 0, 0, \"13883113271\", 129, \"\",,0\r\n\r\nOK\r\n",
+                             calls, 4) == 1);
+    assert(calls[0].id == 1 && !calls[0].incoming && calls[0].state == HAL_CALL_ACTIVE);
+    assert(strcmp(calls[0].number, "13883113271") == 0);
+    assert(a7682e_parse_clcc("\r\n+CLCC: 1, 0, 0, 0, 0, \"13883113271\", 129, \"\"\r\n\r\nOK\r\n",
+                             calls, 4) == 1);
+    assert(strcmp(calls[0].number, "13883113271") == 0);
+
+    // Without the spaces, as 27.007 writes it: an outgoing call ringing at
+    // the far end, and one ringing here.
+    assert(a7682e_parse_clcc("\r\n+CLCC: 1,0,3,0,0,\"+4917612345678\",145,\"\",,0\r\n\r\nOK\r\n",
+                             calls, 4) == 1);
+    assert(calls[0].state == HAL_CALL_ALERTING && !calls[0].incoming);
+    assert(strcmp(calls[0].number, "+4917612345678") == 0);
+    assert(a7682e_parse_clcc("\r\n+CLCC: 2,1,4,0,0,\"+46701234567\",145\r\n\r\nOK\r\n",
+                             calls, 4) == 1);
+    assert(calls[0].id == 2 && calls[0].incoming && calls[0].state == HAL_CALL_INCOMING);
+    assert(strcmp(calls[0].number, "+46701234567") == 0);
+
+    // A withheld number, and a call the network has not yet named.
+    assert(a7682e_parse_clcc("\r\n+CLCC: 1,1,4,0,0,\"\",128,\"\",,1\r\n\r\nOK\r\n", calls, 4) == 1);
+    assert(calls[0].incoming && calls[0].number[0] == '\0');
+    assert(a7682e_parse_clcc("\r\n+CLCC: 1,0,2,0,0\r\n\r\nOK\r\n", calls, 4) == 1);
+    assert(calls[0].state == HAL_CALL_DIALING && calls[0].number[0] == '\0');
+    assert(a7682e_parse_clcc("+CLCC: 1,1,4,0,0,,128", calls, 4) == 1);
+    assert(calls[0].number[0] == '\0');
+
+    // A connected call and one waiting behind it.
+    const char *two =
+        "\r\n+CLCC: 1,0,0,0,0,\"+4917612345678\",145,\"\",,0\r\n"
+        "+CLCC: 2,1,5,0,0,\"0301234567\",129,\"\",,0\r\n\r\nOK\r\n";
+    assert(a7682e_parse_clcc(two, calls, 4) == 2);
+    assert(calls[0].id == 1 && calls[0].state == HAL_CALL_ACTIVE);
+    assert(calls[1].id == 2 && calls[1].incoming && calls[1].state == HAL_CALL_WAITING);
+    assert(strcmp(calls[1].number, "0301234567") == 0);
+
+    // More calls than room: all are counted, only the room is filled.
+    memset(calls, 0xAA, sizeof(calls));
+    assert(a7682e_parse_clcc(two, calls, 1) == 2);
+    assert(calls[0].id == 1);
+    assert(calls[1].id == 0xAA);
+    assert(a7682e_parse_clcc(two, NULL, 0) == 2);
+
+    // A held call, and one being released, are still calls.
+    assert(a7682e_parse_clcc("+CLCC: 1,0,1,0,0,\"112\",129", calls, 4) == 1);
+    assert(calls[0].state == HAL_CALL_HELD);
+    assert(a7682e_parse_clcc("+CLCC: 1,0,6,0,0,\"112\",129", calls, 4) == 1);
+    assert(calls[0].state == HAL_CALL_RELEASED);
+
+    // A data or fax call is not a voice call; one next to a voice call
+    // leaves that one alone.
+    assert(a7682e_parse_clcc("\r\n+CLCC: 1,0,0,1,0,\"*99#\",129\r\n\r\nOK\r\n", calls, 4) == 0);
+    assert(a7682e_parse_clcc("\r\n+CLCC: 1,0,0,2,0,\"123\",129\r\n\r\nOK\r\n", calls, 4) == 0);
+    assert(a7682e_parse_clcc("\r\n+CLCC: 1,0,0,9,0\r\n"
+                             "+CLCC: 2,1,4,0,0,\"+4670\",145\r\n\r\nOK\r\n", calls, 4) == 1);
+    assert(calls[0].id == 2);
+
+    // What the module sent unasked before the answer is passed over.
+    assert(a7682e_parse_clcc("\r\nRING\r\n\r\n+CLIP: \"+4670\",145,,,,0\r\n\r\nNO CARRIER\r\n"
+                             "\r\n+CLCC: 1,1,4,0,0,\"+4670\",145,\"\",,0\r\n\r\nOK\r\n",
+                             calls, 4) == 1);
+    assert(strcmp(calls[0].number, "+4670") == 0);
+    assert(a7682e_parse_clcc("\r\nVOICE CALL: END: 000033\r\n\r\nOK\r\n", calls, 4) == 0);
+
+    // A number longer than the field is cut; control characters are dropped.
+    assert(a7682e_parse_clcc("+CLCC: 1,1,4,0,0,\"123456789012345678901234567890123456\",129",
+                             calls, 4) == 1);
+    assert(strlen(calls[0].number) == sizeof(calls[0].number) - 1);
+    assert(strncmp(calls[0].number, "12345678901234567890123456789012", 32) == 0);
+    assert(a7682e_parse_clcc("+CLCC: 1,1,4,0,0,\"12\x1b" "34\",129", calls, 4) == 1);
+    assert(strcmp(calls[0].number, "1234") == 0);
+
+    // Garbage says nothing about whether there are calls.
+    assert(a7682e_parse_clcc("+CLCC: x,0,0,0,0", calls, 4) == -1);
+    assert(a7682e_parse_clcc("+CLCC: 1,0", calls, 4) == -1);
+    assert(a7682e_parse_clcc("+CLCC: 1,0,0,0", calls, 4) == -1);
+    assert(a7682e_parse_clcc("+CLCC: 1,0,7,0,0", calls, 4) == -1);
+    assert(a7682e_parse_clcc("+CLCC: 1,2,0,0,0", calls, 4) == -1);
+    assert(a7682e_parse_clcc("+CLCC: 0,0,0,0,0", calls, 4) == -1);
+    assert(a7682e_parse_clcc("+CLCC: 1,0,0,0,0x", calls, 4) == -1);
+    assert(a7682e_parse_clcc("+CLCC: 1,0,0,0,0,\"+4670", calls, 4) == -1);
+    assert(a7682e_parse_clcc("+CLCC: 1,0,0,0,0,\"+4670\r\n\",145\r\nOK\r\n", calls, 4) == -1);
+    assert(a7682e_parse_clcc("+CLCC: -1,0,0,0,0", calls, 4) == -1);
+    assert(a7682e_parse_clcc("+CLCC:", calls, 4) == -1);
+    assert(a7682e_parse_clcc(NULL, calls, 4) == -1);
+    // One bad line spoils the answer, even next to a good one.
+    assert(a7682e_parse_clcc("+CLCC: 1,0,0,0,0\r\n+CLCC: 2,1,x,0,0\r\n", calls, 4) == -1);
 }
 
 static void test_sim(void)
@@ -180,6 +307,8 @@ static void test_clock(void)
 int main(void)
 {
     test_final_result();
+    test_call_final_result();
+    test_clcc();
     test_sim();
     test_registration();
     test_best_registration();

@@ -17,6 +17,16 @@
 // both directions run at one format. Recording opens the codec but leaves the
 // amplifier alone, and the idle timeout closes it once reads stop too.
 //
+// On the T-Deck Max the speaker and the headphone jack hear either the codec
+// or the A7682E modem's voice channel, through two RS2257 switches whose
+// select is another expander pin (schematic page 8, U27/U28; AUDIO_SEL,
+// XL9555 P12, high for the A7682E and low for the ES8311, T-Deck-MAX
+// docs/pinmap.md section 2). The driver owns that line too: the codec's level
+// at init, the modem's for set_route(VOICE). With the voice route in, the
+// amplifier is the call's: held as the route asked, through the idle timeout
+// and stop(), and play() refused, until set_route(CODEC) hands the output
+// back.
+//
 // Each direction has a lock of its own, held across its write or read, and a
 // third covers the codec's state: open, the amplifier, the format. A write
 // and a read hold only their own direction while the data moves, so a player
@@ -264,6 +274,9 @@ static struct {
     bool                  initialized;
     bool                  open;
     bool                  amp_on;
+    // The output is the modem's voice channel, set_route(VOICE), and the
+    // amplifier is as that asked, not as playback would have it.
+    bool                  voice;
     // When the codec last opened, and whether a record has since dropped
     // what the microphone captured while settling.
     int64_t               opened_us;
@@ -293,14 +306,32 @@ static esp_err_t amp_set(bool on)
     return ESP_OK;
 }
 
+static bool has_route(void) { return s_audio.cfg.voice_route_expander >= 0; }
+
+// Drive the audio switch's select to the voice channel or to the codec.
+static esp_err_t route_set(bool voice)
+{
+    int voice_level = s_audio.cfg.voice_route_level != 0;
+    esp_err_t ret = thistle_expander_set_level(s_audio.cfg.voice_route_expander,
+                                               s_audio.cfg.voice_route_expander_pin,
+                                               voice ? voice_level : !voice_level);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "audio switch to the %s failed: %s", voice ? "voice channel" : "codec",
+                 esp_err_to_name(ret));
+    }
+    return ret;
+}
+
 // The power manager's hold while the codec is open, or 0.
 static uint32_t s_awake;
 
-// Silence the board: the amplifier goes first, so the speaker never hears the
-// codec's output stage being shut down. Called with all three locks held.
+// Silence the codec: the amplifier goes first, so the speaker never hears the
+// codec's output stage being shut down. In the voice route the amplifier
+// carries the call, and is left as the route set it. Called with all three
+// locks held.
 static void go_quiet(void)
 {
-    if (s_audio.amp_on) amp_set(false);
+    if (s_audio.amp_on && !s_audio.voice) amp_set(false);
     if (s_audio.open) {
         port_codec_close();
         s_audio.open = false;
@@ -437,11 +468,17 @@ static esp_err_t es8311_init(const void *config)
     s_audio.volume = DEFAULT_VOLUME;
     s_audio.mic_gain_db = DEFAULT_MIC_GAIN_DB;
     s_audio.open = false;
+    s_audio.voice = false;
 
     // Claim the amplifier line before anything else: until it is driven it
     // reads "on", and the codec bring-up below is audible through it.
     esp_err_t ret = amp_set(false);
     if (ret != ESP_OK) return ret;
+    // Then the audio switch, to the codec, whatever the board left it at.
+    if (has_route()) {
+        ret = route_set(false);
+        if (ret != ESP_OK) return ret;
+    }
 
     SemaphoreHandle_t *locks[] = { &s_audio.tx_lock, &s_audio.rx_lock, &s_audio.lock };
     for (size_t i = 0; i < sizeof(locks) / sizeof(locks[0]); i++) {
@@ -461,10 +498,12 @@ static esp_err_t es8311_init(const void *config)
     if (ret != ESP_OK) return ret;
 
     s_audio.initialized = true;
-    ESP_LOGI(TAG, "initialized on I2S%d (MCLK=%d BCLK=%d WS=%d DOUT=%d DIN=%d) amp=%d/%d",
+    ESP_LOGI(TAG, "initialized on I2S%d (MCLK=%d BCLK=%d WS=%d DOUT=%d DIN=%d) amp=%d/%d "
+                  "voice route=%d/%d",
              s_audio.cfg.i2s_num, s_audio.cfg.pin_mclk, s_audio.cfg.pin_bclk,
              s_audio.cfg.pin_ws, s_audio.cfg.pin_dout, s_audio.cfg.pin_din,
-             (int)s_audio.cfg.amp_expander, (int)s_audio.cfg.amp_expander_pin);
+             (int)s_audio.cfg.amp_expander, (int)s_audio.cfg.amp_expander_pin,
+             (int)s_audio.cfg.voice_route_expander, (int)s_audio.cfg.voice_route_expander_pin);
     return ESP_OK;
 }
 
@@ -474,6 +513,13 @@ static void es8311_deinit(void)
 
     esp_timer_stop(s_audio.idle_timer);
     take_all();
+    // A driver going away leaves the board as init found it: quiet, and the
+    // switch on the codec.
+    if (s_audio.voice) {
+        if (s_audio.amp_on) amp_set(false);
+        route_set(false);
+        s_audio.voice = false;
+    }
     go_quiet();
     port_codec_destroy();
     s_audio.initialized = false;
@@ -487,6 +533,12 @@ static esp_err_t es8311_play(const uint8_t *data, size_t len)
 
     xSemaphoreTake(s_audio.tx_lock, portMAX_DELAY);
     xSemaphoreTake(s_audio.lock, portMAX_DELAY);
+    // The output is the call's, and so is the amplifier.
+    if (s_audio.voice) {
+        xSemaphoreGive(s_audio.lock);
+        xSemaphoreGive(s_audio.tx_lock);
+        return ESP_ERR_INVALID_STATE;
+    }
     esp_timer_stop(s_audio.idle_timer);
     esp_err_t ret = ensure_open();
     // Only once the codec is running, so its start-up is not amplified.
@@ -587,6 +639,48 @@ static esp_err_t es8311_configure(const hal_audio_config_t *cfg)
     return ESP_OK;
 }
 
+// The vtable carries this on every board; one whose profile names no audio
+// switch gets ESP_ERR_NOT_SUPPORTED.
+static esp_err_t es8311_set_route(hal_audio_route_t route, bool speaker)
+{
+    if (route != HAL_AUDIO_ROUTE_CODEC && route != HAL_AUDIO_ROUTE_VOICE) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!s_audio.initialized) return ESP_ERR_INVALID_STATE;
+    if (!has_route()) return ESP_ERR_NOT_SUPPORTED;
+
+    take_all();
+    esp_err_t ret = ESP_OK;
+    if (route == HAL_AUDIO_ROUTE_VOICE) {
+        if (!s_audio.voice) {
+            // Playback ends, and the amplifier is dropped before the switch
+            // moves, so neither the codec stopping nor the switch is heard.
+            esp_timer_stop(s_audio.idle_timer);
+            go_quiet();
+            ret = route_set(true);
+            if (ret == ESP_OK) s_audio.voice = true;
+        }
+        // Asked again, only the amplifier changes: speaker or headphones.
+        if (ret == ESP_OK && s_audio.amp_on != speaker) ret = amp_set(speaker);
+        if (ret == ESP_OK) {
+            ESP_LOGI(TAG, "output to the voice channel, amplifier %s", speaker ? "on" : "off");
+        }
+    } else if (s_audio.voice) {
+        // The amplifier first, so the switch is not heard; the next play
+        // raises it again.
+        if (s_audio.amp_on) ret = amp_set(false);
+        esp_err_t switched = route_set(false);
+        if (switched == ESP_OK) {
+            s_audio.voice = false;
+            ESP_LOGI(TAG, "output back to the codec");
+        } else {
+            ret = switched;
+        }
+    }
+    give_all();
+    return ret;
+}
+
 // ---------------------------------------------------------------------------
 // vtable + get
 // ---------------------------------------------------------------------------
@@ -601,6 +695,7 @@ static const hal_audio_driver_t s_vtable = {
     .name         = "ES8311",
     .record       = es8311_record,
     .set_mic_gain = es8311_set_mic_gain,
+    .set_route    = es8311_set_route,
 };
 
 const hal_audio_driver_t *drv_audio_es8311_get(void)

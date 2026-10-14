@@ -13,6 +13,13 @@ typedef struct {
     uint8_t channels;
 } hal_audio_config_t;
 
+/* What the board's speaker and headphone output carries, on a board whose
+ * audio switch can hand it to another source. */
+typedef enum {
+    HAL_AUDIO_ROUTE_CODEC = 0,  /* this driver's own output, as at init */
+    HAL_AUDIO_ROUTE_VOICE = 1,  /* the voice channel of a modem wired to the switch */
+} hal_audio_route_t;
+
 typedef struct {
     esp_err_t (*init)(const void *config);
     void (*deinit)(void);
@@ -29,4 +36,12 @@ typedef struct {
     /* Microphone gain in dB, rounded down to what the codec can do. NULL
      * where record is. */
     esp_err_t (*set_mic_gain)(uint8_t db);
+    /* Hand the speaker and headphone output to `route`. For
+     * HAL_AUDIO_ROUTE_VOICE the speaker amplifier is on if `speaker`, off if
+     * not (headphones only), and stays as set until the route changes:
+     * playback here is stopped, and play() refused, meanwhile. Back to
+     * HAL_AUDIO_ROUTE_CODEC, the output is this driver's again and the
+     * amplifier follows playback as before. Optional: NULL on a board with
+     * no audio switch. Appended last, so no field above moves. */
+    esp_err_t (*set_route)(hal_audio_route_t route, bool speaker);
 } hal_audio_driver_t;

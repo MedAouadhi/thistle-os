@@ -14,6 +14,13 @@ extern "C" {
  * the board wires the codec's ASDOUT back to the SoC. Without that line
  * (pin_din -1) the codec runs as a DAC alone and record() reports
  * ESP_ERR_NOT_SUPPORTED.
+ *
+ * A board whose speaker and headphone output can be switched to another
+ * source, a modem's voice channel, names the switch's select line as
+ * voice_route_expander / _pin, and the level of it that picks the voice
+ * channel. The driver drives the other level at init and set_route() moves
+ * it. Without one (voice_route_expander -1) set_route() reports
+ * ESP_ERR_NOT_SUPPORTED.
  */
 typedef struct {
     int      i2s_num;           // I2S port number
@@ -26,6 +33,9 @@ typedef struct {
     int      pin_din;           // SoC data in, from the codec's ASDOUT; -1 if none
     int32_t  amp_expander;      // IO expander index of the amp enable, -1 if none
     int32_t  amp_expander_pin;  // Pin on that expander, high = amplifier on
+    int32_t  voice_route_expander;      // IO expander index of the audio switch's select, -1 if none
+    int32_t  voice_route_expander_pin;  // Pin on that expander
+    int32_t  voice_route_level;         // The select's level that picks the voice channel, 0 or 1
 } audio_es8311_config_t;
 
 /* Return the driver vtable instance. */

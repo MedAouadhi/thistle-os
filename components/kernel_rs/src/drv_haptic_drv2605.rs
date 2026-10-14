@@ -17,7 +17,7 @@ use std::os::raw::{c_char, c_void};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use crate::hal_registry::{HalHapticDriver, HAL_HAPTIC_CLICK, HAL_HAPTIC_MESSAGE};
+use crate::hal_registry::{HalHapticDriver, HAL_HAPTIC_CLICK, HAL_HAPTIC_MESSAGE, HAL_HAPTIC_RING};
 
 const ESP_OK: i32 = 0;
 const ESP_FAIL: i32 = -1;
@@ -60,15 +60,19 @@ fn has_library(status: u8) -> bool {
     matches!(status >> 5, 3 | 7)
 }
 
-// Library A's waveforms (datasheet 11.2).
+// Library A's waveforms (datasheet 11.2, "Waveform Library Effects List").
 const STRONG_CLICK: u8 = 1;
 const STRONG_BUZZ: u8 = 14;
+/// Effect 16, "1000 ms Alert 100%": one second at full strength, the longest
+/// single buzz in the library. A ringing call plays it every two seconds.
+const ALERT_1000MS: u8 = 16;
 
 /// What each effect plays.
 fn sequence(effect: u32) -> Option<&'static [u8]> {
     match effect {
         HAL_HAPTIC_CLICK => Some(&[STRONG_CLICK]),
         HAL_HAPTIC_MESSAGE => Some(&[STRONG_BUZZ, WAIT_10MS | 10, STRONG_BUZZ]),
+        HAL_HAPTIC_RING => Some(&[ALERT_1000MS]),
         _ => None,
     }
 }
@@ -646,6 +650,22 @@ mod tests {
         start(HAL_HAPTIC_CLICK, t0).unwrap();
         assert_eq!(settle(t0 + PLAY_LIMIT), None);
         assert_eq!(reg(REG_GO), 0);
+        assert_eq!(reg(REG_MODE), MODE_STANDBY);
+        unsafe { drv2605_deinit() };
+    }
+
+    #[test]
+    fn a_ring_is_one_second_long_buzz_well_inside_the_play_limit() {
+        a_board(1);
+        assert_eq!(unsafe { drv2605_init(std::ptr::null()) }, ESP_OK);
+        let t0 = Instant::now();
+        assert_eq!(start(HAL_HAPTIC_RING, t0), Ok(Some(SETTLE_POLL)));
+        assert_eq!([reg(0x04), reg(0x05)], [ALERT_1000MS, 0]);
+        assert_eq!(ALERT_1000MS, 16);
+        assert!(Duration::from_millis(1000) < PLAY_LIMIT);
+        // Played to its end, then back to standby.
+        assert_eq!(settle(t0 + SETTLE_POLL), Some(SETTLE_POLL));
+        assert_eq!(settle(t0 + SETTLE_POLL * 2), None);
         assert_eq!(reg(REG_MODE), MODE_STANDBY);
         unsafe { drv2605_deinit() };
     }

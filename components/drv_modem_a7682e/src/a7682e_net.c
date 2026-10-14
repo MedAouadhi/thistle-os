@@ -248,6 +248,10 @@ static esp_err_t dial(const char *apn)
     esp_modem_dce_t *dce = atomic_load(&s_abort) ? NULL : a7682e_dce_locked();
     if (dce && a7682e_ppp_up()) {
         ret = ESP_OK;  // an SMS exchange's redial got there first
+    } else if (dce && a7682e_call_holds_line()) {
+        /* A call began while this attempt registered: the module is the
+         * call's until call_list() finds none, and resumes data then. */
+        ret = ESP_ERR_INVALID_STATE;
     } else if (dce) {
         a7682e_enter_command_locked();
         /* Sent as AT+CGDCONT=1,"IP","<apn>" when data mode is entered.
@@ -369,6 +373,11 @@ static esp_err_t attach(TickType_t start, uint32_t timeout_ms)
 static esp_err_t net_connect(const char *apn, const char *credential, uint32_t timeout_ms)
 {
     (void)credential;
+    /* A call holds the module in command mode; data comes back by itself
+     * once the call ends (a7682e_call_list()). */
+    if (a7682e_call_holds_line()) {
+        return ESP_ERR_INVALID_STATE;
+    }
     if (a7682e_ppp_up()) {
         atomic_store(&s_state, HAL_NET_STATE_CONNECTED);
         return ESP_OK;
@@ -511,10 +520,16 @@ static esp_err_t net_get_cell_info(hal_cell_info_t *out)
     return ESP_OK;
 }
 
-/* The data session ends for sleep; connect() starts it again after. */
+/* The data session ends for sleep; connect() starts it again after. A
+ * module carrying a call stays awake: asleep, it would take no command, and
+ * the call could not be followed or ended. */
 static esp_err_t net_sleep(bool enter)
 {
     if (!a7682e_lifecycle_begin_operation()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (enter && a7682e_call_holds_line()) {
+        a7682e_lifecycle_finish_operation();
         return ESP_ERR_INVALID_STATE;
     }
     esp_err_t ret = a7682e_sleep_locked(enter);
@@ -544,6 +559,15 @@ static const hal_net_driver_t s_net_driver = {
     .sms_due       = drv_a7682e_sms_due,
     .sms_fetch     = drv_a7682e_sms_fetch,
     .get_network_time = drv_a7682e_get_network_time,
+    .call_dial        = a7682e_call_dial,
+    .call_answer      = a7682e_call_answer,
+    .call_hangup      = a7682e_call_hangup,
+    .call_list        = a7682e_call_list,
+    .call_ringing     = a7682e_call_ringing,
+    .call_dtmf        = a7682e_call_dtmf,
+    .call_set_mute    = a7682e_call_set_mute,
+    .call_set_volume  = a7682e_call_set_volume,
+    .call_set_speaker = a7682e_call_set_speaker,
 };
 
 const hal_net_driver_t *drv_a7682e_net_driver(void)

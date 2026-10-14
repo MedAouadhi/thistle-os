@@ -23,7 +23,10 @@ void sim_lvgl_unlock(void) { pthread_mutex_unlock(&s_lvgl_mutex); }
 #include "thistle/kernel.h"
 #include "thistle/app_manager.h"
 #include "thistle/display_server.h"
+#include "thistle/call.h"
+#include "thistle/sms.h"
 #include "ui/manager.h"
+#include "ui/call_ui.h"
 #include "thistle/board_config.h"
 #include "ui/lvgl_wm.h"
 #include "sim_input.h"
@@ -52,11 +55,20 @@ static const char *s_wm_override = NULL;
 #define SIM_TAP_GAP_MS 1500u
 /* keycode is HAL_KEY_HOME, HAL_KEY_BACK or HAL_KEY_QUICK for a press of that
  * key in place of a tap, and 0 for a tap at x,y. A drag goes down at x,y and
- * moves to x2,y2 over SIM_DRAG_MS before it lifts. */
-static struct { int x, y, x2, y2; uint16_t keycode; bool drag; } s_taps[SIM_MAX_TAPS];
+ * moves to x2,y2 over SIM_DRAG_MS before it lifts. A step is done in place
+ * of a tap, at its turn: "wait" (nothing), "dial:NUMBER" or
+ * "compose:NUMBER[:NAME]". */
+static struct { int x, y, x2, y2; uint16_t keycode; bool drag; const char *step; } s_taps[SIM_MAX_TAPS];
 static int s_tap_count = 0;
 static int s_tap_hold_ms = 100;
 #define SIM_DRAG_MS 300u
+/* When the first tap lands: this long after startup (-1: 2250 ms, or 250
+ * under thistle-tk), or after the simulated modem first registers, or after
+ * its --call starts ringing, which wanders with the boot by seconds. */
+static int s_tap_start_ms = -1;
+static enum { TAPS_FROM_START, TAPS_FROM_REGISTERED, TAPS_FROM_RING } s_taps_from = TAPS_FROM_START;
+/* --call-preview: the call screen for a made-up call. */
+static const char *s_call_preview = NULL;
 /* Text to type after the taps. Every key's press and release arrive in one
  * main-loop iteration, as one drain of the TCA8418's event FIFO delivers
  * them, so LVGL reads the keypad only after all of them. */
@@ -109,7 +121,17 @@ static void hear_mesh_messages(void)
 
 static bool add_tap(const char *spec)
 {
+    if (s_tap_count < SIM_MAX_TAPS &&
+        (strcmp(spec, "wait") == 0 || strncmp(spec, "dial:", 5) == 0 ||
+         strncmp(spec, "compose:", 8) == 0)) {
+        s_taps[s_tap_count].drag = false;
+        s_taps[s_tap_count].keycode = 0;
+        s_taps[s_tap_count].step = spec;
+        s_tap_count++;
+        return true;
+    }
     if (s_tap_count < SIM_MAX_TAPS) {
+        s_taps[s_tap_count].step = NULL;
         s_taps[s_tap_count].drag = false;
         s_taps[s_tap_count].keycode = strcmp(spec, "home") == 0  ? HAL_KEY_HOME
                                     : strcmp(spec, "back") == 0  ? HAL_KEY_BACK
@@ -118,8 +140,9 @@ static bool add_tap(const char *spec)
     if (s_tap_count >= SIM_MAX_TAPS ||
         (s_taps[s_tap_count].keycode == 0 &&
          sscanf(spec, "%d,%d", &s_taps[s_tap_count].x, &s_taps[s_tap_count].y) != 2)) {
-        fprintf(stderr, "Invalid --tap value; expected X,Y, home, back or quick "
-                        "(at most %d taps)\n", SIM_MAX_TAPS);
+        fprintf(stderr, "Invalid --tap value; expected X,Y, home, back, quick, wait, "
+                        "dial:NUMBER or compose:NUMBER[:NAME] (at most %d taps)\n",
+                SIM_MAX_TAPS);
         return false;
     }
     s_tap_count++;
@@ -138,8 +161,57 @@ static bool add_drag(const char *spec)
     }
     s_taps[s_tap_count].keycode = 0;
     s_taps[s_tap_count].drag = true;
+    s_taps[s_tap_count].step = NULL;
     s_tap_count++;
     return true;
+}
+
+/* MS, registered+MS or ring+MS. */
+static bool set_tap_start(const char *spec)
+{
+    const char *ms = spec;
+    if (strncmp(spec, "registered+", 11) == 0) {
+        s_taps_from = TAPS_FROM_REGISTERED;
+        ms = spec + 11;
+    } else if (strncmp(spec, "ring+", 5) == 0) {
+        s_taps_from = TAPS_FROM_RING;
+        ms = spec + 5;
+    }
+    char *end;
+    long value = strtol(ms, &end, 10);
+    if (end == ms || *end || value < 0) {
+        fprintf(stderr, "Invalid --tap-start value; expected MS, registered+MS or ring+MS\n");
+        return false;
+    }
+    s_tap_start_ms = (int)value;
+    return true;
+}
+
+extern bool sim_cellular_has_registered(void);
+extern bool sim_cellular_has_rung(void);
+
+/* A step taking a tap's turn. */
+static void run_step(const char *step)
+{
+    if (strncmp(step, "dial:", 5) == 0) {
+        esp_err_t err = rs_call_dial(step + 5);
+        printf("Dial %s: %s\n", step + 5, esp_err_to_name(err));
+    } else if (strncmp(step, "compose:", 8) == 0) {
+        /* As the Phone app's Message button does it. */
+        const char *number = step + 8;
+        const char *name = strchr(number, ':');
+        char buf[CALL_NUMBER_MAX];
+        size_t n = name ? (size_t)(name - number) : strlen(number);
+        if (n >= sizeof(buf)) n = sizeof(buf) - 1;
+        memcpy(buf, number, n);
+        buf[n] = '\0';
+        rs_sms_request_compose(buf, name ? name + 1 : NULL);
+        printf("Compose to %s\n", buf);
+        pthread_mutex_lock(&s_lvgl_mutex);
+        app_manager_launch("com.thistle.messenger");
+        pthread_mutex_unlock(&s_lvgl_mutex);
+    }
+    fflush(stdout);
 }
 
 bool sim_is_headless(void) { return s_headless; }
@@ -191,6 +263,8 @@ static void sim_tk_input_cb(const hal_input_event_t *event, void *user_data)
 extern void sim_board_set_device(const char *device);
 extern void sim_cellular_set_card(const char *card);
 extern bool sim_cellular_add_sms(const char *spec);
+extern void sim_cellular_set_incoming_call(const char *number);
+extern void sim_cellular_set_remote_hangup(int seconds);
 
 int main(int argc, char **argv)
 {
@@ -225,6 +299,8 @@ int main(int argc, char **argv)
             if (!add_drag(argv[++i])) return 2;
         } else if (strcmp(argv[i], "--tap-hold") == 0 && i + 1 < argc) {
             s_tap_hold_ms = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--tap-start") == 0 && i + 1 < argc) {
+            if (!set_tap_start(argv[++i])) return 2;
         } else if (strcmp(argv[i], "--launch-app") == 0 && i + 1 < argc) {
             s_launch_app = argv[++i];
         } else if (strncmp(argv[i], "--launch-app=", 13) == 0) {
@@ -250,6 +326,12 @@ int main(int argc, char **argv)
                 fprintf(stderr, "Invalid SMS; expected \"SENDER: TEXT\" (at most 8)\n");
                 return 2;
             }
+        } else if (strcmp(argv[i], "--call") == 0 && i + 1 < argc) {
+            sim_cellular_set_incoming_call(argv[++i]);
+        } else if (strcmp(argv[i], "--call-hangup") == 0 && i + 1 < argc) {
+            sim_cellular_set_remote_hangup(atoi(argv[++i]));
+        } else if (strcmp(argv[i], "--call-preview") == 0 && i + 1 < argc) {
+            s_call_preview = argv[++i];
         } else if (strcmp(argv[i], "--log-flushes") == 0) {
             sim_display_set_log_flushes(true);
         } else if (strcmp(argv[i], "--report-offscreen") == 0) {
@@ -266,6 +348,13 @@ int main(int argc, char **argv)
             printf("  --tap X,Y           Inject a native-coordinate tap after startup;\n");
             printf("                      repeat for more, %u ms apart\n", SIM_TAP_GAP_MS);
             printf("  --tap home|back|quick  Press the Home, Back or quick key instead\n");
+            printf("  --tap wait          Take a tap's turn doing nothing\n");
+            printf("  --tap dial:NUMBER   Place a call to NUMBER instead (rs_call_dial)\n");
+            printf("  --tap compose:NUMBER[:NAME]\n");
+            printf("                      Ask the Messenger for an SMS to NUMBER, and open it\n");
+            printf("  --tap-start WHEN    When the first tap lands: MS after startup (default\n");
+            printf("                      2250), or registered+MS or ring+MS: MS after the\n");
+            printf("                      modem first registers, or after the --call rings\n");
             printf("  --drag X1,Y1,X2,Y2  Drag from X1,Y1 to X2,Y2 over %u ms, in turn\n"
                    "                      with the taps\n", SIM_DRAG_MS);
             printf("  --tap-hold MS       How long each tap is held (default 100;\n");
@@ -278,6 +367,13 @@ int main(int argc, char **argv)
             printf("                      ready (default), absent, pin or puk\n");
             printf("  --sms \"SENDER: TEXT\" An SMS the modem holds at startup, for the\n");
             printf("                      kernel to fetch once it registers; up to 8\n");
+            printf("  --call NUMBER       An incoming call from NUMBER (\"\" for withheld), on\n");
+            printf("                      a device with a modem: it rings 3 s after the modem\n");
+            printf("                      registers and gives up after 20 s. A number dialled\n");
+            printf("                      answers after 3 s; one ending in 0000 is busy\n");
+            printf("  --call-hangup S     The far end hangs up S seconds after a call connects\n");
+            printf("  --call-preview WHAT The call screen for a made-up call, on any device:\n");
+            printf("                      incoming, calling, active, keypad or ended\n");
             printf("  --mesh-message \"SENDER: TEXT\"\n");
             printf("                      Hear TEXT on the mesh's Public channel at startup\n");
             printf("  --mesh-direct \"SENDER: TEXT\"\n");
@@ -384,6 +480,12 @@ int main(int argc, char **argv)
     }
     fflush(stdout);
 
+#ifdef SIMULATOR_BUILD
+    if (s_call_preview && !use_tk_wm) {
+        call_ui_preview(s_call_preview);
+    }
+#endif
+
     printf("ThistleOS Simulator ready. Close window to exit.\n");
     sim_assert_check_line("ThistleOS Simulator ready");
     fflush(stdout);
@@ -394,6 +496,9 @@ int main(int argc, char **argv)
     int tap_index = 0;
     int tap_phase = 0;   /* 0 = waiting to press, 1 = pressed */
     bool typed = false;
+    const uint32_t first_tap_ms = s_tap_start_ms >= 0 ? (uint32_t)s_tap_start_ms
+                                : use_tk_wm ? 250u : 2250u;
+    int64_t taps_event_ms = -1;   /* since start, when the modem did what the taps wait for */
     while (1) {
         /* Update LVGL tick */
         struct timeval tv;
@@ -419,14 +524,28 @@ int main(int argc, char **argv)
             pthread_mutex_unlock(&s_lvgl_mutex);
         }
 
-        if (tap_index < s_tap_count) {
+        uint32_t since_start = now_ms - start_ms;
+        if (s_taps_from != TAPS_FROM_START && taps_event_ms < 0 &&
+            (s_taps_from == TAPS_FROM_RING ? sim_cellular_has_rung()
+                                           : sim_cellular_has_registered())) {
+            taps_event_ms = since_start;
+            printf("Taps start %u ms after the modem %s\n", (unsigned)first_tap_ms,
+                   s_taps_from == TAPS_FROM_RING ? "rang" : "registered");
+        }
+        bool taps_due = s_taps_from == TAPS_FROM_START || taps_event_ms >= 0;
+        uint32_t taps_base_ms = (taps_event_ms > 0 ? (uint32_t)taps_event_ms : 0u) + first_tap_ms;
+
+        if (taps_due && tap_index < s_tap_count && s_taps[tap_index].step) {
+            if (since_start > taps_base_ms + (uint32_t)tap_index * SIM_TAP_GAP_MS) {
+                run_step(s_taps[tap_index].step);
+                tap_index++;
+            }
+        } else if (taps_due && tap_index < s_tap_count) {
             uint16_t tx = (uint16_t)s_taps[tap_index].x;
             uint16_t ty = (uint16_t)s_taps[tap_index].y;
             uint16_t key = s_taps[tap_index].keycode;
-            uint32_t tap_down_ms = (use_tk_wm ? 250u : 2250u) +
-                                   (uint32_t)tap_index * SIM_TAP_GAP_MS;
+            uint32_t tap_down_ms = taps_base_ms + (uint32_t)tap_index * SIM_TAP_GAP_MS;
             uint32_t tap_up_ms = tap_down_ms + (uint32_t)s_tap_hold_ms;
-            uint32_t since_start = now_ms - start_ms;
             if (tap_phase == 0 && since_start > tap_down_ms &&
                 (key ? sim_input_inject_key(key, true) : sim_input_inject_touch(tx, ty, true))) {
                 tap_phase = 1;
@@ -452,9 +571,8 @@ int main(int argc, char **argv)
             }
         }
 
-        if (s_type_text && !typed && tap_index >= s_tap_count) {
-            uint32_t type_ms = (use_tk_wm ? 250u : 2250u) +
-                               (uint32_t)s_tap_count * SIM_TAP_GAP_MS;
+        if (s_type_text && !typed && taps_due && tap_index >= s_tap_count) {
+            uint32_t type_ms = taps_base_ms + (uint32_t)s_tap_count * SIM_TAP_GAP_MS;
             if (now_ms - start_ms > type_ms) {
                 for (const char *c = s_type_text; *c; c++) {
                     sim_input_inject_key((uint8_t)*c, true);

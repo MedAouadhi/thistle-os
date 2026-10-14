@@ -4,7 +4,20 @@
 #include <stdlib.h>
 #include <string.h>
 
-int a7682e_final_result(const char *buf)
+static bool line_is(const char *line, size_t len, const char *word)
+{
+    return len == strlen(word) && strncmp(line, word, len) == 0;
+}
+
+/* The result codes that end a call attempt without a call (V.25ter 6.3.1,
+ * the manual's 28.1). */
+static bool is_call_failure(const char *line, size_t len)
+{
+    return line_is(line, len, "NO CARRIER") || line_is(line, len, "BUSY")
+        || line_is(line, len, "NO ANSWER") || line_is(line, len, "NO DIALTONE");
+}
+
+static int final_result(const char *buf, bool call)
 {
     if (!buf) {
         return 0;
@@ -16,17 +29,28 @@ int a7682e_final_result(const char *buf)
         if (len > 0 && line[len - 1] == '\r') {
             len--;
         }
-        if (len == 2 && strncmp(line, "OK", 2) == 0) {
+        if (line_is(line, len, "OK")) {
             return 1;
         }
-        if ((len == 5 && strncmp(line, "ERROR", 5) == 0)
+        if (line_is(line, len, "ERROR")
             || strncmp(line, "+CME ERROR:", 11) == 0
-            || strncmp(line, "+CMS ERROR:", 11) == 0) {
+            || strncmp(line, "+CMS ERROR:", 11) == 0
+            || (call && is_call_failure(line, len))) {
             return -1;
         }
         line = eol + 1;
     }
     return 0;
+}
+
+int a7682e_final_result(const char *buf)
+{
+    return final_result(buf, false);
+}
+
+int a7682e_call_final_result(const char *buf)
+{
+    return final_result(buf, true);
 }
 
 hal_sim_state_t a7682e_parse_sim(const char *resp)
@@ -307,4 +331,106 @@ bool a7682e_parse_cclk(const char *resp, int64_t *utc, int *offset_min)
     *offset_min = (int)quarters * 15;
     *utc = local - (int64_t)*offset_min * 60;
     return true;
+}
+
+/* An unsigned integer field, after any spaces; *p is left past it. */
+static bool clcc_int(const char **p, long *out)
+{
+    const char *s = *p;
+    while (*s == ' ') {
+        s++;
+    }
+    if (!is_digit(*s)) {
+        return false;
+    }
+    char *end;
+    *out = strtol(s, &end, 10);
+    *p = end;
+    return true;
+}
+
+/* One +CLCC line, from past its "+CLCC:" to `eol`: 1 for a voice call, read
+ * into *call; 0 for a call of another bearer; -1 for a line that cannot be
+ * read. */
+static int clcc_line(const char *p, const char *eol, hal_call_t *call)
+{
+    /* <id>,<dir>,<stat>,<mode>,<mpty> */
+    long field[5];
+    for (int i = 0; i < 5; i++) {
+        if (i > 0) {
+            while (*p == ' ') {
+                p++;
+            }
+            if (*p != ',') {
+                return -1;
+            }
+            p++;
+        }
+        if (!clcc_int(&p, &field[i]) || p > eol) {
+            return -1;
+        }
+    }
+    long id = field[0], dir = field[1], stat = field[2], mode = field[3];
+    if (id < 1 || id > 255 || (dir != 0 && dir != 1)
+        || stat < HAL_CALL_ACTIVE || stat > HAL_CALL_RELEASED) {
+        return -1;
+    }
+    if (mode != 0) {
+        return 0;
+    }
+
+    memset(call, 0, sizeof(*call));
+    call->id = (uint8_t)id;
+    call->incoming = dir == 1;
+    call->state = (hal_call_state_t)stat;
+
+    /* ,"<number>": absent while the network has not said, "" when withheld.
+     * Only printable characters are kept: the number is shown and dialled. */
+    while (p < eol && *p == ' ') {
+        p++;
+    }
+    if (p == eol || *p != ',') {
+        return p == eol ? 1 : -1;
+    }
+    p++;
+    while (p < eol && *p == ' ') {
+        p++;
+    }
+    if (p == eol || *p != '"') {
+        return 1;
+    }
+    size_t n = 0;
+    for (p++; p < eol && *p != '"'; p++) {
+        if (*p >= 0x20 && *p <= 0x7e && n < sizeof(call->number) - 1) {
+            call->number[n++] = *p;
+        }
+    }
+    call->number[n] = '\0';
+    return p < eol ? 1 : -1;  // a number whose closing quote is missing
+}
+
+int a7682e_parse_clcc(const char *resp, hal_call_t *calls, int max)
+{
+    if (!resp) {
+        return -1;
+    }
+    int listed = 0;
+    for (const char *line = resp; *line;) {
+        const char *eol = line + strcspn(line, "\r\n");
+        if ((size_t)(eol - line) >= 6 && strncmp(line, "+CLCC:", 6) == 0) {
+            hal_call_t call;
+            int got = clcc_line(line + 6, eol, &call);
+            if (got < 0) {
+                return -1;
+            }
+            if (got > 0) {
+                if (calls && listed < max) {
+                    calls[listed] = call;
+                }
+                listed++;
+            }
+        }
+        line = *eol ? eol + 1 : eol;
+    }
+    return listed;
 }

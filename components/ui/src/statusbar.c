@@ -1,4 +1,5 @@
 #include "ui/statusbar.h"
+#include "ui/call_ui.h"
 #include "ui/theme.h"
 #include "thistle/wifi_manager.h"
 #include "thistle/time_manager.h"
@@ -23,10 +24,16 @@ static const char *TAG = "statusbar";
  * nothing new costs no refresh. */
 #define STATUSBAR_UPDATE_MS 10000
 
-/* How often the unread-message count is checked. It is one number read from
- * the kernel, and the label is only touched when it changes, so a message
- * shows within a second at no cost while none arrive. */
+/* How often the unread-message count and the call chip are checked. Each is
+ * a number or two read from the kernel, and a label is only touched when it
+ * changes, so a message shows within a second at no cost while none arrive,
+ * and a call's time on e-paper, in whole minutes, costs a refresh a minute. */
 #define STATUSBAR_MESSAGES_MS 1000
+
+/* Narrower than this, the bar has no room for the call chip beside the
+ * envelope, the network, the battery and the clock: a 240 px T-Deck Max
+ * overflowed. The network reading gives way while the chip shows. */
+#define STATUSBAR_ROOMY_W 300
 
 /* Where a tap on the unread-message count goes. */
 #define MESSENGER_APP_ID "com.thistle.messenger"
@@ -41,6 +48,7 @@ static lv_obj_t *s_container     = NULL;
 static lv_obj_t *s_title_label   = NULL;
 static lv_obj_t *s_time_label    = NULL;
 static lv_obj_t *s_messages_label = NULL;
+static lv_obj_t *s_call_label    = NULL;
 static lv_obj_t *s_battery_label = NULL;
 static lv_obj_t *s_wifi_label    = NULL;
 /* The widest time in the clock's format, which the time label is sized to. */
@@ -67,6 +75,12 @@ static void messages_tap_cb(lv_event_t *e)
 {
     (void)e;
     app_manager_launch(MESSENGER_APP_ID);
+}
+
+static void call_tap_cb(lv_event_t *e)
+{
+    (void)e;
+    call_ui_chip_tapped();
 }
 
 esp_err_t statusbar_create(lv_obj_t *parent)
@@ -142,6 +156,17 @@ esp_err_t statusbar_create(lv_obj_t *parent)
     lv_obj_set_flex_flow(right, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(right, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_column(right, 4, LV_PART_MAIN);
+
+    /* A call tucked away, with its time, or the calls missed: a phone and
+     * a number, hidden when there is neither. A tap brings the call back, or
+     * opens the Phone app. */
+    s_call_label = lv_label_create(right);
+    lv_label_set_text(s_call_label, "");
+    lv_obj_set_style_text_color(s_call_label, colors->text, LV_PART_MAIN);
+    lv_obj_add_flag(s_call_label, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_call_label, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_ext_click_area(s_call_label, 6);
+    lv_obj_add_event_cb(s_call_label, call_tap_cb, LV_EVENT_CLICKED, NULL);
 
     /* Unread messages: an envelope and how many, hidden while there are
      * none. A tap opens the Messenger; the label is small, so the area that
@@ -257,6 +282,7 @@ void statusbar_refresh_theme(void)
     if (s_title_label)   lv_obj_set_style_text_color(s_title_label,   colors->text, LV_PART_MAIN);
     if (s_time_label)    lv_obj_set_style_text_color(s_time_label,    colors->text, LV_PART_MAIN);
     if (s_messages_label) lv_obj_set_style_text_color(s_messages_label, colors->text, LV_PART_MAIN);
+    if (s_call_label)    lv_obj_set_style_text_color(s_call_label,    colors->text, LV_PART_MAIN);
     if (s_battery_label) lv_obj_set_style_text_color(s_battery_label, colors->text, LV_PART_MAIN);
     if (s_wifi_label)    lv_obj_set_style_text_color(s_wifi_label,    colors->text, LV_PART_MAIN);
 }
@@ -314,8 +340,37 @@ static void show_message_alert(void)
     toast_show(text, TOAST_INFO, MESSAGE_POPUP_MS);
 }
 
+static void set_hidden(lv_obj_t *obj, bool hide)
+{
+    if (obj && hide != lv_obj_has_flag(obj, LV_OBJ_FLAG_HIDDEN)) {
+        if (hide) {
+            lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_clear_flag(obj, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+}
+
+/* The call chip (call_ui.h), shown, rewritten and hidden only on change. On
+ * a narrow screen the network reading makes room for it: the clock and the
+ * battery stay. A call has the modem to itself anyway. */
+static void update_call_chip(void)
+{
+    if (s_call_label == NULL) {
+        return;
+    }
+    char text[24];
+    bool shown = call_ui_chip_text(text, sizeof(text));
+    if (shown) {
+        set_text_if_changed(s_call_label, text);
+    }
+    set_hidden(s_call_label, !shown);
+    set_hidden(s_wifi_label,
+               shown && lv_obj_get_width(s_container) < STATUSBAR_ROOMY_W);
+}
+
 /* Show how many mesh messages and SMS are unread, or nothing when none are,
- * and pop up any message that has just arrived. */
+ * and pop up any message that has just arrived; and the call chip. */
 static void statusbar_messages_cb(lv_timer_t *timer)
 {
     (void)timer;
@@ -324,6 +379,7 @@ static void statusbar_messages_cb(lv_timer_t *timer)
     }
 
     show_message_alert();
+    update_call_chip();
 
     uint32_t unread = rs_mesh_unread_count() + rs_sms_unread_count();
     bool hidden = lv_obj_has_flag(s_messages_label, LV_OBJ_FLAG_HIDDEN);

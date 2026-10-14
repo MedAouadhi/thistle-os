@@ -270,6 +270,12 @@ esp_err_t drv_a7682e_get_network_time(hal_net_time_t *out);
  * network assigns when apn is NULL or empty. It fails fast on a SIM that is
  * missing or locked. disconnect() powers the module off. get_cell_info()
  * reports what the last attempt saw of the SIM and the network.
+ *
+ * The call functions place, answer and follow voice calls by AT+CLCC. A call
+ * leaves a data session for command mode, and while one holds the line
+ * connect() refuses with ESP_ERR_INVALID_STATE, as sleep(true) does; the
+ * call_list() that finds no call resumes the session. call_ringing() reads
+ * the RI line alone.
  */
 const hal_net_driver_t *drv_a7682e_net_driver(void);
 

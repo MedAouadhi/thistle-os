@@ -270,6 +270,11 @@ pub extern "C" fn kernel_init() -> i32 {
     // the user set them; esp_netif routes over WiFi whenever it is up.
     crate::net_coordinator::start();
 
+    // Calls: a kernel worker job reads the modem's RI line once a second,
+    // and a call ringing starts the call thread. Only on a board whose modem
+    // makes calls, now registered with the drivers.
+    crate::call_manager::start();
+
     // Publish SYSTEM_BOOT event
     crate::event::event_publish_simple(0); // EVENT_SYSTEM_BOOT = 0
 

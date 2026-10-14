@@ -163,7 +163,10 @@
                 "i2s_data": 40,
                 "i2s_din": 17,
                 "amp_expander": 0,
-                "amp_expander_pin": 6
+                "amp_expander_pin": 6,
+                "voice_route_expander": 0,
+                "voice_route_expander_pin": 10,
+                "voice_route_level": 1
             }
         },
         {

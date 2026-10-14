@@ -3,6 +3,7 @@
  * Copyright (c) 2026 ThistleOS Contributors
  */
 #include "sim_audio.h"
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stddef.h>
 #include <string.h>
@@ -13,6 +14,9 @@ static uint32_t s_rate = 44100;
 static uint8_t  s_bits = 16;
 static uint8_t  s_channels = 2;
 static size_t   s_played;     /* bytes since the format was set, for the log */
+/* What the speaker carries: this driver's output, or a call's voice, during
+ * which play() is refused as on the device. */
+static atomic_int s_route = HAL_AUDIO_ROUTE_CODEC;
 
 static esp_err_t sim_audio_init(const void *config)
 {
@@ -33,6 +37,7 @@ static esp_err_t sim_audio_play(const uint8_t *data, size_t len)
 {
     (void)data;
     if (!len) return ESP_ERR_INVALID_ARG;
+    if (atomic_load(&s_route) == HAL_AUDIO_ROUTE_VOICE) return ESP_ERR_INVALID_STATE;
     if (s_played == 0) printf("[sim_audio] playing\n");
     s_played += len;
     size_t frame = (size_t)s_channels * (s_bits / 8);
@@ -84,6 +89,22 @@ static esp_err_t sim_audio_set_mic_gain(uint8_t db)
     return ESP_OK;
 }
 
+/* The T-Deck Max's AUDIO_SEL: the speaker to the modem's voice, with the
+ * amplifier on or off, or back to the codec. */
+static esp_err_t sim_audio_set_route(hal_audio_route_t route, bool speaker)
+{
+    if (route == HAL_AUDIO_ROUTE_VOICE) {
+        printf("[sim_audio] route voice, speaker %s\n", speaker ? "on" : "off");
+        s_played = 0;
+    } else if (route == HAL_AUDIO_ROUTE_CODEC) {
+        printf("[sim_audio] route codec\n");
+    } else {
+        return ESP_ERR_INVALID_ARG;
+    }
+    atomic_store(&s_route, (int)route);
+    return ESP_OK;
+}
+
 static const hal_audio_driver_t sim_audio_driver = {
     .init      = sim_audio_init,
     .deinit    = sim_audio_deinit,
@@ -94,6 +115,7 @@ static const hal_audio_driver_t sim_audio_driver = {
     .name      = "Simulator Audio",
     .record    = sim_audio_record,
     .set_mic_gain = sim_audio_set_mic_gain,
+    .set_route = sim_audio_set_route,
 };
 
 const hal_audio_driver_t *sim_audio_get(void)

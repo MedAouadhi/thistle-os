@@ -44,6 +44,12 @@
 //! SMS", the modem is powered down instead. Back at `Rest::Normal`, the
 //! modem is woken, WiFi is started, and both reconnect at once.
 //!
+//! A voice call has the modem while it is up (call_manager): nothing is
+//! dialled, registered, fetched or powered down meanwhile, an attempt under
+//! way when it starts is cancelled, and the call thread pokes the
+//! coordinator when it is done. Resting for sleep still goes ahead; the
+//! call holds the device awake.
+//!
 //! All of it happens on the coordinator's one thread, started at boot with
 //! its stack in internal RAM: powering the modem down, rejoining WiFi, and
 //! cellular attempts, one at a time. So WiFi waits to be rejoined while an
@@ -318,6 +324,19 @@ impl CellPolicy {
     /// after whatever backoff came before.
     pub(crate) fn woke(&mut self) {
         self.retry.reset();
+    }
+}
+
+/// What a voice call leaves of the cellular work decided: nothing, while
+/// one is up or its thread still runs. Dialling data or registering would
+/// take the modem from the call, powering down would end it. The policy is
+/// still asked meanwhile, so it asks again for what was held back once the
+/// call is over.
+pub(crate) fn during_call(action: CellAction, calling: bool) -> CellAction {
+    if calling {
+        CellAction::None
+    } else {
+        action
     }
 }
 
@@ -696,14 +715,16 @@ fn evaluate(c: &mut Coordinator) -> Work {
 
     let mut cell = Work::None;
     if let Some(drv) = cellular() {
-        match c.cell.decide(
+        let calling = crate::call_manager::busy();
+        let action = c.cell.decide(
             want(),
             modem_ready(drv),
             cell_state(drv),
             CELL_CONNECTING.load(Ordering::SeqCst),
             CELL_POWERING_OFF.load(Ordering::SeqCst),
             now,
-        ) {
+        );
+        match during_call(action, calling) {
             CellAction::PowerOff => return Work::PowerOff(drv),
             CellAction::Listen => cell = Work::Listen(drv, c.cell.epoch()),
             CellAction::Connect => cell = Work::Connect(drv, c.cell.epoch()),
@@ -712,7 +733,8 @@ fn evaluate(c: &mut Coordinator) -> Work {
         if !c.cell.blocked() {
             c.blocked_info = None;
         }
-        if crate::sms_manager::due(drv) {
+        // SMS wait in the modem until the call is over.
+        if !calling && crate::sms_manager::due(drv) {
             return Work::FetchSms(drv);
         }
     }
@@ -872,7 +894,9 @@ pub extern "C" fn net_cellular_set_enabled(enabled: bool) -> i32 {
     crate::system_json::save(SECTION, "enabled", serde_json::Value::Bool(enabled))
 }
 
-fn cancel_attempt() {
+/// Make a cellular attempt under way give up soon: mobile data switched
+/// off, or a call that needs the modem.
+pub(crate) fn cancel_attempt() {
     if CELL_CONNECTING.load(Ordering::SeqCst) {
         if let Some(cancel) = cellular().and_then(|drv| drv.cancel) {
             unsafe { cancel() };
@@ -1291,6 +1315,26 @@ mod tests {
         assert_eq!(p.decide(Want::Data, true, NET_DISCONNECTED, false, false, now), CellAction::None);
         let later = now + Duration::from_secs(10);
         assert_eq!(p.decide(Want::Data, true, NET_DISCONNECTED, false, false, later), CellAction::Connect);
+    }
+
+    #[test]
+    fn a_call_holds_back_every_cellular_action_until_it_ends() {
+        for action in [CellAction::PowerOff, CellAction::Listen, CellAction::Connect, CellAction::None] {
+            assert_eq!(during_call(action, true), CellAction::None);
+            assert_eq!(during_call(action, false), action);
+        }
+        // A session to dial when the call starts is dialled once it is over.
+        let mut p = CellPolicy::default();
+        let now = t0();
+        let decided = p.decide(Want::Data, true, NET_DISCONNECTED, false, false, now);
+        assert_eq!(during_call(decided, true), CellAction::None);
+        let decided = p.decide(Want::Data, true, NET_DISCONNECTED, false, false, now);
+        assert_eq!(during_call(decided, false), CellAction::Connect);
+        // Both switched off during a call: powered down once it is over.
+        let decided = p.decide(Want::Off, true, NET_DISCONNECTED, false, false, now);
+        assert_eq!(during_call(decided, true), CellAction::None);
+        let decided = p.decide(Want::Off, true, NET_DISCONNECTED, false, false, now);
+        assert_eq!(during_call(decided, false), CellAction::PowerOff);
     }
 
     #[test]

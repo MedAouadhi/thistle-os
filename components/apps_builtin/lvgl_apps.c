@@ -31,6 +31,9 @@
 #ifndef THISTLE_HAVE_PODCASTS
 #define THISTLE_HAVE_PODCASTS 1
 #endif
+#ifndef THISTLE_HAVE_PHONE
+#define THISTLE_HAVE_PHONE 1
+#endif
 #ifndef THISTLE_HAVE_MESSENGER
 #define THISTLE_HAVE_MESSENGER 1
 #endif
@@ -76,6 +79,9 @@
 #endif
 #if THISTLE_HAVE_PODCASTS
 #include "podcasts/podcasts_app.h"
+#endif
+#if THISTLE_HAVE_PHONE
+#include "phone/phone_app.h"
 #endif
 #if THISTLE_HAVE_MESSENGER
 #include "messenger/messenger_app.h"
@@ -134,6 +140,11 @@ esp_err_t lvgl_apps_register_builtin(bool has_radio, bool has_gps)
 #endif
 #if THISTLE_HAVE_PODCASTS
     REGISTER(podcasts_app_register);
+#endif
+#if THISTLE_HAVE_PHONE
+    /* On every board: contacts are worth having without a modem, and the
+     * app says where it cannot call. */
+    REGISTER(phone_app_register);
 #endif
 #if THISTLE_HAVE_MESSENGER
     if (has_radio) {

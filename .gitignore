@@ -55,3 +55,7 @@ simulator/sdcard/messages/
 simulator/sdcard/data/podcasts/
 simulator/sdcard/podcasts/
 simulator/sdcard/config/podcasts.json
+
+# The phonebook's stars and the call log the simulator writes (phonebook.rs,
+# call_log.rs), which the Phone app's tests make
+simulator/sdcard/phone/

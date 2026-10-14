@@ -388,6 +388,66 @@ pub extern "C" fn rs_sms_set_held_unread(count: u32) {
 }
 
 // ---------------------------------------------------------------------------
+// Handing a conversation to the Messenger
+// ---------------------------------------------------------------------------
+
+/// A conversation another app asked the Messenger to open: (number, name).
+/// Apps launch with no arguments, so the Phone app leaves this here and then
+/// launches the Messenger, which takes it when it comes forward. One slot: a
+/// later request replaces one not yet taken.
+static COMPOSE: Mutex<Option<(String, String)>> = Mutex::new(None);
+
+fn c_arg(s: *const c_char) -> String {
+    if s.is_null() {
+        return String::new();
+    }
+    unsafe { std::ffi::CStr::from_ptr(s) }.to_string_lossy().into_owned()
+}
+
+/// Ask the Messenger to open its SMS conversation with `number`, titled
+/// `name` ("" or NULL for the number itself), the next time it comes forward.
+///
+/// # Safety
+/// `number` and `name` must each be NULL or a NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn rs_sms_request_compose(number: *const c_char, name: *const c_char) {
+    let number = c_arg(number);
+    let name = c_arg(name);
+    if let Ok(mut slot) = COMPOSE.lock() {
+        *slot = Some((number, name));
+    }
+}
+
+/// Take the waiting request into the buffers given, each cut at a character
+/// to fit; false, writing nothing, if none waits.
+///
+/// # Safety
+/// `number` must point to `number_size` writable bytes and `name` to
+/// `name_size`; either may be NULL with a size of 0, and is then left alone.
+#[no_mangle]
+pub unsafe extern "C" fn rs_sms_take_compose(
+    number: *mut c_char,
+    number_size: usize,
+    name: *mut c_char,
+    name_size: usize,
+) -> bool {
+    let request = match COMPOSE.lock() {
+        Ok(mut slot) => slot.take(),
+        Err(_) => None,
+    };
+    let Some((n, title)) = request else {
+        return false;
+    };
+    if !number.is_null() && number_size > 0 {
+        copy_c(std::slice::from_raw_parts_mut(number as *mut u8, number_size), &n);
+    }
+    if !name.is_null() && name_size > 0 {
+        copy_c(std::slice::from_raw_parts_mut(name as *mut u8, name_size), &title);
+    }
+    true
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -497,6 +557,47 @@ mod tests {
         copy_c(&mut buf, "aä€");
         // "a" (1) + "ä" (2) fit in 5; "€" (3) does not.
         assert_eq!(&buf[..4], b"a\xc3\xa4\0");
+    }
+
+    fn take_compose() -> Option<(String, String)> {
+        let mut number = [0xffu8; SMS_SENDER_MAX];
+        let mut name = [0xffu8; 16];
+        let taken = unsafe {
+            rs_sms_take_compose(
+                number.as_mut_ptr() as *mut c_char,
+                number.len(),
+                name.as_mut_ptr() as *mut c_char,
+                name.len(),
+            )
+        };
+        taken.then(|| (c_str(&number), c_str(&name)))
+    }
+
+    #[test]
+    fn a_compose_request_is_taken_once_and_a_later_one_replaces_it() {
+        let _ = take_compose();
+        assert_eq!(take_compose(), None);
+        unsafe {
+            rs_sms_request_compose(b"+491701\0".as_ptr() as *const c_char, b"Anna\0".as_ptr() as *const c_char);
+            rs_sms_request_compose(
+                b"+491702\0".as_ptr() as *const c_char,
+                "Jürgen Müller-Lüdenscheidt\0".as_ptr() as *const c_char,
+            );
+        }
+        // The later request, its name cut at a character to fit 16 bytes.
+        assert_eq!(take_compose(), Some(("+491702".into(), "Jürgen Müller".into())));
+        assert_eq!(take_compose(), None);
+    }
+
+    #[test]
+    fn a_compose_request_without_a_name_is_titled_by_nothing() {
+        let _ = take_compose();
+        unsafe { rs_sms_request_compose(b"+491703\0".as_ptr() as *const c_char, std::ptr::null()) };
+        assert_eq!(take_compose(), Some(("+491703".into(), String::new())));
+        // A NULL buffer is left alone, and the request is still taken.
+        unsafe { rs_sms_request_compose(b"+491704\0".as_ptr() as *const c_char, b"\0".as_ptr() as *const c_char) };
+        assert!(unsafe { rs_sms_take_compose(std::ptr::null_mut(), 0, std::ptr::null_mut(), 0) });
+        assert_eq!(take_compose(), None);
     }
 
     #[test]

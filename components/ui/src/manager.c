@@ -6,6 +6,7 @@
 #include "ui/power_ui.h"
 #include "ui/pull_gesture.h"
 #include "ui/quick_panel.h"
+#include "ui/call_ui.h"
 #include "thistle/power_manager.h"
 #include "hal/board.h"
 #include "hal/input.h"
@@ -109,6 +110,8 @@ static pull_gesture_t s_pull;
 static bool s_quick_open_pending = false;
 static bool s_quick_close_pending = false;
 static bool s_quick_toggle_pending = false;
+/* Esc while the call screen is open: offered to it alone, as Back is. */
+static bool s_call_esc_pending = false;
 static void (*s_home_handler)(void) = NULL;
 /* The app in front's back handler, and the root container it belongs to. The
  * app manager destroys an app whenever another comes forward, so deleting the
@@ -139,10 +142,12 @@ void ui_manager_set_back_handler(lv_obj_t *owner, bool (*handler)(void))
     }
 }
 
-/* Back closes the quick panel or the power menu, or takes the app in front
- * up one page; false when there was none of those to do. */
+/* Back goes to the call screen first, which silences a ringing call or tucks
+ * one away; then it closes the quick panel or the power menu, or takes the
+ * app in front up one page; false when there was none of those to do. */
 static bool go_back(void)
 {
+    if (call_ui_back()) return true;
     if (quick_panel_close()) return true;
     if (power_ui_close_menu()) return true;
     return s_back_handler && !lv_obj_has_flag(s_back_owner, LV_OBJ_FLAG_HIDDEN) &&
@@ -156,13 +161,18 @@ static void nav_key_timer_cb(lv_timer_t *timer)
         s_quick_close_pending = false;
         quick_panel_close();
     }
+    /* No quick panel over the call screen. */
     if (s_quick_open_pending) {
         s_quick_open_pending = false;
-        quick_panel_open();
+        if (!call_ui_is_open()) quick_panel_open();
     }
     if (s_quick_toggle_pending) {
         s_quick_toggle_pending = false;
-        quick_panel_toggle();
+        if (!call_ui_is_open()) quick_panel_toggle();
+    }
+    if (s_call_esc_pending) {
+        s_call_esc_pending = false;
+        call_ui_back();
     }
     if (s_back_pending) {
         s_back_pending = false;
@@ -173,6 +183,8 @@ static void nav_key_timer_cb(lv_timer_t *timer)
     if (!s_home_pending) return;
     s_home_pending = false;
 
+    /* Home tucks a call away, and does nothing while one rings. */
+    if (call_ui_home()) return;
     quick_panel_close();
     app_manager_launch("com.thistle.launcher");
     if (s_home_handler) {
@@ -196,7 +208,9 @@ static void kbd_queue_push(kbd_event_t ev)
 static void note_pull(pull_touch_t kind, int16_t x, int16_t y)
 {
     switch (pull_gesture_feed(&s_pull, kind, x, y, quick_panel_is_open())) {
-        case PULL_OPEN:  s_quick_open_pending  = true; break;
+        case PULL_OPEN:
+            if (!call_ui_is_open()) s_quick_open_pending = true;
+            break;
         case PULL_CLOSE: s_quick_close_pending = true; break;
         default: break;
     }
@@ -255,6 +269,13 @@ static void ui_input_hal_cb(const hal_input_event_t *event, void *user_data)
                 if (lv_key != s_kbd_state.key) break;
                 s_kbd_state.state = LV_INDEV_STATE_RELEASED;
                 kbd_queue_push(s_kbd_state);
+                break;
+            }
+
+            /* Esc goes to the call screen, as Back does, and nowhere else:
+             * not to the app under it, nor back to the launcher. */
+            if (lv_key == LV_KEY_ESC && call_ui_is_open()) {
+                s_call_esc_pending = true;
                 break;
             }
 
@@ -580,6 +601,9 @@ esp_err_t ui_manager_init(ui_flush_fn_t flush_cb, bool use_deferred_refresh)
     /* 4b1c. The quick panel, opened by a drag down from the status bar */
     quick_panel_add_builtin();
     pull_gesture_init(&s_pull, STATUSBAR_H, (int16_t)s_display_h);
+
+    /* 4b1d. The call screen, over everything, while a call is up */
+    call_ui_init();
 
     /* Touch stays in TIMER mode — LVGL polls at each lv_timer_handler call */
 

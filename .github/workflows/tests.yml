@@ -70,6 +70,21 @@ jobs:
           ! grep -Eq 'AT\\+CMGS=.*msg|AT\\+CMGS=.*\\\\r' \
             components/drv_modem_a7682e/src/drv_modem_a7682e.c
 
+      - name: Test call command arguments
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror \
+            -fsanitize=address,undefined -fno-omit-frame-pointer \
+            -Icomponents/drv_modem_a7682e/include \
+            -Icomponents/drv_modem_a7682e/tests/host_shim \
+            -Icomponents/thistle_hal/include \
+            components/drv_modem_a7682e/tests/test_call_validation.c \
+            -o /tmp/test_call_validation
+          /tmp/test_call_validation
+          grep -q "a7682e_call_number_is_valid(number)" \
+            components/drv_modem_a7682e/src/a7682e_call.c
+          grep -q "a7682e_call_dtmf_is_valid(digit)" \
+            components/drv_modem_a7682e/src/a7682e_call.c
+
       - name: Test modem answer parsing
         run: |
           cc -std=c11 -Wall -Wextra -Werror \
@@ -169,6 +184,9 @@ jobs:
 
       - name: Test Podcasts API, library and text under sanitizers
         run: apps/podcasts/tests/run_tests.sh
+
+      - name: Test Phone app times and numbers under sanitizers
+        run: apps/phone/tests/run_tests.sh
 
       - name: Test secure signing-key generation
         run: |
@@ -359,6 +377,10 @@ jobs:
       - name: Run Podcasts browse, play and save tests
         working-directory: simulator
         run: python3 tests/test_podcasts.py --sim build/thistle_sim
+
+      - name: Run Phone app contacts, favourites and keypad tests
+        working-directory: simulator
+        run: python3 tests/test_phone_app.py --sim build/thistle_sim
 
       - name: Upload launcher framebuffer failures
         if: failure()

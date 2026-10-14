@@ -4,8 +4,8 @@
 // Pure functions over the text a command returned, so they can be tested on
 // the host. Command forms are those of the A76XX Series AT Command Manual
 // V1.09: AT+CPIN? (6.2.2), AT+CEREG? (5.2.2), AT+CGREG? (5.2.1),
-// AT+CREG? (4.2.1), AT+COPS? (4.2.2), AT+CGDCONT? (5.2.5) and AT+CCLK?
-// (3.2.10).
+// AT+CREG? (4.2.1), AT+COPS? (4.2.2), AT+CGDCONT? (5.2.5), AT+CCLK?
+// (3.2.10), and for calls ATD and ATA (2.2.1, 2.2.2) and AT+CLCC (7.2.6).
 #pragma once
 
 #include "hal/network.h"
@@ -21,6 +21,15 @@
  * the text saying what it is has arrived.
  */
 int a7682e_final_result(const char *buf);
+
+/**
+ * As a7682e_final_result(), for ATD and ATA, which can also end on the result
+ * code of a call that did not happen: "NO CARRIER", "BUSY", "NO ANSWER" or
+ * "NO DIALTONE" (manual 2.2.1, 2.2.2 and 28.1) reads as -1. ATA with nothing
+ * ringing answers NO CARRIER. Not for other commands: the module also sends
+ * NO CARRIER unasked when a call ends, which must not end their exchange.
+ */
+int a7682e_call_final_result(const char *buf);
 
 /**
  * What an AT+CPIN? exchange says about the SIM, given everything the modem
@@ -76,3 +85,19 @@ bool a7682e_parse_context_apn(const char *resp, int cid, char *out, size_t out_s
  * local time does not say what time it is.
  */
 bool a7682e_parse_cclk(const char *resp, int64_t *utc, int *offset_min);
+
+/**
+ * The voice calls in an AT+CLCC answer (7.2.6), one line each:
+ * "+CLCC: <id>,<dir>,<stat>,<mode>,<mpty>[,\"<number>\",<type>[,\"<alpha>\"]
+ * [,<priority>][,<CLI validity>]]", with or without a space after each comma,
+ * and the last two fields only on a 2G call. A call of another bearer (<mode>
+ * 1 data, 2 fax, 9 unknown) is passed over. A withheld number is "", and a
+ * longer one than hal_call_t holds is cut. Lines that are not +CLCC (a RING
+ * or +CLIP the module sent unasked) are passed over too.
+ *
+ * The first `max` calls go into calls[] (which may be NULL when max is 0).
+ * Returns how many voice calls the answer lists, which may be more than max:
+ * 0 when there are none, -1 when a +CLCC line cannot be read, which says
+ * nothing about whether there are calls.
+ */
+int a7682e_parse_clcc(const char *resp, hal_call_t *calls, int max);

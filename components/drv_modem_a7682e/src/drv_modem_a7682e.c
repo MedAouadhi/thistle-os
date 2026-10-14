@@ -323,29 +323,54 @@ esp_modem_dce_t *a7682e_dce_locked(void)
  * longest answer, an SMS read under UCS2; only tasks touch it. */
 static EXT_RAM_BSS_ATTR char s_exchange[A7682E_SMS_BUF];
 
+/* What ends the exchange in progress: a7682e_final_result(), or for ATD and
+ * ATA a7682e_call_final_result(). */
+static int (*s_exchange_final)(const char *buf) = a7682e_final_result;
+
 static esp_err_t exchange_got_line(uint8_t *data, size_t len)
 {
     size_t n = len < sizeof(s_exchange) - 1 ? len : sizeof(s_exchange) - 1;
     memcpy(s_exchange, data, n);
     s_exchange[n] = '\0';
-    switch (a7682e_final_result(s_exchange)) {
+    switch (s_exchange_final(s_exchange)) {
     case 1:  return ESP_OK;
     case -1: return ESP_FAIL;
     default: return ESP_ERR_TIMEOUT;  // keep reading
     }
 }
 
-esp_err_t a7682e_exchange_locked(const char *cmd, char *resp, size_t resp_size,
-                                 uint32_t timeout_ms)
+static esp_err_t exchange_locked(const char *cmd, char *resp, size_t resp_size,
+                                 uint32_t timeout_ms, int (*final)(const char *buf))
 {
     s_exchange[0] = '\0';
+    s_exchange_final = final;
     esp_err_t ret = s_modem.dce
         ? esp_modem_command(s_modem.dce, cmd, exchange_got_line, timeout_ms)
         : ESP_ERR_INVALID_STATE;
+    s_exchange_final = a7682e_final_result;
     if (resp && resp_size > 0) {
         strlcpy(resp, s_exchange, resp_size);
     }
     return ret;
+}
+
+esp_err_t a7682e_exchange_locked(const char *cmd, char *resp, size_t resp_size,
+                                 uint32_t timeout_ms)
+{
+    return exchange_locked(cmd, resp, resp_size, timeout_ms, a7682e_final_result);
+}
+
+/* esp_modem reads the UART only while a command waits for its answer, so
+ * whatever arrives in between stays in the UART driver's buffer for the next
+ * command to read first. */
+esp_err_t a7682e_call_exchange_locked(const char *cmd, char *resp, size_t resp_size,
+                                      uint32_t timeout_ms, bool dial)
+{
+    if (s_modem.dce) {
+        uart_flush_input(s_modem.cfg.uart_num);
+    }
+    return exchange_locked(cmd, resp, resp_size, timeout_ms,
+                           dial ? a7682e_call_final_result : a7682e_final_result);
 }
 
 static bool answers_within(uint32_t ms)
@@ -639,6 +664,8 @@ esp_err_t a7682e_power_off_locked(void)
     }
     s_modem.powered_on = false;
     s_modem.known_off = true;
+    /* A call ends with the module, and there is no session left to resume. */
+    a7682e_call_forget_locked();
     return ESP_OK;
 }
 
@@ -723,6 +750,11 @@ void a7682e_restore_data_locked(bool was_data)
 bool a7682e_resumed_within_locked(uint32_t ms)
 {
     return s_modem.resumed && xTaskGetTickCount() - s_modem.resumed_at < pdMS_TO_TICKS(ms);
+}
+
+bool a7682e_asleep_locked(void)
+{
+    return s_modem.asleep;
 }
 
 /* =========================================================================
@@ -1077,14 +1109,38 @@ esp_err_t drv_a7682e_http_get(const char *url, char *buf, size_t buf_len)
  * Public API — SMS
  * ====================================================================== */
 
+/* When RI last fell, for a7682e_call_ringing(): 0 until it has. 64 bits do
+ * not store atomically on the S3, so a spinlock guards them. */
+static int64_t      s_ri_fell_us;
+static portMUX_TYPE s_ri_lock = portMUX_INITIALIZER_UNLOCKED;
+
 /* The module pulls RI low for 120 ms when an SMS arrives, whatever its UART
  * is doing, and for seconds at a time while a call rings (A76XX Series Sleep
- * Mode Application Note V1.03, 3.2). The pin is an input with a pull-up:
+ * Mode Application Note V1.03, 3.2): until the call is answered or given up
+ * (A7682E Hardware Design V1.05, 3.3.1). The pin is an input with a pull-up:
  * it floats while the module's level shifter is off. */
 static void IRAM_ATTR ri_isr(void *arg)
 {
     (void)arg;
+    int64_t now = esp_timer_get_time();
+    portENTER_CRITICAL_ISR(&s_ri_lock);
+    s_ri_fell_us = now;
+    portEXIT_CRITICAL_ISR(&s_ri_lock);
     atomic_store(&s_modem.sms_ring, true);
+}
+
+int a7682e_ri_pin(void)
+{
+    return (int)s_modem.cfg.pin_ri;
+}
+
+bool a7682e_ri_fell_at(int64_t *us)
+{
+    taskENTER_CRITICAL(&s_ri_lock);
+    int64_t at = s_ri_fell_us;
+    taskEXIT_CRITICAL(&s_ri_lock);
+    *us = at;
+    return at != 0;
 }
 
 static void ri_setup(void)
