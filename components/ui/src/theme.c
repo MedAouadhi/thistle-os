@@ -252,6 +252,35 @@ esp_err_t theme_apply(lv_display_t *disp)
     return ESP_OK;
 }
 
+/* LVGL moves a table cell's bottom border a pixel down, onto the row below,
+ * whose background then covers it: alone, it shows only under the last row.
+ * A row's top border is drawn after the row above, so each row has both, and
+ * the line between two rows is the lower one's top. */
+static void table_rule_draw_cb(lv_event_t *e)
+{
+    lv_draw_task_t *task = lv_event_get_draw_task(e);
+    if (lv_draw_task_get_type(task) != LV_DRAW_TASK_TYPE_BORDER) return;
+    lv_draw_border_dsc_t *border = lv_draw_task_get_border_dsc(task);
+    if (border->base.part != LV_PART_ITEMS) return;
+
+    lv_area_t row, table;
+    lv_draw_task_get_area(task, &row);
+    lv_obj_get_coords(lv_event_get_current_target(e), &table);
+    if (row.y1 <= table.y1) {
+        border->side = (lv_border_side_t)(border->side & ~LV_BORDER_SIDE_TOP);
+    }
+}
+
+void theme_rule_table_rows(lv_obj_t *table)
+{
+    lv_obj_set_style_border_side(table, LV_BORDER_SIDE_TOP | LV_BORDER_SIDE_BOTTOM,
+                                 LV_PART_ITEMS);
+    lv_obj_set_style_border_color(table, s_current_theme.text_secondary, LV_PART_ITEMS);
+    lv_obj_set_style_border_width(table, 1, LV_PART_ITEMS);
+    lv_obj_add_flag(table, LV_OBJ_FLAG_SEND_DRAW_TASK_EVENTS);
+    lv_obj_add_event_cb(table, table_rule_draw_cb, LV_EVENT_DRAW_TASK_ADDED, NULL);
+}
+
 int theme_list_available(char names[][32], int max_count)
 {
     if (!names || max_count <= 0) return 0;

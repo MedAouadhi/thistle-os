@@ -923,9 +923,7 @@ static lv_obj_t *create_list_screen(const char *title, lv_event_cb_t title_click
     lv_obj_set_style_text_line_space(table, LINE_SPACE, LV_PART_ITEMS);
     lv_obj_set_style_bg_color(table, clr->surface, LV_PART_ITEMS);
     lv_obj_set_style_bg_opa(table, LV_OPA_COVER, LV_PART_ITEMS);
-    lv_obj_set_style_border_side(table, LV_BORDER_SIDE_BOTTOM, LV_PART_ITEMS);
-    lv_obj_set_style_border_color(table, clr->text_secondary, LV_PART_ITEMS);
-    lv_obj_set_style_border_width(table, 1, LV_PART_ITEMS);
+    theme_rule_table_rows(table);
     lv_obj_set_style_pad_left(table, CELL_PAD_W, LV_PART_ITEMS);
     lv_obj_set_style_pad_right(table, CELL_PAD_W, LV_PART_ITEMS);
     lv_obj_set_style_pad_top(table, 4, LV_PART_ITEMS);

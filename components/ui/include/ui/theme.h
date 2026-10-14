@@ -34,3 +34,9 @@ int theme_list_available(char names[][32], int max_count);
 
 /* Get the basename of the currently active theme (e.g. "Default" or "dark.json") */
 const char *theme_get_current_name(void);
+
+/* Rules a 1 px line, in text_secondary, above and below each row of a list
+ * made with lv_table, as the lists made of row objects have one below each
+ * row. The row at the table's top edge has none above it: the title bar over
+ * a list draws its own. */
+void theme_rule_table_rows(lv_obj_t *table);
