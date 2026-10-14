@@ -81,7 +81,29 @@ pub struct HalNetDriver {
     pub get_cell_info: Option<unsafe extern "C" fn(*mut CCellInfo) -> i32>,
     pub cancel: Option<unsafe extern "C" fn()>,
     pub sleep: Option<unsafe extern "C" fn(enter: bool) -> i32>,
+    pub listen: Option<unsafe extern "C" fn(timeout_ms: u32) -> i32>,
+    pub sms_send: Option<unsafe extern "C" fn(number: *const c_char, text: *const c_char) -> i32>,
+    pub sms_due: Option<unsafe extern "C" fn() -> bool>,
+    pub sms_fetch: Option<
+        unsafe extern "C" fn(cb: Option<SmsReceiver>, user_data: *mut c_void, kept: *mut i32) -> i32,
+    >,
 }
+
+/// hal_sms_t: an SMS a cellular transport received.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct CHalSms {
+    pub sender: [u8; 33],
+    /// The service centre's time stamp, "yy/MM/dd,hh:mm:ss+zz".
+    pub sent_at: [u8; 24],
+    pub text: [u8; 481],
+    pub concat_ref: u16,
+    pub part: u8,
+    pub parts: u8,
+}
+
+/// hal_sms_rx_cb_t: true once the message is kept.
+pub type SmsReceiver = unsafe extern "C" fn(sms: *const CHalSms, user_data: *mut c_void) -> bool;
 
 // SAFETY: All fields are immutable once registered.
 unsafe impl Send for HalNetDriver {}
@@ -137,6 +159,10 @@ static WIFI_NET_DRIVER: HalNetDriver = HalNetDriver {
     get_cell_info: None,
     cancel: None,
     sleep: None,
+    listen: None,
+    sms_send: None,
+    sms_due: None,
+    sms_fetch: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -621,6 +647,10 @@ mod tests {
         get_cell_info: None,
         cancel: None,
         sleep: None,
+        listen: None,
+        sms_send: None,
+        sms_due: None,
+        sms_fetch: None,
     };
 
     static MOCK_CONNECTED: HalNetDriver = HalNetDriver {
@@ -636,6 +666,10 @@ mod tests {
         get_cell_info: None,
         cancel: None,
         sleep: None,
+        listen: None,
+        sms_send: None,
+        sms_due: None,
+        sms_fetch: None,
     };
 
     static MOCK_VPN_CONNECTED: HalNetDriver = HalNetDriver {
@@ -651,6 +685,10 @@ mod tests {
         get_cell_info: None,
         cancel: None,
         sleep: None,
+        listen: None,
+        sms_send: None,
+        sms_due: None,
+        sms_fetch: None,
     };
 
     // -----------------------------------------------------------------------
@@ -878,6 +916,10 @@ mod tests {
         get_cell_info: None,
         cancel: None,
         sleep: None,
+        listen: None,
+        sms_send: None,
+        sms_due: None,
+        sms_fetch: None,
     };
 
     static MOCK_WIFI_CONNECTED: HalNetDriver = HalNetDriver {
@@ -893,6 +935,10 @@ mod tests {
         get_cell_info: None,
         cancel: None,
         sleep: None,
+        listen: None,
+        sms_send: None,
+        sms_due: None,
+        sms_fetch: None,
     };
 
     static MOCK_WIFI_DISCONNECTED: HalNetDriver = HalNetDriver {
@@ -908,6 +954,10 @@ mod tests {
         get_cell_info: None,
         cancel: None,
         sleep: None,
+        listen: None,
+        sms_send: None,
+        sms_due: None,
+        sms_fetch: None,
     };
 
     /// The modem registers while the drivers load, before WiFi does; WiFi

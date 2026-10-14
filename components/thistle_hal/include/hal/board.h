@@ -11,6 +11,7 @@
 #include "hal/storage.h"
 #include "hal/crypto.h"
 #include "hal/rtc.h"
+#include "hal/haptic.h"
 
 #define HAL_MAX_INPUT_DRIVERS  4
 #define HAL_MAX_STORAGE_DRIVERS 2
@@ -32,10 +33,6 @@ typedef struct {
     const void                 *power_config;
     const hal_imu_driver_t     *imu;
     const void                 *imu_config;
-    /* TODO: haptics have no HAL interface. The T-Deck Max carries a DRV2605
-     * (0x5A, enable on XL9555 P05) and the T-Deck Pro V1.1 the same part, but
-     * adding an interface changes this struct, the syscall table and every
-     * consumer — a kernel ABI change that needs its own design. */
     const hal_storage_driver_t *storage[HAL_MAX_STORAGE_DRIVERS];
     const void                 *storage_configs[HAL_MAX_STORAGE_DRIVERS];
     uint8_t                     storage_count;
@@ -47,6 +44,10 @@ typedef struct {
     const hal_crypto_driver_t  *crypto;       /* Hardware crypto accelerator (NULL = software) */
     const hal_rtc_driver_t     *rtc;          /* Real-time clock (NULL = not present) */
     const char                 *board_name;
+    /* Added after everything else, so that drivers and apps built before it
+     * find every field above where they expect it (ADR-0005). */
+    const hal_haptic_driver_t  *haptic;       /* Vibration motor (NULL = not present) */
+    const void                 *haptic_config;
 } hal_registry_t;
 
 /* Global HAL registry access. The returned immutable generation remains valid
@@ -65,6 +66,7 @@ esp_err_t hal_imu_register(const hal_imu_driver_t *driver, const void *config);
 esp_err_t hal_storage_register(const hal_storage_driver_t *driver, const void *config);
 esp_err_t hal_crypto_register(const hal_crypto_driver_t *driver);
 esp_err_t hal_rtc_register(const hal_rtc_driver_t *driver);
+esp_err_t hal_haptic_register(const hal_haptic_driver_t *driver, const void *config);
 esp_err_t hal_set_board_name(const char *name);
 
 /* The last driver start failure, or ESP_OK if every registered driver started.

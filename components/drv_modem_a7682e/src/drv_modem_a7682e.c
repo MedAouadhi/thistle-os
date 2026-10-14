@@ -11,6 +11,7 @@
 #include "a7682e_lifecycle.h"
 #include "a7682e_internal.h"
 #include "a7682e_parse.h"
+#include "a7682e_sms.h"
 
 #include "thistle_expander.h"
 
@@ -21,6 +22,8 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "driver/gpio.h"
+#include "esp_attr.h"
+#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -42,7 +45,21 @@ static const char *TAG = "a7682e";
 #define A7682E_OFF_ON_MS          2000  ///< Powered down to the next start: ≥2 s (Toff-on)
 #define A7682E_ESCAPE_GUARD_MS    1100  ///< Silence around "+++": 1 s
 #define A7682E_PPP_TIMEOUT_S      30    ///< Seconds to wait for IP after PPP start
-#define A7682E_SMS_POLL_MS        3000
+/* How often a modem with no data session is asked for SMS: often without an
+ * RI line, rarely with one, in case its pulse was missed. */
+#define A7682E_SMS_POLL_MS        15000
+#define A7682E_SMS_RI_POLL_MS     120000
+/* How often a data session is interrupted to look for SMS when no RI line
+ * says one came: each look costs the session a few seconds. */
+#define A7682E_SMS_DATA_POLL_MS   (10 * 60 * 1000)
+/* RI also rings, for seconds at a time, for a call. Within this long of the
+ * last look it does not interrupt a data session again. */
+#define A7682E_SMS_RING_QUIET_MS  30000
+/* The most stored messages read in one fetch; the rest wait for the next. */
+#define A7682E_SMS_FETCH_MAX      32
+/* An AT+CMGR answer under AT+CSCS="UCS2": 160 characters as 640 hex digits,
+ * and the header. */
+#define A7682E_SMS_BUF            1024
 
 /* Driver state ------------------------------------------------------------ */
 static struct {
@@ -57,11 +74,9 @@ static struct {
     bool             resumed;     ///< resumed_at holds when data mode was last restored
     TickType_t       resumed_at;
     uint32_t         dte_baud;    ///< The rate the SoC's UART runs at
-    a7682e_sms_cb_t  sms_cb;
-    void            *sms_cb_data;
-    bool             sms_initialized;
-    TaskHandle_t     sms_poll_task;
-    uint32_t         sms_poll_gen; ///< A poll task whose generation differs exits
+    atomic_bool      sms_ring;    ///< RI fell since the last fetch
+    bool             sms_fetched; ///< Fetched since the module last powered on
+    TickType_t       sms_fetched_at;
     bool             got_ip_handler_registered;
     bool             lost_ip_handler_registered;
     bool             ppp_status_handler_registered;
@@ -69,10 +84,9 @@ static struct {
 
 static portMUX_TYPE s_ip_lock = portMUX_INITIALIZER_UNLOCKED;
 
-static void sms_poll_task(void *arg);
-static void sms_poll_start_if_needed(void);
-static void sms_poll_stop(void);
 static esp_err_t sms_configure_locked(void);
+static void ri_setup(void);
+static void ri_arm(void);
 static void destroy_transport_locked(void);
 
 /* =========================================================================
@@ -247,6 +261,9 @@ static esp_err_t create_transport_locked(void)
     dte_config.uart_config.rx_io_num  = s_modem.cfg.pin_rx;
     dte_config.uart_config.port_num   = s_modem.cfg.uart_num;
     dte_config.uart_config.baud_rate  = (int)s_modem.cfg.baud_rate;
+    /* An answer longer than this buffer is given up on: an SMS read under
+     * UCS2 runs to some 850 bytes, against the 512 default. */
+    dte_config.dte_buffer_size        = A7682E_SMS_BUF;
 
     /* PPP's default route priority (20) is below WiFi station's (100), so
      * esp_netif keeps WiFi the default route whenever both are up. */
@@ -301,8 +318,9 @@ esp_modem_dce_t *a7682e_dce_locked(void)
 }
 
 /* The answer to the exchange in progress. esp_modem_command() takes a plain
- * function, and exchanges are serialised by the driver lock. */
-static char s_exchange[A7682E_EXCHANGE_BUF];
+ * function, and exchanges are serialised by the driver lock. Sized for the
+ * longest answer, an SMS read under UCS2; only tasks touch it. */
+static EXT_RAM_BSS_ATTR char s_exchange[A7682E_SMS_BUF];
 
 static esp_err_t exchange_got_line(uint8_t *data, size_t len)
 {
@@ -494,10 +512,11 @@ esp_err_t a7682e_power_on_locked(void)
     s_modem.known_off = false;
     ESP_LOGI(TAG, "power-on: modem answering");
     /* The module forgets the text mode and storage SMS reading relies on. */
-    if (s_modem.sms_initialized && sms_configure_locked() != ESP_OK) {
-        ESP_LOGW(TAG, "power-on: SMS settings not restored");
+    if (sms_configure_locked() != ESP_OK) {
+        ESP_LOGW(TAG, "power-on: SMS settings not applied");
     }
-    sms_poll_start_if_needed();
+    s_modem.sms_fetched = false;
+    ri_arm();
     return ESP_OK;
 }
 
@@ -505,7 +524,6 @@ esp_err_t a7682e_power_off_locked(void)
 {
     /* A sleeping module answers nothing until DTR wakes it. */
     a7682e_sleep_locked(false);
-    sms_poll_stop();
 
     if (!s_modem.dce && s_modem.known_off) {
         /* Shut down here already; only the supply could have changed. */
@@ -579,12 +597,10 @@ esp_err_t a7682e_sleep_locked(bool enter)
         if (!s_modem.powered_on || !s_modem.dce) {
             return ESP_ERR_INVALID_STATE;
         }
-        sms_poll_stop();
         a7682e_enter_command_locked();
         char resp[A7682E_AT_BUF];
         if (esp_modem_at(s_modem.dce, "AT+CSCLK=1", resp, 2000) != ESP_OK) {
             ESP_LOGW(TAG, "sleep: AT+CSCLK=1 refused; the module stays awake");
-            sms_poll_start_if_needed();
             return ESP_FAIL;
         }
         gpio_set_level(dtr, 1);
@@ -608,7 +624,6 @@ esp_err_t a7682e_sleep_locked(bool enter)
     } else {
         ESP_LOGW(TAG, "sleep: module not answering after DTR went low");
     }
-    sms_poll_start_if_needed();
     return alive ? ESP_OK : ESP_ERR_TIMEOUT;
 }
 
@@ -690,16 +705,17 @@ esp_err_t drv_a7682e_init(const a7682e_config_t *config)
         gpio_set_level(s_modem.cfg.pin_dtr, 0);
     }
     s_modem.asleep = false;
+    ri_setup();
 
     atomic_store(&s_modem.ppp_connected, false);
     ESP_LOGI(TAG, "driver initialised (esp_modem backend, UART%d, %lu baud then %lu, "
-             "TX=%d RX=%d PWRKEY=%d/exp%d:%d RST=%d DTR=%d supply=exp%d:%d)",
+             "TX=%d RX=%d PWRKEY=%d/exp%d:%d RST=%d DTR=%d RI=%d supply=exp%d:%d)",
              (int)s_modem.cfg.uart_num, (unsigned long)s_modem.cfg.baud_rate,
              (unsigned long)s_modem.cfg.fast_baud_rate,
              (int)s_modem.cfg.pin_tx, (int)s_modem.cfg.pin_rx,
              (int)s_modem.cfg.pin_pwrkey, s_modem.cfg.pwrkey_expander,
              s_modem.cfg.pwrkey_expander_pin, (int)s_modem.cfg.pin_reset,
-             (int)s_modem.cfg.pin_dtr, s_modem.cfg.power_expander,
+             (int)s_modem.cfg.pin_dtr, (int)s_modem.cfg.pin_ri, s_modem.cfg.power_expander,
              s_modem.cfg.power_expander_pin);
     a7682e_lifecycle_finish_init(true);
     return ESP_OK;
@@ -724,9 +740,9 @@ void drv_a7682e_deinit(void)
         gpio_reset_pin(s_modem.cfg.pin_dtr);
     }
 
-    s_modem.sms_initialized = false;
-    s_modem.sms_cb = NULL;
-    s_modem.sms_cb_data = NULL;
+    if (s_modem.cfg.pin_ri >= 0) {
+        gpio_isr_handler_remove(s_modem.cfg.pin_ri);
+    }
     ESP_LOGI(TAG, "driver de-initialised");
     a7682e_lifecycle_finish_stop();
 }
@@ -744,84 +760,6 @@ esp_err_t drv_a7682e_power(bool on)
     esp_err_t result = on ? a7682e_power_on_locked() : a7682e_power_off_locked();
     a7682e_lifecycle_finish_operation();
     return result;
-}
-
-/* While the DCE carries data the module answers no commands, and leaving
- * data mode to poll would drop the session every few seconds; messages wait
- * until the session ends. */
-static void sms_poll_task(void *arg)
-{
-    const uint32_t gen = (uint32_t)(uintptr_t)arg;
-
-    while (true) {
-        if (!a7682e_lifecycle_begin_operation()) {
-            /* The driver is stopped. */
-            vTaskDelete(NULL);
-        }
-        /* Stopped by sms_poll_stop(), which never deletes this task itself:
-         * it may be inside the callback, holding the heap or LVGL. */
-        if (gen != s_modem.sms_poll_gen) {
-            a7682e_lifecycle_finish_operation();
-            vTaskDelete(NULL);
-        }
-        if (!s_modem.sms_cb || !s_modem.sms_initialized || !s_modem.powered_on || !s_modem.dce
-            || s_modem.asleep || esp_modem_get_mode(s_modem.dce) == ESP_MODEM_MODE_DATA) {
-            a7682e_lifecycle_finish_operation();
-            vTaskDelay(pdMS_TO_TICKS(A7682E_SMS_POLL_MS));
-            continue;
-        }
-
-        int unread_indices[16];
-        size_t unread_count = 0;
-        a7682e_sms_cb_t callback = s_modem.sms_cb;
-        void *callback_data = s_modem.sms_cb_data;
-        char resp[A7682E_EXCHANGE_BUF] = {0};
-        if (a7682e_exchange_locked("AT+CMGL=\"REC UNREAD\"\r", resp, sizeof(resp),
-                                   5000) == ESP_OK) {
-            const char *p = resp;
-            while ((p = strstr(p, "+CMGL:")) != NULL) {
-                int index = 0;
-                if (sscanf(p, "+CMGL: %d", &index) == 1 && index > 0
-                    && unread_count < sizeof(unread_indices) / sizeof(unread_indices[0])) {
-                    unread_indices[unread_count++] = index;
-                }
-                p += 6;
-            }
-        }
-
-        a7682e_lifecycle_finish_operation();
-        for (size_t i = 0; i < unread_count; ++i) {
-            callback(unread_indices[i], callback_data);
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(A7682E_SMS_POLL_MS));
-    }
-}
-
-static void sms_poll_start_if_needed(void)
-{
-    if (!s_modem.sms_cb || !s_modem.sms_initialized || !s_modem.powered_on || !s_modem.dce
-        || s_modem.asleep) {
-        return;
-    }
-    if (s_modem.sms_poll_task) {
-        return;
-    }
-    if (xTaskCreate(sms_poll_task, "a7682e_sms", 4096,
-                    (void *)(uintptr_t)s_modem.sms_poll_gen, 4,
-                    &s_modem.sms_poll_task) != pdPASS) {
-        s_modem.sms_poll_task = NULL;
-        ESP_LOGW(TAG, "sms poll task create failed");
-    }
-}
-
-/* The task sees the new generation at its next turn and ends itself. */
-static void sms_poll_stop(void)
-{
-    if (s_modem.sms_poll_task) {
-        s_modem.sms_poll_gen++;
-        s_modem.sms_poll_task = NULL;
-    }
 }
 
 /* =========================================================================
@@ -1075,32 +1013,59 @@ esp_err_t drv_a7682e_http_get(const char *url, char *buf, size_t buf_len)
  * Public API — SMS
  * ====================================================================== */
 
-esp_err_t drv_a7682e_sms_init(void)
+/* The module pulls RI low for 120 ms when an SMS arrives, whatever its UART
+ * is doing, and for seconds at a time while a call rings (A76XX Series Sleep
+ * Mode Application Note V1.03, 3.2). The pin is an input with a pull-up:
+ * it floats while the module's level shifter is off. */
+static void IRAM_ATTR ri_isr(void *arg)
 {
-    if (!a7682e_lifecycle_begin_operation()) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    if (!s_modem.dce || !s_modem.powered_on) {
-        ESP_LOGE(TAG, "sms_init: modem not powered on");
-        a7682e_lifecycle_finish_operation();
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    bool was_data = a7682e_enter_command_locked();
-
-    esp_err_t ret = sms_configure_locked();
-    if (ret == ESP_OK) {
-        s_modem.sms_initialized = true;
-        ESP_LOGI(TAG, "sms_init: SMS subsystem ready");
-        sms_poll_start_if_needed();
-    }
-
-    a7682e_restore_data_locked(was_data);
-    a7682e_lifecycle_finish_operation();
-    return ret;
+    (void)arg;
+    atomic_store(&s_modem.sms_ring, true);
 }
 
-/* Text mode, messages in the module's own storage, and +CMTI notices. */
+static void ri_setup(void)
+{
+    gpio_num_t ri = s_modem.cfg.pin_ri;
+    if (ri < 0) {
+        return;
+    }
+    gpio_config_t io = {
+        .pin_bit_mask = 1ULL << ri,
+        .mode         = GPIO_MODE_INPUT,
+        .pull_up_en   = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type    = GPIO_INTR_NEGEDGE,
+    };
+    esp_err_t ret = gpio_config(&io);
+    if (ret == ESP_OK) {
+        ret = gpio_install_isr_service(0);
+        if (ret == ESP_ERR_INVALID_STATE) {
+            ret = ESP_OK;  // installed by someone else first
+        }
+    }
+    if (ret == ESP_OK) {
+        ret = gpio_isr_handler_add(ri, ri_isr, NULL);
+    }
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "RI on GPIO%d not watched: %s", (int)ri, esp_err_to_name(ret));
+        s_modem.cfg.pin_ri = GPIO_NUM_NC;
+    }
+}
+
+/* The power manager configures the same pin as a wake source, with its
+ * interrupt off, and may do so after the module powered on: each power-on,
+ * and each look at whether a fetch is due, turns it back on. */
+static void ri_arm(void)
+{
+    if (s_modem.cfg.pin_ri >= 0) {
+        gpio_set_intr_type(s_modem.cfg.pin_ri, GPIO_INTR_NEGEDGE);
+        gpio_intr_enable(s_modem.cfg.pin_ri);
+    }
+}
+
+/* Text mode with every header field (AT+CSDH=1 gives the first octet and
+ * the coding scheme the text is read by), messages kept in the module's own
+ * storage, and +CMTI notices, which are what pulse RI. */
 static esp_err_t sms_configure_locked(void)
 {
     char resp[A7682E_AT_BUF] = {0};
@@ -1110,6 +1075,10 @@ static esp_err_t sms_configure_locked(void)
         ESP_LOGE(TAG, "sms: AT+CMGF=1 failed: %s", esp_err_to_name(ret));
         return ret;
     }
+    ret = esp_modem_at(s_modem.dce, "AT+CSDH=1", resp, 2000);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "sms: AT+CSDH=1 failed: %s", esp_err_to_name(ret));
+    }
     ret = esp_modem_at(s_modem.dce, "AT+CPMS=\"ME\",\"ME\",\"ME\"", resp, 2000);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "sms: AT+CPMS failed: %s", esp_err_to_name(ret));
@@ -1118,6 +1087,146 @@ static esp_err_t sms_configure_locked(void)
     ret = esp_modem_at(s_modem.dce, "AT+CNMI=2,1,0,0,0", resp, 2000);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "sms: AT+CNMI failed: %s", esp_err_to_name(ret));
+    }
+    return ret;
+}
+
+bool drv_a7682e_sms_due(void)
+{
+    if (!a7682e_lifecycle_begin_operation()) {
+        return false;
+    }
+    bool due = false;
+    if (s_modem.powered_on && s_modem.dce && !s_modem.asleep) {
+        ri_arm();
+        bool data = esp_modem_get_mode(s_modem.dce) == ESP_MODEM_MODE_DATA;
+        bool ring = atomic_load(&s_modem.sms_ring);
+        bool has_ri = s_modem.cfg.pin_ri >= 0;
+        TickType_t since = xTaskGetTickCount() - s_modem.sms_fetched_at;
+        if (!s_modem.sms_fetched) {
+            /* What came while the module was off or the SoC was not looking.
+             * Not in a session that just started: it is fetched on the next
+             * ring, or the next session's start. */
+            due = !data;
+        } else if (data) {
+            due = has_ri
+                ? ring && since >= pdMS_TO_TICKS(A7682E_SMS_RING_QUIET_MS)
+                : since >= pdMS_TO_TICKS(A7682E_SMS_DATA_POLL_MS);
+        } else {
+            due = ring || since >= pdMS_TO_TICKS(has_ri ? A7682E_SMS_RI_POLL_MS
+                                                        : A7682E_SMS_POLL_MS);
+        }
+    }
+    a7682e_lifecycle_finish_operation();
+    return due;
+}
+
+/* Read every message the storage holds, hand each to cb, and delete those cb
+ * kept. AT+CMGL would list them in one answer, but marks each it lists read,
+ * so one that did not fit the answer would never be listed again; AT+CMGD=?
+ * names where they are, and each is read on its own. */
+static esp_err_t sms_fetch_locked(hal_sms_rx_cb_t cb, void *user_data, int *kept)
+{
+    struct scratch {
+        char      resp[A7682E_SMS_BUF];
+        int       index[A7682E_SMS_FETCH_MAX];
+        hal_sms_t sms;
+    };
+    struct scratch *w = heap_caps_malloc(sizeof(*w), MALLOC_CAP_SPIRAM);
+    if (!w) {
+        w = malloc(sizeof(*w));
+    }
+    if (!w) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    esp_err_t ret = a7682e_exchange_locked("AT+CPMS?\r", w->resp, sizeof(w->resp), 5000);
+    int used = ret == ESP_OK ? a7682e_parse_storage_used(w->resp) : -1;
+    if (used <= 0) {
+        free(w);
+        return used == 0 ? ESP_OK : ESP_ERR_INVALID_RESPONSE;
+    }
+
+    /* Under UCS2 the sender and the text of a 7-bit message come as UCS2 in
+     * hex, so an a-umlaut or a euro sign arrives as itself, and the line
+     * breaks inside a message cannot be taken for the end of the answer. */
+    bool ucs2 = a7682e_exchange_locked("AT+CSCS=\"UCS2\"\r", NULL, 0, 2000) == ESP_OK;
+
+    ret = a7682e_exchange_locked("AT+CMGD=?\r", w->resp, sizeof(w->resp), 5000);
+    int count = ret == ESP_OK
+        ? a7682e_parse_index_list(w->resp, w->index, A7682E_SMS_FETCH_MAX) : -1;
+    if (count < 0) {
+        ESP_LOGW(TAG, "sms: %d stored, but AT+CMGD=? did not say where", used);
+        ret = ESP_ERR_INVALID_RESPONSE;
+    } else {
+        ret = ESP_OK;
+    }
+
+    int found = 0;
+    for (int i = 0; i < count && found < used; i++) {
+        char cmd[24];
+        snprintf(cmd, sizeof(cmd), "AT+CMGR=%d\r", w->index[i]);
+        if (a7682e_exchange_locked(cmd, w->resp, sizeof(w->resp), 5000) != ESP_OK) {
+            continue;  // an empty slot, if AT+CMGD=? lists every one
+        }
+        esp_err_t got = a7682e_parse_cmgr(w->resp, ucs2, &w->sms);
+        if (got == ESP_ERR_INVALID_RESPONSE) {
+            ESP_LOGW(TAG, "sms: message %d unreadable; left in storage", w->index[i]);
+            continue;
+        }
+        found++;
+        /* A status report, or a message stored to be sent: nothing here asks
+         * for either, and left, it would be read at every fetch. */
+        bool drop = got == ESP_ERR_NOT_SUPPORTED;
+        if (!drop && cb(&w->sms, user_data)) {
+            (*kept)++;
+            drop = true;
+        }
+        if (drop) {
+            snprintf(cmd, sizeof(cmd), "AT+CMGD=%d\r", w->index[i]);
+            if (a7682e_exchange_locked(cmd, NULL, 0, 5000) != ESP_OK) {
+                ESP_LOGW(TAG, "sms: could not delete message %d", w->index[i]);
+            }
+        }
+    }
+
+    /* AT+CMGS takes the number in the character set in force. */
+    if (ucs2) {
+        a7682e_exchange_locked("AT+CSCS=\"IRA\"\r", NULL, 0, 2000);
+    }
+    free(w);
+    return ret;
+}
+
+esp_err_t drv_a7682e_sms_fetch(hal_sms_rx_cb_t cb, void *user_data, int *kept)
+{
+    int none = 0;
+    if (!kept) {
+        kept = &none;
+    }
+    *kept = 0;
+    if (!cb) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!a7682e_lifecycle_begin_operation()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!s_modem.dce || !s_modem.powered_on || s_modem.asleep) {
+        a7682e_lifecycle_finish_operation();
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    /* Cleared before the look, so a message arriving during it rings again. */
+    atomic_store(&s_modem.sms_ring, false);
+    bool was_data = a7682e_enter_command_locked();
+    esp_err_t ret = sms_fetch_locked(cb, user_data, kept);
+    a7682e_restore_data_locked(was_data);
+    s_modem.sms_fetched = true;
+    s_modem.sms_fetched_at = xTaskGetTickCount();
+    a7682e_lifecycle_finish_operation();
+
+    if (*kept > 0) {
+        ESP_LOGI(TAG, "sms: %d received", *kept);
     }
     return ret;
 }
@@ -1147,6 +1256,9 @@ esp_err_t drv_a7682e_send_sms(const char *phone, const char *msg)
                  esp_err_to_name(ret));
         goto restore;
     }
+    /* The number and the text go as they are, which a fetch left in UCS2
+     * would not take. */
+    a7682e_exchange_locked("AT+CSCS=\"IRA\"\r", NULL, 0, 2000);
 
     ESP_LOGI(TAG, "send_sms: sending to %s", phone);
     /* esp_modem_send_sms performs the prompt-aware two-stage exchange: it
@@ -1163,140 +1275,4 @@ restore:
     a7682e_restore_data_locked(was_data);
     a7682e_lifecycle_finish_operation();
     return ret;
-}
-
-esp_err_t drv_a7682e_read_sms(int index, char *sender, size_t sender_len,
-                               char *body, size_t body_len)
-{
-    if (!a7682e_lifecycle_begin_operation()) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    if (!s_modem.dce || !s_modem.powered_on) {
-        ESP_LOGE(TAG, "read_sms: modem not powered on");
-        a7682e_lifecycle_finish_operation();
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    bool was_data = a7682e_enter_command_locked();
-
-    char cmd[32]   = {0};
-    char resp[A7682E_EXCHANGE_BUF] = {0};
-    snprintf(cmd, sizeof(cmd), "AT+CMGR=%d\r", index);
-
-    /* AT+CMGR answers in two lines, header and body. */
-    esp_err_t ret = a7682e_exchange_locked(cmd, resp, sizeof(resp), 5000);
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "read_sms: AT+CMGR=%d failed: %s",
-                 index, esp_err_to_name(ret));
-        ret = ESP_ERR_NOT_FOUND;
-        goto restore;
-    }
-
-    /* Response format (text mode):
-     *   +CMGR: "REC READ","<sender>","","<timestamp>"\r\n
-     *   <message body>\r\n
-     *   \r\nOK
-     */
-    const char *header = strstr(resp, "+CMGR:");
-    if (!header) {
-        ESP_LOGW(TAG, "read_sms: no +CMGR in response: %s", resp);
-        ret = ESP_ERR_NOT_FOUND;
-        goto restore;
-    }
-
-    /* Extract sender: second quoted field on the +CMGR: line */
-    if (sender && sender_len > 0) {
-        const char *q1 = strchr(header, '"');           /* open quote of status */
-        if (q1) {
-            const char *q2 = strchr(q1 + 1, '"');       /* close quote of status */
-            if (q2) {
-                const char *q3 = strchr(q2 + 1, '"');   /* open quote of sender */
-                if (q3) {
-                    const char *q4 = strchr(q3 + 1, '"'); /* close quote of sender */
-                    if (q4) {
-                        size_t len = (size_t)(q4 - q3 - 1);
-                        if (len >= sender_len) {
-                            len = sender_len - 1;
-                        }
-                        memcpy(sender, q3 + 1, len);
-                        sender[len] = '\0';
-                    }
-                }
-            }
-        }
-    }
-
-    /* Extract body: line immediately following the +CMGR: header line */
-    if (body && body_len > 0) {
-        const char *eol = strchr(header, '\n');
-        if (eol) {
-            eol++; /* skip the '\n' */
-            /* Skip a leading '\r' if present */
-            if (*eol == '\r') {
-                eol++;
-            }
-            /* Body ends at the next '\r' or '\n' */
-            const char *end = strpbrk(eol, "\r\n");
-            size_t len = end ? (size_t)(end - eol) : strlen(eol);
-            if (len >= body_len) {
-                len = body_len - 1;
-            }
-            memcpy(body, eol, len);
-            body[len] = '\0';
-        }
-    }
-
-    ESP_LOGD(TAG, "read_sms: index=%d sender='%s'",
-             index, (sender ? sender : "(not requested)"));
-
-restore:
-    a7682e_restore_data_locked(was_data);
-    a7682e_lifecycle_finish_operation();
-    return ret;
-}
-
-esp_err_t drv_a7682e_delete_sms(int index)
-{
-    if (!a7682e_lifecycle_begin_operation()) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    if (!s_modem.dce || !s_modem.powered_on) {
-        ESP_LOGE(TAG, "delete_sms: modem not powered on");
-        a7682e_lifecycle_finish_operation();
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    bool was_data = a7682e_enter_command_locked();
-
-    char cmd[32]  = {0};
-    char resp[A7682E_AT_BUF] = {0};
-    snprintf(cmd, sizeof(cmd), "AT+CMGD=%d", index);
-
-    esp_err_t ret = esp_modem_at(s_modem.dce, cmd, resp, 5000);
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "delete_sms: AT+CMGD=%d failed: %s",
-                 index, esp_err_to_name(ret));
-    } else {
-        ESP_LOGD(TAG, "delete_sms: index %d deleted", index);
-    }
-    a7682e_restore_data_locked(was_data);
-    a7682e_lifecycle_finish_operation();
-    return ret;
-}
-
-void drv_a7682e_register_sms_cb(a7682e_sms_cb_t cb, void *user_data)
-{
-    if (!a7682e_lifecycle_begin_operation()) {
-        return;
-    }
-    s_modem.sms_cb      = cb;
-    s_modem.sms_cb_data = user_data;
-    if (cb) {
-        sms_poll_start_if_needed();
-    } else {
-        sms_poll_stop();
-    }
-    ESP_LOGD(TAG, "register_sms_cb: callback %s",
-             cb ? "registered" : "unregistered");
-    a7682e_lifecycle_finish_operation();
 }

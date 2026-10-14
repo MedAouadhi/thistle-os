@@ -95,6 +95,7 @@ set(WASM_SRCS
     ${SIM_DIR}/drivers/sim_power.c
     ${SIM_DIR}/drivers/sim_gps.c
     ${SIM_DIR}/drivers/sim_imu.c
+    ${SIM_DIR}/drivers/sim_haptic.c
     ${SIM_DIR}/drivers/sim_rtc.c
     ${SIM_DIR}/drivers/sim_audio.c
     ${SIM_DIR}/drivers/sim_radio.c

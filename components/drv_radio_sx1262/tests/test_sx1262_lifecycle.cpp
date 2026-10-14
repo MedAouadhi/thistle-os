@@ -148,9 +148,69 @@ static void a_listener_that_sends_is_still_listening_afterwards()
     sx1262_deinit();
 }
 
+/* The receive task and a sender run on either core, and RadioLib has no lock:
+ * a send that starts while a packet is read interleaves its commands with the
+ * read's, and the radio refuses the mixture (RADIOLIB_ERR_SPI_CMD_INVALID).
+ * The send waits for the read. */
+static void a_send_waits_for_a_packet_being_read()
+{
+    sx1262_test::reset();
+    auto cfg = config();
+    assert(sx1262_init(&cfg) == ESP_OK);
+    assert(sx1262_start_receive(nullptr, nullptr) == ESP_OK);
+
+    sx1262_test::block_read = true;
+    dio1_isr();
+    {
+        std::unique_lock<std::mutex> lock(sx1262_test::read_mutex);
+        sx1262_test::read_cv.wait(lock, [] { return sx1262_test::read_entered; });
+    }
+
+    uint8_t payload[] = {1, 2, 3};
+    std::thread sender([&payload] { assert(sx1262_send(payload, sizeof(payload)) == ESP_OK); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    assert(sx1262_test::transmit_calls == 0);
+
+    {
+        std::lock_guard<std::mutex> lock(sx1262_test::read_mutex);
+        sx1262_test::release_read = true;
+    }
+    sx1262_test::read_cv.notify_all();
+    sender.join();
+    assert(sx1262_test::transmit_calls == 1);
+    assert(!sx1262_test::overlapped);
+    sx1262_deinit();
+}
+
+/* A packet's wake-up can reach the receive task after a send has taken the
+ * radio, and by the time the task has it the buffer holds what was sent. The
+ * task reads only a packet the radio says it received. */
+static void a_wake_up_a_send_overtook_reads_nothing()
+{
+    sx1262_test::reset();
+    auto cfg = config();
+    assert(sx1262_init(&cfg) == ESP_OK);
+    assert(sx1262_start_receive(nullptr, nullptr) == ESP_OK);
+    const int armed = sx1262_test::rearm_calls;
+
+    sx1262_test::irq_flags = 0;
+    dio1_isr();
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    assert(sx1262_test::read_calls == 0);
+    assert(sx1262_test::rearm_calls == armed);
+
+    sx1262_test::irq_flags = RADIOLIB_SX126X_IRQ_RX_DONE;
+    dio1_isr();
+    await_read(1);
+    sx1262_deinit();
+}
+
 int main()
 {
     auto cfg = config();
+
+    a_send_waits_for_a_packet_being_read();
+    a_wake_up_a_send_overtook_reads_nothing();
 
     band_comes_from_the_board_that_declares_it();
     the_radio_uses_the_preamble_meshcore_nodes_use();

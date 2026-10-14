@@ -18,6 +18,7 @@ use std::sync::{Mutex, MutexGuard};
 const ESP_OK: i32 = 0;
 const ESP_ERR_NO_MEM: i32 = 0x101;
 const ESP_ERR_INVALID_ARG: i32 = 0x102;
+const ESP_ERR_NOT_SUPPORTED: i32 = 0x106;
 
 // ── Registry capacity constants (must match board.h) ─────────────────
 
@@ -393,6 +394,23 @@ pub struct HalRtcDriver {
 unsafe impl Send for HalRtcDriver {}
 unsafe impl Sync for HalRtcDriver {}
 
+// ── Haptic driver (hal/haptic.h) ─────────────────────────────────────────
+
+/// hal_haptic_effect_t
+pub const HAL_HAPTIC_CLICK: u32 = 0;
+pub const HAL_HAPTIC_MESSAGE: u32 = 1;
+
+#[repr(C)]
+pub struct HalHapticDriver {
+    pub init: Option<unsafe extern "C" fn(config: *const c_void) -> i32>,
+    pub deinit: Option<unsafe extern "C" fn()>,
+    pub play: Option<unsafe extern "C" fn(effect: u32) -> i32>,
+    pub name: *const c_char,
+}
+
+unsafe impl Send for HalHapticDriver {}
+unsafe impl Sync for HalHapticDriver {}
+
 // ── HAL Registry struct (hal/board.h: hal_registry_t) ─────────────────
 
 #[repr(C)]
@@ -423,6 +441,10 @@ pub struct HalRegistry {
     pub crypto: *const HalCryptoDriver,
     pub rtc: *const HalRtcDriver,
     pub board_name: *const c_char,
+    /// After everything else, so that the fields above keep their offsets for
+    /// drivers and apps built before it (ADR-0005).
+    pub haptic: *const HalHapticDriver,
+    pub haptic_config: *const c_void,
 }
 
 unsafe impl Send for HalRegistry {}
@@ -456,6 +478,8 @@ impl HalRegistry {
             crypto: std::ptr::null(),
             rtc: std::ptr::null(),
             board_name: std::ptr::null(),
+            haptic: std::ptr::null(),
+            haptic_config: std::ptr::null(),
         }
     }
 }
@@ -779,6 +803,39 @@ pub unsafe extern "C" fn hal_imu_register(
     ESP_OK
 }
 
+/// Register the vibration motor's driver.
+///
+/// # Safety
+/// `driver` must be null or a valid pointer.
+#[no_mangle]
+pub unsafe extern "C" fn hal_haptic_register(
+    driver: *const HalHapticDriver,
+    config: *const c_void,
+) -> i32 {
+    if driver.is_null() {
+        return ESP_ERR_INVALID_ARG;
+    }
+    let mut reg = registry_mut();
+    reg.haptic = driver;
+    reg.haptic_config = config;
+    let name = driver_name((*driver).name);
+    hal_logi!(b"haptic driver registered: %s\0", name.as_ptr());
+    ESP_OK
+}
+
+/// Play `effect` (HAL_HAPTIC_*) on the vibration motor, if the board has one.
+/// Returns at once; ESP_ERR_NOT_SUPPORTED without a motor.
+pub(crate) fn haptic_play(effect: u32) -> i32 {
+    let reg = registry();
+    if reg.haptic.is_null() {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    match unsafe { (*reg.haptic).play } {
+        Some(play) => unsafe { play(effect) },
+        None => ESP_ERR_NOT_SUPPORTED,
+    }
+}
+
 /// Register a storage driver (SD card or internal flash).
 ///
 /// # Safety
@@ -1096,6 +1153,17 @@ pub extern "C" fn hal_registry_start_all() -> i32 {
         }
     }
 
+    // Haptic — non-fatal
+    if !reg.haptic.is_null() {
+        let drv = unsafe { &*reg.haptic };
+        if let Some(init_fn) = drv.init {
+            hal_logi!(b"Starting haptic...\0");
+            if unsafe { init_fn(reg.haptic_config) } != ESP_OK {
+                hal_logw!(b"Haptic init failed (non-fatal)\0");
+            }
+        }
+    }
+
     // Storage — non-fatal; skip mount if init fails
     for i in 0..(reg.storage_count as usize) {
         if !reg.storage[i].is_null() {
@@ -1133,6 +1201,11 @@ pub extern "C" fn hal_registry_stop_all() -> i32 {
         }
     }
 
+    if !reg.haptic.is_null() {
+        if let Some(f) = unsafe { (*reg.haptic).deinit } {
+            unsafe { f() };
+        }
+    }
     if !reg.imu.is_null() {
         if let Some(f) = unsafe { (*reg.imu).deinit } {
             unsafe { f() };
@@ -1232,6 +1305,10 @@ mod tests {
             );
             assert_eq!(
                 hal_imu_register(std::ptr::null(), std::ptr::null()),
+                ESP_ERR_INVALID_ARG
+            );
+            assert_eq!(
+                hal_haptic_register(std::ptr::null(), std::ptr::null()),
                 ESP_ERR_INVALID_ARG
             );
             assert_eq!(

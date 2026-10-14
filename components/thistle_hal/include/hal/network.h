@@ -57,6 +57,24 @@ typedef struct {
     char            operator_name[24];  /* "" if unknown */
 } hal_cell_info_t;
 
+/* An SMS a cellular transport received */
+typedef struct {
+    char     sender[33];   /* "+4917612345678", or a name such as "DHL" */
+    /* The service centre's time stamp, "yy/MM/dd,hh:mm:ss+zz" with zz in
+     * quarters of an hour, or "" if the modem gave none */
+    char     sent_at[24];
+    char     text[481];    /* UTF-8: 160 GSM characters take up to 480 bytes */
+    /* Part `part` of `parts` of a long message, counted from 1, which the
+     * sender numbered `concat_ref`; parts is 0 for a message that is whole */
+    uint16_t concat_ref;
+    uint8_t  part;
+    uint8_t  parts;
+} hal_sms_t;
+
+/* Return true once the message is kept: only then is it deleted from the
+ * modem. Called with the driver held: it must not call the driver. */
+typedef bool (*hal_sms_rx_cb_t)(const hal_sms_t *sms, void *user_data);
+
 /* Network driver vtable */
 typedef struct {
     hal_net_transport_t type;
@@ -84,4 +102,19 @@ typedef struct {
      * the modem is off and there is nothing to listen with. !enter: wake it
      * to answer commands; connect() then starts data again. */
     esp_err_t (*sleep)(bool enter);
+    /* Cellular only, optional: power the modem and register with a network
+     * without a data session, so that SMS come and go. Returns as connect()
+     * does: ESP_ERR_NOT_FOUND for a SIM that is missing or locked. connect()
+     * starts data from there; disconnect() powers the modem down. */
+    esp_err_t (*listen)(uint32_t timeout_ms);
+    /* Cellular only, optional: send an SMS to `number` ('+' and digits, or
+     * digits), of up to 160 plain ASCII characters. */
+    esp_err_t (*sms_send)(const char *number, const char *text);
+    /* Cellular only, optional: whether the modem may hold SMS not yet
+     * fetched: it signalled one, or it is time to look again. */
+    bool (*sms_due)(void);
+    /* Cellular only, optional: hand each SMS the modem holds to cb, and
+     * delete each one cb kept; *kept says how many. A data session is
+     * interrupted for the length of the exchange. */
+    esp_err_t (*sms_fetch)(hal_sms_rx_cb_t cb, void *user_data, int *kept);
 } hal_net_driver_t;

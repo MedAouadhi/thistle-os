@@ -27,6 +27,7 @@ constexpr TickType_t portMAX_DELAY = UINT32_MAX;
 constexpr UBaseType_t configMAX_PRIORITIES = 25;
 constexpr int RADIOLIB_ERR_NONE = 0;
 constexpr int RADIOLIB_SX126X_SYNC_WORD_PRIVATE = 0x12;
+constexpr uint32_t RADIOLIB_SX126X_IRQ_RX_DONE = 0x0002;
 
 #define IRAM_ATTR
 #define ESP_LOGD(...) ((void)0)
@@ -98,6 +99,13 @@ inline std::condition_variable isr_cv;
 inline bool block_isr;
 inline bool isr_entered;
 inline bool release_isr;
+/* What the radio's interrupt status reports: a packet received, unless a
+ * test says otherwise. */
+inline uint32_t irq_flags;
+inline int transmit_calls;
+/* Set when a transmission began while a packet was being read: two callers
+ * talking to the radio at once. */
+inline bool overlapped;
 
 inline void record(Event event)
 {
@@ -126,6 +134,9 @@ inline void reset()
     block_isr = false;
     isr_entered = false;
     release_isr = false;
+    irq_flags = RADIOLIB_SX126X_IRQ_RX_DONE;
+    transmit_calls = 0;
+    overlapped = false;
 }
 
 struct TestTask {
@@ -222,6 +233,13 @@ inline SemaphoreHandle_t xSemaphoreCreateBinary()
     return new sx1262_test::TestSemaphore;
 }
 
+inline SemaphoreHandle_t xSemaphoreCreateMutex()
+{
+    auto *mutex = new sx1262_test::TestSemaphore;
+    mutex->available = true;
+    return mutex;
+}
+
 inline BaseType_t xSemaphoreGive(SemaphoreHandle_t semaphore)
 {
     {
@@ -276,6 +294,7 @@ public:
         sx1262_test::interrupt_attached = false;
         sx1262_test::record(sx1262_test::Event::Detach);
     }
+    uint32_t getIrqFlags() { return sx1262_test::irq_flags; }
     size_t getPacketLength() { return 1; }
     int readData(uint8_t *data, size_t) {
         data[0] = 0x42;
@@ -286,6 +305,7 @@ public:
         if (sx1262_test::block_read) {
             sx1262_test::read_cv.wait(lock, [] { return sx1262_test::release_read; });
         }
+        sx1262_test::read_entered = false;
         return RADIOLIB_ERR_NONE;
     }
     float getRSSI() { return -42.0f; }
@@ -310,6 +330,11 @@ public:
     int setOutputPower(int8_t) { return RADIOLIB_ERR_NONE; }
     int setBandwidth(float) { return RADIOLIB_ERR_NONE; }
     int setSpreadingFactor(uint8_t) { return RADIOLIB_ERR_NONE; }
-    int transmit(uint8_t *, size_t) { return RADIOLIB_ERR_NONE; }
+    int transmit(uint8_t *, size_t) {
+        std::lock_guard<std::mutex> lock(sx1262_test::read_mutex);
+        if (sx1262_test::read_entered) sx1262_test::overlapped = true;
+        sx1262_test::transmit_calls++;
+        return RADIOLIB_ERR_NONE;
+    }
     int sleep() { return RADIOLIB_ERR_NONE; }
 };

@@ -33,6 +33,7 @@ typedef struct {
     gpio_num_t  pin_pwrkey;  ///< Power key on a SoC GPIO, or -1
     gpio_num_t  pin_reset;   ///< Hardware reset — active-low, or -1
     gpio_num_t  pin_dtr;     ///< DTR, held low to keep the module awake, or -1
+    gpio_num_t  pin_ri;      ///< RI, pulsed low when an SMS arrives, or -1
     uint32_t    baud_rate;   ///< The module's power-up rate; 0 → its default, 115200
     /** Rate both ends switch to (AT+IPR) once the module answers, or 0 to stay
      *  at baud_rate. One the module lists: up to 3686400. With no RTS/CTS, a
@@ -203,24 +204,16 @@ bool drv_a7682e_ppp_connected(void);
 
 /* -------------------------------------------------------------------------
  * SMS
+ *
+ * Received messages stay in the module's storage until fetched. The
+ * cellular transport (drv_a7682e_net_driver) offers these as its sms_send,
+ * sms_due and sms_fetch.
  * ---------------------------------------------------------------------- */
-
-/**
- * @brief Initialise SMS subsystem (text mode, preferred storage).
- *
- * Sends AT+CMGF=1 (text mode), AT+CPMS="ME","ME","ME" (modem storage),
- * and AT+CNMI=2,1,0,0,0 (forward new-message notifications as +CMTI URCs).
- * Must be called after drv_a7682e_power(true).
- *
- * @return ESP_OK on success.
- */
-esp_err_t drv_a7682e_sms_init(void);
 
 /**
  * @brief Send an SMS in text mode.
  *
- * Temporarily switches to command mode if PPP is active, sends the message,
- * then restores PPP if it was active.
+ * Interrupts a data session for the length of the exchange.
  *
  * @param phone  Destination number: optional leading '+', then digits only.
  * @param msg    Message text (max 160 chars; controls and quotes rejected).
@@ -230,38 +223,27 @@ esp_err_t drv_a7682e_sms_init(void);
 esp_err_t drv_a7682e_send_sms(const char *phone, const char *msg);
 
 /**
- * @brief Read an SMS by storage index.
+ * @brief Whether the module may hold SMS not yet fetched.
  *
- * @param index    Message index (from +CMTI URC or AT+CMGL listing).
- * @param sender   Buffer for sender phone number (at least 32 bytes). May be NULL.
- * @param sender_len  Size of sender buffer.
- * @param body     Buffer for message body. May be NULL.
- * @param body_len Size of body buffer.
- * @return ESP_OK on success, ESP_ERR_NOT_FOUND if index does not exist.
+ * True once after each power-on, outside a data session; whenever RI has
+ * fallen since the last fetch (in a data session, no sooner than 30 s after
+ * it); and periodically, often without an RI line and rarely with one. A
+ * data session without an RI line is looked into every ten minutes.
  */
-esp_err_t drv_a7682e_read_sms(int index, char *sender, size_t sender_len,
-                               char *body, size_t body_len);
+bool drv_a7682e_sms_due(void);
 
 /**
- * @brief Delete an SMS by storage index.
+ * @brief Hand every SMS in the module's storage to cb, and delete each one
+ *        cb returns true for.
  *
- * @param index  Message index to delete.
- * @return ESP_OK on success.
+ * Runs with the driver held, leaving a data session for command mode and
+ * resuming it after: cb must not call the driver.
+ *
+ * @param kept  Set to how many cb kept. May be NULL.
+ * @return ESP_OK, ESP_ERR_INVALID_STATE with the module off or asleep, or
+ *         the error of the exchange that failed.
  */
-esp_err_t drv_a7682e_delete_sms(int index);
-
-/**
- * @brief Register a callback for incoming SMS notifications (+CMTI URCs).
- *
- * The callback receives the storage index of the new message. Call
- * drv_a7682e_read_sms() from the callback (or queue the index for later
- * processing) to retrieve the message contents.
- *
- * @param cb        Callback function, or NULL to unregister.
- * @param user_data Opaque pointer passed to the callback.
- */
-typedef void (*a7682e_sms_cb_t)(int index, void *user_data);
-void drv_a7682e_register_sms_cb(a7682e_sms_cb_t cb, void *user_data);
+esp_err_t drv_a7682e_sms_fetch(hal_sms_rx_cb_t cb, void *user_data, int *kept);
 
 /* -------------------------------------------------------------------------
  * Network transport

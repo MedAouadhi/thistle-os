@@ -78,9 +78,10 @@ typedef struct {
     bool            enabled;      /* mobile data switched on */
     hal_net_state_t data;         /* the data session */
     bool            sim_blocked;  /* the SIM was missing or locked; nothing is
-                                     tried until mobile data is switched off
-                                     and on again */
+                                     tried until mobile data or SMS is
+                                     switched off or on */
     hal_cell_info_t info;         /* what the modem last reported */
+    bool            sms;          /* SMS reception switched on */
 } net_cellular_status_t;
 
 /* Whether the board has a cellular modem. */
@@ -90,6 +91,11 @@ bool net_cellular_present(void);
  * at once; the modem starts or stops in the background. The choice applies
  * even when saving it fails, which the return reports. */
 esp_err_t net_cellular_set_enabled(bool enabled);
+
+/* Switch SMS reception on or off, saved as thistle_os.cellular.sms (on
+ * unless switched off). With mobile data off it decides whether the modem
+ * is powered at all: registered with a network, without a data session. */
+esp_err_t net_cellular_set_sms(bool enabled);
 
 esp_err_t net_cellular_get_status(net_cellular_status_t *out);
 

@@ -2340,6 +2340,29 @@ mod tests {
         // the data rate, still slow enough for a link without RTS/CTS.
         assert_eq!(json_get_int(config, "baud_rate"), Some(115200), "{config}");
         assert_eq!(json_get_int(config, "fast_baud_rate"), Some(921600), "{config}");
+        // BOARD_A7682E_RI: the module pulses it when an SMS arrives, which
+        // is how one is noticed during a data session (pinmap.md section 10).
+        assert_eq!(json_get_int(config, "ri"), Some(7), "{config}");
+    }
+
+    #[test]
+    fn the_tdeck_max_leaves_its_vibration_motor_to_the_driver() {
+        let mut rec = Recorder::default();
+        run_boot_sequence(TDECK_MAX_PROFILE, &mut rec);
+
+        // A DRV2605 at 0x5A, powered by XL9555 P05 (`M_EN`, T-Deck-MAX
+        // docs/pinmap.md section 7). Boot leaves the pin alone; the driver
+        // raises it when it starts and drops it when it stops.
+        const MOTOR_EN_PIN: i32 = 5;
+        let levels = expander_levels(&rec);
+        assert!(levels.iter().all(|(_, pin, _)| *pin != MOTOR_EN_PIN), "{levels:?}");
+
+        let config = rec
+            .loaded_config("com.thistle.drv.haptic-drv2605")
+            .expect("the Max declares its vibration motor");
+        assert_eq!(json_get_string(config, "i2c_addr").as_deref(), Some("0x5A"), "{config}");
+        assert_eq!(json_get_int(config, "en_expander"), Some(0), "{config}");
+        assert_eq!(json_get_int(config, "en_expander_pin"), Some(MOTOR_EN_PIN as i64));
     }
 
     #[test]

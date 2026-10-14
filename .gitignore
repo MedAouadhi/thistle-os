@@ -43,3 +43,6 @@ docs/simulator/
 appstore-site/
 external/ghostty
 crates/thistle-tk/target/
+
+# The message history the simulator writes (msg_log.rs)
+simulator/sdcard/messages/

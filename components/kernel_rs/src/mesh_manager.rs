@@ -15,6 +15,9 @@
 //             "frequency_mhz": 869.618, "bandwidth_khz": 62.5,
 //             "spreading_factor": 8, "coding_rate": 5, "tx_power_dbm": 22 }
 //
+// Every message received or sent is also recorded in the message history
+// (msg_log), whether or not an app is open to read it.
+//
 // On simulator and test builds there is no engine: the mesh never starts, and
 // the store below is exercised directly.
 
@@ -627,10 +630,84 @@ unsafe extern "C" fn on_message(message: *const EngineMessage) {
     if message.is_null() {
         return;
     }
-    let message = message_from_engine(&*message);
-    if let Ok(mut state) = MESH_STATE.lock() {
-        state.receive(message);
+    hear(message_from_engine(&*message));
+}
+
+/// Queue a message for apps and record it, unless it is a repeat. Returns
+/// whether it was new.
+fn hear(message: CMeshMessage) -> bool {
+    let new = match MESH_STATE.lock() {
+        Ok(mut state) => state.receive(message),
+        Err(_) => false,
+    };
+    if new {
+        record_received(&message);
+        alert_received(&message);
     }
+    new
+}
+
+// ---------------------------------------------------------------------------
+// The message history
+// ---------------------------------------------------------------------------
+
+/// A conversation's name in the history: a channel, or a contact by the
+/// first MSG_MESH_KEY_PREFIX bytes of its key, as the Messenger addresses it.
+fn history_conv(kind: u8, channel: u8, key: &[u8; 32]) -> String {
+    if kind == MSG_CHANNEL {
+        if channel == PUBLIC_CHANNEL {
+            "public".to_string()
+        } else {
+            format!("channel{channel}")
+        }
+    } else {
+        key[..6].iter().map(|b| format!("{b:02x}")).collect()
+    }
+}
+
+/// Buzz and pop up for a message heard, unless the Messenger shows its
+/// conversation: a channel's is the Public one, "" there, and a contact's is
+/// its address, as history_conv() makes it.
+fn alert_received(m: &CMeshMessage) {
+    let name = String::from_utf8_lossy(&m.sender_name[..(m.sender_name_len as usize).min(32)]);
+    let name = if name.is_empty() { "?".into() } else { name };
+    let text = String::from_utf8_lossy(&m.text[..(m.text_len as usize).min(m.text.len())]);
+    let (conv, from) = if m.kind == MSG_CHANNEL {
+        let channel = if m.channel == PUBLIC_CHANNEL {
+            "Public".to_string()
+        } else {
+            format!("channel {}", m.channel)
+        };
+        (String::new(), format!("{name} in {channel}"))
+    } else {
+        (history_conv(m.kind, m.channel, &m.sender_key), name.into_owned())
+    };
+    crate::msg_alert::arrived(crate::msg_alert::Transport::Mesh, &conv, &from, &text);
+}
+
+fn record_received(m: &CMeshMessage) {
+    let name = String::from_utf8_lossy(&m.sender_name[..(m.sender_name_len as usize).min(32)]);
+    let text = String::from_utf8_lossy(&m.text[..(m.text_len as usize).min(m.text.len())]);
+    crate::msg_log::record(&crate::msg_log::Entry {
+        transport: crate::msg_log::Transport::Mesh,
+        conv: &history_conv(m.kind, m.channel, &m.sender_key),
+        dir: crate::msg_log::Direction::In,
+        peer: &name,
+        text: &text,
+        sent: (m.timestamp != 0).then_some(m.timestamp as u64),
+    });
+}
+
+fn record_sent(kind: u8, channel: u8, key: &[u8; 32], to: &str, text: *const c_char) {
+    let text = unsafe { std::ffi::CStr::from_ptr(text) }.to_string_lossy();
+    crate::msg_log::record(&crate::msg_log::Entry {
+        transport: crate::msg_log::Transport::Mesh,
+        conv: &history_conv(kind, channel, key),
+        dir: crate::msg_log::Direction::Out,
+        peer: to,
+        text: &text,
+        sent: None,
+    });
 }
 
 #[cfg_attr(not(target_os = "espidf"), allow(dead_code))]
@@ -781,7 +858,8 @@ pub unsafe extern "C" fn rs_mesh_send_direct(
     if len > MESH_TEXT_MAX {
         return ESP_ERR_INVALID_SIZE;
     }
-    let known = {
+    let key = &*(pub_key as *const [u8; 32]);
+    let name = {
         let state = match MESH_STATE.lock() {
             Ok(s) => s,
             Err(_) => return ESP_FAIL,
@@ -789,19 +867,23 @@ pub unsafe extern "C" fn rs_mesh_send_direct(
         if !state.running {
             return ESP_ERR_INVALID_STATE;
         }
-        let key = &*(pub_key as *const [u8; 32]);
-        state.contacts.iter().any(|c| &c.pub_key == key)
+        state.contacts.iter().find(|c| &c.pub_key == key).map(|c| {
+            String::from_utf8_lossy(&c.name[..(c.name_len as usize).min(32)]).into_owned()
+        })
     };
-    if !known {
+    let Some(name) = name else {
         return ESP_ERR_NOT_FOUND;
-    }
+    };
     let id = next_message_id();
     #[cfg(target_os = "espidf")]
     let rc = meshcore_send_direct(pub_key, text, id);
     #[cfg(not(target_os = "espidf"))]
     let rc = ESP_OK;
-    if rc == ESP_OK && !out_id.is_null() {
-        *out_id = id;
+    if rc == ESP_OK {
+        if !out_id.is_null() {
+            *out_id = id;
+        }
+        record_sent(MSG_DIRECT, 0, key, &name, text);
     }
     rc
 }
@@ -832,12 +914,13 @@ pub unsafe extern "C" fn rs_mesh_send_channel(
     #[cfg(target_os = "espidf")]
     let rc = meshcore_send_channel(channel, text, id);
     #[cfg(not(target_os = "espidf"))]
-    let rc = {
-        let _ = channel;
-        ESP_OK
-    };
-    if rc == ESP_OK && !out_id.is_null() {
-        *out_id = id;
+    let rc = ESP_OK;
+    if rc == ESP_OK {
+        if !out_id.is_null() {
+            *out_id = id;
+        }
+        let to = if channel == PUBLIC_CHANNEL { "Public".to_string() } else { format!("Channel {channel}") };
+        record_sent(MSG_CHANNEL, channel, &[0u8; 32], &to, text);
     }
     rc
 }
@@ -1172,10 +1255,7 @@ pub unsafe extern "C" fn rs_mesh_sim_hear(
         timestamp: HEARD.fetch_add(1, Ordering::Relaxed),
         text: to_c_array(&text),
     };
-    match MESH_STATE.lock() {
-        Ok(mut s) => s.receive(message_from_engine(&heard)),
-        Err(_) => false,
-    }
+    hear(message_from_engine(&heard))
 }
 
 // ── Syscall wrappers (thistle_mesh_* → rs_mesh_*) ───────────────────

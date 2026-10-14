@@ -185,11 +185,23 @@
                 "baud_rate": 115200,
                 "fast_baud_rate": 921600,
                 "dtr": 8,
+                "ri": 7,
                 "power_expander": 0,
                 "power_expander_pin": 0,
                 "pwrkey_expander": 0,
                 "pwrkey_expander_pin": 8,
                 "pwrkey_press_level": 1
+            }
+        },
+        {
+            "id": "com.thistle.drv.haptic-drv2605",
+            "hal": "haptic",
+            "entry": "haptic-drv2605.drv.elf",
+            "config": {
+                "i2c_bus": 0,
+                "i2c_addr": "0x5A",
+                "en_expander": 0,
+                "en_expander_pin": 5
             }
         }
     ]

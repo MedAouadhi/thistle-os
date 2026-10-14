@@ -142,6 +142,26 @@ running of them in `power_manager.rs`; every ESP-IDF sleep call in
   the middle of a bus transfer.
 - **The log's timestamps stop during light sleep**; they count FreeRTOS ticks.
 
+### SMS and the message history
+
+The kernel, not an app, receives SMS: the network coordinator fetches them
+from the modem (`sms_manager.rs`, `thistle/sms.h`), keeping it registered
+while `thistle_os.cellular.sms` is on even with mobile data off. During a
+data session an SMS is noticed by the modem's RI line and fetched by
+interrupting the session (ADR-0004). Every SMS and MeshCore message, in or
+out, is appended to `/sdcard/messages/{sms,mesh}/<conversation>.jsonl` by
+`msg_log.rs`, unless `thistle_os.messenger.save_history` is off (the
+Messenger's settings). The simulator's `--sms "SENDER: TEXT"` puts a message
+in its fake modem. Ticket 14 has what the hardware has yet to confirm.
+
+Each message received also buzzes the vibration motor and pops up
+(`msg_alert.rs`, `thistle/msg_alert.h`), unless
+`thistle_os.messenger.alerts` is off or the Messenger has its conversation on
+screen (`rs_msg_alert_set_viewing`). The buzz is played where the message is
+received, so a LoRa wake buzzes without the UI; the status bar takes the
+pop-up. The status bar's envelope counts unread SMS and mesh messages. The
+simulator's motor prints `[sim_haptic] message buzz`. Ticket 15.
+
 ### Rust toolchains
 
 Two toolchains, for two different jobs:
@@ -186,13 +206,13 @@ SPIFFS (10.5MB) + SD card — updateable
 
 The kernel is **100% Rust and hardware-independent**. It never calls ESP-IDF hardware APIs directly. All hardware interaction goes through HAL driver vtables:
 
-- **Display, Input, Radio, GPS, Audio, Power, IMU, Storage, Network, Crypto, RTC** — all accessed exclusively via their respective `hal_*_driver_t` vtables.
+- **Display, Input, Radio, GPS, Audio, Power, IMU, Storage, Network, Crypto, RTC, Haptic** — all accessed exclusively via their respective `hal_*_driver_t` vtables.
 - **Crypto** — the `hal_crypto_driver_t` vtable allows hardware acceleration (e.g. ESP32-S3 hardware AES/SHA engines) when a crypto driver is registered. If no hardware crypto driver is present, the kernel's built-in Rust software implementation is used as a transparent fallback.
 - **RTC** — the `hal_rtc_driver_t` vtable provides timekeeping (e.g. PCF8563). Falls back to system tick when absent.
 - The kernel itself does not know or care which physical chip is present — that detail lives entirely in the loaded `.drv.elf` files and `board.json`. Component-level hardware detection (I2C/SPI/UART scanning) is handled by the Recovery OS.
 
 ### Key components
-- **HAL** (`components/thistle_hal/`): Pure vtable interfaces. Bus handle sharing (SPI/I2C). 11 HAL interfaces: display, input, radio, GPS, audio, power, IMU, storage, network, crypto, RTC.
+- **HAL** (`components/thistle_hal/`): Pure vtable interfaces. Bus handle sharing (SPI/I2C). 12 HAL interfaces: display, input, radio, GPS, audio, power, IMU, storage, network, crypto, RTC, haptic. Haptic was appended to the end of `hal_registry_t` so no existing field moved (ADR-0005); a new interface goes there too.
 - **Drivers** (`components/drv_*/`): 16 drivers (13 Rust + 3 C, compiled-in + standalone `.drv.elf`): e-paper, LCD, OLED, keyboard, touch (×2), GPS, accelerometer, power, audio, RTC (PCF8563), SD card, IMU (QMI8658C), light sensor. C drivers for modem (esp_modem), radio (RadioLib) and the ES8311 audio codec (esp_codec_dev).
 - **Networking** (`components/kernel_rs/src/net_manager.rs`, `net_coordinator.rs`): WiFi and LTE (the A7682E driver) register as `hal_net_driver_t` transports. esp_netif routes over WiFi whenever it is up and LTE otherwise, with DNS following the route (ADR-0003). The coordinator keeps mobile data up while Settings has it on, and rejoins the saved WiFi network after a drop unless WiFi is switched off in Settings (`wifi.radio_off`, which stops the radio).
 - **Board config**: Per-board `board.json` files in `sdcard_layout/config/boards/` define pins, buses, and which drivers to load. Replaces compiled `board_*` components. 10 boards supported.
@@ -233,6 +253,9 @@ The kernel is **100% Rust and hardware-independent**. It never calls ESP-IDF har
 1. Create `components/drv_<name>/`
 2. Implement HAL vtable
 3. Add to board definition
+
+A driver that drives its own SPI chip select holds the bus while it is low
+(ADR-0006).
 
 ## Adding a New Board
 1. Create `sdcard_layout/config/boards/<board_name>.json` with pin assignments, bus configs, driver list

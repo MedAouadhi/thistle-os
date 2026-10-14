@@ -152,15 +152,31 @@ public:
         }
     }
 
-    void spiBeginTransaction() override {}
-    void spiEndTransaction() override {}
+    /* RadioLib drives chip select as a GPIO and calls these either side of
+     * it, so the bus is ours from before the radio is selected until after.
+     * The bus is shared (on the T-Deck Max with the SD card and the e-paper),
+     * and a transfer to another device while the radio is selected reaches
+     * the radio as a command: it refuses one that makes no sense
+     * (RADIOLIB_ERR_SPI_CMD_INVALID, -706) and carries out one that does. */
+    void spiBeginTransaction() override {
+        spi_device_acquire_bus(_spi, portMAX_DELAY);
+    }
+    void spiEndTransaction() override {
+        spi_device_release_bus(_spi);
+    }
 
     void spiTransfer(uint8_t *out, size_t len, uint8_t *in) override {
         spi_transaction_t t = {};
         t.length = len * 8;
         t.tx_buffer = out;
         t.rx_buffer = in;
-        spi_device_polling_transmit(_spi, &t);
+        esp_err_t ret = spi_device_polling_transmit(_spi, &t);
+        if (ret != ESP_OK) {
+            /* Nothing was read: RadioLib would parse whatever the buffer
+             * held as the radio's status. Zeroes read as no radio at all. */
+            ESP_LOGE(TAG, "SPI transfer failed: %s", esp_err_to_name(ret));
+            if (in) memset(in, 0, len);
+        }
     }
 
     void yield() override {
@@ -196,7 +212,20 @@ static struct {
     portMUX_TYPE state_lock = portMUX_INITIALIZER_UNLOCKED;
 #endif
     SemaphoreHandle_t irq_stopped;
+    /* Held by whoever is talking to the radio. Created once, never freed. */
+    SemaphoreHandle_t lock;
 } s_radio;
+
+/* RadioLib keeps no lock of its own, and the receive task and a sender (the
+ * mesh, on the kernel worker) run on either core: interleaved, the two send
+ * the radio each other's command bytes. One of them talks to it at a time. */
+class RadioLock {
+public:
+    RadioLock() { xSemaphoreTake(s_radio.lock, portMAX_DELAY); }
+    ~RadioLock() { xSemaphoreGive(s_radio.lock); }
+    RadioLock(const RadioLock &) = delete;
+    RadioLock &operator=(const RadioLock &) = delete;
+};
 
 static RadioLifecycle lifecycle_get(void) {
 #ifdef SX1262_LIFECYCLE_HOST_TEST
@@ -351,21 +380,35 @@ static void radio_irq_task(void *arg) {
          * two apart. */
         if (!receiving_get()) continue;
 
-        /* Read received data */
         uint8_t buf[256];
-        size_t len = s_radio.radio->getPacketLength();
-        if (len > sizeof(buf)) len = sizeof(buf);
+        size_t len = 0;
+        int state = RADIOLIB_ERR_NONE;
+        float rssi = 0;
+        {
+            RadioLock hold;
+            /* A send can have started after the check above and finished while
+             * this task waited for the radio, and the packet that woke it is
+             * then gone: what the buffer holds is what was sent. Only a packet
+             * the radio says it has received is read. */
+            if (!radio_is_running() || !receiving_get() ||
+                !(s_radio.radio->getIrqFlags() & RADIOLIB_SX126X_IRQ_RX_DONE)) {
+                continue;
+            }
 
-        int state = s_radio.radio->readData(buf, len);
+            len = s_radio.radio->getPacketLength();
+            if (len > sizeof(buf)) len = sizeof(buf);
+            state = s_radio.radio->readData(buf, len);
+            if (state == RADIOLIB_ERR_NONE) rssi = s_radio.radio->getRSSI();
 
-        if (state == RADIOLIB_ERR_NONE && len > 0 && s_radio.rx_cb) {
-            float rssi = s_radio.radio->getRSSI();
-            s_radio.rx_cb(buf, len, (int)rssi, s_radio.rx_cb_data);
+            /* Re-arm RX if in continuous mode */
+            if (radio_is_running() && receiving_get()) {
+                s_radio.radio->startReceive();
+            }
         }
 
-        /* Re-arm RX if in continuous mode */
-        if (radio_is_running() && receiving_get()) {
-            s_radio.radio->startReceive();
+        /* Outside the lock, so a callback that answers by sending can. */
+        if (state == RADIOLIB_ERR_NONE && len > 0 && s_radio.rx_cb) {
+            s_radio.rx_cb(buf, len, (int)rssi, s_radio.rx_cb_data);
         }
     }
 
@@ -394,6 +437,12 @@ static esp_err_t sx1262_init(const void *config) {
     RadioLifecycle observed;
     if (!lifecycle_transition(RadioLifecycle::Stopped, RadioLifecycle::Starting, &observed)) {
         return observed == RadioLifecycle::Running ? ESP_OK : ESP_ERR_INVALID_STATE;
+    }
+
+    if (!s_radio.lock) s_radio.lock = xSemaphoreCreateMutex();
+    if (!s_radio.lock) {
+        reset_runtime_state();
+        return ESP_ERR_NO_MEM;
     }
 
     memcpy(&s_radio.cfg, config, sizeof(radio_sx1262_config_t));
@@ -495,7 +544,10 @@ static void sx1262_deinit(void) {
         irq_task_set(nullptr);
     }
 
-    s_radio.radio->standby();
+    {
+        RadioLock hold;
+        s_radio.radio->standby();
+    }
 
     vSemaphoreDelete(s_radio.irq_stopped);
     s_radio.irq_stopped = nullptr;
@@ -508,12 +560,14 @@ static void sx1262_deinit(void) {
 static esp_err_t sx1262_set_frequency(uint32_t freq_hz) {
     if (!radio_is_running()) return ESP_ERR_INVALID_STATE;
     float mhz = freq_hz / 1000000.0f;
+    RadioLock hold;
     int state = s_radio.radio->setFrequency(mhz);
     return state == RADIOLIB_ERR_NONE ? ESP_OK : ESP_FAIL;
 }
 
 static esp_err_t sx1262_set_tx_power(int8_t dbm) {
     if (!radio_is_running()) return ESP_ERR_INVALID_STATE;
+    RadioLock hold;
     int state = s_radio.radio->setOutputPower(dbm);
     return state == RADIOLIB_ERR_NONE ? ESP_OK : ESP_FAIL;
 }
@@ -521,12 +575,14 @@ static esp_err_t sx1262_set_tx_power(int8_t dbm) {
 static esp_err_t sx1262_set_bandwidth(uint32_t bw_hz) {
     if (!radio_is_running()) return ESP_ERR_INVALID_STATE;
     float bw_khz = bw_hz / 1000.0f;
+    RadioLock hold;
     int state = s_radio.radio->setBandwidth(bw_khz);
     return state == RADIOLIB_ERR_NONE ? ESP_OK : ESP_FAIL;
 }
 
 static esp_err_t sx1262_set_spreading_factor(uint8_t sf) {
     if (!radio_is_running()) return ESP_ERR_INVALID_STATE;
+    RadioLock hold;
     int state = s_radio.radio->setSpreadingFactor(sf);
     return state == RADIOLIB_ERR_NONE ? ESP_OK : ESP_FAIL;
 }
@@ -539,13 +595,17 @@ static esp_err_t sx1262_send(const uint8_t *data, size_t len) {
      * has to be put back on air afterwards — otherwise it hears the first
      * message and nothing after its own first reply. Listening is suspended
      * across the transmission because DIO1 carries TxDone as well as RxDone. */
-    const bool was_receiving = receiving_get();
-    receiving_set(false);
-    int state = s_radio.radio->transmit((uint8_t *)data, len);
+    int state;
+    {
+        RadioLock hold;
+        const bool was_receiving = receiving_get();
+        receiving_set(false);
+        state = s_radio.radio->transmit((uint8_t *)data, len);
 
-    if (was_receiving) {
-        receiving_set(true);
-        s_radio.radio->startReceive();
+        if (was_receiving) {
+            receiving_set(true);
+            s_radio.radio->startReceive();
+        }
     }
 
     if (state == RADIOLIB_ERR_NONE) {
@@ -559,6 +619,7 @@ static esp_err_t sx1262_send(const uint8_t *data, size_t len) {
 static esp_err_t sx1262_start_receive(hal_radio_rx_cb_t cb, void *user_data) {
     if (!radio_is_running()) return ESP_ERR_INVALID_STATE;
 
+    RadioLock hold;
     s_radio.rx_cb = cb;
     s_radio.rx_cb_data = user_data;
     receiving_set(true);
@@ -575,6 +636,7 @@ static esp_err_t sx1262_start_receive(hal_radio_rx_cb_t cb, void *user_data) {
 
 static esp_err_t sx1262_stop_receive(void) {
     if (!radio_is_running()) return ESP_ERR_INVALID_STATE;
+    RadioLock hold;
     receiving_set(false);
     s_radio.radio->standby();
     return ESP_OK;
@@ -582,11 +644,13 @@ static esp_err_t sx1262_stop_receive(void) {
 
 static int sx1262_get_rssi(void) {
     if (!radio_is_running()) return -128;
+    RadioLock hold;
     return (int)s_radio.radio->getRSSI();
 }
 
 static esp_err_t sx1262_sleep(bool enter) {
     if (!radio_is_running()) return ESP_ERR_INVALID_STATE;
+    RadioLock hold;
     if (enter) {
         s_radio.radio->sleep();
     } else {

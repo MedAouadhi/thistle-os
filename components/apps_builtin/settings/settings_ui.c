@@ -991,7 +991,7 @@ static const char *cell_reg_text(hal_cell_reg_t reg)
 /* Why mobile data is not carrying data, or that it is. */
 static const char *cell_status_text(const net_cellular_status_t *st)
 {
-    if (!st->enabled) {
+    if (!st->enabled && !st->sms) {
         return "Off";
     }
     if (st->sim_blocked) {
@@ -1001,6 +1001,11 @@ static const char *cell_status_text(const net_cellular_status_t *st)
         case HAL_SIM_PUK_REQUIRED: return "SIM blocked";
         default:                   return "SIM not usable";
         }
+    }
+    if (!st->enabled) {
+        /* The modem is kept registered for SMS alone. */
+        return st->info.powered && st->info.sim == HAL_SIM_READY ? "SMS only"
+                                                                 : "Starting for SMS";
     }
     switch (st->data) {
     case HAL_NET_STATE_CONNECTED:  return "Connected";
@@ -1031,7 +1036,7 @@ static void cell_update_labels(void)
     snprintf(buf, sizeof(buf), "Status: %s", cell_status_text(&st));
     set_label_if_changed(s_cell_status_lbl, buf);
 
-    bool live = st.enabled && (st.info.powered || st.sim_blocked);
+    bool live = (st.enabled || st.sms) && (st.info.powered || st.sim_blocked);
     snprintf(buf, sizeof(buf), "SIM: %s", live ? cell_sim_text(st.info.sim) : "--");
     set_label_if_changed(s_cell_sim_lbl, buf);
 
@@ -1105,6 +1110,21 @@ static void cell_switch_cb(lv_event_t *e)
     }
 }
 
+static void cell_sms_switch_cb(lv_event_t *e)
+{
+    bool on = (bool)(uintptr_t)lv_event_get_user_data(e);
+    esp_err_t err = net_cellular_set_sms(on);
+    if (err == ESP_ERR_NOT_SUPPORTED) {
+        toast_warn("No modem on this board");
+        return;
+    }
+    choice_check_only(lv_event_get_current_target(e));
+    if (err != ESP_OK) {
+        toast_warn("Not saved for next boot");
+    }
+    cell_update_labels();
+}
+
 static void cell_show_apn(void)
 {
     if (!s_cell_apn_lbl) return;
@@ -1154,11 +1174,20 @@ static void open_mobile_screen(void)
     s_current_screen = SETTINGS_MOBILE;
 
     net_cellular_status_t st;
-    bool enabled = net_cellular_get_status(&st) == ESP_OK && st.enabled;
+    bool have = net_cellular_get_status(&st) == ESP_OK;
+    bool enabled = have && st.enabled;
+    bool sms = have && st.sms;
 
     lv_obj_t *row = create_choice_row(content);
     create_choice_button(row, "On", cell_switch_cb, 1, enabled);
     create_choice_button(row, "Off", cell_switch_cb, 0, !enabled);
+
+    /* With mobile data off, this keeps the modem registered, without data,
+     * so SMS still arrive. */
+    create_info_row(content, "Receive SMS");
+    row = create_choice_row(content);
+    create_choice_button(row, "On", cell_sms_switch_cb, 1, sms);
+    create_choice_button(row, "Off", cell_sms_switch_cb, 0, !sms);
     create_separator(content);
 
     s_cell_status_lbl = create_cell_row(content);

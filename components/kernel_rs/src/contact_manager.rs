@@ -732,6 +732,12 @@ pub fn contact_count() -> i32 {
     }
 }
 
+/// The id and name of the contact with this phone number, if there is one.
+pub fn contact_by_phone(phone: &str) -> Option<(u32, String)> {
+    let mgr = CONTACTS.lock().ok()?;
+    mgr.find_by_phone(phone).map(|c| (c.id, c.name.clone()))
+}
+
 pub fn contact_save() -> i32 {
     match CONTACTS.lock() {
         Ok(mut mgr) => mgr.save_to_disk(),

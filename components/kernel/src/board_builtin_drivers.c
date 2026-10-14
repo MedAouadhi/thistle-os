@@ -28,6 +28,7 @@
 #include "drv_radio_sx1262.h"
 #include "drv_audio_es8311.h"
 #include "drv_imu_bhi260ap.h"
+#include "drv_haptic_drv2605.h"
 #ifdef THISTLE_HAS_MODEM_A7682E
 #include "drv_modem_a7682e.h"
 #include "thistle/net_manager.h"
@@ -365,6 +366,14 @@ esp_err_t board_builtin_driver_init(const char *id, const char *hal_type,
         return drv_imu_bhi260ap_register(config_json);
     }
 
+    // ── Haptics: TI DRV2605 ─────────────────────────────────────────────────
+    // A vibration motor driver whose power may be an IO expander pin, which
+    // the entry names as `en_expander` / `en_expander_pin`.
+    if (strcmp(id, "com.thistle.drv.haptic-drv2605") == 0) {
+        ESP_LOGI(TAG, "haptic-drv2605: %s", config_json);
+        return drv_haptic_drv2605_register(config_json);
+    }
+
 #ifdef THISTLE_HAS_MODEM_A7682E
     // ── Cellular: Simcom A7682E ─────────────────────────────────────────────
     // A network transport, not a HAL registry slot: it registers with the
@@ -381,6 +390,7 @@ esp_err_t board_builtin_driver_init(const char *id, const char *hal_type,
         cfg.pin_pwrkey          = (gpio_num_t)json_int(config_json, "pwrkey", -1);
         cfg.pin_reset           = (gpio_num_t)json_int(config_json, "rst", -1);
         cfg.pin_dtr             = (gpio_num_t)json_int(config_json, "dtr", -1);
+        cfg.pin_ri              = (gpio_num_t)json_int(config_json, "ri", -1);
         cfg.pwrkey_expander     = json_int(config_json, "pwrkey_expander", -1);
         cfg.pwrkey_expander_pin = json_int(config_json, "pwrkey_expander_pin", 0);
         cfg.pwrkey_press_level  = json_int(config_json, "pwrkey_press_level", 0);

@@ -5,19 +5,24 @@
  * Screen flow:
  *
  *   SCREEN_CONV_LIST
- *     Scrollable list of conversations: each transport's own (the mesh's
- *     Public channel, the SMS inbox) and one per contact a direct message
- *     has gone to or come from. Each entry shows the transport icon, the
+ *     Scrollable list of conversations: the mesh's Public channel, one per
+ *     contact a direct message has gone to or come from, and one per phone
+ *     number an SMS has. Each entry shows the transport icon, the
  *     conversation's name, how many messages in it are unread, and its last
  *     message. A message is read once its conversation has been on screen;
- *     the status bar counts the mesh's unread ones, here or still waiting in
- *     the kernel.
- *     A [+] button in the header opens SCREEN_NEW_CONV.
+ *     the status bar counts the unread mesh messages and SMS, here or still
+ *     waiting in the kernel.
+ *     A [+] button in the header opens SCREEN_NEW_CONV, a gear SCREEN_SETTINGS.
  *
  *   SCREEN_NEW_CONV
  *     What a conversation can be started with: the mesh's Public channel and
- *     every contact it has heard advertise, and each other transport that is
- *     ready. Also where this node advertises itself to the mesh.
+ *     every contact it has heard advertise, a phone number to text, and each
+ *     other transport that is ready. Also where this node advertises itself
+ *     to the mesh.
+ *
+ *   SCREEN_SETTINGS
+ *     Whether every message is saved to the SD card (thistle/msg_log.h).
+ *     The kernel saves them as they come and go, Messenger open or not.
  *
  *   SCREEN_CHAT
  *     Classic message-bubble chat view.  The header shows the conversation
@@ -39,6 +44,9 @@
 #include "stdlib.h"
 
 #include "thistle/mesh.h"
+#include "thistle/msg_log.h"
+#include "thistle/sms.h"
+#include "thistle/msg_alert.h"
 #include "thistle/wifi_manager.h"
 #include "ui/theme.h"
 
@@ -75,6 +83,7 @@ typedef enum {
     SCREEN_CONV_LIST,
     SCREEN_NEW_CONV,
     SCREEN_CHAT,
+    SCREEN_SETTINGS,
 } app_screen_t;
 
 typedef struct {
@@ -123,6 +132,18 @@ static EXT_RAM_BSS_ATTR struct {
     lv_obj_t   *new_conv_screen;
     lv_obj_t   *new_conv_list;
     lv_obj_t   *advert_label;
+    lv_obj_t   *sms_number_ta;
+    lv_obj_t   *sms_note_label;
+
+    /* --- Settings screen --- */
+    lv_obj_t   *settings_screen;
+    lv_obj_t   *settings_list;
+    lv_obj_t   *save_on_btn;
+    lv_obj_t   *save_off_btn;
+    lv_obj_t   *save_note;
+    lv_obj_t   *alert_on_btn;
+    lv_obj_t   *alert_off_btn;
+    lv_obj_t   *alert_note;
 
     /* --- Chat screen --- */
     lv_obj_t   *chat_screen;
@@ -154,6 +175,8 @@ static void show_screen(app_screen_t screen);
 static void build_conv_list_screen(void);
 static void build_new_conv_screen(void);
 static void refresh_new_conv_list(void);
+static void build_settings_screen(void);
+static void refresh_settings(void);
 static void build_chat_screen(void);
 static void refresh_conv_list(void);
 static void open_conversation(int conv_idx);
@@ -224,17 +247,39 @@ static bool conversation_on_screen(int ci)
     return s_msg.visible && s_msg.screen == SCREEN_CHAT && s_msg.active_conv == ci;
 }
 
-/* Tell the kernel how many mesh messages the Messenger holds unread. The
- * status bar adds those still waiting in the mesh's inbox. */
-static void report_unread(void)
+/* Tell the kernel which conversation is on screen, so that a message
+ * arriving in it neither buzzes nor pops up: the user is reading it. */
+static void report_viewing(void)
 {
-    uint32_t held = 0;
-    for (int i = 0; i < s_conv_count; i++) {
-        if (s_convs[i]->transport == MSG_TRANSPORT_LORA) {
-            held += (uint32_t)s_convs[i]->unread;
+    int ci = s_msg.active_conv;
+    if (s_msg.visible && s_msg.screen == SCREEN_CHAT && ci >= 0 && ci < s_conv_count) {
+        const conversation_t *cv = s_convs[ci];
+        if (cv->transport == MSG_TRANSPORT_SMS) {
+            rs_msg_alert_set_viewing(MSG_ALERT_SMS, cv->dest);
+            return;
+        }
+        if (cv->transport == MSG_TRANSPORT_LORA) {
+            rs_msg_alert_set_viewing(MSG_ALERT_MESH, cv->dest);
+            return;
         }
     }
-    rs_mesh_set_held_unread(held);
+    rs_msg_alert_set_viewing(-1, NULL);
+}
+
+/* Tell the kernel how many mesh messages and SMS the Messenger holds unread.
+ * The status bar adds those still waiting in the kernel's inboxes. */
+static void report_unread(void)
+{
+    uint32_t mesh = 0, sms = 0;
+    for (int i = 0; i < s_conv_count; i++) {
+        if (s_convs[i]->transport == MSG_TRANSPORT_LORA) {
+            mesh += (uint32_t)s_convs[i]->unread;
+        } else if (s_convs[i]->transport == MSG_TRANSPORT_SMS) {
+            sms += (uint32_t)s_convs[i]->unread;
+        }
+    }
+    rs_mesh_set_held_unread(mesh);
+    rs_sms_set_held_unread(sms);
 }
 
 /* The user has seen everything in the conversation. */
@@ -257,9 +302,6 @@ static void deliver_message(msg_transport_t transport, const char *conv,
     if (!sender) sender = "?";
     if (!text) text = "";
 
-    int ci = ensure_conversation(transport, conv, sender);
-    if (ci < 0) return;
-
     /* Contact resolution: an SMS sender is a phone number, which the
      * kernel contact manager may know a name for. */
     const char *display_name = sender;
@@ -276,6 +318,9 @@ static void deliver_message(msg_transport_t transport, const char *conv,
             display_name = resolved_name;
         }
     }
+
+    int ci = ensure_conversation(transport, conv, display_name);
+    if (ci < 0) return;
 
     /* Decrypt if an encrypted channel is active for this contact. A mesh
      * direct message is already end-to-end encrypted by MeshCore. */
@@ -387,6 +432,8 @@ static void show_screen(app_screen_t screen)
         lv_obj_add_flag(s_msg.new_conv_screen, LV_OBJ_FLAG_HIDDEN);
     if (s_msg.chat_screen)
         lv_obj_add_flag(s_msg.chat_screen, LV_OBJ_FLAG_HIDDEN);
+    if (s_msg.settings_screen)
+        lv_obj_add_flag(s_msg.settings_screen, LV_OBJ_FLAG_HIDDEN);
 
     switch (screen) {
         case SCREEN_CONV_LIST:
@@ -405,8 +452,15 @@ static void show_screen(app_screen_t screen)
             if (s_msg.chat_screen)
                 lv_obj_clear_flag(s_msg.chat_screen, LV_OBJ_FLAG_HIDDEN);
             break;
+        case SCREEN_SETTINGS:
+            if (s_msg.settings_screen) {
+                refresh_settings();
+                lv_obj_clear_flag(s_msg.settings_screen, LV_OBJ_FLAG_HIDDEN);
+            }
+            break;
     }
     s_msg.screen = screen;
+    report_viewing();
 }
 
 /* A screen-sized panel with a header bar, as every screen here has. */
@@ -456,6 +510,31 @@ static void new_conv_btn_cb(lv_event_t *e)
     show_screen(SCREEN_NEW_CONV);
 }
 
+static void settings_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    show_screen(SCREEN_SETTINGS);
+}
+
+/* A small square button at the right of a header, `right` from its edge. */
+static void add_header_button(lv_obj_t *header, const char *text, int right,
+                              lv_event_cb_t cb)
+{
+    const theme_colors_t *colors = theme_get_colors();
+    lv_obj_t *btn = lv_button_create(header);
+    lv_obj_set_size(btn, 22, 22);
+    lv_obj_align(btn, LV_ALIGN_RIGHT_MID, -right, 0);
+    lv_obj_set_style_bg_color(btn, colors->primary, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_radius(btn, 4, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(btn, 2, LV_PART_MAIN);
+    lv_obj_t *lbl = lv_label_create(btn);
+    lv_label_set_text(lbl, text);
+    lv_obj_set_style_text_color(lbl, lv_color_white(), LV_PART_MAIN);
+    lv_obj_center(lbl);
+    lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL);
+}
+
 static void build_conv_list_screen(void)
 {
     const theme_colors_t *colors = theme_get_colors();
@@ -470,19 +549,8 @@ static void build_conv_list_screen(void)
     lv_obj_set_style_text_color(title, colors->text, LV_PART_MAIN);
     lv_obj_align(title, LV_ALIGN_LEFT_MID, 0, 0);
 
-    /* [+] new conversation button */
-    lv_obj_t *new_btn = lv_button_create(header);
-    lv_obj_set_size(new_btn, 22, 22);
-    lv_obj_align(new_btn, LV_ALIGN_RIGHT_MID, 0, 0);
-    lv_obj_set_style_bg_color(new_btn, colors->primary, LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(new_btn, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_radius(new_btn, 4, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(new_btn, 2, LV_PART_MAIN);
-    lv_obj_t *new_lbl = lv_label_create(new_btn);
-    lv_label_set_text(new_lbl, "+");
-    lv_obj_set_style_text_color(new_lbl, lv_color_white(), LV_PART_MAIN);
-    lv_obj_center(new_lbl);
-    lv_obj_add_event_cb(new_btn, new_conv_btn_cb, LV_EVENT_CLICKED, NULL);
+    add_header_button(header, "+", 0, new_conv_btn_cb);
+    add_header_button(header, LV_SYMBOL_SETTINGS, 28, settings_btn_cb);
 
     /* Scrollable list body */
     s_msg.conv_list = lv_obj_create(scr);
@@ -655,10 +723,10 @@ static void build_new_conv_screen(void)
     lv_obj_set_scroll_dir(s_msg.new_conv_list, LV_DIR_VER);
 }
 
-static lv_obj_t *add_picker_label(const char *text, bool secondary)
+static lv_obj_t *add_list_label(lv_obj_t *list, const char *text, bool secondary)
 {
     const theme_colors_t *colors = theme_get_colors();
-    lv_obj_t *lbl = lv_label_create(s_msg.new_conv_list);
+    lv_obj_t *lbl = lv_label_create(list);
     lv_label_set_text(lbl, text);
     lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(lbl, DISP_W - 16);
@@ -668,11 +736,11 @@ static lv_obj_t *add_picker_label(const char *text, bool secondary)
     return lbl;
 }
 
-static void add_picker_button(const char *text, lv_event_cb_t cb, intptr_t user_data,
-                              bool primary)
+static lv_obj_t *add_list_button(lv_obj_t *list, const char *text, lv_event_cb_t cb,
+                                 intptr_t user_data, bool primary)
 {
     const theme_colors_t *colors = theme_get_colors();
-    lv_obj_t *btn = lv_button_create(s_msg.new_conv_list);
+    lv_obj_t *btn = lv_button_create(list);
     lv_obj_set_size(btn, DISP_W - 16, 36);
     lv_obj_set_style_bg_color(btn, primary ? colors->primary : colors->surface, LV_PART_MAIN);
     lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, LV_PART_MAIN);
@@ -689,6 +757,18 @@ static void add_picker_button(const char *text, lv_event_cb_t cb, intptr_t user_
     lv_obj_center(lbl);
 
     lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, (void *)user_data);
+    return btn;
+}
+
+static lv_obj_t *add_picker_label(const char *text, bool secondary)
+{
+    return add_list_label(s_msg.new_conv_list, text, secondary);
+}
+
+static void add_picker_button(const char *text, lv_event_cb_t cb, intptr_t user_data,
+                              bool primary)
+{
+    add_list_button(s_msg.new_conv_list, text, cb, user_data, primary);
 }
 
 /* How far a contact is, as MeshCore knows it. */
@@ -742,16 +822,102 @@ static int add_mesh_choices(void)
     return 1;
 }
 
+/* A phone number as the modem takes it: an optional '+', then digits. */
+static bool sms_number_valid(const char *n)
+{
+    if (*n == '+') n++;
+    if (!*n) return false;
+    for (; *n; n++) {
+        if (*n < '0' || *n > '9') return false;
+    }
+    return true;
+}
+
+static void sms_start_cb(lv_event_t *e)
+{
+    (void)e;
+    if (!s_msg.sms_number_ta) return;
+
+    /* Spaces, dashes and brackets as people write numbers are dropped. */
+    const char *typed = lv_textarea_get_text(s_msg.sms_number_ta);
+    char number[24];
+    size_t n = 0;
+    for (; *typed && n < sizeof(number) - 1; typed++) {
+        if (*typed == ' ' || *typed == '-' || *typed == '(' || *typed == ')') continue;
+        number[n++] = *typed;
+    }
+    number[n] = '\0';
+    if (*typed || !sms_number_valid(number)) {
+        if (s_msg.sms_note_label) {
+            lv_label_set_text(s_msg.sms_note_label,
+                              "A number is digits, with + in front if international.");
+        }
+        return;
+    }
+
+    char title[CONV_NAME_MAX];
+    CContactInfo contact;
+    if (rs_contact_find_by_phone(number, &contact) == 0 && contact.name[0] != '\0') {
+        snprintf(title, sizeof(title), "%.*s", (int)sizeof(title) - 1,
+                 (const char *)contact.name);
+    } else {
+        snprintf(title, sizeof(title), "%s", number);
+    }
+    start_conversation(MSG_TRANSPORT_SMS, number, title);
+}
+
+static void sms_number_key_cb(lv_event_t *e)
+{
+    if (lv_event_get_key(e) == LV_KEY_ENTER) sms_start_cb(e);
+}
+
+static int add_sms_choices(void)
+{
+    const msg_transport_driver_t *sms = messenger_get_transport(MSG_TRANSPORT_SMS);
+    if (!sms || !sms->is_available()) return 0;
+
+    add_picker_label("SMS - a phone number", false);
+    s_msg.sms_number_ta = lv_textarea_create(s_msg.new_conv_list);
+    lv_textarea_set_one_line(s_msg.sms_number_ta, true);
+    lv_textarea_set_max_length(s_msg.sms_number_ta, 23);
+    lv_textarea_set_accepted_chars(s_msg.sms_number_ta, "+0123456789 -()");
+    lv_textarea_set_placeholder_text(s_msg.sms_number_ta, "+49...");
+    lv_obj_set_width(s_msg.sms_number_ta, DISP_W - 16);
+    lv_obj_set_style_border_width(s_msg.sms_number_ta, 1, LV_PART_MAIN);
+    lv_obj_set_style_border_color(s_msg.sms_number_ta, theme_get_colors()->text_secondary,
+                                  LV_PART_MAIN);
+    lv_obj_set_style_radius(s_msg.sms_number_ta, 4, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(s_msg.sms_number_ta, 6, LV_PART_MAIN);
+    lv_obj_add_event_cb(s_msg.sms_number_ta, sms_number_key_cb, LV_EVENT_KEY, NULL);
+
+    char line[48];
+    snprintf(line, sizeof(line), "%s Text this number", sms->icon);
+    add_picker_button(line, sms_start_cb, 0, true);
+    s_msg.sms_note_label = add_picker_label("", true);
+
+    /* The physical keyboard types the number. */
+    lv_group_t *grp = lv_group_get_default();
+    if (grp) {
+        lv_group_add_obj(grp, s_msg.sms_number_ta);
+        lv_group_focus_obj(s_msg.sms_number_ta);
+    }
+    return 1;
+}
+
 static void refresh_new_conv_list(void)
 {
     if (!s_msg.new_conv_list) return;
     lv_obj_clean(s_msg.new_conv_list);
     s_msg.advert_label = NULL;
+    s_msg.sms_number_ta = NULL;
+    s_msg.sms_note_label = NULL;
 
     int visible_count = add_mesh_choices();
+    visible_count += add_sms_choices();
 
     for (int t = 0; t < MSG_TRANSPORT_COUNT; t++) {
-        if (t == MSG_TRANSPORT_LORA) continue;
+        /* Every SMS conversation is with a number. */
+        if (t == MSG_TRANSPORT_LORA || t == MSG_TRANSPORT_SMS) continue;
         const msg_transport_driver_t *drv = messenger_get_transport((msg_transport_t)t);
         if (!drv || !drv->is_available()) continue;
 
@@ -764,6 +930,134 @@ static void refresh_new_conv_list(void)
     if (visible_count == 0) {
         add_picker_label("No message transports are ready yet.", true);
     }
+}
+
+/* ------------------------------------------------------------------ */
+/* Settings screen                                                      */
+/* ------------------------------------------------------------------ */
+
+static void update_settings(esp_err_t saved);
+static void update_alerts(esp_err_t saved);
+
+static void settings_back_cb(lv_event_t *e)
+{
+    (void)e;
+    show_screen(SCREEN_CONV_LIST);
+}
+
+static void save_history_cb(lv_event_t *e)
+{
+    bool on = (bool)(intptr_t)lv_event_get_user_data(e);
+    update_settings(rs_msg_log_set_enabled(on));
+}
+
+static void alerts_cb(lv_event_t *e)
+{
+    bool on = (bool)(intptr_t)lv_event_get_user_data(e);
+    update_alerts(rs_msg_alert_set_enabled(on));
+}
+
+static void build_settings_screen(void)
+{
+    const theme_colors_t *colors = theme_get_colors();
+
+    lv_obj_t *header;
+    lv_obj_t *scr = create_screen_with_header(&header);
+    s_msg.settings_screen = scr;
+
+    lv_obj_t *title = lv_label_create(header);
+    lv_label_set_text(title, "< Settings");
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_color(title, colors->text, LV_PART_MAIN);
+    lv_obj_align(title, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_add_flag(title, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(title, settings_back_cb, LV_EVENT_CLICKED, NULL);
+
+    s_msg.settings_list = lv_obj_create(scr);
+    lv_obj_set_size(s_msg.settings_list, DISP_W, DISP_H - HEADER_H);
+    lv_obj_set_pos(s_msg.settings_list, 0, HEADER_H);
+    lv_obj_set_style_bg_color(s_msg.settings_list, colors->bg, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(s_msg.settings_list, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_width(s_msg.settings_list, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(s_msg.settings_list, 8, LV_PART_MAIN);
+    lv_obj_set_style_radius(s_msg.settings_list, 0, LV_PART_MAIN);
+    lv_obj_set_flex_flow(s_msg.settings_list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(s_msg.settings_list, 8, LV_PART_MAIN);
+    lv_obj_set_scroll_dir(s_msg.settings_list, LV_DIR_VER);
+}
+
+/* Mark which of an On/Off pair stands. The buttons' own handlers call this
+ * through update_settings() and update_alerts(), so it changes them rather
+ * than building them again. */
+static void show_choice(lv_obj_t *on_btn, lv_obj_t *off_btn, bool on)
+{
+    const theme_colors_t *colors = theme_get_colors();
+    lv_obj_t *btns[2] = { on_btn, off_btn };
+    const char *names[2] = { "On", "Off" };
+    for (int i = 0; i < 2; i++) {
+        bool chosen = (i == 0) == on;
+        lv_obj_set_style_bg_color(btns[i], chosen ? colors->primary : colors->surface,
+                                  LV_PART_MAIN);
+        lv_obj_set_style_border_width(btns[i], chosen ? 0 : 1, LV_PART_MAIN);
+        lv_obj_t *lbl = lv_obj_get_child(btns[i], 0);
+        lv_label_set_text_fmt(lbl, "%s%s", chosen ? LV_SYMBOL_OK " " : "", names[i]);
+        lv_obj_set_style_text_color(lbl, chosen ? lv_color_white() : colors->text,
+                                    LV_PART_MAIN);
+    }
+}
+
+/* Show whether messages are saved, as it stands. */
+static void update_settings(esp_err_t saved)
+{
+    if (!s_msg.save_on_btn) return;
+    bool on = rs_msg_log_enabled();
+    show_choice(s_msg.save_on_btn, s_msg.save_off_btn, on);
+
+    char note[160];
+    if (saved != ESP_OK) {
+        snprintf(note, sizeof(note), "Could not save the choice; it lasts until a restart.");
+    } else if (!on) {
+        snprintf(note, sizeof(note), "Messages are not saved: a restart loses them.");
+    } else if (!rs_msg_log_writable()) {
+        snprintf(note, sizeof(note), "No SD card: messages are not being saved.");
+    } else {
+        snprintf(note, sizeof(note),
+                 "Every SMS and MeshCore message, sent or received, goes to %s, "
+                 "a file per conversation, unencrypted.", rs_msg_log_dir());
+    }
+    lv_label_set_text(s_msg.save_note, note);
+}
+
+/* Show whether new messages buzz and pop up, as it stands. */
+static void update_alerts(esp_err_t saved)
+{
+    if (!s_msg.alert_on_btn) return;
+    bool on = rs_msg_alert_enabled();
+    show_choice(s_msg.alert_on_btn, s_msg.alert_off_btn, on);
+    lv_label_set_text(s_msg.alert_note,
+        saved != ESP_OK ? "Could not save the choice; it lasts until a restart." :
+        on ? "A new SMS or MeshCore message vibrates and pops up, unless its "
+             "conversation is on screen." :
+             "New messages are only counted in the status bar.");
+}
+
+static void refresh_settings(void)
+{
+    if (!s_msg.settings_list) return;
+    lv_obj_t *list = s_msg.settings_list;
+    lv_obj_clean(list);
+
+    add_list_label(list, "Save messages to the SD card", false);
+    s_msg.save_on_btn = add_list_button(list, "On", save_history_cb, 1, true);
+    s_msg.save_off_btn = add_list_button(list, "Off", save_history_cb, 0, false);
+    s_msg.save_note = add_list_label(list, "", true);
+    update_settings(ESP_OK);
+
+    add_list_label(list, "Vibrate and pop up for new messages", false);
+    s_msg.alert_on_btn = add_list_button(list, "On", alerts_cb, 1, true);
+    s_msg.alert_off_btn = add_list_button(list, "Off", alerts_cb, 0, false);
+    s_msg.alert_note = add_list_label(list, "", true);
+    update_alerts(ESP_OK);
 }
 
 /* ------------------------------------------------------------------ */
@@ -885,6 +1179,8 @@ static void build_chat_screen(void)
  * message goes out as "<our name>: <text>", inside MeshCore's limit. */
 static uint32_t conv_text_limit(const conversation_t *cv)
 {
+    /* One SMS: the modem sends no longer message. */
+    if (cv->transport == MSG_TRANSPORT_SMS) return 160;
     if (cv->transport != MSG_TRANSPORT_LORA) return MSG_MAX_TEXT - 1;
     if (cv->dest[0] != '\0') return MESH_TEXT_MAX;
     size_t prefix = strlen(rs_mesh_get_self_name()) + 2;
@@ -1279,10 +1575,13 @@ esp_err_t messenger_ui_create(lv_obj_t *parent)
     build_conv_list_screen();
     build_new_conv_screen();
     build_chat_screen();
+    build_settings_screen();
 
     /* Each ready transport's own conversation, then anything that arrived
-     * while the messenger was closed. */
+     * while the messenger was closed. SMS have none of their own: each is
+     * with a number. */
     for (int t = 0; t < MSG_TRANSPORT_COUNT; t++) {
+        if (t == MSG_TRANSPORT_SMS) continue;
         const msg_transport_driver_t *drv = messenger_get_transport((msg_transport_t)t);
         if (!drv || !drv->is_available()) continue;
         (void)ensure_conversation((msg_transport_t)t, "", NULL);
@@ -1308,6 +1607,7 @@ void messenger_ui_show(void)
         lv_timer_resume(s_tick_timer);
     }
     s_msg.visible = true;
+    report_viewing();
     if (s_msg.screen == SCREEN_CHAT) mark_read(s_msg.active_conv);
     /* What arrived while hidden, before the first tick. */
     poll_transports();
@@ -1317,6 +1617,7 @@ void messenger_ui_show(void)
 void messenger_ui_hide(void)
 {
     s_msg.visible = false;
+    report_viewing();
     if (s_msg.root) {
         lv_obj_add_flag(s_msg.root, LV_OBJ_FLAG_HIDDEN);
 
@@ -1352,4 +1653,5 @@ void messenger_ui_destroy(void)
      * lv_async_call finds none and lands in its conversation unread. */
     memset(&s_msg, 0, sizeof(s_msg));
     s_msg.active_conv = -1;
+    report_viewing();
 }

@@ -2,9 +2,10 @@
 // ThistleOS — the A7682E as a cellular network transport (hal_net_driver_t)
 //
 // connect() walks the module from off to carrying data: power, a ready SIM,
-// a registration, then a PPP session. Each step holds the driver only for its
-// own exchange with the module, so SMS and status calls are not shut out for
-// the minute a registration can take, and disconnect() can cut in between.
+// a registration, then a PPP session; listen() stops short of the session,
+// which is all SMS need. Each step holds the driver only for its own exchange
+// with the module, so SMS and status calls are not shut out for the minute a
+// registration can take, and disconnect() can cut in between.
 
 #include "drv_modem_a7682e.h"
 #include "a7682e_internal.h"
@@ -288,6 +289,76 @@ static void power_off(void)
     info_update(apply_powered, &powered);
 }
 
+/* From a module powered on to one registered with a network: a ready SIM,
+ * then a registration. ESP_ERR_NOT_FOUND for a SIM that will not do. */
+static esp_err_t attach(TickType_t start, uint32_t timeout_ms)
+{
+    leave_dead_session();
+
+    /* The SIM. A module just started reads it for a few seconds, and says
+     * "SIM busy" or even that there is none meanwhile; a verdict other than
+     * ready is taken only once it has held for SIM_SETTLE_POLLS answers. */
+    int silent = 0;
+    int same = 0;
+    hal_sim_state_t sim = HAL_SIM_UNKNOWN;
+    hal_sim_state_t prev = HAL_SIM_UNKNOWN;
+    for (;;) {
+        bool answered = false;
+        sim = read_sim(&answered);
+        info_update(apply_sim, &sim);
+        same = sim == prev ? same + 1 : 1;
+        prev = sim;
+        if (sim == HAL_SIM_READY || (sim != HAL_SIM_UNKNOWN && same >= SIM_SETTLE_POLLS)) {
+            break;
+        }
+        silent = answered ? 0 : silent + 1;
+        if (silent >= MAX_SILENT_POLLS) {
+            ESP_LOGW(TAG, "modem stopped answering; powering it off");
+            power_off();
+            return ESP_ERR_TIMEOUT;
+        }
+        if (deadline_passed(start, timeout_ms) || !sleep_unless_aborted(SIM_POLL_MS)) {
+            return ESP_ERR_TIMEOUT;
+        }
+    }
+    if (sim != HAL_SIM_READY) {
+        ESP_LOGW(TAG, "SIM not usable (state %d)", (int)sim);
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    /* A registration. Searching can take a minute after a cold start; a
+     * denial can lift as the module tries other cells, so it is waited out
+     * too. */
+    hal_cell_info_t seen;
+    hal_cell_reg_t last_reg = HAL_CELL_REG_UNKNOWN;
+    silent = 0;
+    for (;;) {
+        bool answered = read_network(&seen);
+        info_update(apply_network, &seen);
+        if (seen.reg != last_reg) {
+            ESP_LOGI(TAG, "registration %d, %d dBm", (int)seen.reg, (int)seen.rssi_dbm);
+            last_reg = seen.reg;
+        }
+        if (a7682e_reg_is_registered(seen.reg)) {
+            break;
+        }
+        silent = answered ? 0 : silent + 1;
+        if (silent >= MAX_SILENT_POLLS) {
+            ESP_LOGW(TAG, "modem stopped answering; powering it off");
+            power_off();
+            return ESP_ERR_TIMEOUT;
+        }
+        if (deadline_passed(start, timeout_ms) || !sleep_unless_aborted(REG_POLL_MS)) {
+            ESP_LOGW(TAG, "no registration");
+            return ESP_ERR_TIMEOUT;
+        }
+    }
+    ESP_LOGI(TAG, "registered on %s, %d dBm",
+             seen.operator_name[0] ? seen.operator_name : "(unnamed network)",
+             (int)seen.rssi_dbm);
+    return ESP_OK;
+}
+
 /* -------------------------------------------------------------------------
  * hal_net_driver_t
  * ---------------------------------------------------------------------- */
@@ -326,74 +397,10 @@ static esp_err_t net_connect(const char *apn, const char *credential, uint32_t t
             return ESP_OK;
         }
     }
-    leave_dead_session();
-
-    /* The SIM. A module just started reads it for a few seconds, and says
-     * "SIM busy" or even that there is none meanwhile; a verdict other than
-     * ready is taken only once it has held for SIM_SETTLE_POLLS answers. */
-    int silent = 0;
-    int same = 0;
-    hal_sim_state_t sim = HAL_SIM_UNKNOWN;
-    hal_sim_state_t prev = HAL_SIM_UNKNOWN;
-    for (;;) {
-        bool answered = false;
-        sim = read_sim(&answered);
-        info_update(apply_sim, &sim);
-        same = sim == prev ? same + 1 : 1;
-        prev = sim;
-        if (sim == HAL_SIM_READY || (sim != HAL_SIM_UNKNOWN && same >= SIM_SETTLE_POLLS)) {
-            break;
-        }
-        silent = answered ? 0 : silent + 1;
-        if (silent >= MAX_SILENT_POLLS) {
-            ESP_LOGW(TAG, "modem stopped answering; powering it off");
-            power_off();
-            ret = ESP_ERR_TIMEOUT;
-            goto fail;
-        }
-        if (deadline_passed(start, timeout_ms) || !sleep_unless_aborted(SIM_POLL_MS)) {
-            ret = ESP_ERR_TIMEOUT;
-            goto fail;
-        }
-    }
-    if (sim != HAL_SIM_READY) {
-        ESP_LOGW(TAG, "SIM not usable (state %d)", (int)sim);
-        ret = ESP_ERR_NOT_FOUND;
+    ret = attach(start, timeout_ms);
+    if (ret != ESP_OK) {
         goto fail;
     }
-
-    /* A registration. Searching can take a minute after a cold start; a
-     * denial can lift as the module tries other cells, so it is waited out
-     * too. */
-    hal_cell_info_t seen;
-    hal_cell_reg_t last_reg = HAL_CELL_REG_UNKNOWN;
-    silent = 0;
-    for (;;) {
-        bool answered = read_network(&seen);
-        info_update(apply_network, &seen);
-        if (seen.reg != last_reg) {
-            ESP_LOGI(TAG, "registration %d, %d dBm", (int)seen.reg, (int)seen.rssi_dbm);
-            last_reg = seen.reg;
-        }
-        if (a7682e_reg_is_registered(seen.reg)) {
-            break;
-        }
-        silent = answered ? 0 : silent + 1;
-        if (silent >= MAX_SILENT_POLLS) {
-            ESP_LOGW(TAG, "modem stopped answering; powering it off");
-            power_off();
-            ret = ESP_ERR_TIMEOUT;
-            goto fail;
-        }
-        if (deadline_passed(start, timeout_ms) || !sleep_unless_aborted(REG_POLL_MS)) {
-            ESP_LOGW(TAG, "no registration");
-            ret = ESP_ERR_TIMEOUT;
-            goto fail;
-        }
-    }
-    ESP_LOGI(TAG, "registered on %s, %d dBm",
-             seen.operator_name[0] ? seen.operator_name : "(unnamed network)",
-             (int)seen.rssi_dbm);
 
     /* The data session. */
     if (atomic_load(&s_abort)) {
@@ -422,6 +429,26 @@ static esp_err_t net_connect(const char *apn, const char *credential, uint32_t t
 fail:
     atomic_store(&s_state, HAL_NET_STATE_DISCONNECTED);
     return ret;
+}
+
+static esp_err_t net_listen(uint32_t timeout_ms)
+{
+    if (a7682e_ppp_up()) {
+        return ESP_OK;  // registered, and carrying data besides
+    }
+    if (timeout_ms == 0) {
+        timeout_ms = CONNECT_DEFAULT_TIMEOUT_MS;
+    }
+    TickType_t start = xTaskGetTickCount();
+    atomic_store(&s_abort, false);
+
+    esp_err_t ret = power_on();
+    bool powered = ret == ESP_OK;
+    info_update(apply_powered, &powered);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    return attach(start, timeout_ms);
 }
 
 /* Every wait in net_connect() checks this, so the attempt ends within one
@@ -509,6 +536,10 @@ static const hal_net_driver_t s_net_driver = {
     .get_cell_info = net_get_cell_info,
     .cancel        = net_cancel,
     .sleep         = net_sleep,
+    .listen        = net_listen,
+    .sms_send      = drv_a7682e_send_sms,
+    .sms_due       = drv_a7682e_sms_due,
+    .sms_fetch     = drv_a7682e_sms_fetch,
 };
 
 const hal_net_driver_t *drv_a7682e_net_driver(void)

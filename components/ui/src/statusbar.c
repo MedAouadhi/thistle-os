@@ -3,6 +3,9 @@
 #include "thistle/wifi_manager.h"
 #include "thistle/net_manager.h"
 #include "thistle/mesh.h"
+#include "thistle/sms.h"
+#include "thistle/msg_alert.h"
+#include "ui/toast.h"
 #include "thistle/app_manager.h"
 #include "hal/board.h"
 #include "esp_log.h"
@@ -273,7 +276,31 @@ static void update_battery(void)
     statusbar_set_battery(pct, charging);
 }
 
-/* Show how many messages are unread, or nothing when none are. */
+/* How long a new message's pop-up stays up */
+#define MESSAGE_POPUP_MS 5000
+
+/* Pop up the latest message the kernel alerted for (thistle/msg_alert.h),
+ * which has buzzed for it already. Any that came before it are counted. */
+static void show_message_alert(void)
+{
+    msg_alert_t alert;
+    if (!rs_msg_alert_take(&alert)) {
+        return;
+    }
+    /* Room for the longest name, preview and count; in practice it is well
+     * under the 127 bytes a toast shows. */
+    char text[160];
+    if (alert.count > 1) {
+        snprintf(text, sizeof(text), LV_SYMBOL_ENVELOPE " %s: %s (+%u more)",
+                 alert.from, alert.text, (unsigned)(alert.count - 1));
+    } else {
+        snprintf(text, sizeof(text), LV_SYMBOL_ENVELOPE " %s: %s", alert.from, alert.text);
+    }
+    toast_show(text, TOAST_INFO, MESSAGE_POPUP_MS);
+}
+
+/* Show how many mesh messages and SMS are unread, or nothing when none are,
+ * and pop up any message that has just arrived. */
 static void statusbar_messages_cb(lv_timer_t *timer)
 {
     (void)timer;
@@ -281,7 +308,9 @@ static void statusbar_messages_cb(lv_timer_t *timer)
         return;
     }
 
-    uint32_t unread = rs_mesh_unread_count();
+    show_message_alert();
+
+    uint32_t unread = rs_mesh_unread_count() + rs_sms_unread_count();
     bool hidden = lv_obj_has_flag(s_messages_label, LV_OBJ_FLAG_HIDDEN);
     if (unread == 0) {
         if (!hidden) {

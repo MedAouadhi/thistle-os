@@ -5,7 +5,7 @@
  * Four backends are registered at init time:
  *
  *  MSG_TRANSPORT_LORA     — the kernel's MeshCore node: Public channel and direct messages
- *  MSG_TRANSPORT_SMS      — A7682E 4G modem (send/receive via AT commands)
+ *  MSG_TRANSPORT_SMS      — the kernel's SMS: a conversation per phone number
  *  MSG_TRANSPORT_BLE      — ble_manager relay stub (logs TODO, returns NOT_SUPPORTED)
  *  MSG_TRANSPORT_INTERNET — HTTP/WebSocket stub    (logs TODO, returns NOT_SUPPORTED)
  *
@@ -22,9 +22,9 @@
 #include "stdlib.h"
 #include "string.h"
 
-#include "drv_modem_a7682e.h"
 #include "thistle/ble_manager.h"
 #include "thistle/mesh.h"
+#include "thistle/sms.h"
 
 static const char *TAG = "msg_transport";
 
@@ -156,50 +156,50 @@ static const msg_transport_driver_t s_lora_driver = {
 };
 
 /* ------------------------------------------------------------------ */
-/* SMS transport (A7682E modem)                                         */
+/* SMS transport                                                        */
 /* ------------------------------------------------------------------ */
 
-static msg_rx_cb_t s_sms_rx_cb;
+/*
+ * The kernel fetches each SMS from the modem as it arrives and queues it,
+ * as it does the mesh's; this hands them over when polled. Every
+ * conversation is with a phone number, or with the name a sender such as a
+ * bank or a parcel service gives instead; there is no "" conversation.
+ */
+
+/* Messages handed over per poll, as for the mesh. */
+#define SMS_POLL_BUDGET 4
 
 static bool sms_is_available(void)
 {
-    return drv_a7682e_is_ready();
+    return rs_sms_ready();
 }
 
 static esp_err_t sms_send(const char *dest, const char *text, uint32_t *out_ref)
 {
     if (out_ref) *out_ref = 0;
-    if (!dest || !text) return ESP_ERR_INVALID_ARG;
-    return drv_a7682e_send_sms(dest, text);
+    if (!dest || !dest[0] || !text || !text[0]) return ESP_ERR_INVALID_ARG;
+    return rs_sms_send(dest, text);
 }
 
-static void sms_incoming_handler(int index, void *user_data)
-{
-    (void)user_data;
-    if (!s_sms_rx_cb) return;
-
-    char sender[32] = {0};
-    char body[200]  = {0};
-    if (drv_a7682e_read_sms(index, sender, sizeof(sender),
-                             body, sizeof(body)) == ESP_OK) {
-        s_sms_rx_cb(MSG_TRANSPORT_SMS, "", sender, body);
-        drv_a7682e_delete_sms(index);
-    }
-}
-
+/* The kernel is always listening; there is nothing to start or stop. */
 static esp_err_t sms_start_receive(msg_rx_cb_t cb)
 {
-    s_sms_rx_cb = cb;
-    esp_err_t ret = drv_a7682e_sms_init();
-    if (ret != ESP_OK) return ret;
-    drv_a7682e_register_sms_cb(sms_incoming_handler, NULL);
+    (void)cb;
     return ESP_OK;
 }
 
 static void sms_stop_receive(void)
 {
-    drv_a7682e_register_sms_cb(NULL, NULL);
-    s_sms_rx_cb = NULL;
+}
+
+static void sms_poll(msg_rx_cb_t rx, msg_status_cb_t status)
+{
+    (void)status;
+    /* Too big for the LVGL task's stack, and only ever used here. */
+    static sms_message_t m;
+    for (int n = 0; n < SMS_POLL_BUDGET && rs_sms_inbox_pop(&m); n++) {
+        if (rx) rx(MSG_TRANSPORT_SMS, m.sender, m.sender, m.text);
+    }
 }
 
 static const msg_transport_driver_t s_sms_driver = {
@@ -211,6 +211,7 @@ static const msg_transport_driver_t s_sms_driver = {
     .send           = sms_send,
     .start_receive  = sms_start_receive,
     .stop_receive   = sms_stop_receive,
+    .poll           = sms_poll,
 };
 
 /* ------------------------------------------------------------------ */

@@ -95,6 +95,7 @@ set(SIM_SRCS
     drivers/sim_power.c
     drivers/sim_gps.c
     drivers/sim_imu.c
+    drivers/sim_haptic.c
     drivers/sim_rtc.c
     drivers/sim_audio.c
     drivers/sim_radio.c

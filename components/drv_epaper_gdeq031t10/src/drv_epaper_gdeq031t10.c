@@ -131,13 +131,20 @@ static esp_err_t bl_set_duty(uint8_t percent)
 
 /* ── Low-level helpers ──────────────────────────────────────────────── */
 
+/* CS is a GPIO this driver drives, so the bus is held for as long as it is
+ * low. The bus is shared (on the T-Deck Max with the SD card and the LoRa
+ * radio), and a transfer to another device between two of a frame's chunks
+ * would otherwise reach the panel as pixels. */
 static esp_err_t epaper_send_cmd(uint8_t cmd)
 {
+    esp_err_t ret = spi_device_acquire_bus(s_epd.spi, portMAX_DELAY);
+    if (ret != ESP_OK) return ret;
     gpio_set_level(s_epd.cfg.pin_cs, 0);
     gpio_set_level(s_epd.cfg.pin_dc, 0);
     spi_transaction_t t = { .length = 8, .tx_buffer = &cmd };
-    esp_err_t ret = spi_device_polling_transmit(s_epd.spi, &t);
+    ret = spi_device_polling_transmit(s_epd.spi, &t);
     gpio_set_level(s_epd.cfg.pin_cs, 1);
+    spi_device_release_bus(s_epd.spi);
     if (ret != ESP_OK) ESP_LOGE(TAG, "cmd 0x%02X spi err: %s", cmd, esp_err_to_name(ret));
     return ret;
 }
@@ -145,9 +152,10 @@ static esp_err_t epaper_send_cmd(uint8_t cmd)
 static esp_err_t epaper_send_data(const uint8_t *data, size_t len)
 {
     if (len == 0) return ESP_OK;
+    esp_err_t ret = spi_device_acquire_bus(s_epd.spi, portMAX_DELAY);
+    if (ret != ESP_OK) return ret;
     gpio_set_level(s_epd.cfg.pin_cs, 0);
     gpio_set_level(s_epd.cfg.pin_dc, 1);
-    esp_err_t ret = ESP_OK;
     size_t sent = 0;
     while (sent < len && ret == ESP_OK) {
         size_t chunk = len - sent;
@@ -158,6 +166,7 @@ static esp_err_t epaper_send_data(const uint8_t *data, size_t len)
         sent += chunk;
     }
     gpio_set_level(s_epd.cfg.pin_cs, 1);
+    spi_device_release_bus(s_epd.spi);
     return ret;
 }
 

@@ -14,9 +14,9 @@ With a cellular modem there are two ways to the internet, and traffic should tak
 
 The ranking in `net_manager.rs` (`transport_rank`) must agree with the route priorities in esp-idf's `esp_netif_defaults.h`. A test pins the order.
 
-While the modem carries data it answers no AT commands: the session runs over plain PPP, not CMUX. Signal and operator are therefore the values read before dialling. Sending an SMS interrupts the session for the length of the exchange. Incoming SMS are polled only when no session is up. With mobile data off the modem is powered down, so in practice no SMS is received at all. Moving to CMUX would lift all of these restrictions.
+While the modem carries data it answers no AT commands: the session runs over plain PPP, not CMUX. Signal and operator are therefore the values read before dialling. Sending an SMS interrupts the session for the length of the exchange, and so does fetching one that the modem's RI line announced (ADR-0004). Moving to CMUX would lift these restrictions.
 
-The modem is powered down when the SIM is missing or locked, and it is not tried again until mobile data is switched off and on. A SIM PIN is not entered: a PIN retried by a background loop would use up the card's attempts and lock it behind its PUK.
+The modem is powered down when the SIM is missing or locked, and it is not tried again until mobile data or SMS is switched off or on. A SIM PIN is not entered: a PIN retried by a background loop would use up the card's attempts and lock it behind its PUK.
 
 WiFi can be switched off in Settings (`thistle_os.wifi.radio_off`). That stops the radio and the coordinator's rejoining, so traffic takes LTE without any route being touched. The key is separate from `wifi.enabled`, which says only whether the saved network is joined at boot and is false in a fresh system.json.
 

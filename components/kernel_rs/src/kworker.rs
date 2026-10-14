@@ -103,6 +103,12 @@ pub fn post(func: JobFn, arg: *mut c_void) -> u32 {
     add(func, arg, Duration::ZERO, None)
 }
 
+/// Run `func(arg)` once on the worker, `delay` from now or once it is free
+/// after that.
+pub fn after(func: JobFn, arg: *mut c_void, delay: Duration) -> u32 {
+    add(func, arg, delay, None)
+}
+
 /// Run `func(arg)` on the worker now, and then `period` after each run ends,
 /// until cancelled.
 pub fn every(func: JobFn, arg: *mut c_void, period: Duration) -> u32 {

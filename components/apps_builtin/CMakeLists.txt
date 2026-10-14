@@ -17,7 +17,7 @@ idf_component_register(
         "terminal/terminal_app.c"
         "terminal/terminal_ui.c"
     INCLUDE_DIRS "."
-    REQUIRES kernel ui thistle_hal mbedtls esp_http_client drv_modem_a7682e
+    REQUIRES kernel ui thistle_hal mbedtls esp_http_client
     # lvgl_apps.c is the only caller of the apps that live as their own
     # components under apps/, and lvgl_apps.h exposes none of them, so this
     # dependency is an implementation detail rather than part of the interface.

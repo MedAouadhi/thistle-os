@@ -81,6 +81,17 @@ jobs:
             -o /tmp/test_modem_parse
           /tmp/test_modem_parse
 
+      - name: Test SMS decoding
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror \
+            -Icomponents/drv_modem_a7682e/include \
+            -Icomponents/drv_modem_a7682e/tests/host_shim \
+            -Icomponents/thistle_hal/include \
+            components/drv_modem_a7682e/src/a7682e_sms.c \
+            components/drv_modem_a7682e/tests/test_sms.c \
+            -o /tmp/test_modem_sms
+          /tmp/test_modem_sms
+
       - name: Test modem lifecycle concurrency
         run: |
           cc -std=c11 -Wall -Wextra -Werror -pthread \

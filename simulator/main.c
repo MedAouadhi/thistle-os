@@ -163,6 +163,7 @@ static void sim_tk_input_cb(const hal_input_event_t *event, void *user_data)
 /* Defined in board_simulator.c */
 extern void sim_board_set_device(const char *device);
 extern void sim_cellular_set_card(const char *card);
+extern bool sim_cellular_add_sms(const char *spec);
 
 int main(int argc, char **argv)
 {
@@ -215,6 +216,11 @@ int main(int argc, char **argv)
             if (!add_mesh_message(argv[++i], true)) return 2;
         } else if (strcmp(argv[i], "--sim-card") == 0 && i + 1 < argc) {
             sim_cellular_set_card(argv[++i]);
+        } else if (strcmp(argv[i], "--sms") == 0 && i + 1 < argc) {
+            if (!sim_cellular_add_sms(argv[++i])) {
+                fprintf(stderr, "Invalid SMS; expected \"SENDER: TEXT\" (at most 8)\n");
+                return 2;
+            }
         } else if (strcmp(argv[i], "--log-flushes") == 0) {
             sim_display_set_log_flushes(true);
         } else if (strcmp(argv[i], "--report-offscreen") == 0) {
@@ -238,6 +244,8 @@ int main(int argc, char **argv)
             printf("  --type-rollover     Press each typed key before releasing the last\n");
             printf("  --sim-card STATE    The modem's SIM, on a device with one (tdeck-max):\n");
             printf("                      ready (default), absent, pin or puk\n");
+            printf("  --sms \"SENDER: TEXT\" An SMS the modem holds at startup, for the\n");
+            printf("                      kernel to fetch once it registers; up to 8\n");
             printf("  --mesh-message \"SENDER: TEXT\"\n");
             printf("                      Hear TEXT on the mesh's Public channel at startup\n");
             printf("  --mesh-direct \"SENDER: TEXT\"\n");

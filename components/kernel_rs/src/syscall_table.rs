@@ -217,6 +217,7 @@ extern "C" {
     fn hal_gps_register(drv: *const c_void, cfg: *const c_void) -> i32;
     fn hal_audio_register(drv: *const c_void, cfg: *const c_void) -> i32;
     fn hal_power_register(drv: *const c_void, cfg: *const c_void) -> i32;
+    fn hal_haptic_register(drv: *const c_void, cfg: *const c_void) -> i32;
     fn hal_imu_register(drv: *const c_void, cfg: *const c_void) -> i32;
     fn hal_storage_register(drv: *const c_void, cfg: *const c_void) -> i32;
     fn hal_set_board_name(name: *const c_char);
@@ -1730,6 +1731,10 @@ static SYSCALL_TABLE: &[SyscallEntry] = &[
     entry!(
         "hal_gps_register",
         hal_gps_register as unsafe extern "C" fn(*const c_void, *const c_void) -> i32
+    ),
+    entry!(
+        "hal_haptic_register",
+        hal_haptic_register as unsafe extern "C" fn(*const c_void, *const c_void) -> i32
     ),
     entry!(
         "hal_imu_register",

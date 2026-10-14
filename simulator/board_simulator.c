@@ -8,6 +8,7 @@
 #include "sim_power.h"
 #include "sim_gps.h"
 #include "sim_imu.h"
+#include "sim_haptic.h"
 #include "sim_rtc.h"
 #include "sim_audio.h"
 #include "sim_radio.h"
@@ -50,6 +51,8 @@ typedef struct {
     bool        has_light_sensor;
     /* A cellular modem: the A7682E of the Max's profile. */
     bool        has_modem;
+    /* A vibration motor: the DRV2605 of the Max's profile. */
+    bool        has_haptic;
 } sim_device_t;
 
 /* Every device has an RTC and a light sensor unless it says otherwise, which
@@ -71,7 +74,7 @@ static const sim_device_t DEVICES[] = {
     { .name = "tdeck-max",  .board_name = "T-Deck Pro Max (Simulator)", .width = 240, .height = 320,
       .has_keyboard = true, .has_touch = true, .touch_is_cst66xx = true,
       .has_radio = true, .has_gps = true,
-      .is_epaper = true, .has_io_expander = true, .has_modem = true },
+      .is_epaper = true, .has_io_expander = true, .has_modem = true, .has_haptic = true },
     { .name = "tdisplay",   .board_name = "T-Display-S3 (Simulator)",  .width = 320, .height = 170,
       .has_touch = true,  SIM_DEVICE_DEFAULTS },
     { .name = "heltec-v3",  .board_name = "Heltec V3 (Simulator)",     .width = 128, .height = 64,
@@ -123,6 +126,7 @@ esp_err_t board_init(void)
     hal_audio_register(sim_audio_get(), NULL);
     if (dev->has_radio) hal_radio_register(sim_radio_get(), NULL);
     if (dev->has_gps)   hal_gps_register(sim_gps_get(), NULL);
+    if (dev->has_haptic) hal_haptic_register(sim_haptic_get(), NULL);
 
     /* Initialize virtual buses and register device models */
     sim_i2c_bus_init();

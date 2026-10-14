@@ -109,9 +109,31 @@ _Static_assert(sizeof(hal_net_state_t) == 4 && sizeof(hal_sim_state_t) == 4,
 _Static_assert(offsetof(net_cellular_status_t, data) == 4, "CCellularStatus.data");
 _Static_assert(offsetof(net_cellular_status_t, sim_blocked) == 8, "CCellularStatus.sim_blocked");
 _Static_assert(offsetof(net_cellular_status_t, info) == 12, "CCellularStatus.info");
-_Static_assert(sizeof(net_cellular_status_t) == 52, "CCellularStatus size");
+_Static_assert(offsetof(net_cellular_status_t, sms) == 52, "CCellularStatus.sms");
+_Static_assert(sizeof(net_cellular_status_t) == 56, "CCellularStatus size");
 _Static_assert(offsetof(hal_net_driver_t, get_cell_info) == 9 * sizeof(void *),
                "HalNetDriver.get_cell_info");
+_Static_assert(offsetof(hal_net_driver_t, sms_fetch) == 15 * sizeof(void *),
+               "HalNetDriver.sms_fetch");
+
+// net_manager.rs mirrors hal_sms_t as CHalSms; sms_manager.rs mirrors
+// sms_message_t as CSmsMessage.
+#include "thistle/sms.h"
+_Static_assert(offsetof(hal_sms_t, sent_at) == 33, "CHalSms.sent_at");
+_Static_assert(offsetof(hal_sms_t, text) == 57, "CHalSms.text");
+_Static_assert(offsetof(hal_sms_t, concat_ref) == 538, "CHalSms.concat_ref");
+_Static_assert(offsetof(hal_sms_t, parts) == 541, "CHalSms.parts");
+_Static_assert(sizeof(hal_sms_t) == 542, "CHalSms size");
+_Static_assert(offsetof(sms_message_t, text) == 33, "CSmsMessage.text");
+_Static_assert(offsetof(sms_message_t, sent) == 1060, "CSmsMessage.sent");
+_Static_assert(sizeof(sms_message_t) == 1064, "CSmsMessage size");
+
+// msg_alert_t as CMsgAlert.
+#include "thistle/msg_alert.h"
+_Static_assert(offsetof(msg_alert_t, transport) == 4, "CMsgAlert.transport");
+_Static_assert(offsetof(msg_alert_t, from) == 5, "CMsgAlert.from");
+_Static_assert(offsetof(msg_alert_t, text) == 38, "CMsgAlert.text");
+_Static_assert(sizeof(msg_alert_t) == 112, "CMsgAlert size");
 
 // Reference each symbol so the linker pulls it from the ESP-IDF archive.
 // This function is never called — it's dead code that exists only to
