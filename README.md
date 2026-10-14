@@ -193,7 +193,7 @@ See the [Board Support](https://wan0net.github.io/esp32-os/docs/board-support.ht
 
 ## Built-in Apps
 
-ThistleOS ships with 14 apps that demonstrate the platform. All are built-in but follow the same patterns as external apps — they use the syscall table, HAL vtables, and permissions system.
+ThistleOS ships with 15 apps that demonstrate the platform. All are built-in but follow the same patterns as external apps — they use the syscall table, HAL vtables, and permissions system.
 
 | App | What it does |
 |-----|-------------|
@@ -201,6 +201,7 @@ ThistleOS ships with 14 apps that demonstrate the platform. All are built-in but
 | **Settings** | WiFi, Bluetooth, Appearance (themes), Drivers (live HAL status), About |
 | **File Manager** | SD card browser with directory navigation |
 | **Reader** | EPUB and text books, Arabic included; recent books first, each opened where it was left |
+| **Podcasts** | PodcastIndex search, trending and categories; streams MP3 episodes, saves them to the SD card to play offline; starred, recently viewed, continue listening |
 | **Messenger** | Messaging app with working LoRa transport and in-progress SMS/BLE/Internet backends |
 | **Navigator** | GPS dashboard with GPX track recording |
 | **Notes** | Text editor with auto-save |

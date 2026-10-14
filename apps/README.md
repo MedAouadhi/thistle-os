@@ -11,6 +11,7 @@ Each app is an independent ESP-IDF component today, on a path to becoming a sign
 |----------------|----------------------------|------------------------------------|
 | `notes/`       | com.thistle.notes          | Text note editor with SD persistence |
 | `reader/`      | com.thistle.reader         | Document/ebook reader               |
+| `podcasts/`    | com.thistle.podcasts       | PodcastIndex podcast player         |
 | `vault/`       | com.thistle.vault          | Encrypted file vault                |
 | `file_manager/`| com.thistle.filemgr        | SD card file browser                |
 | `wifiscanner/` | com.thistle.wifiscanner    | WiFi network scanner                |

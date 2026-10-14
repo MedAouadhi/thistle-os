@@ -1,0 +1,7 @@
+{
+  "id": "com.thistle.podcasts",
+  "name": "Podcasts",
+  "version": "0.1.0",
+  "allow_background": true,
+  "permissions": ["network", "storage", "audio"]
+}

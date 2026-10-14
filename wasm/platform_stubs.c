@@ -171,6 +171,8 @@ int sim_http_client_open(sim_http_client_handle_t c, int l) { (void)c;(void)l; r
 int sim_http_client_fetch_headers(sim_http_client_handle_t c) { (void)c; return -1; }
 int sim_http_client_read(sim_http_client_handle_t c, char *b, int l) { (void)c;(void)b;(void)l; return -1; }
 int sim_http_client_close(sim_http_client_handle_t c) { (void)c; return 0; }
+int sim_http_client_set_url(sim_http_client_handle_t c, const char *u) { (void)c;(void)u; return -1; }
+int sim_http_client_set_redirection(sim_http_client_handle_t c) { (void)c; return -1; }
 void sim_http_client_cleanup(sim_http_client_handle_t c) { (void)c; }
 int sim_http_client_set_method(sim_http_client_handle_t c, const char *m) { (void)c;(void)m; return -1; }
 int sim_http_client_set_header(sim_http_client_handle_t c, const char *k, const char *v) { (void)c;(void)k;(void)v; return -1; }

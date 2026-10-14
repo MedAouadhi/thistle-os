@@ -356,6 +356,7 @@ void app_main(void)
     permissions_grant("com.thistle.settings",   PERM_ALL);
     permissions_grant("com.thistle.filemgr",    PERM_ALL);
     permissions_grant("com.thistle.reader",     PERM_ALL);
+    permissions_grant("com.thistle.podcasts",   PERM_NETWORK | PERM_STORAGE | PERM_AUDIO);
     permissions_grant("com.thistle.messenger",  PERM_RADIO | PERM_IPC);
     permissions_grant("com.thistle.navigator",  PERM_GPS | PERM_STORAGE);
     permissions_grant("com.thistle.notes",      PERM_STORAGE);

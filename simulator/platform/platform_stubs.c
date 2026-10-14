@@ -131,7 +131,11 @@ int xTaskCreatePinnedToCore(void *fn, const char *n, unsigned int s, void *p, un
 
     pthread_attr_t attr;
     pthread_attr_init(&attr);
-    if (s > 0) pthread_attr_setstacksize(&attr, s < 16384 ? 16384 : s);
+    /* A stack sized for the device is too small here: a task that makes an
+     * HTTPS request runs the host's OpenSSL, through libcurl, which needs
+     * far more than the device's mbedTLS, whose buffers are in PSRAM. Host
+     * memory is cheap, so every task gets plenty. */
+    if (s > 0) pthread_attr_setstacksize(&attr, s < 256 * 1024 ? 256 * 1024 : s);
     int ret = pthread_create(&task->thread, &attr, task_wrapper, task);
     pthread_attr_destroy(&attr);
     pthread_detach(task->thread);  /* Auto-cleanup on exit */

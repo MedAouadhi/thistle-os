@@ -147,6 +147,7 @@ target_compile_definitions(thistle_sim PRIVATE
     SIMULATOR_BUILD=1
     THISTLE_HAVE_FILEMGR=${THISTLE_HAVE_FILEMGR}
     THISTLE_HAVE_READER=${THISTLE_HAVE_READER}
+    THISTLE_HAVE_PODCASTS=${THISTLE_HAVE_PODCASTS}
     THISTLE_HAVE_NAVIGATOR=${THISTLE_HAVE_NAVIGATOR}
     THISTLE_HAVE_NOTES=${THISTLE_HAVE_NOTES}
     THISTLE_HAVE_APPSTORE=${THISTLE_HAVE_APPSTORE}
@@ -158,6 +159,12 @@ target_compile_definitions(thistle_sim PRIVATE
     # SD card path for simulator — points to local sdcard directory
     THISTLE_SDCARD_PATH="/tmp/thistle_sdcard"
 )
+
+# The Podcasts app's PodcastIndex key and secret, from .env when there is
+# one, into a header in this build directory: never the source tree.
+include(${THISTLE_DIR}/apps/podcasts/credentials.cmake)
+thistle_podcasts_credentials("${CMAKE_CURRENT_BINARY_DIR}/podcasts")
+target_include_directories(thistle_sim PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/podcasts")
 
 # Build Rust kernel for host target
 set(KERNEL_RS_DIR "${THISTLE_DIR}/components/kernel_rs")

@@ -69,6 +69,7 @@ static const char *app_icon_symbol(const char *app_id)
     if (strstr(app_id, "weather"))     return LV_SYMBOL_REFRESH;
     if (strstr(app_id, "terminal"))    return LV_SYMBOL_KEYBOARD;
     if (strstr(app_id, "vault"))       return LV_SYMBOL_WARNING;
+    if (strstr(app_id, "podcasts"))    return LV_SYMBOL_AUDIO;
     if (strstr(app_id, "radio"))       return LV_SYMBOL_AUDIO;
     return LV_SYMBOL_FILE;
 }

@@ -4,17 +4,20 @@
  *
  * Provides both a buffered API (sim_http_client_perform) and a streaming
  * read API (open / fetch_headers / read / close) that mirrors the
- * esp_http_client chunked-read pattern used by appstore_download_file.
+ * esp_http_client chunked-read pattern used by appstore_download_file and
+ * the Podcasts app's player and downloads.
  */
 
 #include "sim_http.h"
 #include <curl/curl.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <stdio.h>
+#include <time.h>
 
 struct sim_http_client {
-    char   url[512];
+    char  *url;
     int    timeout_ms;
     bool   follow_redirects;
     void  *event_handler;
@@ -30,6 +33,13 @@ struct sim_http_client {
     int    content_length;
     /* Read cursor for streaming API */
     size_t read_offset;
+    /* The streaming API's transfer, driven a step at a time by read() */
+    CURLM *multi;
+    CURL  *easy;
+    bool   stream_done;      /* the transfer has finished, well or not */
+    bool   stream_failed;
+    char  *location;         /* a redirect's Location, for set_redirection() */
+    char  *location_raw;     /* as the header gave it, maybe relative */
 };
 
 /* ── Write callback — appends received data to the response buffer ── */
@@ -62,7 +72,8 @@ sim_http_client_handle_t sim_http_client_init(const sim_http_client_config_t *co
     struct sim_http_client *c = calloc(1, sizeof(*c));
     if (!c) return NULL;
 
-    strncpy(c->url, config->url, sizeof(c->url) - 1);
+    c->url = strdup(config->url);
+    if (!c->url) { free(c); return NULL; }
     c->timeout_ms   = config->timeout_ms > 0 ? config->timeout_ms : 15000;
     c->follow_redirects = !config->disable_auto_redirect;
     c->event_handler = config->event_handler;
@@ -70,7 +81,7 @@ sim_http_client_handle_t sim_http_client_init(const sim_http_client_config_t *co
     strcpy(c->method, "GET");
     c->response_cap = 4096;
     c->response_buf = malloc(c->response_cap);
-    if (!c->response_buf) { free(c); return NULL; }
+    if (!c->response_buf) { free(c->url); free(c); return NULL; }
     c->response_buf[0] = '\0';
     return c;
 }
@@ -78,6 +89,10 @@ sim_http_client_handle_t sim_http_client_init(const sim_http_client_config_t *co
 void sim_http_client_cleanup(sim_http_client_handle_t client)
 {
     if (!client) return;
+    sim_http_client_close(client);
+    free(client->url);
+    free(client->location);
+    free(client->location_raw);
     curl_slist_free_all(client->headers);
     free(client->post_data);
     free(client->response_buf);
@@ -85,6 +100,16 @@ void sim_http_client_cleanup(sim_http_client_handle_t client)
 }
 
 /* ── Request setup ────────────────────────────────────────────────── */
+
+esp_err_t sim_http_client_set_url(sim_http_client_handle_t client, const char *url)
+{
+    if (!client || !url) return ESP_FAIL;
+    char *copy = strdup(url);
+    if (!copy) return ESP_FAIL;
+    free(client->url);
+    client->url = copy;
+    return ESP_OK;
+}
 
 esp_err_t sim_http_client_set_method(sim_http_client_handle_t client, const char *method)
 {
@@ -132,6 +157,21 @@ void *sim_http_client_get_user_data(sim_http_client_handle_t client)
     return client ? client->user_data : NULL;
 }
 
+/* A transfer of the request as set up so far, the body going to
+ * write_callback. */
+static CURL *new_easy(struct sim_http_client *client)
+{
+    CURL *curl = curl_easy_init();
+    if (!curl) return NULL;
+    curl_easy_setopt(curl, CURLOPT_URL,           client->url);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,  write_callback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA,      client);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, client->follow_redirects ? 1L : 0L);
+    curl_easy_setopt(curl, CURLOPT_MAXREDIRS,      10L);  /* ESP-IDF's default */
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+    return curl;
+}
+
 /* ── Buffered perform ─────────────────────────────────────────────── */
 
 esp_err_t sim_http_client_perform(sim_http_client_handle_t client)
@@ -143,15 +183,9 @@ esp_err_t sim_http_client_perform(sim_http_client_handle_t client)
     client->read_offset   = 0;
     client->response_buf[0] = '\0';
 
-    CURL *curl = curl_easy_init();
+    CURL *curl = new_easy(client);
     if (!curl) return ESP_FAIL;
-
-    curl_easy_setopt(curl, CURLOPT_URL,           client->url);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,  write_callback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA,      client);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS,    (long)client->timeout_ms);
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, client->follow_redirects ? 1L : 0L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
 
     /* An empty "Expect:" stops curl holding a large body back for a
      * 100-continue that esp_http_client never waits for either. */
@@ -219,43 +253,169 @@ size_t sim_http_client_get_response_length(sim_http_client_handle_t c) {
 
 /* ── Streaming API (open / fetch_headers / read / close) ─────────── *
  *
- * appstore_download_file uses this pattern to stream a file to disk
- * without buffering the whole thing in RAM.  On the simulator we still
- * buffer it (memory is plentiful on the host), but we expose the same
- * chunked-read interface so the calling code compiles unchanged.
+ * As on the device, the body arrives as it is read: open() starts the
+ * transfer, fetch_headers() runs it until the headers are in, and each read()
+ * runs it until there is some body to hand over. A podcast is never held
+ * whole in memory, and a 50 MB episode starts playing at once.
+ *
+ * timeout_ms is how long any one step may wait, as ESP-IDF's is per socket
+ * operation; the whole transfer may take as long as it takes.
  */
+
+/* Keeps the Location header, which ESP-IDF does too, for a redirect the
+ * caller follows itself. */
+static size_t header_callback(char *data, size_t size, size_t nmemb, void *userp)
+{
+    struct sim_http_client *c = (struct sim_http_client *)userp;
+    size_t len = size * nmemb;
+    if (len >= 9 && strncasecmp(data, "location:", 9) == 0) {
+        size_t start = 9, end = len;
+        while (start < end && (data[start] == ' ' || data[start] == '\t')) start++;
+        while (end > start && (data[end - 1] == '\r' || data[end - 1] == '\n' || data[end - 1] == ' ')) end--;
+        free(c->location_raw);
+        c->location_raw = strndup(data + start, end - start);
+    }
+    return len;
+}
+
+/* Runs the transfer for up to wait_ms, or until it has finished. */
+static void stream_step(struct sim_http_client *c, int wait_ms)
+{
+    int running = 0;
+    if (curl_multi_perform(c->multi, &running) != CURLM_OK) {
+        c->stream_done = c->stream_failed = true;
+        return;
+    }
+    if (running) {
+        if (wait_ms > 0) curl_multi_poll(c->multi, NULL, 0, wait_ms, NULL);
+        return;
+    }
+
+    int left = 0;
+    CURLMsg *msg;
+    while ((msg = curl_multi_info_read(c->multi, &left)) != NULL) {
+        if (msg->msg == CURLMSG_DONE && msg->data.result != CURLE_OK) {
+            fprintf(stderr, "[sim_http] curl error: %s\n", curl_easy_strerror(msg->data.result));
+            c->stream_failed = true;
+        }
+    }
+    c->stream_done = true;
+}
+
+/* Runs the transfer until it has body to hand over or has finished: true,
+ * or false when timeout_ms passed with neither. */
+static bool stream_wait(struct sim_http_client *c)
+{
+    struct timespec start, now;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    while (!c->stream_done && c->read_offset >= c->response_len) {
+        stream_step(c, 50);
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        long waited = (now.tv_sec - start.tv_sec) * 1000 + (now.tv_nsec - start.tv_nsec) / 1000000;
+        if (waited >= c->timeout_ms) return false;
+    }
+    return true;
+}
 
 esp_err_t sim_http_client_open(sim_http_client_handle_t client, int write_len)
 {
     (void)write_len;
     if (!client) return ESP_FAIL;
-    /* Reset read cursor; actual transfer happens in fetch_headers */
+    sim_http_client_close(client);
+
+    client->response_len = 0;
     client->read_offset = 0;
+    client->status_code = 0;
+    client->content_length = 0;
+    client->stream_done = client->stream_failed = false;
+
+    client->easy = new_easy(client);
+    client->multi = curl_multi_init();
+    if (!client->easy || !client->multi) {
+        sim_http_client_close(client);
+        return ESP_FAIL;
+    }
+    long wait_s = client->timeout_ms / 1000 > 0 ? client->timeout_ms / 1000 : 1;
+    curl_easy_setopt(client->easy, CURLOPT_CONNECTTIMEOUT_MS, (long)client->timeout_ms);
+    curl_easy_setopt(client->easy, CURLOPT_LOW_SPEED_LIMIT, 1L);
+    curl_easy_setopt(client->easy, CURLOPT_LOW_SPEED_TIME, wait_s);
+    curl_easy_setopt(client->easy, CURLOPT_HEADERFUNCTION, header_callback);
+    curl_easy_setopt(client->easy, CURLOPT_HEADERDATA, client);
+    free(client->location_raw);
+    client->location_raw = NULL;
+    if (client->headers) curl_easy_setopt(client->easy, CURLOPT_HTTPHEADER, client->headers);
+    if (strcmp(client->method, "GET") != 0) {
+        curl_easy_setopt(client->easy, CURLOPT_CUSTOMREQUEST, client->method);
+    }
+    curl_multi_add_handle(client->multi, client->easy);
     return ESP_OK;
 }
 
 int sim_http_client_fetch_headers(sim_http_client_handle_t client)
 {
-    if (!client) return -1;
-    /* Perform the full HTTP request and buffer the body */
-    esp_err_t ret = sim_http_client_perform(client);
-    if (ret != ESP_OK) return -1;
-    client->content_length = (int)client->response_len;
+    if (!client || !client->multi) return -1;
+    if (!stream_wait(client)) return -ESP_ERR_HTTP_EAGAIN;
+    if (client->stream_failed) return -1;
+
+    long http_code = 0;
+    curl_easy_getinfo(client->easy, CURLINFO_RESPONSE_CODE, &http_code);
+    client->status_code = (int)http_code;
+    curl_off_t cl = -1;
+    curl_easy_getinfo(client->easy, CURLINFO_CONTENT_LENGTH_DOWNLOAD_T, &cl);
+    /* As ESP-IDF: 0 when the server did not say. */
+    client->content_length = cl > 0 ? (int)cl : 0;
+    /* Where a redirect not followed points, made whole if relative. */
+    free(client->location);
+    client->location = NULL;
+    if (client->location_raw) {
+        CURLU *u = curl_url();
+        char *whole = NULL;
+        if (u && curl_url_set(u, CURLUPART_URL, client->url, 0) == CURLUE_OK &&
+            curl_url_set(u, CURLUPART_URL, client->location_raw, 0) == CURLUE_OK &&
+            curl_url_get(u, CURLUPART_URL, &whole, 0) == CURLUE_OK) {
+            client->location = strdup(whole);
+        }
+        curl_free(whole);
+        curl_url_cleanup(u);
+    }
     return client->content_length;
+}
+
+esp_err_t sim_http_client_set_redirection(sim_http_client_handle_t client)
+{
+    if (!client || !client->location) return ESP_ERR_INVALID_ARG;
+    return sim_http_client_set_url(client, client->location);
 }
 
 int sim_http_client_read(sim_http_client_handle_t client, char *buf, int len)
 {
-    if (!client || !buf || client->read_offset >= client->response_len) return 0;
+    if (!client || !buf || len <= 0) return 0;
+    if (!client->multi) {
+        return 0;
+    }
+    if (!stream_wait(client)) return -ESP_ERR_HTTP_EAGAIN;
+
     size_t remaining = client->response_len - client->read_offset;
-    size_t to_copy   = ((size_t)len < remaining) ? (size_t)len : remaining;
+    if (remaining == 0) return client->stream_failed ? -1 : 0;
+    size_t to_copy = ((size_t)len < remaining) ? (size_t)len : remaining;
     memcpy(buf, client->response_buf + client->read_offset, to_copy);
     client->read_offset += to_copy;
+    if (client->read_offset == client->response_len) {
+        /* All handed over: the buffer starts again, so it never grows past
+         * what one step of the transfer delivers. */
+        client->read_offset = client->response_len = 0;
+    }
     return (int)to_copy;
 }
 
 esp_err_t sim_http_client_close(sim_http_client_handle_t client)
 {
-    if (client) client->read_offset = 0;
+    if (!client) return ESP_OK;
+    if (client->multi && client->easy) curl_multi_remove_handle(client->multi, client->easy);
+    if (client->easy) curl_easy_cleanup(client->easy);
+    if (client->multi) curl_multi_cleanup(client->multi);
+    client->easy = NULL;
+    client->multi = NULL;
+    client->read_offset = 0;
     return ESP_OK;
 }

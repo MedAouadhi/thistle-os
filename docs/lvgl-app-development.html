@@ -85,7 +85,7 @@
     <div class="page-header">
       <div class="breadcrumb"><a href="index.html">ThistleOS</a> / LVGL Apps</div>
       <h1>Building apps for the LVGL window manager</h1>
-      <p class="lead">On ESP32-S3 boards an LVGL window manager hosts all fourteen built-in apps, the launcher included. This page covers what an app must implement to run under it, when ThistleOS calls that code, and which interfaces it can use.</p>
+      <p class="lead">On ESP32-S3 boards an LVGL window manager hosts all fifteen built-in apps, the launcher included. This page covers what an app must implement to run under it, when ThistleOS calls that code, and which interfaces it can use.</p>
       <a href="https://github.com/wan0net/thistle-os/blob/main/docs/lvgl-app-development.html" class="edit-link">&#9998; Edit on GitHub</a>
     </div>
 
@@ -95,7 +95,7 @@
     </div>
 
     <h2>Two kinds of app</h2>
-    <p>An app reaches the LVGL window manager in one of two ways. Most of this page is about the first, because all fourteen apps on the device today are written that way.</p>
+    <p>An app reaches the LVGL window manager in one of two ways. Most of this page is about the first, because all fifteen apps on the device today are written that way.</p>
 
     <div class="table-wrap">
     <table>
@@ -750,6 +750,7 @@ idf_component_register(
     <ul>
       <li>The app area is the display width by its height minus 24. That is 240 × 296 on the T-Deck Pro, 320 × 216 on the T-Deck, 240 × 111 on the Cardputer. Read it at runtime with <code>lv_obj_update_layout(parent)</code> and <code>lv_obj_get_width()</code>, as Notes does, instead of hard-coding it. <code>test_app_matrix.py</code> fails any app whose first screen runs past the left or right edge.</li>
       <li><code>theme_get_colors()</code> returns <code>primary</code>, <code>secondary</code>, <code>bg</code>, <code>surface</code>, <code>text</code> and <code>text_secondary</code>, plus <code>radius</code> and <code>padding</code>. Use these instead of literal colours, since users switch themes from Settings.</li>
+      <li>Rule a line between the entries of a list, so each reads as one. A list of row objects gives each row a 1 px bottom border, as Settings and Files do. A list made with <code>lv_table</code>, as the Reader's and Podcasts' are, calls <code>theme_rule_table_rows()</code>: LVGL draws a cell's bottom border a pixel down, under the next row's background, so on its own it never shows between rows.</li>
       <li><code>sdkconfig.defaults</code> enables LVGL's Montserrat 14, 18 and 22. Any other font has to be compiled into your app.</li>
       <li>Set your title with <code>statusbar_set_title()</code> in <code>on_start</code> and again in <code>on_resume</code>.</li>
     </ul>

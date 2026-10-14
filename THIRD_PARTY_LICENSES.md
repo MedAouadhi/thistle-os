@@ -584,12 +584,29 @@ SOFTWARE.
 
 ---
 
+## minimp3
+
+**License:** CC0-1.0 (public domain dedication)
+**Source:** https://github.com/lieff/minimp3, commit `ea99364f61c14656440e8d77e9c233ccf3124633`
+**Used for:** Decoding MP3 episodes in the Podcasts app. `minimp3.h` is vendored in `apps/podcasts/third_party/minimp3/` with its `LICENSE`; one change, a hook that puts the decoder's 16 KB scratch in PSRAM rather than on the stack, is described in the README beside it.
+
+```
+To the extent possible under law, the author(s) have dedicated all copyright
+and related and neighboring rights to this software to the public domain
+worldwide. This software is distributed without any warranty.
+See <http://creativecommons.org/publicdomain/zero/1.0/>.
+```
+
+Full text: https://github.com/lieff/minimp3/blob/master/LICENSE
+
+---
+
 ## DejaVu fonts
 
 **License:** Bitstream Vera Fonts license; DejaVu changes are in the public domain
 **Version:** 2.37
 **Source:** https://dejavu-fonts.github.io/
-**Used for:** `apps/reader/reader/reader_font_16.c` and `reader_font_16_mono.c`, the bitmap fonts the Reader sets books in on colour screens and on e-paper, made from DejaVu Sans by `apps/reader/tools/gen_reader_font.sh`. LVGL's `lv_font_dejavu_16_persian_hebrew` is made from the same font.
+**Used for:** `apps/reader/reader/reader_font_16.c` and `reader_font_16_mono.c`, the bitmap fonts the Reader sets books in on colour screens and on e-paper, made from DejaVu Sans by `apps/reader/tools/gen_reader_font.sh`, which the Podcasts app sets its text in too; and `apps/podcasts/podcasts/pod_symbols_16.c` and `pod_symbols_16_mono.c`, its two stars, made from DejaVu Sans by `apps/podcasts/tools/gen_symbols_font.sh`. LVGL's `lv_font_dejavu_16_persian_hebrew` is made from the same font.
 
 ```
 Copyright (c) 2003 by Bitstream, Inc. All Rights Reserved. Bitstream Vera is
@@ -650,6 +667,7 @@ All dependencies are compatible with the ThistleOS BSD 3-Clause license:
 | BSD-3-Clause | Yes | Bosch BHI260AP firmware and BHY2 SensorAPI |
 | BSD-2-Clause | Yes | Monocypher |
 | zlib | Yes | SDL2, uzlib |
+| CC0-1.0 | Yes | minimp3 |
 | Bitstream Vera | Yes | DejaVu fonts (the Reader's font) |
 | MIT OR Apache-2.0 | Yes | argon2, serde_json, esp-idf-hal, esp-idf-svc, esp-idf-sys |
 

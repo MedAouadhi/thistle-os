@@ -100,6 +100,8 @@ extern void test_fingerprint_a_match_carries_the_profile_for_the_board_it_names(
 
 /* test_http_client_shim.c */
 extern void test_http_shim_delivers_fixture_bytes_status_and_cleanup(void);
+extern void test_http_shim_streams_a_body_in_pieces(void);
+extern void test_http_shim_stream_of_a_missing_file_fails(void);
 
 int main(void)
 {
@@ -204,6 +206,8 @@ int main(void)
 
     printf("\n[http_client_shim]\n");
     RUN_TEST(http_shim_delivers_fixture_bytes_status_and_cleanup);
+    RUN_TEST(http_shim_streams_a_body_in_pieces);
+    RUN_TEST(http_shim_stream_of_a_missing_file_fails);
 
     TEST_SUMMARY();
     return _tests_failed > 0 ? 1 : 0;

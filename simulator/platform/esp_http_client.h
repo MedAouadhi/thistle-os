@@ -10,6 +10,7 @@
  */
 
 #include "sim_http.h"
+#include <stdint.h>
 
 typedef sim_http_client_handle_t esp_http_client_handle_t;
 
@@ -18,6 +19,26 @@ typedef esp_err_t (*crt_bundle_attach_fn)(void *);
 typedef enum {
     HTTP_EVENT_ON_DATA = 0,
 } esp_http_client_event_id_t;
+
+/* The status codes ESP-IDF names. A client made with disable_auto_redirect
+ * sees the 3xx ones, as on the device, and follows them with
+ * esp_http_client_set_redirection(). */
+typedef enum {
+    HttpStatus_Ok                = 200,
+    HttpStatus_MultipleChoices   = 300,
+    HttpStatus_MovedPermanently  = 301,
+    HttpStatus_Found             = 302,
+    HttpStatus_SeeOther          = 303,
+    HttpStatus_NotModified       = 304,
+    HttpStatus_TemporaryRedirect = 307,
+    HttpStatus_PermanentRedirect = 308,
+    HttpStatus_BadRequest        = 400,
+    HttpStatus_Unauthorized      = 401,
+    HttpStatus_Forbidden         = 403,
+    HttpStatus_NotFound          = 404,
+    HttpStatus_RangeNotSatisfiable = 416,
+    HttpStatus_InternalError     = 500
+} HttpStatus_Code;
 
 typedef enum {
     HTTP_METHOD_GET  = 0,
@@ -45,6 +66,10 @@ typedef struct {
     int         timeout_ms;
     bool        disable_auto_redirect;
     int         buffer_size_tx;             /* ignored in simulator */
+    int         buffer_size;                /* ignored in simulator */
+    const char *user_agent;                 /* sent as the User-Agent header */
+    int         max_redirection_count;      /* ignored: libcurl follows up to 10 */
+    bool        keep_alive_enable;          /* ignored in simulator */
 } esp_http_client_config_t;
 
 static inline esp_http_client_handle_t esp_http_client_init(const esp_http_client_config_t *config)
@@ -56,7 +81,9 @@ static inline esp_http_client_handle_t esp_http_client_init(const esp_http_clien
         .event_handler = (void *)config->event_handler,
         .user_data  = config->user_data,
     };
-    return sim_http_client_init(&sc);
+    sim_http_client_handle_t c = sim_http_client_init(&sc);
+    if (c && config->user_agent) sim_http_client_set_header(c, "User-Agent", config->user_agent);
+    return c;
 }
 
 static inline esp_err_t esp_http_client_perform(esp_http_client_handle_t c) {
@@ -112,4 +139,24 @@ static inline esp_err_t esp_http_client_set_header(esp_http_client_handle_t c, c
 
 static inline esp_err_t esp_http_client_set_post_field(esp_http_client_handle_t c, const char *data, int len) {
     return sim_http_client_set_post_field(c, data, len);
+}
+
+static inline int64_t esp_http_client_get_content_length(esp_http_client_handle_t c) {
+    return sim_http_client_get_content_length(c);
+}
+
+static inline esp_err_t esp_http_client_set_url(esp_http_client_handle_t c, const char *url) {
+    return sim_http_client_set_url(c, url);
+}
+
+static inline esp_err_t esp_http_client_set_redirection(esp_http_client_handle_t c) {
+    return sim_http_client_set_redirection(c);
+}
+
+static inline esp_err_t esp_http_client_flush_response(esp_http_client_handle_t c, int *len) {
+    char buf[512];
+    int total = 0, n;
+    while ((n = sim_http_client_read(c, buf, sizeof buf)) > 0) total += n;
+    if (len) *len = total;
+    return n < 0 ? ESP_FAIL : ESP_OK;
 }

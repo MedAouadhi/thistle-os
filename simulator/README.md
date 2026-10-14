@@ -1,6 +1,6 @@
 # ThistleOS Simulator
 
-SDL2 host-native simulator that runs the real Rust kernel with virtual hardware for development and testing. Not an emulator -- it compiles the actual kernel, display server, window manager, and all 14 built-in apps as a native desktop binary.
+SDL2 host-native simulator that runs the real Rust kernel with virtual hardware for development and testing. Not an emulator -- it compiles the actual kernel, display server, window manager, and all 15 built-in apps as a native desktop binary.
 
 ## Quick Start
 

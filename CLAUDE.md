@@ -222,6 +222,30 @@ host tests. LVGL window managers only; thistle-tk has none.
 - `simulator/tests/test_quick_panel.py`; the simulator's `--drag` and
   `--tap quick` drive it.
 
+### Podcasts
+
+`apps/podcasts/` browses PodcastIndex (search, trending, categories), streams
+MP3 episodes, and saves them to the SD card to play with no network; its
+spec is `.scratch/podcasts/spec.md`.
+
+- **The key and secret are never in the source tree.** CMake reads
+  `PODCASTINDEX_API_KEY` and `PODCASTINDEX_SECRET` from the repository's
+  `.env` (git-ignored) into `pod_cred_default.h` in the *build* directory
+  (`apps/podcasts/credentials.cmake`); a card's `config/podcasts.json`, which
+  the app's setup page writes, takes their place. The simulator's SD card is
+  in the repository, so its `config/podcasts.json` is git-ignored too.
+  Requests are signed with the date, so they fail until the clock is set.
+- **The player outlives the app.** Leaving an app destroys it, so the player
+  (`pod_player.c`) and downloads (`pod_download.c`) are module statics with
+  threads of their own, not the pages'; the quick panel gets a Podcast
+  switch while one is loaded. minimp3's 16 KB scratch is in PSRAM
+  (`pod_mp3.c`), so the decoder's stack is small.
+- **ESP-IDF's open/read HTTP API does not follow redirects**, which podcast
+  hosts' links are made of; `pod_net.c` follows them itself. The simulator's
+  shim streams for real (curl's multi interface) and does the same.
+- `simulator/tests/test_podcasts.py` runs the app against a fake PodcastIndex
+  and podcast host; `apps/podcasts/tests/run_tests.sh` has the host tests.
+
 ### LVGL's pool is 64 KB
 
 LVGL allocates every object and every local style property from its own
@@ -290,8 +314,8 @@ The kernel is **100% Rust and hardware-independent**. It never calls ESP-IDF har
 - **Kernel (Rust)** (`components/kernel_rs/`): 100% Rust. 57 modules: manifest parser, permissions, IPC, events, app manager, version, crypto, HAL registry, driver manager, WM, app store, wifi/ble/net managers, OTA, and more. 1231 tests.
 - **Display Server** (`components/kernel/src/display_server.c`): Surface management, compositor, WM vtable interface.
 - **UI** (`components/ui/`): thistle-tk WM (default). LVGL-based WM also available. Both loadable as `.wm.elf`.
-- **Apps**: 14 apps, migrating to `.app.elf` on SPIFFS. Five remain in
-  `components/apps_builtin/`; the other nine are their own components under
+- **Apps**: 15 apps, migrating to `.app.elf` on SPIFFS. Five remain in
+  `components/apps_builtin/`; the other ten are their own components under
   `apps/`, listed once in `cmake/thistle_apps.cmake` for the simulators and
   found by `EXTRA_COMPONENT_DIRS` for the firmware.
 - **App Store** (`components/kernel_rs/src/tk_appstore.rs`): Browsable Rust app. Rich catalog with ratings, categories, download counts, changelogs, and component-level driver matching for arch-aware installs.
@@ -362,8 +386,8 @@ launching them under thistle-tk segfaults. App Store and Flashlight exist in
 both toolkits under the same IDs, and the app manager keeps the first
 registration of an ID, so each manager registers only its own:
 `lvgl_apps_register_builtin()` under LVGL, `tk_native_apps_register()` under
-thistle-tk. All fourteen apps are reachable by default on every S3 board;
-naming `thistle-tk` trades eleven of them for its refresh behaviour.
+thistle-tk. All fifteen apps are reachable by default on every S3 board;
+naming `thistle-tk` trades twelve of them for its refresh behaviour.
 
 `simulator/tests/test_app_matrix.py` launches every app on every simulated
 device profile, and the simulator's `--wm NAME` overrides `system.json` for a

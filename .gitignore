@@ -19,6 +19,9 @@ managed_components/
 .DS_Store
 .cache/
 
+# Local API credentials (the Podcasts app's PodcastIndex key and secret)
+.env
+
 # Signing keys (NEVER commit private keys)
 private.key
 *_private.key
@@ -46,3 +49,9 @@ crates/thistle-tk/target/
 
 # The message history the simulator writes (msg_log.rs)
 simulator/sdcard/messages/
+
+# What the Podcasts app writes to the simulator's SD card: its library, saved
+# episodes, and a PodcastIndex key and secret if set up from the app
+simulator/sdcard/data/podcasts/
+simulator/sdcard/podcasts/
+simulator/sdcard/config/podcasts.json

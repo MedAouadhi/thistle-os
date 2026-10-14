@@ -28,6 +28,9 @@
 #ifndef THISTLE_HAVE_READER
 #define THISTLE_HAVE_READER 1
 #endif
+#ifndef THISTLE_HAVE_PODCASTS
+#define THISTLE_HAVE_PODCASTS 1
+#endif
 #ifndef THISTLE_HAVE_MESSENGER
 #define THISTLE_HAVE_MESSENGER 1
 #endif
@@ -70,6 +73,9 @@
 #endif
 #if THISTLE_HAVE_READER
 #include "reader/reader_app.h"
+#endif
+#if THISTLE_HAVE_PODCASTS
+#include "podcasts/podcasts_app.h"
 #endif
 #if THISTLE_HAVE_MESSENGER
 #include "messenger/messenger_app.h"
@@ -125,6 +131,9 @@ esp_err_t lvgl_apps_register_builtin(bool has_radio, bool has_gps)
 #endif
 #if THISTLE_HAVE_READER
     REGISTER(reader_app_register);
+#endif
+#if THISTLE_HAVE_PODCASTS
+    REGISTER(podcasts_app_register);
 #endif
 #if THISTLE_HAVE_MESSENGER
     if (has_radio) {

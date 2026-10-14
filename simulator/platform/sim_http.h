@@ -11,6 +11,15 @@
 
 typedef struct sim_http_client *sim_http_client_handle_t;
 
+/* As ESP-IDF's esp_http_client.h: a streaming read or fetch_headers returns
+ * -ESP_ERR_HTTP_EAGAIN when timeout_ms passed with nothing to hand over. */
+#ifndef ESP_ERR_HTTP_BASE
+#define ESP_ERR_HTTP_BASE   0x7000
+#endif
+#ifndef ESP_ERR_HTTP_EAGAIN
+#define ESP_ERR_HTTP_EAGAIN (ESP_ERR_HTTP_BASE + 7)
+#endif
+
 typedef struct {
     const char *url;
     int timeout_ms;
@@ -31,6 +40,11 @@ esp_err_t sim_http_client_open(sim_http_client_handle_t client, int write_len);
 int sim_http_client_fetch_headers(sim_http_client_handle_t client);
 int sim_http_client_read(sim_http_client_handle_t client, char *buf, int len);
 esp_err_t sim_http_client_close(sim_http_client_handle_t client);
+esp_err_t sim_http_client_set_url(sim_http_client_handle_t client, const char *url);
+/* After fetch_headers() answered a redirect that was not followed (the
+ * client was made with disable_auto_redirect), points the client at its
+ * Location, as ESP-IDF's does. */
+esp_err_t sim_http_client_set_redirection(sim_http_client_handle_t client);
 void sim_http_client_cleanup(sim_http_client_handle_t client);
 /* method is "GET", "POST", "PUT" or "DELETE". */
 esp_err_t sim_http_client_set_method(sim_http_client_handle_t client, const char *method);

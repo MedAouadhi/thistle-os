@@ -320,7 +320,7 @@ resolution, networking, verification, and recovery coordination needed before
 any app starts. It can therefore boot headlessly, report status over serial, read
 its bootstrap state, and attempt to make the external-volume system available.
 
-The current firmware does not yet enforce this boundary. Fourteen apps are still
+The current firmware does not yet enforce this boundary. Fifteen apps are still
 compiled into the kernel firmware, so they consume space in both OTA slots. All
 of them must become signed `.app.elf` packages installed on the system volume
 unless a capability is proven to be a kernel service rather than an application.

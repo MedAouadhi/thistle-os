@@ -7,7 +7,7 @@ boots by default, and requires it to come up and survive a couple of seconds
 of timers.
 
 It exists because e-paper boards used to default to thistle-tk, which hosts
-three of the fourteen apps, and nothing noticed that the T-Deck Pro and Max
+three of the fourteen apps of the time, and nothing noticed that the T-Deck Pro and Max
 had lost the other eleven.
 
 Each LVGL app's first screen must also fit the display: nothing may reach past
@@ -49,8 +49,8 @@ DEVICES = (
 )
 
 UNGATED_APPS = (
-    "launcher", "settings", "filemgr", "reader", "notes", "appstore",
-    "assistant", "flashlight", "weather", "terminal", "vault",
+    "launcher", "settings", "filemgr", "reader", "podcasts", "notes",
+    "appstore", "assistant", "flashlight", "weather", "terminal", "vault",
 )
 # lvgl_apps_register_builtin() registers these only on a capable board.
 RADIO_APPS = ("messenger", "wifiscanner")

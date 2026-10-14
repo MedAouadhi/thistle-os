@@ -167,6 +167,9 @@ jobs:
       - name: Test Reader EPUB parsing and Arabic shaping under sanitizers
         run: apps/reader/tests/run_tests.sh
 
+      - name: Test Podcasts API, library and text under sanitizers
+        run: apps/podcasts/tests/run_tests.sh
+
       - name: Test secure signing-key generation
         run: |
           python3 -m pip install -r tools/requirements.txt
@@ -352,6 +355,10 @@ jobs:
       - name: Run Assistant chat and setup tests
         working-directory: simulator
         run: python3 tests/test_assistant_chat.py --sim build/thistle_sim
+
+      - name: Run Podcasts browse, play and save tests
+        working-directory: simulator
+        run: python3 tests/test_podcasts.py --sim build/thistle_sim
 
       - name: Upload launcher framebuffer failures
         if: failure()
