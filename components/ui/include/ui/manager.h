@@ -41,3 +41,11 @@ void ui_manager_show_splash(uint32_t duration_ms);
  * launcher forward, so the launcher can close whatever it had open over its
  * home screen. One handler; NULL clears it. */
 void ui_manager_set_home_handler(void (*handler)(void));
+
+/* Called with the LVGL lock held when HAL_KEY_BACK is pressed while owner is
+ * shown. It takes the app up one page and returns true, or returns false on
+ * the app's first page, where Back then does what Home does. Apps register
+ * once, with their root container as owner; there is one handler, the last
+ * registered, and it is dropped when owner is deleted. Without one, Back does
+ * what Home does. */
+void ui_manager_set_back_handler(lv_obj_t *owner, bool (*handler)(void));

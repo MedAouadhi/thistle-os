@@ -15,3 +15,6 @@ esp_err_t power_ui_init(void);
 /* Whether the sleep screen is up, drawn into the framebuffer. The panel may
  * still be refreshing it. LVGL context only. */
 bool power_ui_sleep_screen_shown(void);
+
+/* Close the power menu, if it is open; whether it was. LVGL context only. */
+bool power_ui_close_menu(void);

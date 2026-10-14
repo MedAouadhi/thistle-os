@@ -17,6 +17,7 @@
 #include "appstore/appstore_app.h"
 
 #include "hal/sdcard_path.h"
+#include "ui/manager.h"
 #include "ui/theme.h"
 #include "ui/toast.h"
 #include "thistle/app_manager.h"
@@ -531,6 +532,14 @@ static void back_to_catalog_cb(lv_event_t *e)
     if (s_store.current_tab == TAB_INSTALLED && s_store.installed_screen) {
         lv_obj_remove_flag(s_store.installed_screen, LV_OBJ_FLAG_HIDDEN);
     }
+}
+
+/* The Back key: from an app's details to the tab it was opened from. */
+static bool appstore_back(void)
+{
+    if (!s_store.detail_screen) return false;
+    back_to_catalog_cb(NULL);
+    return true;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1458,6 +1467,8 @@ esp_err_t appstore_ui_create(lv_obj_t *parent)
     } else if (err != ESP_OK) {
         lv_label_set_text(s_store.catalog_status_label, "Catalog load error");
     }
+
+    ui_manager_set_back_handler(s_store.root, appstore_back);
 
     ESP_LOGI(TAG, "App Store UI created (%d entries loaded)", s_store.entry_count);
     return ESP_OK;

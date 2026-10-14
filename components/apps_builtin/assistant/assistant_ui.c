@@ -44,6 +44,7 @@
 #include "thistle/net_manager.h"
 #include "thistle/wifi_manager.h"
 #include "thistle/time_manager.h"
+#include "ui/manager.h"
 #include "ui/theme.h"
 #include "ui/toast.h"
 
@@ -723,6 +724,14 @@ static void open_setup(void)
     }
 }
 
+/* The Back key: from the setup form to the chat, without saving. */
+static bool assistant_back(void)
+{
+    if (!assistant_setup_is_open()) return false;
+    assistant_setup_cancel();
+    return true;
+}
+
 /* ------------------------------------------------------------------ */
 /* Event callbacks                                                      */
 /* ------------------------------------------------------------------ */
@@ -959,6 +968,8 @@ esp_err_t assistant_ui_create(lv_obj_t *parent)
      * Load persisted conversation from SD card
      * ---------------------------------------------------------------- */
     load_conversation();
+
+    ui_manager_set_back_handler(s_ai.root, assistant_back);
 
     return ESP_OK;
 }

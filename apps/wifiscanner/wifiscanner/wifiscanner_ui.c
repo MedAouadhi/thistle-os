@@ -20,6 +20,7 @@
 #include "esp_attr.h"
 
 #include "hal/sdcard_path.h"
+#include "ui/manager.h"
 #include "ui/theme.h"
 #include "ui/toast.h"
 #include "thistle/app_manager.h"
@@ -363,6 +364,14 @@ static void back_btn_cb(lv_event_t *e)
 {
     (void)e;
     switch_to_list();
+}
+
+/* The Back key: from a network's details to the list. */
+static bool wifiscanner_back(void)
+{
+    if (lv_obj_has_flag(s_scanner.detail_screen, LV_OBJ_FLAG_HIDDEN)) return false;
+    switch_to_list();
+    return true;
 }
 
 static void connect_btn_cb(lv_event_t *e)
@@ -716,6 +725,8 @@ esp_err_t wifiscanner_ui_create(lv_obj_t *parent)
     lv_label_set_text(s_scanner.detail_rssi_lbl,       "RSSI: -");
     lv_label_set_text(s_scanner.detail_auth_lbl,       "Security: -");
     lv_label_set_text(s_scanner.detail_signal_bar_lbl, "Signal: -");
+
+    ui_manager_set_back_handler(s_scanner.root, wifiscanner_back);
 
     return ESP_OK;
 }

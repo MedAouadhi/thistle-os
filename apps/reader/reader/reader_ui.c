@@ -23,6 +23,7 @@
 #include "reader/epub.h"
 #include "reader/epub_port.h"
 
+#include "ui/manager.h"
 #include "ui/theme.h"
 #include "ui/toast.h"
 #include "thistle/app_manager.h"
@@ -1043,6 +1044,21 @@ static void library_title_clicked_cb(lv_event_t *e)
     app_manager_launch("com.thistle.launcher");
 }
 
+/* The Back key, as q: from the contents to the page, and from the page to the
+ * library. */
+static bool reader_back(void)
+{
+    if (s_reader.toc_screen && !lv_obj_has_flag(s_reader.toc_screen, LV_OBJ_FLAG_HIDDEN)) {
+        switch_to_reading();
+        return true;
+    }
+    if (!lv_obj_has_flag(s_reader.reader_screen, LV_OBJ_FLAG_HIDDEN)) {
+        switch_to_library();
+        return true;
+    }
+    return false;
+}
+
 /* E-paper shows a pixel black or white, black only if it is at least half
  * ink. Antialiased, the dots of Arabic letters are spread over a few lighter
  * pixels and some of them drop out; the mono font draws each pixel inked or
@@ -1089,6 +1105,7 @@ esp_err_t reader_ui_create(lv_obj_t *parent)
                                                  &s_reader.lib_list);
     create_reader_screen();
     populate_library();
+    ui_manager_set_back_handler(s_reader.root, reader_back);
     return ESP_OK;
 }
 

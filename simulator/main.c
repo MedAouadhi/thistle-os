@@ -50,7 +50,9 @@ static const char *s_wm_override = NULL;
  * busy refreshing a panel. */
 #define SIM_MAX_TAPS   8
 #define SIM_TAP_GAP_MS 1500u
-static struct { int x, y; } s_taps[SIM_MAX_TAPS];
+/* keycode is HAL_KEY_HOME or HAL_KEY_BACK for a press of that touch key in
+ * place of a tap, and 0 for a tap at x,y. */
+static struct { int x, y; uint16_t keycode; } s_taps[SIM_MAX_TAPS];
 static int s_tap_count = 0;
 static int s_tap_hold_ms = 100;
 /* Text to type after the taps. Every key's press and release arrive in one
@@ -105,9 +107,14 @@ static void hear_mesh_messages(void)
 
 static bool add_tap(const char *spec)
 {
+    if (s_tap_count < SIM_MAX_TAPS) {
+        s_taps[s_tap_count].keycode = strcmp(spec, "home") == 0 ? HAL_KEY_HOME
+                                    : strcmp(spec, "back") == 0 ? HAL_KEY_BACK : 0;
+    }
     if (s_tap_count >= SIM_MAX_TAPS ||
-        sscanf(spec, "%d,%d", &s_taps[s_tap_count].x, &s_taps[s_tap_count].y) != 2) {
-        fprintf(stderr, "Invalid --tap value; expected X,Y (at most %d taps)\n",
+        (s_taps[s_tap_count].keycode == 0 &&
+         sscanf(spec, "%d,%d", &s_taps[s_tap_count].x, &s_taps[s_tap_count].y) != 2)) {
+        fprintf(stderr, "Invalid --tap value; expected X,Y, home or back (at most %d taps)\n",
                 SIM_MAX_TAPS);
         return false;
     }
@@ -236,6 +243,7 @@ int main(int argc, char **argv)
             printf("  --screenshot FILE   Save native-resolution framebuffer as PPM on exit\n");
             printf("  --tap X,Y           Inject a native-coordinate tap after startup;\n");
             printf("                      repeat for more, %u ms apart\n", SIM_TAP_GAP_MS);
+            printf("  --tap home|back     Press the Home or Back touch key instead\n");
             printf("  --tap-hold MS       How long each tap is held (default 100;\n");
             printf("                      0 = press and release between two pointer reads)\n");
             printf("  --type TEXT         Type TEXT after the taps, every key pressed and\n");
@@ -390,17 +398,18 @@ int main(int argc, char **argv)
         if (tap_index < s_tap_count) {
             uint16_t tx = (uint16_t)s_taps[tap_index].x;
             uint16_t ty = (uint16_t)s_taps[tap_index].y;
+            uint16_t key = s_taps[tap_index].keycode;
             uint32_t tap_down_ms = (use_tk_wm ? 250u : 2250u) +
                                    (uint32_t)tap_index * SIM_TAP_GAP_MS;
             uint32_t tap_up_ms = tap_down_ms + (uint32_t)s_tap_hold_ms;
             uint32_t since_start = now_ms - start_ms;
             if (tap_phase == 0 && since_start > tap_down_ms &&
-                sim_input_inject_touch(tx, ty, true)) {
+                (key ? sim_input_inject_key(key, true) : sim_input_inject_touch(tx, ty, true))) {
                 tap_phase = 1;
             }
             /* Same iteration when the hold is 0: LVGL never runs in between. */
             if (tap_phase == 1 && since_start >= tap_up_ms &&
-                sim_input_inject_touch(tx, ty, false)) {
+                (key ? sim_input_inject_key(key, false) : sim_input_inject_touch(tx, ty, false))) {
                 tap_phase = 0;
                 tap_index++;
             }

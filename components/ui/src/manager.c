@@ -93,22 +93,61 @@ static kbd_event_t s_kbd_queue[KBD_QUEUE_LEN];
 static uint8_t     s_kbd_queue_head = 0;
 static uint8_t     s_kbd_queue_len  = 0;
 
-/* A Home press waiting for the LVGL lock. Input drivers are polled before
- * lvgl_task takes the lock, so the HAL callback only records the press, and
- * an LVGL timer acts on it from inside lv_timer_handler(), lock held, the way
- * a tap on a launcher icon launches an app. */
-#define HOME_TIMER_PERIOD_MS 20
+/* A Home or Back press waiting for the LVGL lock. Input drivers are polled
+ * before lvgl_task takes the lock, so the HAL callback only records the press,
+ * and an LVGL timer acts on it from inside lv_timer_handler(), lock held, the
+ * way a tap on a launcher icon launches an app. */
+#define NAV_KEY_TIMER_PERIOD_MS 20
 static bool s_home_pending = false;
+static bool s_back_pending = false;
 static void (*s_home_handler)(void) = NULL;
+/* The app in front's back handler, and the root container it belongs to. The
+ * app manager destroys an app whenever another comes forward, so deleting the
+ * container is what retires the handler; no app has to remember to. */
+static lv_obj_t *s_back_owner = NULL;
+static bool (*s_back_handler)(void) = NULL;
 
 void ui_manager_set_home_handler(void (*handler)(void))
 {
     s_home_handler = handler;
 }
 
-static void home_timer_cb(lv_timer_t *timer)
+static void back_owner_deleted_cb(lv_event_t *e)
+{
+    /* An app destroyed after the next one registered leaves that one's. */
+    if (lv_event_get_target(e) == s_back_owner) {
+        s_back_owner   = NULL;
+        s_back_handler = NULL;
+    }
+}
+
+void ui_manager_set_back_handler(lv_obj_t *owner, bool (*handler)(void))
+{
+    s_back_owner   = owner;
+    s_back_handler = owner ? handler : NULL;
+    if (owner) {
+        lv_obj_add_event_cb(owner, back_owner_deleted_cb, LV_EVENT_DELETE, NULL);
+    }
+}
+
+/* Back closes the power menu, or takes the app in front up one page; false
+ * when there was neither to do. */
+static bool go_back(void)
+{
+    if (power_ui_close_menu()) return true;
+    return s_back_handler && !lv_obj_has_flag(s_back_owner, LV_OBJ_FLAG_HIDDEN) &&
+           s_back_handler();
+}
+
+static void nav_key_timer_cb(lv_timer_t *timer)
 {
     (void)timer;
+    if (s_back_pending) {
+        s_back_pending = false;
+        if (!go_back()) {
+            s_home_pending = true;
+        }
+    }
     if (!s_home_pending) return;
     s_home_pending = false;
 
@@ -149,10 +188,15 @@ static void ui_input_hal_cb(const hal_input_event_t *event, void *user_data)
             break;
         case HAL_INPUT_EVENT_KEY_DOWN:
         case HAL_INPUT_EVENT_KEY_UP: {
-            /* Home types nothing, so it never reaches LVGL's keypad. */
-            if (event->key.keycode == HAL_KEY_HOME) {
+            /* Home and Back type nothing, so they never reach LVGL's
+             * keypad. */
+            if (event->key.keycode == HAL_KEY_HOME || event->key.keycode == HAL_KEY_BACK) {
                 if (event->type == HAL_INPUT_EVENT_KEY_DOWN) {
-                    s_home_pending = true;
+                    if (event->key.keycode == HAL_KEY_HOME) {
+                        s_home_pending = true;
+                    } else {
+                        s_back_pending = true;
+                    }
                 }
                 break;
             }
@@ -474,8 +518,8 @@ esp_err_t ui_manager_init(ui_flush_fn_t flush_cb, bool use_deferred_refresh)
     lv_indev_set_type(s_kbd_indev, LV_INDEV_TYPE_KEYPAD);
     lv_indev_set_read_cb(s_kbd_indev, ui_kbd_read_cb);
 
-    /* 4b1. Act on a Home press from inside lv_timer_handler() */
-    lv_timer_create(home_timer_cb, HOME_TIMER_PERIOD_MS, NULL);
+    /* 4b1. Act on a Home or Back press from inside lv_timer_handler() */
+    lv_timer_create(nav_key_timer_cb, NAV_KEY_TIMER_PERIOD_MS, NULL);
 
     /* 4b1a. Show toasts other tasks post, the same way */
     if (toast_init() != ESP_OK) {

@@ -43,6 +43,9 @@ static uint16_t sdl_key_to_keycode(SDL_Keycode key)
         case SDLK_SLASH:     return '/';
         case SDLK_MINUS:     return '-';
         case SDLK_EQUALS:    return '=';
+        /* The touch keys below the T-Deck Max's panel: left and right. */
+        case SDLK_F1:        return HAL_KEY_HOME;
+        case SDLK_F3:        return HAL_KEY_BACK;
         default:             return 0;
     }
 }

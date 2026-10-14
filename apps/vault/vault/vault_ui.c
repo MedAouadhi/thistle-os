@@ -15,6 +15,7 @@
 #include "vault/vault_app.h"
 
 #include "hal/sdcard_path.h"
+#include "ui/manager.h"
 #include "ui/theme.h"
 #include "ui/toast.h"
 #include "thistle/app_manager.h"
@@ -1029,6 +1030,21 @@ static void detail_key_cb(lv_event_t *e)
     }
 }
 
+/* The Back key, as Esc: from an entry to the list, and from the list to the
+ * lock screen, locking the vault. */
+static bool vault_back(void)
+{
+    if (!lv_obj_has_flag(s_vault.detail_screen, LV_OBJ_FLAG_HIDDEN)) {
+        switch_to_list();
+        return true;
+    }
+    if (!lv_obj_has_flag(s_vault.list_screen, LV_OBJ_FLAG_HIDDEN)) {
+        vault_ui_lock();
+        return true;
+    }
+    return false;
+}
+
 /* ------------------------------------------------------------------ */
 /* Helper: create a labelled form row                                   */
 /* ------------------------------------------------------------------ */
@@ -1404,6 +1420,8 @@ esp_err_t vault_ui_create(lv_obj_t *parent)
     lv_obj_t *del_btn = lv_obj_get_child(btn_row, -1);
     lv_obj_set_style_border_width(del_btn, 1, LV_PART_MAIN);
     lv_obj_set_style_border_color(del_btn, clr->text_secondary, LV_PART_MAIN);
+
+    ui_manager_set_back_handler(s_vault.root, vault_back);
 
     return ESP_OK;
 }

@@ -92,6 +92,10 @@ pub struct HalInputKeyData {
 /// the user back to the launcher's home screen.
 pub const HAL_KEY_HOME: u16 = 0x0100;
 
+/// Mirrors `HAL_KEY_BACK` in hal/input.h: a key that types nothing and takes
+/// the app in front up one page, or home from its first page.
+pub const HAL_KEY_BACK: u16 = 0x0101;
+
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct HalInputTouchData {

@@ -34,6 +34,7 @@
 #include "thistle/time_manager.h"
 #include "hal/board.h"
 #include "hal/sdcard_path.h"
+#include "ui/manager.h"
 #include "ui/theme.h"
 #include "ui/toast.h"
 #include "ui/epaper_refresh.h"
@@ -438,6 +439,8 @@ static lv_obj_t *alloc_sub_screen(lv_obj_t *container_parent,
     lv_obj_set_style_bg_color(title_bar, tc->primary, LV_STATE_PRESSED);
     lv_obj_set_style_bg_opa(title_bar, LV_OPA_COVER, LV_STATE_PRESSED);
     lv_obj_add_event_cb(title_bar, back_cb, LV_EVENT_CLICKED, back_udata);
+    /* What the Back key presses, with this screen in front. */
+    lv_obj_set_user_data(screen, title_bar);
 
     char back_text[48];
     snprintf(back_text, sizeof(back_text), "< %s", title);
@@ -604,6 +607,14 @@ static void wifi_pwd_connect_cb(lv_event_t *e)
     wifi_update_status_label();
 }
 
+/* The dialog goes with its screen, too, when that is left with it open. */
+static void wifi_pwd_deleted_cb(lv_event_t *e)
+{
+    wifi_pwd_ctx_t *ctx = (wifi_pwd_ctx_t *)lv_event_get_user_data(e);
+    ctx->dialog = NULL;
+    ctx->ta     = NULL;
+}
+
 static void wifi_pwd_cancel_cb(lv_event_t *e)
 {
     wifi_pwd_ctx_t *ctx = (wifi_pwd_ctx_t *)lv_event_get_user_data(e);
@@ -645,6 +656,7 @@ static void show_wifi_password_dialog(const char *ssid)
     lv_obj_move_foreground(dialog);
 
     s_wifi_pwd_ctx.dialog = dialog;
+    lv_obj_add_event_cb(dialog, wifi_pwd_deleted_cb, LV_EVENT_DELETE, &s_wifi_pwd_ctx);
 
     /* SSID title — one line, shortened with dots if the name is too long */
     lv_obj_t *title = lv_label_create(dialog);
@@ -3391,6 +3403,20 @@ static void create_list_item(lv_obj_t *list, const settings_item_t *item)
     lv_obj_set_style_text_color(lbl_chevron, tc->bg, LV_STATE_PRESSED);
 }
 
+/* The Back key: closes the WiFi password dialog, or does what tapping the
+ * title bar of the screen in front does. */
+static bool settings_back(void)
+{
+    if (s_wifi_pwd_ctx.dialog) {
+        lv_obj_delete(s_wifi_pwd_ctx.dialog);
+        return true;
+    }
+    lv_obj_t *screen = s_detail_screen ? s_detail_screen : s_sub_screen;
+    if (!screen) return false;
+    lv_obj_send_event(lv_obj_get_user_data(screen), LV_EVENT_CLICKED, NULL);
+    return true;
+}
+
 /* ------------------------------------------------------------------ */
 /* Public API                                                           */
 /* ------------------------------------------------------------------ */
@@ -3475,6 +3501,7 @@ esp_err_t settings_ui_create(lv_obj_t *parent)
     s_current_screen = SETTINGS_MAIN;
     s_sub_screen     = NULL;
     s_detail_screen  = NULL;
+    ui_manager_set_back_handler(s_root, settings_back);
 
     /* Start the main list live-update timer (2 s interval) */
     if (s_main_timer) {

@@ -25,6 +25,7 @@ typedef struct {
  * name keys that type nothing; the window manager acts on them, and they are
  * never delivered to an app as text. */
 #define HAL_KEY_HOME 0x0100  /* Back to the launcher's home screen */
+#define HAL_KEY_BACK 0x0101  /* Up one page in the app in front; Home from its first */
 
 typedef void (*hal_input_cb_t)(const hal_input_event_t *event, void *user_data);
 

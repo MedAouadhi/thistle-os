@@ -23,6 +23,7 @@ Requires SDL2 (`brew install sdl2` / `apt install libsdl2-dev`) and a prior ESP-
 | `--assert FILE` | Check log output against assertion file on exit |
 | `--scenario FILE` | Load hardware scenario from JSON |
 | `--tap X,Y` | Inject a tap after startup; repeat for more taps, 1.5 s apart |
+| `--tap home`, `--tap back` | Press the Home or Back touch key in that tap's turn (F1 and F3 in the window) |
 | `--tap-hold MS` | How long each tap is held (default 100; `0` delivers press and release before LVGL next reads the pointer) |
 | `--type TEXT` | Type TEXT after the taps, every key pressed and released before LVGL next reads the keypad; prints `Focused text: "..."` on exit |
 | `--type-rollover` | With `--type`, press each key before releasing the one before it |

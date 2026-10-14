@@ -9,6 +9,7 @@
  */
 #include "notes/notes_app.h"
 
+#include "ui/manager.h"
 #include "ui/theme.h"
 #include "ui/toast.h"
 #include "thistle/app_manager.h"
@@ -194,6 +195,15 @@ static void back_from_editor_cb(lv_event_t *e)
         }
     }
     switch_to_list();
+}
+
+/* The Back key: from the editor to the list, saving first, as the editor's
+ * "< Back" button does. */
+static bool notes_back(void)
+{
+    if (lv_obj_has_flag(s_notes.editor_screen, LV_OBJ_FLAG_HIDDEN)) return false;
+    back_from_editor_cb(NULL);
+    return true;
 }
 
 static void new_note_btn_cb(lv_event_t *e)
@@ -669,6 +679,8 @@ esp_err_t notes_ui_create(lv_obj_t *parent)
     lv_obj_add_event_cb(s_notes.editor_screen, editor_key_cb,
                         LV_EVENT_KEY, NULL);
     lv_obj_add_flag(s_notes.editor_screen, LV_OBJ_FLAG_CLICKABLE);
+
+    ui_manager_set_back_handler(s_notes.root, notes_back);
 
     return ESP_OK;
 }

@@ -21,4 +21,7 @@ void assistant_setup_open(lv_obj_t *parent, assistant_setup_done_cb_t done);
 /* Delete the form without saving or calling done, if it is open. */
 void assistant_setup_close(void);
 
+/* Leave the form without saving, as tapping its title bar does: done runs. */
+void assistant_setup_cancel(void);
+
 bool assistant_setup_is_open(void);

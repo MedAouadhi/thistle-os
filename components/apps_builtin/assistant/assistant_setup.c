@@ -466,6 +466,11 @@ void assistant_setup_close(void)
     memset(&s_setup, 0, sizeof(s_setup));
 }
 
+void assistant_setup_cancel(void)
+{
+    finish(false);
+}
+
 bool assistant_setup_is_open(void)
 {
     return s_setup.panel != NULL;

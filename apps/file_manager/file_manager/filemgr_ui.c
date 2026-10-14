@@ -2,6 +2,7 @@
 
 #include "hal/board.h"
 #include "hal/sdcard_path.h"
+#include "ui/manager.h"
 #include "ui/theme.h"
 
 #include "lvgl.h"
@@ -142,6 +143,14 @@ static void title_clicked_cb(lv_event_t *e)
     }
 
     navigate_to(parent);
+}
+
+/* The Back key: up one folder, until the SD card's own. */
+static bool filemgr_back(void)
+{
+    if (strcmp(s_fm.current_path, THISTLE_SDCARD) == 0) return false;
+    title_clicked_cb(NULL);
+    return true;
 }
 
 /* ------------------------------------------------------------------ */
@@ -607,6 +616,8 @@ esp_err_t filemgr_ui_create(lv_obj_t *parent)
 
     /* Populate list starting at SD card root */
     navigate_to(THISTLE_SDCARD);
+
+    ui_manager_set_back_handler(s_fm.root, filemgr_back);
 
     return ESP_OK;
 }

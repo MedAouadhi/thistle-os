@@ -49,6 +49,7 @@
 #include "thistle/msg_alert.h"
 #include "thistle/wifi_manager.h"
 #include "thistle/time_manager.h"
+#include "ui/manager.h"
 #include "ui/theme.h"
 
 #include <stdatomic.h>
@@ -1079,6 +1080,23 @@ static void chat_back_cb(lv_event_t *e)
     show_screen(SCREEN_CONV_LIST);
 }
 
+/* The Back key: to the conversation list, as each other screen's back button
+ * goes. */
+static bool messenger_back(void)
+{
+    switch (s_msg.screen) {
+        case SCREEN_CHAT:
+            chat_back_cb(NULL);
+            return true;
+        case SCREEN_NEW_CONV:
+        case SCREEN_SETTINGS:
+            show_screen(SCREEN_CONV_LIST);
+            return true;
+        default:
+            return false;
+    }
+}
+
 static void send_btn_cb(lv_event_t *e)
 {
     (void)e;
@@ -1594,6 +1612,7 @@ esp_err_t messenger_ui_create(lv_obj_t *parent)
 
     /* Start on the conversation list */
     show_screen(SCREEN_CONV_LIST);
+    ui_manager_set_back_handler(s_msg.root, messenger_back);
 
     ESP_LOGI(TAG, "messenger ready");
     return ESP_OK;

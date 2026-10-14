@@ -51,6 +51,13 @@ static void close_menu(void)
     }
 }
 
+bool power_ui_close_menu(void)
+{
+    bool open = s_menu != NULL;
+    close_menu();
+    return open;
+}
+
 bool power_ui_sleep_screen_shown(void)
 {
     return s_sleep_screen != NULL;
