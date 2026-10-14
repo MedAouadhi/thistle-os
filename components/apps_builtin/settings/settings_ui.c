@@ -27,6 +27,7 @@
 #include "thistle/ota.h"
 #include "thistle/driver_loader.h"
 #include "thistle/light_prefs.h"
+#include "thistle/gps_manager.h"
 #include "thistle/mesh.h"
 #include "thistle/radio_antenna.h"
 #include "thistle/refresh_prefs.h"
@@ -132,10 +133,6 @@ static lv_obj_t   *s_gps_sat_lbl    = NULL;
 #define IMU_AXES 6
 static lv_timer_t *s_imu_timer = NULL;
 static lv_obj_t   *s_imu_lbl[IMU_AXES];
-
-/* GPS enabled state. The kernel starts the receiver at boot
- * (hal_registry_start_all), so it is on until this page turns it off. */
-static bool s_gps_enabled = true;
 
 /* Main list dynamic value labels */
 static lv_obj_t *s_wifi_value_label = NULL;
@@ -1877,9 +1874,7 @@ static void create_light_level_row(lv_obj_t *content, lv_event_cb_t cb,
 static void display_brightness_cb(lv_event_t *e)
 {
     uint8_t percent = (uint8_t)(uintptr_t)lv_event_get_user_data(e);
-    const hal_registry_t *reg = hal_get_registry();
-    if (!reg || !reg->display || !reg->display->set_brightness) return;
-    esp_err_t ret = reg->display->set_brightness(percent);
+    esp_err_t ret = light_set_display(percent, false);
     if (ret == ESP_OK) {
         ESP_LOGI(TAG, "Display: brightness -> %u%%", (unsigned)percent);
         /* The light is already set; a save that fails costs only the level
@@ -2233,7 +2228,7 @@ static void gps_timer_cb(lv_timer_t *timer)
     char buf[48];
 
     if (err != ESP_OK) {
-        lv_label_set_text(s_gps_status_lbl, s_gps_enabled ? "Status: Error" : "Status: Off");
+        lv_label_set_text(s_gps_status_lbl, rs_gps_is_enabled() ? "Status: Error" : "Status: Off");
         lv_label_set_text(s_gps_lat_lbl,    "Lat: --");
         lv_label_set_text(s_gps_lon_lbl,    "Lon: --");
         lv_label_set_text(s_gps_sat_lbl,    "Satellites: --");
@@ -2258,19 +2253,15 @@ static void gps_timer_cb(lv_timer_t *timer)
 static void gps_toggle_cb(lv_event_t *e)
 {
     lv_obj_t *btn_lbl = (lv_obj_t *)lv_event_get_user_data(e);
-    const hal_registry_t *reg = hal_get_registry();
-    if (!reg || !reg->gps) return;
-
-    if (s_gps_enabled) {
-        if (reg->gps->disable) reg->gps->disable();
-        s_gps_enabled = false;
-        if (btn_lbl) lv_label_set_text(btn_lbl, "Enable");
-        ESP_LOGI(TAG, "GPS disabled");
-    } else {
-        if (reg->gps->enable) reg->gps->enable();
-        s_gps_enabled = true;
-        if (btn_lbl) lv_label_set_text(btn_lbl, "Disable");
-        ESP_LOGI(TAG, "GPS enabled");
+    bool on = !rs_gps_is_enabled();
+    esp_err_t err = rs_gps_set_enabled(on);
+    if (rs_gps_is_enabled() != on) {
+        toast_warn(on ? "GPS did not start" : "GPS did not stop");
+        return;
+    }
+    if (btn_lbl) lv_label_set_text(btn_lbl, on ? "Disable" : "Enable");
+    if (err != ESP_OK) {
+        toast_warn("Not saved for next boot");
     }
 }
 
@@ -2316,7 +2307,7 @@ static void open_detail_gps(lv_obj_t *content)
     lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *bl = lv_label_create(btn);
-    lv_label_set_text(bl, s_gps_enabled ? "Disable" : "Enable");
+    lv_label_set_text(bl, rs_gps_is_enabled() ? "Disable" : "Enable");
     lv_obj_set_style_text_font(bl, &lv_font_montserrat_14, LV_PART_MAIN);
     lv_obj_set_style_text_color(bl, tc_gps->text, LV_PART_MAIN);
     lv_obj_set_style_text_color(bl, tc_gps->bg, LV_STATE_PRESSED);
@@ -2488,25 +2479,15 @@ static void open_detail_storage(lv_obj_t *content, int index)
 static void input_backlight_cb(lv_event_t *e)
 {
     uint8_t percent = (uint8_t)(uintptr_t)lv_event_get_user_data(e);
-    const hal_registry_t *reg = hal_get_registry();
-    if (!reg) return;
-    /* Whichever input driver has a backlight gets the level. Touch panels
-     * carry no setter at all, so they are skipped here rather than asked. */
-    bool lit = false;
-    for (int i = 0; i < (int)reg->input_count; i++) {
-        const hal_input_driver_t *inp = reg->inputs[i];
-        if (!inp || !inp->set_backlight) continue;
-        if (inp->set_backlight(percent) == ESP_OK) {
-            ESP_LOGI(TAG, "Input: %s backlight -> %u%%",
-                     inp->name ? inp->name : "?", (unsigned)percent);
-            lit = true;
-        }
-    }
-    /* A driver whose board left the backlight pin unwired reports
-     * NOT_SUPPORTED. Saying so beats a button that quietly does nothing. */
-    if (!lit) {
+    /* Whichever input driver has a backlight gets the level. A driver whose
+     * board left the backlight pin unwired reports NOT_SUPPORTED. Saying so
+     * beats a button that quietly does nothing. */
+    if (light_set_keys(percent, false) != ESP_OK) {
         toast_warn("No key backlight on this board");
-    } else if (light_prefs_save_keys(percent) != ESP_OK) {
+        return;
+    }
+    ESP_LOGI(TAG, "Input: key backlight -> %u%%", (unsigned)percent);
+    if (light_prefs_save_keys(percent) != ESP_OK) {
         toast_warn("Key backlight not saved for next boot");
     }
 }

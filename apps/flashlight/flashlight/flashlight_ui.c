@@ -22,6 +22,7 @@
 
 #include "ui/theme.h"
 #include "thistle/app_manager.h"
+#include "thistle/light_prefs.h"
 #include "hal/board.h"
 
 #include "lvgl.h"
@@ -202,7 +203,9 @@ static void apply_mode(flash_mode_t new_mode)
     }
     if (s_fl.mode == FLASH_MODE_ON) {
         set_screen_normal();
-        set_backlight(50); /* restore default brightness */
+        /* Back to the level the user chose, which the driver call above did
+         * not change (thistle/light_prefs.h). */
+        set_backlight(light_display_level());
     }
 
     s_fl.mode = new_mode;

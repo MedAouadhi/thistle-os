@@ -99,7 +99,8 @@
                 "max_x": 240,
                 "max_y": 320,
                 "home_key": 0,
-                "back_key": 2
+                "back_key": 2,
+                "quick_key": 1
             }
         },
         {

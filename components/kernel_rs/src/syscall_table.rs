@@ -677,13 +677,11 @@ unsafe extern "C" fn thistle_gps_get_position_impl(pos: *mut c_void) -> i32 {
 }
 
 unsafe extern "C" fn thistle_gps_enable_impl() -> i32 {
-    let reg = crate::hal_registry::registry();
-    if !reg.gps.is_null() {
-        if let Some(enable) = (*reg.gps).enable {
-            return enable();
-        }
+    if crate::hal_registry::registry().gps.is_null() {
+        return -1;
     }
-    -1
+    // Through the GPS manager, so the quick panel shows it on.
+    crate::gps_manager::enable_for_app()
 }
 
 unsafe extern "C" fn thistle_power_get_battery_mv_impl() -> u16 {
@@ -771,10 +769,8 @@ unsafe extern "C" fn thistle_audio_stop_impl() -> i32 {
 }
 
 unsafe extern "C" fn thistle_audio_set_volume_impl(percent: u8) -> i32 {
-    match audio_driver().and_then(|d| d.set_volume) {
-        Some(set_volume) => set_volume(percent),
-        None => ESP_ERR_NOT_SUPPORTED,
-    }
+    // The system's volume, so the quick panel shows it and mute holds.
+    crate::audio_volume::set_for_app(percent)
 }
 
 unsafe extern "C" fn thistle_audio_set_mic_gain_impl(db: u8) -> i32 {

@@ -753,6 +753,14 @@ public:
             save_contacts();
         }
     }
+
+    // Save now what tick() would have saved later: the node is stopping.
+    void flush() {
+        if (_dirty) {
+            _dirty = false;
+            save_contacts();
+        }
+    }
 };
 
 // ── Job ────────────────────────────────────────────────────────────────
@@ -769,6 +777,9 @@ static uint32_t s_job;
 static meshcore_config_t s_config;
 static const meshcore_callbacks_t* s_callbacks;
 static volatile bool s_running;
+// The node has been loaded once: its identity, its contacts, the Public
+// channel. A start after a stop only puts it back on air.
+static bool s_began;
 
 // The worker's stack is sized for this: the crypto self-check is the deepest
 // MeshCore goes, at 10.7 KB.
@@ -796,14 +807,28 @@ static void start_node() {
              (unsigned)s_config.sf);
     if (s_callbacks->on_ready) s_callbacks->on_ready(s_mesh->self_id.pub_key, s_mesh->name);
     s_running = true;
+    s_began = true;
 
     s_mesh->advertise(BOOT_ADVERT_DELAY_MS);
 }
 
-// Every LOOP_PERIOD_MS. The first run starts the node.
+// Back on air after meshcore_stop(): the node is as the stop left it, so
+// only the radio has to listen again.
+static void resume_node() {
+    s_radio->begin();
+    ESP_LOGI(TAG, "back on air as %s", s_mesh->name);
+    if (s_callbacks->on_ready) s_callbacks->on_ready(s_mesh->self_id.pub_key, s_mesh->name);
+    s_running = true;
+}
+
+// Every LOOP_PERIOD_MS. The first run starts the node, or resumes it.
 static void mesh_job(void*) {
     if (!s_running) {
-        start_node();
+        if (s_began) {
+            resume_node();
+        } else {
+            start_node();
+        }
         return;
     }
     Command cmd;
@@ -831,6 +856,10 @@ esp_err_t meshcore_start(const meshcore_config_t* config, const meshcore_callbac
     s_config = *config;
     s_callbacks = callbacks;
 
+    // A stop, or a boot with the mesh switched off, left the radio asleep,
+    // where it takes no settings. Waking one that is awake costs nothing.
+    if (reg->radio->sleep) reg->radio->sleep(false);
+
     if (!s_radio) s_radio = new_in_psram<HalRadio>();
     if (!s_radio) return ESP_ERR_NO_MEM;
     esp_err_t err = s_radio->configure(reg->radio, s_config);
@@ -850,10 +879,31 @@ esp_err_t meshcore_start(const meshcore_config_t* config, const meshcore_callbac
     }
     if (!s_commands || !s_clock || !s_packets || !s_tables || !s_mesh) return ESP_ERR_NO_MEM;
 
-    if (!s_mesh->load_identity()) return ESP_FAIL;
+    if (!s_began && !s_mesh->load_identity()) return ESP_FAIL;
 
     s_job = kworker_every(mesh_job, nullptr, LOOP_PERIOD_MS);
     return s_job ? ESP_OK : ESP_FAIL;
+}
+
+esp_err_t meshcore_stop(void) {
+    if (!s_job) return ESP_OK;
+    if (kworker_is_current()) return ESP_ERR_INVALID_STATE;
+
+    // Once this returns the job is not running and will not run again, so
+    // the node is this thread's to touch.
+    kworker_cancel(s_job);
+    s_job = 0;
+    s_running = false;
+    if (s_commands) xQueueReset(s_commands);
+    if (s_began) s_mesh->flush();
+
+    const hal_registry_t* reg = hal_get_registry();
+    if (reg && reg->radio) {
+        if (reg->radio->stop_receive) reg->radio->stop_receive();
+        if (reg->radio->sleep) reg->radio->sleep(true);
+    }
+    ESP_LOGI(TAG, "off air; radio asleep");
+    return ESP_OK;
 }
 
 bool meshcore_running(void) { return s_running; }

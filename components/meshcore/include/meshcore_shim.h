@@ -91,6 +91,11 @@ typedef struct {
  * ESP_ERR_INVALID_STATE if already running. The callbacks must outlive it. */
 esp_err_t meshcore_start(const meshcore_config_t *config, const meshcore_callbacks_t *callbacks);
 
+/* Take the node off air and put the radio to sleep. Its contacts are saved
+ * first, and what was queued to send is dropped. meshcore_start() puts it
+ * back on air as it was. Not from the kernel worker. */
+esp_err_t meshcore_stop(void);
+
 bool meshcore_running(void);
 
 /* Packets queued to go out. Call from the kernel worker only. */

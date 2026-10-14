@@ -26,6 +26,7 @@ typedef struct {
  * never delivered to an app as text. */
 #define HAL_KEY_HOME 0x0100  /* Back to the launcher's home screen */
 #define HAL_KEY_BACK 0x0101  /* Up one page in the app in front; Home from its first */
+#define HAL_KEY_QUICK 0x0102 /* Open or close the quick panel */
 
 typedef void (*hal_input_cb_t)(const hal_input_event_t *event, void *user_data);
 

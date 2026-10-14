@@ -4,6 +4,8 @@
 #include "ui/epaper_refresh.h"
 #include "ui/toast.h"
 #include "ui/power_ui.h"
+#include "ui/pull_gesture.h"
+#include "ui/quick_panel.h"
 #include "thistle/power_manager.h"
 #include "hal/board.h"
 #include "hal/input.h"
@@ -100,6 +102,13 @@ static uint8_t     s_kbd_queue_len  = 0;
 #define NAV_KEY_TIMER_PERIOD_MS 20
 static bool s_home_pending = false;
 static bool s_back_pending = false;
+
+/* The quick panel, asked for by a drag (pull_gesture.h) or the quick key,
+ * and opened or closed by the same timer. */
+static pull_gesture_t s_pull;
+static bool s_quick_open_pending = false;
+static bool s_quick_close_pending = false;
+static bool s_quick_toggle_pending = false;
 static void (*s_home_handler)(void) = NULL;
 /* The app in front's back handler, and the root container it belongs to. The
  * app manager destroys an app whenever another comes forward, so deleting the
@@ -130,10 +139,11 @@ void ui_manager_set_back_handler(lv_obj_t *owner, bool (*handler)(void))
     }
 }
 
-/* Back closes the power menu, or takes the app in front up one page; false
- * when there was neither to do. */
+/* Back closes the quick panel or the power menu, or takes the app in front
+ * up one page; false when there was none of those to do. */
 static bool go_back(void)
 {
+    if (quick_panel_close()) return true;
     if (power_ui_close_menu()) return true;
     return s_back_handler && !lv_obj_has_flag(s_back_owner, LV_OBJ_FLAG_HIDDEN) &&
            s_back_handler();
@@ -142,6 +152,18 @@ static bool go_back(void)
 static void nav_key_timer_cb(lv_timer_t *timer)
 {
     (void)timer;
+    if (s_quick_close_pending) {
+        s_quick_close_pending = false;
+        quick_panel_close();
+    }
+    if (s_quick_open_pending) {
+        s_quick_open_pending = false;
+        quick_panel_open();
+    }
+    if (s_quick_toggle_pending) {
+        s_quick_toggle_pending = false;
+        quick_panel_toggle();
+    }
     if (s_back_pending) {
         s_back_pending = false;
         if (!go_back()) {
@@ -151,6 +173,7 @@ static void nav_key_timer_cb(lv_timer_t *timer)
     if (!s_home_pending) return;
     s_home_pending = false;
 
+    quick_panel_close();
     app_manager_launch("com.thistle.launcher");
     if (s_home_handler) {
         s_home_handler();
@@ -165,6 +188,18 @@ static void kbd_queue_push(kbd_event_t ev)
     }
     s_kbd_queue[(s_kbd_queue_head + s_kbd_queue_len) % KBD_QUEUE_LEN] = ev;
     s_kbd_queue_len++;
+}
+
+/* Watch the touch stream for the drags that open and close the quick panel.
+ * The touch still reaches LVGL: it went down on the status bar, which does
+ * nothing with a drag, or on the open panel. */
+static void note_pull(pull_touch_t kind, int16_t x, int16_t y)
+{
+    switch (pull_gesture_feed(&s_pull, kind, x, y, quick_panel_is_open())) {
+        case PULL_OPEN:  s_quick_open_pending  = true; break;
+        case PULL_CLOSE: s_quick_close_pending = true; break;
+        default: break;
+    }
 }
 
 /* HAL input callback — handles all event types from any registered driver.
@@ -182,20 +217,27 @@ static void ui_input_hal_cb(const hal_input_event_t *event, void *user_data)
             s_touch_state.y     = (int16_t)event->touch.y;
             s_touch_state.state = LV_INDEV_STATE_PRESSED;
             s_touch_press_unread = true;
+            note_pull(event->type == HAL_INPUT_EVENT_TOUCH_DOWN ? PULL_TOUCH_DOWN
+                                                                : PULL_TOUCH_MOVE,
+                      s_touch_state.x, s_touch_state.y);
             break;
         case HAL_INPUT_EVENT_TOUCH_UP:
             s_touch_state.state = LV_INDEV_STATE_RELEASED;
+            note_pull(PULL_TOUCH_UP, s_touch_state.x, s_touch_state.y);
             break;
         case HAL_INPUT_EVENT_KEY_DOWN:
         case HAL_INPUT_EVENT_KEY_UP: {
-            /* Home and Back type nothing, so they never reach LVGL's
-             * keypad. */
-            if (event->key.keycode == HAL_KEY_HOME || event->key.keycode == HAL_KEY_BACK) {
+            /* Home, Back and the quick key type nothing, so they never reach
+             * LVGL's keypad. */
+            if (event->key.keycode == HAL_KEY_HOME || event->key.keycode == HAL_KEY_BACK ||
+                event->key.keycode == HAL_KEY_QUICK) {
                 if (event->type == HAL_INPUT_EVENT_KEY_DOWN) {
                     if (event->key.keycode == HAL_KEY_HOME) {
                         s_home_pending = true;
-                    } else {
+                    } else if (event->key.keycode == HAL_KEY_BACK) {
                         s_back_pending = true;
+                    } else {
+                        s_quick_toggle_pending = true;
                     }
                 }
                 break;
@@ -213,6 +255,12 @@ static void ui_input_hal_cb(const hal_input_event_t *event, void *user_data)
                 if (lv_key != s_kbd_state.key) break;
                 s_kbd_state.state = LV_INDEV_STATE_RELEASED;
                 kbd_queue_push(s_kbd_state);
+                break;
+            }
+
+            /* Esc closes the quick panel, and does nothing else. */
+            if (lv_key == LV_KEY_ESC && quick_panel_is_open()) {
+                s_quick_close_pending = true;
                 break;
             }
 
@@ -528,6 +576,10 @@ esp_err_t ui_manager_init(ui_flush_fn_t flush_cb, bool use_deferred_refresh)
 
     /* 4b1b. The sleep screen and the power menu, when the power manager asks */
     power_ui_init();
+
+    /* 4b1c. The quick panel, opened by a drag down from the status bar */
+    quick_panel_add_builtin();
+    pull_gesture_init(&s_pull, STATUSBAR_H, (int16_t)s_display_h);
 
     /* Touch stays in TIMER mode — LVGL polls at each lv_timer_handler call */
 

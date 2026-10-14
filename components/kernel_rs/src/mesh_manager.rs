@@ -23,7 +23,7 @@
 
 use std::collections::VecDeque;
 use std::os::raw::c_char;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 use std::sync::Mutex;
 
 // ---------------------------------------------------------------------------
@@ -243,6 +243,7 @@ struct EngineCallbacks {
 #[cfg(target_os = "espidf")]
 extern "C" {
     fn meshcore_start(config: *const EngineConfig, callbacks: *const EngineCallbacks) -> i32;
+    fn meshcore_stop() -> i32;
     fn meshcore_send_direct(pub_key: *const u8, text: *const c_char, message_id: u32) -> i32;
     fn meshcore_send_channel(channel: u8, text: *const c_char, message_id: u32) -> i32;
     fn meshcore_send_advert() -> i32;
@@ -746,6 +747,61 @@ fn read_system_json() -> Option<String> {
     std::fs::read_to_string(crate::system_json::path()).ok()
 }
 
+// ---------------------------------------------------------------------------
+// Switched on or off
+// ---------------------------------------------------------------------------
+
+const UNKNOWN: u8 = 0;
+const ON: u8 = 1;
+const OFF: u8 = 2;
+
+/// `mesh.enabled`, read from system.json once and kept here after.
+static ENABLED: AtomicU8 = AtomicU8::new(UNKNOWN);
+
+fn enabled() -> bool {
+    match ENABLED.load(Ordering::Relaxed) {
+        ON => true,
+        OFF => false,
+        _ => {
+            let on = mesh_enabled(read_system_json().as_deref());
+            ENABLED.store(if on { ON } else { OFF }, Ordering::Relaxed);
+            on
+        }
+    }
+}
+
+/// Put the radio to sleep, where it hears nothing and draws next to nothing.
+fn radio_sleep() {
+    let reg = crate::hal_registry::registry();
+    if let Some(radio) = unsafe { reg.radio.as_ref() } {
+        unsafe {
+            if let Some(stop) = radio.stop_receive {
+                stop();
+            }
+            if let Some(sleep) = radio.sleep {
+                sleep(true);
+            }
+        }
+    }
+}
+
+/// Take the node off air and put the radio to sleep.
+fn mesh_stop() -> i32 {
+    #[cfg(target_os = "espidf")]
+    let rc = unsafe { meshcore_stop() };
+    #[cfg(not(target_os = "espidf"))]
+    let rc = {
+        radio_sleep();
+        ESP_OK
+    };
+    if rc == ESP_OK {
+        if let Ok(mut state) = MESH_STATE.lock() {
+            state.running = false;
+        }
+    }
+    rc
+}
+
 /// Bring the mesh up, if the board has a radio and system.json has not
 /// switched it off. kernel_init() calls this once the drivers have started and
 /// the antenna the user chose is selected.
@@ -754,8 +810,9 @@ pub(crate) fn mesh_start() -> i32 {
         return ESP_OK;
     }
     let json = read_system_json();
-    if !mesh_enabled(json.as_deref()) {
-        mesh_log!(ESP_LOG_INFO, b"mesh: off in system.json\n\0");
+    if !enabled() {
+        mesh_log!(ESP_LOG_INFO, b"mesh: off in system.json; radio asleep\n\0");
+        radio_sleep();
         return ESP_ERR_NOT_SUPPORTED;
     }
     let params = match mesh_params(radio_band(), json.as_deref()) {
@@ -838,6 +895,45 @@ pub extern "C" fn rs_mesh_get_radio(out: *mut CMeshRadio) -> i32 {
 #[no_mangle]
 pub extern "C" fn rs_mesh_is_running() -> bool {
     MESH_STATE.lock().map(|s| s.running).unwrap_or(false)
+}
+
+/// Whether the board has a radio for the mesh to run on.
+#[no_mangle]
+pub extern "C" fn rs_mesh_available() -> bool {
+    !crate::hal_registry::registry().radio.is_null()
+}
+
+/// Whether the user has the mesh switched on (`mesh.enabled`, on unless
+/// switched off). It may still be starting.
+#[no_mangle]
+pub extern "C" fn rs_mesh_is_enabled() -> bool {
+    enabled()
+}
+
+/// Switch the mesh on or off and remember it. Off takes the node off air and
+/// puts the radio to sleep at once. On starts it; if it will not start, it
+/// stays off, unsaved, and the error is returned. Otherwise the return says
+/// whether the choice was saved.
+#[no_mangle]
+pub extern "C" fn rs_mesh_set_enabled(on: bool) -> i32 {
+    if !on {
+        ENABLED.store(OFF, Ordering::Relaxed);
+        let rc = mesh_stop();
+        if rc != ESP_OK {
+            return rc;
+        }
+        mesh_log!(ESP_LOG_INFO, b"mesh: switched off\n\0");
+        return crate::system_json::save("mesh", "enabled", serde_json::Value::Bool(false));
+    }
+    let was = ENABLED.swap(ON, Ordering::Relaxed);
+    let rc = mesh_start();
+    if rc != ESP_OK {
+        ENABLED.store(if was == ON { ON } else { OFF }, Ordering::Relaxed);
+        mesh_log!(ESP_LOG_WARN, b"mesh: would not start (0x%x)\n\0", rc);
+        return rc;
+    }
+    mesh_log!(ESP_LOG_INFO, b"mesh: switched on\n\0");
+    crate::system_json::save("mesh", "enabled", serde_json::Value::Bool(true))
 }
 
 /// Send a direct message to a contact. Its id, for following its delivery
@@ -1352,6 +1448,7 @@ mod tests {
         *PARAMS_IN_USE.lock().unwrap() = None;
         *SELF_NAME_C.lock().unwrap() = [0u8; MESH_NAME_MAX];
         declare_radio_band(None);
+        ENABLED.store(UNKNOWN, Ordering::Relaxed);
     }
 
     /// The state as it is once the engine has reported in.
@@ -1504,7 +1601,33 @@ mod tests {
     #[test]
     fn a_board_with_no_radio_does_not_start_the_mesh() {
         reset_state();
+        ENABLED.store(ON, Ordering::Relaxed);
         assert_eq!(mesh_start(), ESP_ERR_NOT_FOUND);
+        assert!(!rs_mesh_is_running());
+    }
+
+    #[test]
+    fn a_mesh_switched_off_is_not_started() {
+        reset_state();
+        ENABLED.store(OFF, Ordering::Relaxed);
+        assert_eq!(mesh_start(), ESP_ERR_NOT_SUPPORTED);
+        assert!(!rs_mesh_is_running());
+    }
+
+    #[test]
+    fn switching_on_a_mesh_that_will_not_start_leaves_it_off() {
+        reset_state();
+        ENABLED.store(OFF, Ordering::Relaxed);
+        // No radio band declared, so there is nothing to tune to.
+        assert_eq!(rs_mesh_set_enabled(true), ESP_ERR_NOT_FOUND);
+        assert!(!rs_mesh_is_enabled());
+        assert!(!rs_mesh_is_running());
+    }
+
+    #[test]
+    fn stopping_takes_the_node_off_air() {
+        running_as("ThistleOS-A5A5");
+        assert_eq!(mesh_stop(), ESP_OK);
         assert!(!rs_mesh_is_running());
     }
 

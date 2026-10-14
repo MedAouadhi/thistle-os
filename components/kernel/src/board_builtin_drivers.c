@@ -252,14 +252,16 @@ esp_err_t board_builtin_driver_init(const char *id, const char *hal_type,
         // The heart key, leftmost of the three below the T-Deck Max's panel,
         // is key 0, and the rightmost is key 2: read off the board, since the
         // chip only numbers its keys and the vendor repo names none of them.
-        // The defaults serve a board whose stored profile predates "home_key"
-        // or "back_key".
-        cfg.home_key = json_int(config_json, "home_key", 0);
-        cfg.back_key = json_int(config_json, "back_key", 2);
-        ESP_LOGI(TAG, "touch-cst66xx: i2c_bus=%p addr=0x%02x int=%d rst_exp=%d/%d home_key=%d back_key=%d",
+        // The middle key, 1, opens the quick panel. The defaults serve a
+        // board whose stored profile predates "home_key", "back_key" or
+        // "quick_key".
+        cfg.home_key  = json_int(config_json, "home_key", 0);
+        cfg.back_key  = json_int(config_json, "back_key", 2);
+        cfg.quick_key = json_int(config_json, "quick_key", 1);
+        ESP_LOGI(TAG, "touch-cst66xx: i2c_bus=%p addr=0x%02x int=%d rst_exp=%d/%d home_key=%d back_key=%d quick_key=%d",
                  (void *)cfg.i2c_bus, cfg.i2c_addr, cfg.pin_int,
                  (int)cfg.rst_expander, (int)cfg.rst_expander_pin, (int)cfg.home_key,
-                 (int)cfg.back_key);
+                 (int)cfg.back_key, (int)cfg.quick_key);
         return hal_input_register(drv_touch_cst66xx_get(), &cfg);
     }
 

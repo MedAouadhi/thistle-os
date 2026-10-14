@@ -50,11 +50,13 @@ static const char *s_wm_override = NULL;
  * busy refreshing a panel. */
 #define SIM_MAX_TAPS   8
 #define SIM_TAP_GAP_MS 1500u
-/* keycode is HAL_KEY_HOME or HAL_KEY_BACK for a press of that touch key in
- * place of a tap, and 0 for a tap at x,y. */
-static struct { int x, y; uint16_t keycode; } s_taps[SIM_MAX_TAPS];
+/* keycode is HAL_KEY_HOME, HAL_KEY_BACK or HAL_KEY_QUICK for a press of that
+ * key in place of a tap, and 0 for a tap at x,y. A drag goes down at x,y and
+ * moves to x2,y2 over SIM_DRAG_MS before it lifts. */
+static struct { int x, y, x2, y2; uint16_t keycode; bool drag; } s_taps[SIM_MAX_TAPS];
 static int s_tap_count = 0;
 static int s_tap_hold_ms = 100;
+#define SIM_DRAG_MS 300u
 /* Text to type after the taps. Every key's press and release arrive in one
  * main-loop iteration, as one drain of the TCA8418's event FIFO delivers
  * them, so LVGL reads the keypad only after all of them. */
@@ -108,16 +110,34 @@ static void hear_mesh_messages(void)
 static bool add_tap(const char *spec)
 {
     if (s_tap_count < SIM_MAX_TAPS) {
-        s_taps[s_tap_count].keycode = strcmp(spec, "home") == 0 ? HAL_KEY_HOME
-                                    : strcmp(spec, "back") == 0 ? HAL_KEY_BACK : 0;
+        s_taps[s_tap_count].drag = false;
+        s_taps[s_tap_count].keycode = strcmp(spec, "home") == 0  ? HAL_KEY_HOME
+                                    : strcmp(spec, "back") == 0  ? HAL_KEY_BACK
+                                    : strcmp(spec, "quick") == 0 ? HAL_KEY_QUICK : 0;
     }
     if (s_tap_count >= SIM_MAX_TAPS ||
         (s_taps[s_tap_count].keycode == 0 &&
          sscanf(spec, "%d,%d", &s_taps[s_tap_count].x, &s_taps[s_tap_count].y) != 2)) {
-        fprintf(stderr, "Invalid --tap value; expected X,Y, home or back (at most %d taps)\n",
-                SIM_MAX_TAPS);
+        fprintf(stderr, "Invalid --tap value; expected X,Y, home, back or quick "
+                        "(at most %d taps)\n", SIM_MAX_TAPS);
         return false;
     }
+    s_tap_count++;
+    return true;
+}
+
+/* A drag, taking its turn among the taps. */
+static bool add_drag(const char *spec)
+{
+    if (s_tap_count >= SIM_MAX_TAPS ||
+        sscanf(spec, "%d,%d,%d,%d", &s_taps[s_tap_count].x, &s_taps[s_tap_count].y,
+               &s_taps[s_tap_count].x2, &s_taps[s_tap_count].y2) != 4) {
+        fprintf(stderr, "Invalid --drag value; expected X1,Y1,X2,Y2 (at most %d taps "
+                        "and drags)\n", SIM_MAX_TAPS);
+        return false;
+    }
+    s_taps[s_tap_count].keycode = 0;
+    s_taps[s_tap_count].drag = true;
     s_tap_count++;
     return true;
 }
@@ -201,6 +221,8 @@ int main(int argc, char **argv)
             s_screenshot_file = argv[i] + 13;
         } else if (strcmp(argv[i], "--tap") == 0 && i + 1 < argc) {
             if (!add_tap(argv[++i])) return 2;
+        } else if (strcmp(argv[i], "--drag") == 0 && i + 1 < argc) {
+            if (!add_drag(argv[++i])) return 2;
         } else if (strcmp(argv[i], "--tap-hold") == 0 && i + 1 < argc) {
             s_tap_hold_ms = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--launch-app") == 0 && i + 1 < argc) {
@@ -243,7 +265,9 @@ int main(int argc, char **argv)
             printf("  --screenshot FILE   Save native-resolution framebuffer as PPM on exit\n");
             printf("  --tap X,Y           Inject a native-coordinate tap after startup;\n");
             printf("                      repeat for more, %u ms apart\n", SIM_TAP_GAP_MS);
-            printf("  --tap home|back     Press the Home or Back touch key instead\n");
+            printf("  --tap home|back|quick  Press the Home, Back or quick key instead\n");
+            printf("  --drag X1,Y1,X2,Y2  Drag from X1,Y1 to X2,Y2 over %u ms, in turn\n"
+                   "                      with the taps\n", SIM_DRAG_MS);
             printf("  --tap-hold MS       How long each tap is held (default 100;\n");
             printf("                      0 = press and release between two pointer reads)\n");
             printf("  --type TEXT         Type TEXT after the taps, every key pressed and\n");
@@ -406,6 +430,19 @@ int main(int argc, char **argv)
             if (tap_phase == 0 && since_start > tap_down_ms &&
                 (key ? sim_input_inject_key(key, true) : sim_input_inject_touch(tx, ty, true))) {
                 tap_phase = 1;
+            }
+            if (tap_phase == 1 && s_taps[tap_index].drag) {
+                /* Along the line, as far as the time says, a move per loop. */
+                uint32_t t = since_start - tap_down_ms;
+                if (t > SIM_DRAG_MS) t = SIM_DRAG_MS;
+                int x = s_taps[tap_index].x + (s_taps[tap_index].x2 - s_taps[tap_index].x) *
+                                                  (int)t / (int)SIM_DRAG_MS;
+                int y = s_taps[tap_index].y + (s_taps[tap_index].y2 - s_taps[tap_index].y) *
+                                                  (int)t / (int)SIM_DRAG_MS;
+                sim_input_inject_touch_move((uint16_t)x, (uint16_t)y);
+                tap_up_ms = tap_down_ms + SIM_DRAG_MS;
+                tx = (uint16_t)s_taps[tap_index].x2;
+                ty = (uint16_t)s_taps[tap_index].y2;
             }
             /* Same iteration when the hold is 0: LVGL never runs in between. */
             if (tap_phase == 1 && since_start >= tap_up_ms &&

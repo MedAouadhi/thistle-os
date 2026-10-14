@@ -69,6 +69,19 @@ _Static_assert(sizeof(mesh_message_t) == 276, "mesh_message_t must match CMeshMe
 /* Whether the node is on air. */
 bool rs_mesh_is_running(void);
 
+/* Whether the board has a radio for the mesh. */
+bool rs_mesh_available(void);
+
+/* Whether the user has the mesh on (thistle_os.mesh.enabled, on unless
+ * switched off). It may still be starting. */
+bool rs_mesh_is_enabled(void);
+
+/* Switch the mesh on or off and remember it. Off takes the node off air and
+ * puts the radio to sleep. On starts it; one that will not start stays off,
+ * unsaved, and its error is returned. Otherwise the return says whether the
+ * choice was saved. Not from the kernel worker. */
+esp_err_t rs_mesh_set_enabled(bool on);
+
 /* ESP_ERR_INVALID_STATE until the mesh has started. */
 esp_err_t rs_mesh_get_radio(mesh_radio_t *out);
 

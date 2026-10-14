@@ -23,7 +23,8 @@ Requires SDL2 (`brew install sdl2` / `apt install libsdl2-dev`) and a prior ESP-
 | `--assert FILE` | Check log output against assertion file on exit |
 | `--scenario FILE` | Load hardware scenario from JSON |
 | `--tap X,Y` | Inject a tap after startup; repeat for more taps, 1.5 s apart |
-| `--tap home`, `--tap back` | Press the Home or Back touch key in that tap's turn (F1 and F3 in the window) |
+| `--tap home`, `--tap back`, `--tap quick` | Press the Home, Back or quick-panel key in that tap's turn (F1, F3 and F2 in the window) |
+| `--drag X1,Y1,X2,Y2` | Drag from one point to another over 0.3 s, in turn with the taps; `--drag 120,8,120,160` opens the quick panel on the T-Deck Max |
 | `--tap-hold MS` | How long each tap is held (default 100; `0` delivers press and release before LVGL next reads the pointer) |
 | `--type TEXT` | Type TEXT after the taps, every key pressed and released before LVGL next reads the keypad; prints `Focused text: "..."` on exit |
 | `--type-rollover` | With `--type`, press each key before releasing the one before it |

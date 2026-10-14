@@ -200,6 +200,28 @@ them in `time_manager.rs` (`thistle/time_manager.h`), every ESP-IDF call in
   source and size (`clock slewing by -125 ms, from NTP`). Like every Rust
   module's on the device, these lines carry no tag and no newline.
 
+### The quick panel
+
+A drag down from the status bar, or the quick key (`HAL_KEY_QUICK`, the
+T-Deck Max's middle touch key, `quick_key` in its profile), drops a panel of
+switches and sliders over the app in front (`components/ui/src/quick_panel.c`,
+`ui/quick_panel.h`); Back, Esc, Home, a tap below it or a drag up close it.
+The drag is picked out of the raw touch stream by `pull_gesture.c`, which has
+host tests. LVGL window managers only; thistle-tk has none.
+
+- **A switch is a registered struct of callbacks**, `quick_toggle_t` or
+  `quick_level_t`; the built-in ones are in `quick_panel_tiles.c`. Add one
+  with `quick_panel_add_toggle()` rather than by editing the panel.
+- **Its state belongs to the kernel, not the panel**, so Settings and apps
+  agree with it: `wifi_manager`, `net_cellular_*`, `gps_manager.rs`
+  (`thistle_os.gps.enabled`), `rs_mesh_set_enabled` (which stops MeshCore
+  and sleeps the radio), `audio_volume.rs` (`thistle_os.audio`), and
+  `light_prefs.rs`, which now keeps the lights' levels. Set the lights
+  through `light_set_display()` / `light_set_keys()`, not the drivers, or
+  the panel shows a stale level.
+- `simulator/tests/test_quick_panel.py`; the simulator's `--drag` and
+  `--tap quick` drive it.
+
 ### LVGL's pool is 64 KB
 
 LVGL allocates every object and every local style property from its own

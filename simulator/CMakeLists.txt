@@ -40,6 +40,9 @@ set(THISTLE_SRCS
     ${THISTLE_DIR}/components/ui/src/epaper_refresh.c
     ${THISTLE_DIR}/components/ui/src/toast.c
     ${THISTLE_DIR}/components/ui/src/power_ui.c
+    ${THISTLE_DIR}/components/ui/src/pull_gesture.c
+    ${THISTLE_DIR}/components/ui/src/quick_panel.c
+    ${THISTLE_DIR}/components/ui/src/quick_panel_tiles.c
     # Built-in apps
     ${THISTLE_DIR}/components/apps_builtin/lvgl_apps.c
     ${THISTLE_DIR}/components/apps_builtin/launcher/launcher_app.c
@@ -226,6 +229,8 @@ add_executable(thistle_sim_tests
     ${THISTLE_DIR}/components/ui/src/wm_select.c
     tests/test_epaper_refresh_policy.c
     ${THISTLE_DIR}/components/ui/src/epaper_refresh.c
+    tests/test_pull_gesture.c
+    ${THISTLE_DIR}/components/ui/src/pull_gesture.c
     tests/test_xl9555.c
     tests/test_board_fingerprint.c
     tests/test_http_client_shim.c

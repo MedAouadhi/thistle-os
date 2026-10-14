@@ -333,6 +333,10 @@ jobs:
         working-directory: simulator
         run: python3 tests/test_touch_taps.py --sim build/thistle_sim
 
+      - name: Run quick panel tests
+        working-directory: simulator
+        run: python3 tests/test_quick_panel.py --sim build/thistle_sim
+
       - name: Run screen fit regression tests
         working-directory: simulator
         run: python3 tests/test_fits_screen.py --sim build/thistle_sim

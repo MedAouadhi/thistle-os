@@ -19,6 +19,7 @@
 
 pub mod app_manager;
 pub mod appstore_client;
+pub mod audio_volume;
 pub mod tap_installer;
 pub mod ble_manager;
 pub mod battery_curve;
@@ -60,6 +61,7 @@ pub mod elf_loader;
 pub mod event;
 mod ffi;
 mod gpio_isr_service;
+pub mod gps_manager;
 pub mod gps_track;
 pub mod hal_registry;
 pub mod ipc;

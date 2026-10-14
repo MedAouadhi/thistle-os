@@ -43,8 +43,10 @@ static uint16_t sdl_key_to_keycode(SDL_Keycode key)
         case SDLK_SLASH:     return '/';
         case SDLK_MINUS:     return '-';
         case SDLK_EQUALS:    return '=';
-        /* The touch keys below the T-Deck Max's panel: left and right. */
+        /* The touch keys below the T-Deck Max's panel: left, middle and
+         * right. */
         case SDLK_F1:        return HAL_KEY_HOME;
+        case SDLK_F2:        return HAL_KEY_QUICK;
         case SDLK_F3:        return HAL_KEY_BACK;
         default:             return 0;
     }
@@ -136,6 +138,20 @@ const hal_input_driver_t *sim_input_get(void)
 void sim_input_poll_sdl(void)
 {
     sim_input_poll();
+}
+
+bool sim_input_inject_touch_move(uint16_t x, uint16_t y)
+{
+    if (!s_initialized || !s_cb) return false;
+
+    hal_input_event_t event = {
+        .type = HAL_INPUT_EVENT_TOUCH_MOVE,
+        .timestamp = 0,
+    };
+    event.touch.x = x;
+    event.touch.y = y;
+    s_cb(&event, s_cb_data);
+    return true;
 }
 
 bool sim_input_inject_touch(uint16_t x, uint16_t y, bool pressed)

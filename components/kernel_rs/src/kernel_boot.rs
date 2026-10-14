@@ -191,6 +191,12 @@ pub extern "C" fn kernel_init() -> i32 {
     // are up and the SD card that may hold system.json is mounted.
     crate::light_prefs::light_prefs_restore();
 
+    // GPS, unless the user switched it off.
+    crate::gps_manager::restore();
+
+    // The volume, and whether the device was left muted.
+    crate::audio_volume::restore();
+
     // The LoRa antenna the user last chose. Boot left the radio on the
     // internal one, and nothing has transmitted yet.
     crate::radio_antenna::radio_antenna_restore();

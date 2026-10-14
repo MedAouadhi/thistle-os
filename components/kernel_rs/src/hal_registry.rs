@@ -96,6 +96,10 @@ pub const HAL_KEY_HOME: u16 = 0x0100;
 /// the app in front up one page, or home from its first page.
 pub const HAL_KEY_BACK: u16 = 0x0101;
 
+/// Mirrors `HAL_KEY_QUICK` in hal/input.h: a key that types nothing and opens
+/// or closes the quick panel.
+pub const HAL_KEY_QUICK: u16 = 0x0102;
+
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct HalInputTouchData {

@@ -57,6 +57,24 @@ extern void test_epaper_policy_requested_full_restarts_the_auto_run(void);
 extern void test_epaper_policy_unknown_value_falls_back_to_fast(void);
 extern void test_epaper_policy_init_forgets_the_policy_and_any_request(void);
 
+/* test_pull_gesture.c */
+extern void test_pull_threshold_is_an_eighth_of_the_screen(void);
+extern void test_pull_threshold_has_a_floor_on_a_short_screen(void);
+extern void test_pull_down_from_the_bar_opens(void);
+extern void test_pull_down_opens_before_the_finger_lifts(void);
+extern void test_pull_down_from_below_the_bar_does_nothing(void);
+extern void test_pull_too_short_does_nothing(void);
+extern void test_pull_more_sideways_than_down_does_nothing(void);
+extern void test_pull_a_tap_on_the_bar_does_nothing(void);
+extern void test_pull_down_acts_once_per_touch(void);
+extern void test_pull_down_does_not_open_an_open_panel_again(void);
+extern void test_pull_up_closes_an_open_panel(void);
+extern void test_pull_up_does_nothing_with_the_panel_shut(void);
+extern void test_pull_a_slider_drag_does_not_close(void);
+extern void test_pull_a_move_with_no_press_starts_a_touch(void);
+extern void test_pull_a_lift_with_no_press_does_nothing(void);
+extern void test_pull_each_touch_starts_afresh(void);
+
 /* test_xl9555.c */
 extern void test_xl9555_resets_to_all_inputs_with_its_latches_high(void);
 extern void test_xl9555_records_every_write_in_order(void);
@@ -142,6 +160,24 @@ int main(void)
     RUN_TEST(epaper_policy_requested_full_restarts_the_auto_run);
     RUN_TEST(epaper_policy_unknown_value_falls_back_to_fast);
     RUN_TEST(epaper_policy_init_forgets_the_policy_and_any_request);
+
+    printf("\n[pull_gesture]\n");
+    RUN_TEST(pull_threshold_is_an_eighth_of_the_screen);
+    RUN_TEST(pull_threshold_has_a_floor_on_a_short_screen);
+    RUN_TEST(pull_down_from_the_bar_opens);
+    RUN_TEST(pull_down_opens_before_the_finger_lifts);
+    RUN_TEST(pull_down_from_below_the_bar_does_nothing);
+    RUN_TEST(pull_too_short_does_nothing);
+    RUN_TEST(pull_more_sideways_than_down_does_nothing);
+    RUN_TEST(pull_a_tap_on_the_bar_does_nothing);
+    RUN_TEST(pull_down_acts_once_per_touch);
+    RUN_TEST(pull_down_does_not_open_an_open_panel_again);
+    RUN_TEST(pull_up_closes_an_open_panel);
+    RUN_TEST(pull_up_does_nothing_with_the_panel_shut);
+    RUN_TEST(pull_a_slider_drag_does_not_close);
+    RUN_TEST(pull_a_move_with_no_press_starts_a_touch);
+    RUN_TEST(pull_a_lift_with_no_press_does_nothing);
+    RUN_TEST(pull_each_touch_starts_afresh);
 
     printf("\n[xl9555]\n");
     RUN_TEST(xl9555_resets_to_all_inputs_with_its_latches_high);

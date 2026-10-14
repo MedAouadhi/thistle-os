@@ -34,7 +34,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::hal_registry::{
     HalInputCb, HalInputDriver, HalInputEvent, HalInputEventData, HalInputEventType,
-    HalInputKeyData, HalInputTouchData, HAL_KEY_BACK, HAL_KEY_HOME,
+    HalInputKeyData, HalInputTouchData, HAL_KEY_BACK, HAL_KEY_HOME, HAL_KEY_QUICK,
 };
 
 // ── ESP error codes ─────────────────────────────────────────────────────────
@@ -362,6 +362,7 @@ fn log_key(id: u8, keycode: Option<u16>) {
     let meaning: &[u8] = match keycode {
         Some(HAL_KEY_HOME) => b" (home)\0",
         Some(HAL_KEY_BACK) => b" (back)\0",
+        Some(HAL_KEY_QUICK) => b" (quick panel)\0",
         _ => b"\0",
     };
     unsafe {
@@ -407,6 +408,8 @@ pub struct TouchCst66xxConfig {
     pub home_key: i32,
     /// Id of the touch key reported as `HAL_KEY_BACK`, or `-1`.
     pub back_key: i32,
+    /// Id of the touch key reported as `HAL_KEY_QUICK`, or `-1`.
+    pub quick_key: i32,
 }
 
 // ── Driver state ─────────────────────────────────────────────────────────────
@@ -448,6 +451,7 @@ impl TouchState {
                 max_y: 320,
                 home_key: -1,
                 back_key: -1,
+                quick_key: -1,
             },
             cb: None,
             cb_data: std::ptr::null_mut(),
@@ -643,10 +647,11 @@ fn to_panel(c: Contact, max_x: u16, max_y: u16) -> (u16, u16) {
 
 /// The keycode a touch key reports, or `None` for a key the board gave no
 /// meaning.
-fn keycode_for(id: u8, home_key: i32, back_key: i32) -> Option<u16> {
+fn keycode_for(id: u8, cfg: &TouchCst66xxConfig) -> Option<u16> {
     match id as i32 {
-        k if k == home_key => Some(HAL_KEY_HOME),
-        k if k == back_key => Some(HAL_KEY_BACK),
+        k if k == cfg.home_key => Some(HAL_KEY_HOME),
+        k if k == cfg.back_key => Some(HAL_KEY_BACK),
+        k if k == cfg.quick_key => Some(HAL_KEY_QUICK),
         _ => None,
     }
 }
@@ -806,6 +811,7 @@ unsafe extern "C" fn cst66xx_init(config: *const c_void) -> i32 {
     S_TOUCH.cfg.max_y = src.max_y;
     S_TOUCH.cfg.home_key = src.home_key;
     S_TOUCH.cfg.back_key = src.back_key;
+    S_TOUCH.cfg.quick_key = src.quick_key;
 
     S_TOUCH.irq_pending.store(false, Ordering::Relaxed);
     S_TOUCH.touching = false;
@@ -1030,7 +1036,7 @@ unsafe fn cst66_read_report() -> Report {
 /// # Safety
 /// Reads the driver state; called from `cst66xx_poll` only.
 unsafe fn send_key(id: u8, event_type: HalInputEventType, now_ms: u32) {
-    let keycode = keycode_for(id, S_TOUCH.cfg.home_key, S_TOUCH.cfg.back_key);
+    let keycode = keycode_for(id, &S_TOUCH.cfg);
     let (Some(keycode), Some(cb)) = (keycode, S_TOUCH.cb) else {
         return;
     };
@@ -1055,7 +1061,7 @@ unsafe fn key_report(id: u8, pressed: bool, now_ms: u32) {
         send_key(r, HalInputEventType::KeyUp, now_ms);
     }
     if let Some(p) = newly_pressed {
-        log_key(p, keycode_for(p, S_TOUCH.cfg.home_key, S_TOUCH.cfg.back_key));
+        log_key(p, keycode_for(p, &S_TOUCH.cfg));
         send_key(p, HalInputEventType::KeyDown, now_ms);
     }
 }
@@ -1348,21 +1354,45 @@ mod tests {
 
     // ── Touch keys ───────────────────────────────────────────────────────
 
-    #[test]
-    fn test_only_the_configured_key_reports_home() {
-        assert_eq!(keycode_for(1, 1, -1), Some(HAL_KEY_HOME));
-        assert_eq!(keycode_for(0, 1, -1), None);
-        assert_eq!(keycode_for(2, 1, -1), None);
-        // -1, the default, gives no key a meaning.
-        assert_eq!(keycode_for(0, -1, -1), None);
+    /// A config naming only the touch keys.
+    fn keys(home_key: i32, back_key: i32, quick_key: i32) -> TouchCst66xxConfig {
+        TouchCst66xxConfig {
+            i2c_bus: std::ptr::null_mut(),
+            i2c_addr: 0x1A,
+            pin_int: GPIO_NUM_NC,
+            pin_rst: GPIO_NUM_NC,
+            rst_expander: -1,
+            rst_expander_pin: 0,
+            max_x: 240,
+            max_y: 320,
+            home_key,
+            back_key,
+            quick_key,
+        }
     }
 
     #[test]
-    fn test_the_t_deck_max_keys_report_home_left_and_back_right() {
-        // tdeck-max.json: the heart key, leftmost, is 0; the rightmost is 2.
-        assert_eq!(keycode_for(0, 0, 2), Some(HAL_KEY_HOME));
-        assert_eq!(keycode_for(1, 0, 2), None);
-        assert_eq!(keycode_for(2, 0, 2), Some(HAL_KEY_BACK));
+    fn test_only_the_configured_key_reports_home() {
+        assert_eq!(keycode_for(1, &keys(1, -1, -1)), Some(HAL_KEY_HOME));
+        assert_eq!(keycode_for(0, &keys(1, -1, -1)), None);
+        assert_eq!(keycode_for(2, &keys(1, -1, -1)), None);
+        // -1, the default, gives no key a meaning.
+        assert_eq!(keycode_for(0, &keys(-1, -1, -1)), None);
+    }
+
+    #[test]
+    fn test_the_t_deck_max_keys_report_home_left_quick_middle_and_back_right() {
+        // tdeck-max.json: the heart key, leftmost, is 0; the rightmost is 2;
+        // the middle one, 1, opens the quick panel.
+        let max = keys(0, 2, 1);
+        assert_eq!(keycode_for(0, &max), Some(HAL_KEY_HOME));
+        assert_eq!(keycode_for(1, &max), Some(HAL_KEY_QUICK));
+        assert_eq!(keycode_for(2, &max), Some(HAL_KEY_BACK));
+    }
+
+    #[test]
+    fn test_a_board_naming_no_quick_key_leaves_the_middle_key_unused() {
+        assert_eq!(keycode_for(1, &keys(0, 2, -1)), None);
     }
 
     #[test]
