@@ -5,8 +5,8 @@
  * ThistleOS — Reader app UI
  *
  * Three screens:
- *   Library   — the .epub, .txt and .md files in /sdcard/books and at the top
- *               of the card
+ *   Library   — the books read last, to go back to, then the .epub, .txt and
+ *               .md files in /sdcard/books and at the top of the card
  *   Reading   — a page of text; an EPUB is read a chapter at a time
  *   Contents  — an EPUB's table of contents, or its chapters by number
  *
@@ -15,11 +15,14 @@
  * the bottom nor stops short. Arabic is shaped here, before that measuring:
  * see arabic_shape.c for why LVGL does not do it.
  *
- * A book opens where it was left: see book_progress.h.
+ * A book opens where it was left, and the library names the books read last
+ * by their own titles and says how far each has been read: see
+ * book_progress.h.
  */
 #include "reader/reader_app.h"
 #include "reader/arabic_shape.h"
 #include "reader/book_progress.h"
+#include "reader/book_title.h"
 #include "reader/epub.h"
 #include "reader/epub_port.h"
 
@@ -54,6 +57,8 @@ static int s_app_w = 240;
 static int s_app_h = 296;
 #define TITLE_BAR_H      30
 #define FOOTER_H         24
+#define PROGRESS_H        3   /* the line across the footer's top, as far as read */
+#define CELL_PAD_W        8   /* a list row's left and right padding */
 #define TEXT_MARGIN_H     8   /* top margin inside the text area */
 #define TEXT_MARGIN_W     8   /* left/right margin */
 /* DejaVu's line is 24 px at 16 px (23 in the mono font), tall enough for
@@ -63,6 +68,11 @@ static int s_app_h = 296;
 
 #define BOOKS_PATH      THISTLE_SDCARD "/books"
 #define MAX_BOOK_FILES   64
+/* The books read last that the library shows above the rest: as many as fit
+ * on the T-Deck's screen, which is not as tall as the Pro's. */
+#define RECENT_SHOWN      3
+/* A row a book, and a heading above each of the two sections. */
+#define MAX_LIBRARY_ROWS (MAX_BOOK_FILES + RECENT_SHOWN + 2)
 /* A plain text file is read whole; past this it would crowd out everything
  * else in PSRAM. */
 #define MAX_TEXT_FILE   (4 * 1024 * 1024)
@@ -82,15 +92,19 @@ static struct {
 
     /* Library */
     lv_obj_t *library_screen;
-    lv_obj_t *lib_list;          /* an lv_table, one row a book */
-    struct book_entry *books;    /* the rows' files */
+    lv_obj_t *lib_list;          /* an lv_table, one row a book or a heading */
+    struct book_entry *books;    /* the books on the card, by name */
     int       book_count;
+    int16_t   row_book[MAX_LIBRARY_ROWS];  /* each row's book, or -1 for a heading */
+    int       row_count;
     bool      filling_list;      /* a list's rows are being set, not chosen */
 
     /* Reading */
     lv_obj_t *reader_screen;
     lv_obj_t *text_label;
-    lv_obj_t *footer_label;
+    lv_obj_t *footer_label;      /* where in the chapter, or the file */
+    lv_obj_t *footer_far;        /* how far through the book, as a percentage */
+    lv_obj_t *progress_line;     /* the same, as a line across the footer's top */
     const lv_font_t *font;       /* the font books are set in */
     int32_t   text_w;            /* the label's width, for measuring lines */
     int       lines_per_page;
@@ -128,6 +142,8 @@ static void switch_to_contents(void);
 static void open_book(const char *path);
 static void show_page(int page);
 static void save_progress(void);
+static const char *book_key(const char *path);
+static bool is_heading_row(uint32_t row);
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                              */
@@ -295,6 +311,17 @@ static size_t place_in_text(const book_progress_t *left)
     return (size_t)((uint64_t)left->offset * s_reader.text_len / left->text_len);
 }
 
+/* How far through the book the end of the page shown is, in thousandths:
+ * the last page of a book is 1000. */
+static uint16_t book_permille(void)
+{
+    size_t end = s_reader.pages[s_reader.page + 1];
+    if (s_reader.epub) {
+        return (uint16_t)epub_permille(s_reader.epub, s_reader.chapter, end, s_reader.text_len);
+    }
+    return s_reader.text_len ? (uint16_t)((uint64_t)end * 1000 / s_reader.text_len) : 1000;
+}
+
 /* Saves the open book's place: the first byte of the page shown. */
 static void save_progress(void)
 {
@@ -302,21 +329,26 @@ static void save_progress(void)
     if (!s_reader.book_key[0] || !s_reader.text || s_reader.page_count <= 0) return;
 
     uint32_t chapter = s_reader.epub ? (uint32_t)s_reader.chapter : 0;
-    /* Not while the page still holds the place saved. On a screen whose
-     * pages begin elsewhere, its first byte comes before that place, and
-     * saving it would move the place back each time the card changed
-     * devices. */
-    if (s_reader.has_saved && s_reader.saved.chapter == chapter &&
-        page_of(place_in_text(&s_reader.saved)) == s_reader.page) {
-        return;
-    }
-
     book_progress_t now = {
         .book_size = s_reader.book_size,
         .chapter   = chapter,
         .offset    = (uint32_t)s_reader.pages[s_reader.page],
         .text_len  = (uint32_t)s_reader.text_len,
+        .permille  = book_permille(),
     };
+    /* Not the page's first byte while the page still holds the place saved.
+     * On a screen whose pages begin elsewhere, it comes before that place,
+     * and saving it would move the place back each time the card changed
+     * devices. How far through the book that is, as this screen pages it,
+     * is saved with the place as it was: a place saved before the Reader
+     * kept it gets it. */
+    if (s_reader.has_saved && s_reader.saved.chapter == chapter &&
+        page_of(place_in_text(&s_reader.saved)) == s_reader.page) {
+        if (s_reader.saved.permille == now.permille) return;
+        now.offset   = s_reader.saved.offset;
+        now.text_len = s_reader.saved.text_len;
+    }
+
     if (book_progress_save(PROGRESS_PATH, s_reader.book_key, &now)) {
         s_reader.saved     = now;
         s_reader.has_saved = true;
@@ -495,14 +527,17 @@ static void show_page(int page)
 
     char footer[64];
     if (s_reader.epub) {
-        snprintf(footer, sizeof(footer), "Ch %d/%d    Page %d/%d",
+        snprintf(footer, sizeof(footer), "Ch %d/%d   Page %d/%d",
                  s_reader.chapter + 1, epub_chapter_count(s_reader.epub),
                  page + 1, s_reader.page_count);
     } else {
-        snprintf(footer, sizeof(footer), "Page %d / %d    %d%%",
-                 page + 1, s_reader.page_count, (page + 1) * 100 / s_reader.page_count);
+        snprintf(footer, sizeof(footer), "Page %d/%d", page + 1, s_reader.page_count);
     }
     lv_label_set_text(s_reader.footer_label, footer);
+
+    uint16_t far = book_permille();
+    lv_label_set_text_fmt(s_reader.footer_far, "%u%%", far / 10u);
+    lv_obj_set_width(s_reader.progress_line, (int32_t)((int64_t)s_app_w * far / 1000));
 
     if (s_reader.save_timer) {
         lv_timer_reset(s_reader.save_timer);
@@ -664,7 +699,23 @@ static void create_reader_screen(void)
     lv_obj_set_style_text_font(s_reader.footer_label, &lv_font_montserrat_14, LV_PART_MAIN);
     lv_obj_set_style_text_color(s_reader.footer_label, clr->text_secondary, LV_PART_MAIN);
     lv_obj_align(s_reader.footer_label, LV_ALIGN_LEFT_MID, 0, 0);
-    lv_label_set_text(s_reader.footer_label, "Page -- / --");
+    lv_label_set_text(s_reader.footer_label, "Page --/--");
+
+    s_reader.footer_far = lv_label_create(footer_bar);
+    lv_obj_set_style_text_font(s_reader.footer_far, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_color(s_reader.footer_far, clr->text, LV_PART_MAIN);
+    lv_obj_align(s_reader.footer_far, LV_ALIGN_RIGHT_MID, 0, 0);
+    lv_label_set_text(s_reader.footer_far, "");
+
+    /* Over the footer's top border, from the left edge: its padding and
+     * border are outside its content, where a child is placed from. */
+    s_reader.progress_line = lv_obj_create(footer_bar);
+    lv_obj_remove_style_all(s_reader.progress_line);
+    lv_obj_set_style_bg_color(s_reader.progress_line, clr->text, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(s_reader.progress_line, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_size(s_reader.progress_line, 0, PROGRESS_H);
+    lv_obj_align(s_reader.progress_line, LV_ALIGN_TOP_LEFT, -8, -1);
+    lv_obj_clear_flag(s_reader.progress_line, LV_OBJ_FLAG_CLICKABLE);
 
     lv_obj_add_flag(s_reader.reader_screen, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(s_reader.reader_screen, reader_key_cb, LV_EVENT_KEY, NULL);
@@ -678,10 +729,7 @@ static void open_book(const char *path)
     /* Its place is kept by its path from the card's root, which any device
      * the card goes into sees the same, and its size: a book that has changed
      * since starts at the beginning. */
-    size_t root_len = strlen(THISTLE_SDCARD);
-    const char *key = strncmp(path, THISTLE_SDCARD, root_len) == 0 && path[root_len] == '/'
-                          ? path + root_len : path;
-    snprintf(s_reader.book_key, sizeof(s_reader.book_key), "%s", key);
+    snprintf(s_reader.book_key, sizeof(s_reader.book_key), "%s", book_key(path));
     struct stat st;
     s_reader.book_size = stat(path, &st) == 0 ? (uint32_t)st.st_size : 0;
     book_progress_t left = {0};
@@ -711,6 +759,8 @@ static void open_book(const char *path)
         ESP_LOGI(TAG, "%s: back at chapter %d, page %d of %d", s_reader.book_key,
                  s_reader.chapter + 1, s_reader.page + 1, s_reader.page_count);
     }
+    book_recent_put(PROGRESS_PATH, s_reader.book_key, epub_title(s_reader.epub),
+                    epub_author(s_reader.epub));
 
     /* A right-to-left book reads from the right even on a page that begins
      * with a number or a Latin word. */
@@ -762,19 +812,36 @@ static void list_changed_cb(lv_event_t *e)
     }
 }
 
-/* j and k move like the arrows; q goes back. */
+/* j and k move like the arrows, which the table has moved already; the
+ * library's headings are passed over. q goes back. */
 static void list_key_cb(lv_event_t *e)
 {
     lv_obj_t *table = lv_event_get_target(e);
     uint32_t key = lv_event_get_key(e);
-    if (key == 'j' || key == 'k') {
+    int step = key == 'j' || key == LV_KEY_DOWN ? 1 : key == 'k' || key == LV_KEY_UP ? -1 : 0;
+    if (step) {
         uint32_t row = 0, col = 0;
         lv_table_get_selected_cell(table, &row, &col);
         uint32_t rows = lv_table_get_row_count(table);
         if (row == LV_TABLE_CELL_NONE) row = 0;
         else if (key == 'j' && row + 1 < rows) row++;
         else if (key == 'k' && row > 0) row--;
+        if (table == s_reader.lib_list) {
+            uint32_t from = row;
+            while (is_heading_row(row) && (int)row + step >= 0 && (int)row + step < (int)rows) {
+                row = (uint32_t)((int)row + step);
+            }
+            /* None that way: the heading at the top stays above the first. */
+            if (is_heading_row(row)) {
+                row = from;
+                while (is_heading_row(row) && row + 1 < rows) row++;
+            }
+        }
         lv_table_set_selected_cell(table, (uint16_t)row, 0);
+        /* The heading at the top is shown when the first book is. */
+        if (table == s_reader.lib_list && row == 1 && is_heading_row(0)) {
+            lv_obj_scroll_to_y(table, 0, LV_ANIM_OFF);
+        }
     } else if (key == 'q' || key == 'Q') {
         if (table == s_reader.toc_list) {
             switch_to_reading();
@@ -859,8 +926,8 @@ static lv_obj_t *create_list_screen(const char *title, lv_event_cb_t title_click
     lv_obj_set_style_border_side(table, LV_BORDER_SIDE_BOTTOM, LV_PART_ITEMS);
     lv_obj_set_style_border_color(table, clr->text_secondary, LV_PART_ITEMS);
     lv_obj_set_style_border_width(table, 1, LV_PART_ITEMS);
-    lv_obj_set_style_pad_left(table, 8, LV_PART_ITEMS);
-    lv_obj_set_style_pad_right(table, 8, LV_PART_ITEMS);
+    lv_obj_set_style_pad_left(table, CELL_PAD_W, LV_PART_ITEMS);
+    lv_obj_set_style_pad_right(table, CELL_PAD_W, LV_PART_ITEMS);
     lv_obj_set_style_pad_top(table, 4, LV_PART_ITEMS);
     lv_obj_set_style_pad_bottom(table, 4, LV_PART_ITEMS);
     /* The selected row, inverted, as the other lists draw a pressed one. */
@@ -885,14 +952,26 @@ static lv_obj_t *create_list_screen(const char *title, lv_event_cb_t title_click
 /* ------------------------------------------------------------------ */
 
 typedef struct book_entry {
-    char  name[256];    /* shown: the file name without its extension */
-    char  path[384];
-    off_t size;
+    char     path[384];
+    char     name[256];   /* shown: its title, or its file's name tidied */
+    char     author[96];  /* "" when not known */
+    off_t    size;
+    uint16_t permille;    /* how far it has been read; BOOK_PROGRESS_UNKNOWN */
+    int      recent;      /* its place among the books read last, or -1 */
 } book_entry_t;
 
 static int book_cmp(const void *a, const void *b)
 {
     return strcasecmp(((const book_entry_t *)a)->name, ((const book_entry_t *)b)->name);
+}
+
+/* A book's path from the card's root, which is what its place and the list
+ * of books read last are kept by. */
+static const char *book_key(const char *path)
+{
+    size_t root_len = strlen(THISTLE_SDCARD);
+    return strncmp(path, THISTLE_SDCARD, root_len) == 0 && path[root_len] == '/'
+               ? path + root_len : path;
 }
 
 /* Adds the books in `dir` to `entries`. */
@@ -913,18 +992,198 @@ static void scan_books(const char *dir_path, book_entry_t *entries, int *count)
         struct stat st;
         if (stat(b->path, &st) != 0 || S_ISDIR(st.st_mode)) continue;
         b->size = st.st_size;
-
-        snprintf(b->name, sizeof(b->name), "%s", de->d_name);
-        char *dot = strrchr(b->name, '.');
-        if (dot && dot != b->name) *dot = '\0';
         (*count)++;
     }
     closedir(dir);
 }
 
+/* Names each book, by the title it gave when last opened if it is among the
+ * books read last, else by its file's name, and finds how far those have
+ * been read. */
+static void name_books(void)
+{
+    book_recent_t *recent = epub_malloc(sizeof(book_recent_t) * BOOK_RECENT_MAX);
+    int recent_count = recent ? book_recent_load(PROGRESS_PATH, recent) : 0;
+
+    for (int i = 0; i < s_reader.book_count; i++) {
+        book_entry_t *b = &s_reader.books[i];
+        const char *key = book_key(b->path);
+        const char *slash = strrchr(b->path, '/');
+        book_title_from_file(slash ? slash + 1 : b->path, b->name, sizeof(b->name));
+        b->author[0] = '\0';
+        b->permille  = BOOK_PROGRESS_UNKNOWN;
+        b->recent    = -1;
+
+        for (int r = 0; r < recent_count; r++) {
+            if (strcasecmp(recent[r].book, key) != 0) continue;
+            b->recent = r;
+            if (recent[r].title[0]) snprintf(b->name, sizeof(b->name), "%s", recent[r].title);
+            snprintf(b->author, sizeof(b->author), "%s", recent[r].author);
+            book_progress_t left;
+            if (book_progress_load(PROGRESS_PATH, key, &left) && left.book_size == (uint32_t)b->size) {
+                b->permille = left.permille;
+            }
+            break;
+        }
+    }
+    free(recent);
+    qsort(s_reader.books, (size_t)s_reader.book_count, sizeof(book_entry_t), book_cmp);
+}
+
+/* Appends `text` to `cell`, shaping any Arabic in it, in at most `max_lines`
+ * lines of a list row, the last of them `reserve` px short: cut, if it does
+ * not fit, with an ellipsis. Lines are measured as the row will break them. */
+static void append_fitted(char *cell, size_t cap, const char *text, int max_lines, int32_t reserve)
+{
+    static const char ELLIPSIS[] = "\xE2\x80\xA6";
+    size_t len = strlen(text);
+    char *shaped = arabic_present(text, len) ? arabic_shape(text, len, NULL, 0, &len) : NULL;
+    if (shaped) text = shaped;
+
+    const lv_font_t *font = s_reader.font;
+    int32_t width = s_app_w - 2 * CELL_PAD_W;
+    size_t pos = 0, line_start = 0;
+    for (int line = 0; pos < len && line < max_lines; line++) {
+        line_start = pos;
+        int32_t room = line == max_lines - 1 ? width - reserve : width;
+        uint32_t n = lv_text_get_next_line(text + pos, font, 0, room, NULL, LV_TEXT_FLAG_NONE);
+        pos += n ? n : 1;
+    }
+
+    size_t end = pos;
+    bool cut = pos < len;
+    if (cut) {
+        int32_t room = width - reserve - lv_text_get_width(ELLIPSIS, sizeof(ELLIPSIS) - 1, font, 0);
+        while (end > line_start &&
+               lv_text_get_width(text + line_start, (uint32_t)(end - line_start), font, 0) > room) {
+            do end--; while (end > line_start && ((unsigned char)text[end] & 0xc0) == 0x80);
+        }
+    }
+    while (end > 0 && (text[end - 1] == ' ' || text[end - 1] == '\n')) end--;
+
+    size_t used = strlen(cell);
+    if (used + end + sizeof(ELLIPSIS) < cap) {
+        memcpy(cell + used, text, end);
+        strcpy(cell + used + end, cut ? ELLIPSIS : "");
+    }
+    free(shaped);
+}
+
+/* A book's row: its title, in two lines at most, and under it its author and
+ * how far it has been read, or, for a book not opened, its size. */
+static void book_cell(const book_entry_t *b, char *cell, size_t cap)
+{
+    cell[0] = '\0';
+    append_fitted(cell, cap, b->name, 2, 0);
+    strcat(cell, "\n");
+
+    char far[24] = "";
+    if (b->permille >= 1000 && b->permille != BOOK_PROGRESS_UNKNOWN) {
+        snprintf(far, sizeof(far), "Finished");
+    } else if (b->permille != BOOK_PROGRESS_UNKNOWN) {
+        snprintf(far, sizeof(far), "%u%%", b->permille / 10u);
+    }
+    if (b->author[0] && far[0]) {
+        /* The author cut short before how far, which matters more. */
+        char after[32];
+        snprintf(after, sizeof(after), " \xC2\xB7 %s", far);
+        append_fitted(cell, cap, b->author, 1,
+                      lv_text_get_width(after, (uint32_t)strlen(after), s_reader.font, 0));
+        strncat(cell, after, cap - strlen(cell) - 1);
+    } else if (b->author[0] || far[0]) {
+        append_fitted(cell, cap, b->author[0] ? b->author : far, 1, 0);
+    } else {
+        char size[16];
+        format_size(b->size, size, sizeof(size));
+        strncat(cell, size, cap - strlen(cell) - 1);
+    }
+}
+
+static void add_heading_row(const char *text)
+{
+    lv_table_set_cell_value(s_reader.lib_list, (uint32_t)s_reader.row_count, 0, text);
+    s_reader.row_book[s_reader.row_count++] = -1;
+}
+
+static void add_book_row(int book)
+{
+    char cell[2 * sizeof(s_reader.books[0].name)];
+    book_cell(&s_reader.books[book], cell, sizeof(cell));
+    lv_table_set_cell_value(s_reader.lib_list, (uint32_t)s_reader.row_count, 0, cell);
+    s_reader.row_book[s_reader.row_count++] = (int16_t)book;
+}
+
+static bool is_heading_row(uint32_t row)
+{
+    return row < (uint32_t)s_reader.row_count && s_reader.row_book[row] < 0;
+}
+
+/* Fills the library: the books read last, newest first, then all of them by
+ * name. The newest is selected, to go back to it with a tap or Enter. */
+static void fill_library(void)
+{
+    name_books();
+
+    int recent[RECENT_SHOWN];
+    int recent_count = 0;
+    for (int r = 0; r < BOOK_RECENT_MAX && recent_count < RECENT_SHOWN; r++) {
+        for (int i = 0; i < s_reader.book_count; i++) {
+            if (s_reader.books[i].recent == r) recent[recent_count++] = i;
+        }
+    }
+
+    lv_obj_t *table = s_reader.lib_list;
+    s_reader.filling_list = true;
+    s_reader.row_count = 0;
+    lv_table_set_row_count(table, (uint32_t)(s_reader.book_count + (recent_count ? recent_count + 2 : 0)));
+    if (s_reader.book_count == 0) {
+        lv_table_set_row_count(table, 1);
+        add_heading_row("No books found. Add .epub or .txt files to the SD card.");
+    }
+    if (recent_count > 0) {
+        add_heading_row("Recent");
+        for (int i = 0; i < recent_count; i++) add_book_row(recent[i]);
+        add_heading_row("All books");
+    }
+    for (int i = 0; i < s_reader.book_count; i++) add_book_row(i);
+    s_reader.filling_list = false;
+
+    for (int row = 0; row < s_reader.row_count; row++) {
+        if (!is_heading_row((uint32_t)row)) {
+            select_row(table, (uint32_t)row);
+            break;
+        }
+    }
+    lv_obj_scroll_to_y(table, 0, LV_ANIM_OFF);
+}
+
+/* Headings are set smaller and plainer than the books, and never drawn
+ * selected. */
+static void library_draw_cb(lv_event_t *e)
+{
+    static const lv_font_t *const HEADING_FONT = &lv_font_montserrat_14;
+    lv_draw_task_t *task = lv_event_get_draw_task(e);
+    lv_draw_dsc_base_t *base = lv_draw_task_get_draw_dsc(task);
+    if (base->part != LV_PART_ITEMS || !is_heading_row(base->id1)) return;
+
+    const theme_colors_t *clr = theme_get_colors();
+    if (lv_draw_task_get_type(task) == LV_DRAW_TASK_TYPE_FILL) {
+        lv_draw_task_get_fill_dsc(task)->color = clr->bg;
+    } else if (lv_draw_task_get_type(task) == LV_DRAW_TASK_TYPE_LABEL) {
+        lv_draw_label_dsc_t *label = lv_draw_task_get_label_dsc(task);
+        label->color = clr->text_secondary;
+        label->font  = HEADING_FONT;
+        /* The table centres a line of the books' font, which is taller. */
+        label->ofs_y = (lv_font_get_line_height(s_reader.font) -
+                        lv_font_get_line_height(HEADING_FONT)) / 2;
+    }
+}
+
 static void open_library_row(uint32_t row)
 {
-    if (row < (uint32_t)s_reader.book_count) open_book(s_reader.books[row].path);
+    if (row < (uint32_t)s_reader.row_count && s_reader.row_book[row] >= 0) {
+        open_book(s_reader.books[s_reader.row_book[row]].path);
+    }
 }
 
 static void populate_library(void)
@@ -935,25 +1194,8 @@ static void populate_library(void)
     if (!s_reader.books) return;
     scan_books(BOOKS_PATH, s_reader.books, &s_reader.book_count);
     scan_books(THISTLE_SDCARD, s_reader.books, &s_reader.book_count);
-    qsort(s_reader.books, (size_t)s_reader.book_count, sizeof(book_entry_t), book_cmp);
-
-    lv_obj_t *table = s_reader.lib_list;
-    s_reader.filling_list = true;
-    if (s_reader.book_count == 0) {
-        lv_table_set_row_count(table, 1);
-        lv_table_set_cell_value(table, 0, 0, "No books found. Add .epub or .txt files to the SD card.");
-    } else {
-        lv_table_set_row_count(table, (uint32_t)s_reader.book_count);
-        for (int i = 0; i < s_reader.book_count; i++) {
-            char size_str[16], cell[sizeof(s_reader.books[i].name) + sizeof(size_str) + 2];
-            format_size(s_reader.books[i].size, size_str, sizeof(size_str));
-            snprintf(cell, sizeof(cell), "%s\n%s", s_reader.books[i].name, size_str);
-            set_cell(table, (uint32_t)i, 0, cell);
-        }
-    }
-    s_reader.filling_list = false;
-    if (s_reader.book_count > 0) select_row(table, 0);
-    focus(table);
+    fill_library();
+    focus(s_reader.lib_list);
 }
 
 static void switch_to_library(void)
@@ -962,9 +1204,11 @@ static void switch_to_library(void)
     if (s_reader.toc_screen) lv_obj_add_flag(s_reader.toc_screen, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(s_reader.library_screen, LV_OBJ_FLAG_HIDDEN);
 
-    /* Free the book to reclaim PSRAM. */
+    /* Free the book to reclaim PSRAM, its place saved first, for the library
+     * to put it at the top with how far it has been read. */
     close_book();
     lv_label_set_text(s_reader.text_label, "");
+    if (s_reader.books) fill_library();
     focus(s_reader.lib_list);
 }
 
@@ -1103,6 +1347,8 @@ esp_err_t reader_ui_create(lv_obj_t *parent)
 
     s_reader.library_screen = create_list_screen("< Library", library_title_clicked_cb,
                                                  &s_reader.lib_list);
+    lv_obj_add_flag(s_reader.lib_list, LV_OBJ_FLAG_SEND_DRAW_TASK_EVENTS);
+    lv_obj_add_event_cb(s_reader.lib_list, library_draw_cb, LV_EVENT_DRAW_TASK_ADDED, NULL);
     create_reader_screen();
     populate_library();
     ui_manager_set_back_handler(s_reader.root, reader_back);

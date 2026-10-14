@@ -293,8 +293,10 @@ static char *resolve_href(const char *base, const char *href)
 struct epub {
     epub_zip_t       *zip;
     char             *title;
+    char             *author;
     char             *language;
     char            **chapters;    /* archive paths, in reading order */
+    uint64_t         *chapter_at;  /* the documents' sizes before each, then all */
     int               chapter_count;
     epub_toc_entry_t *toc;
     int               toc_count;
@@ -387,7 +389,7 @@ typedef struct {
     epub_t     *book;
     const char *base;
     bool        in_metadata;
-    char      **capture;      /* &book->title or &book->language while in one */
+    char      **capture;      /* the book's title, author or language while in one */
     buf_t       text;
     item_t     *items;
     int         item_count;
@@ -442,6 +444,9 @@ static void XMLCALL opf_start(void *ud, const XML_Char *name, const XML_Char **a
         if (strcmp(tag, "title") == 0 && !c->book->title) {
             c->capture = &c->book->title;
             buf_reset(&c->text);
+        } else if (strcmp(tag, "creator") == 0 && !c->book->author) {
+            c->capture = &c->book->author;
+            buf_reset(&c->text);
         } else if (strcmp(tag, "language") == 0 && !c->book->language) {
             c->capture = &c->book->language;
             buf_reset(&c->text);
@@ -462,7 +467,8 @@ static void XMLCALL opf_end(void *ud, const XML_Char *name)
 
     if (strcmp(tag, "metadata") == 0) {
         c->in_metadata = false;
-    } else if (c->capture && (strcmp(tag, "title") == 0 || strcmp(tag, "language") == 0)) {
+    } else if (c->capture && (strcmp(tag, "title") == 0 || strcmp(tag, "creator") == 0 ||
+                              strcmp(tag, "language") == 0)) {
         *c->capture = collapse_space(c->text.data ? c->text.data : "", c->text.len);
         c->capture = NULL;
     }
@@ -691,6 +697,18 @@ static bool read_package(epub_t *book, const char *opf_path)
         }
     }
 
+    /* Where each chapter begins in the book, by its document's size. */
+    if (book->chapter_count > 0) {
+        book->chapter_at = epub_malloc(sizeof(uint64_t) * (size_t)(book->chapter_count + 1));
+    }
+    if (book->chapter_at) {
+        book->chapter_at[0] = 0;
+        for (int i = 0; i < book->chapter_count; i++) {
+            size_t size = book->chapters[i] ? epub_zip_size(book->zip, book->chapters[i]) : 0;
+            book->chapter_at[i + 1] = book->chapter_at[i] + size;
+        }
+    }
+
     /* The EPUB 3 navigation document if there is one, else the NCX. */
     if (book->chapter_count > 0) {
         const item_t *nav = NULL, *ncx = find_item(&c, c.ncx_id);
@@ -725,8 +743,8 @@ epub_t *epub_open(const char *path)
         return NULL;
     }
     epub_free(opf_path);
-    ESP_LOGI(TAG, "%s: \"%s\", %d chapters, %d contents entries, language '%s'",
-             path, epub_title(book), book->chapter_count, book->toc_count,
+    ESP_LOGI(TAG, "%s: \"%s\" by \"%s\", %d chapters, %d contents entries, language '%s'",
+             path, epub_title(book), epub_author(book), book->chapter_count, book->toc_count,
              epub_language(book));
     return book;
 }
@@ -736,9 +754,11 @@ void epub_close(epub_t *book)
     if (!book) return;
     epub_zip_close(book->zip);
     epub_free(book->title);
+    epub_free(book->author);
     epub_free(book->language);
     for (int i = 0; i < book->chapter_count; i++) epub_free(book->chapters[i]);
     epub_free(book->chapters);
+    epub_free(book->chapter_at);
     for (int i = 0; i < book->toc_count; i++) {
         epub_free((char *)book->toc[i].title);
         epub_free((char *)book->toc[i].anchor);
@@ -752,6 +772,11 @@ const char *epub_title(const epub_t *book)
     return book && book->title ? book->title : "";
 }
 
+const char *epub_author(const epub_t *book)
+{
+    return book && book->author ? book->author : "";
+}
+
 const char *epub_language(const epub_t *book)
 {
     return book && book->language ? book->language : "";
@@ -760,6 +785,22 @@ const char *epub_language(const epub_t *book)
 int epub_chapter_count(const epub_t *book)
 {
     return book ? book->chapter_count : 0;
+}
+
+int epub_permille(const epub_t *book, int chapter, size_t offset, size_t len)
+{
+    if (!book || book->chapter_count <= 0 || chapter < 0) return 0;
+    if (chapter >= book->chapter_count) return 1000;
+    if (offset > len) offset = len;
+
+    /* A book whose sizes cannot be had counts its chapters alike. */
+    uint64_t total = book->chapter_at ? book->chapter_at[book->chapter_count] : 0;
+    uint64_t start = total ? book->chapter_at[chapter] : (uint64_t)chapter;
+    uint64_t size  = total ? book->chapter_at[chapter + 1] - start : 1;
+    if (!total) total = (uint64_t)book->chapter_count;
+
+    uint64_t at = start + (len ? size * offset / len : 0);
+    return (int)(at * 1000 / total);
 }
 
 int epub_toc_count(const epub_t *book)

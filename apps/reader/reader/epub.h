@@ -26,12 +26,19 @@ epub_t *epub_open(const char *path);
 
 void epub_close(epub_t *book);
 
-/* "" when the book does not say. */
+/* "" when the book does not say. The author is the first of its creators. */
 const char *epub_title(const epub_t *book);
+const char *epub_author(const epub_t *book);
 const char *epub_language(const epub_t *book);
 
 /* The chapters, in reading order: the book's spine. */
 int epub_chapter_count(const epub_t *book);
+
+/* How far into the book a place is, in thousandths: `offset` bytes into the
+ * `len` bytes of chapter `chapter`'s text. Each chapter counts for the size of
+ * its document, which tells how much text it holds near enough without
+ * reading it, so a cover or a title page counts for little. */
+int epub_permille(const epub_t *book, int chapter, size_t offset, size_t len);
 
 /* The table of contents: empty for a book that has none, or none whose
  * entries name one of its chapters. */

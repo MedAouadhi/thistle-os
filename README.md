@@ -200,7 +200,7 @@ ThistleOS ships with 14 apps that demonstrate the platform. All are built-in but
 | **Launcher** | Home screen with favorites dock + full app drawer |
 | **Settings** | WiFi, Bluetooth, Appearance (themes), Drivers (live HAL status), About |
 | **File Manager** | SD card browser with directory navigation |
-| **Reader** | Plain text ebook reader with pagination |
+| **Reader** | EPUB and text books, Arabic included; recent books first, each opened where it was left |
 | **Messenger** | Messaging app with working LoRa transport and in-progress SMS/BLE/Internet backends |
 | **Navigator** | GPS dashboard with GPX track recording |
 | **Notes** | Text editor with auto-save |

@@ -28,6 +28,9 @@ EPUB2_OPF = """<?xml version="1.0" encoding="UTF-8"?>
     <dc:title>  A  Test
       Book </dc:title>
     <dc:title>A Subtitle</dc:title>
+    <dc:creator opf:role="aut" xmlns:opf="http://www.idpf.org/2007/opf">  Ann
+      Author </dc:creator>
+    <dc:creator>A Second Author</dc:creator>
     <dc:language>en</dc:language>
   </metadata>
   <manifest>

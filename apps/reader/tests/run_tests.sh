@@ -1,8 +1,8 @@
 #!/bin/sh
 # SPDX-License-Identifier: BSD-3-Clause
-# Builds the Reader's EPUB, Arabic shaping and reading progress code for the
-# host under AddressSanitizer and UndefinedBehaviorSanitizer, and runs their
-# tests, the EPUB ones against fresh fixtures.
+# Builds the Reader's EPUB, Arabic shaping, reading progress and book title
+# code for the host under AddressSanitizer and UndefinedBehaviorSanitizer, and
+# runs their tests, the EPUB ones against fresh fixtures.
 #
 #     apps/reader/tests/run_tests.sh
 #
@@ -36,7 +36,11 @@ $cc -std=c11 -Wall -Wextra -Werror $sanitize $includes \
     "$app/reader/book_progress.c" "$here/test_book_progress.c" "$work/crc32.o" \
     -o "$work/test_book_progress"
 
+$cc -std=c11 -Wall -Wextra -Werror $sanitize $includes \
+    "$app/reader/book_title.c" "$here/test_book_title.c" -o "$work/test_book_title"
+
 python3 "$here/make_fixtures.py" "$work/fixtures"
 "$work/test_epub" "$work/fixtures"
 "$work/test_arabic_shape"
 "$work/test_book_progress" "$work/card"
+"$work/test_book_title"

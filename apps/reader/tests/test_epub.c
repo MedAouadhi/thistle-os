@@ -85,6 +85,8 @@ static void test_epub2_index_and_contents(void)
     /* Its first title, white space collapsed; the second is a subtitle. */
     CHECK_STR(epub_title(book), "A Test Book");
     CHECK_STR(epub_language(book), "en");
+    /* The first of its creators, likewise. */
+    CHECK_STR(epub_author(book), "Ann Author");
 
     /* The spine without the image and the idref the manifest lacks. */
     CHECK(epub_chapter_count(book) == 3);
@@ -145,6 +147,7 @@ static void test_epub3_arabic_with_nav(void)
 
     CHECK_STR(epub_title(book), "\xD9\x83\xD8\xAA\xD8\xA7\xD8\xA8 \xD8\xA7\xD9\x84\xD8\xA7\xD8\xAE\xD8\xAA\xD8\xA8\xD8\xA7\xD8\xB1");
     CHECK_STR(epub_language(book), "ar");
+    CHECK_STR(epub_author(book), "");
     CHECK(epub_chapter_count(book) == 2);
 
     /* The toc nav, not the landmarks; text in a <span> inside the link counts. */
@@ -164,6 +167,39 @@ static void test_epub3_arabic_with_nav(void)
                   "\xD8\xB3\xD8\xB7\xD8\xB1 \xD8\xAB\xD8\xA7\xD9\x86.");
     /* Listed in the manifest as text/../text/ch2.xhtml. */
     CHECK_CHAPTER(book, 1, "\xD9\x86\xD9\x87\xD8\xA7\xD9\x8A\xD8\xA9");
+    epub_close(book);
+}
+
+/* How far through the book a place is, each chapter weighed by its
+ * document's size: the cover is a few lines of markup, chapter one most of
+ * the book. */
+static void test_position_in_book(void)
+{
+    epub_t *book = open_fixture("epub2.epub");
+    CHECK(book != NULL);
+    if (!book) return;
+
+    CHECK(epub_permille(book, 0, 0, 100) == 0);
+    CHECK(epub_permille(book, 2, 100, 100) == 1000);
+
+    /* A chapter ends where the next begins, whatever its text's length. */
+    int ch1 = epub_permille(book, 1, 0, 70);
+    int ch2 = epub_permille(book, 2, 0, 30);
+    CHECK(epub_permille(book, 0, 50, 50) == ch1);
+    CHECK(epub_permille(book, 1, 70, 70) == ch2);
+    CHECK(ch1 > 0 && ch1 < ch2 && ch2 < 1000);
+    CHECK(ch1 < ch2 - ch1);
+
+    int quarter = epub_permille(book, 1, 25, 100);
+    int three_quarters = epub_permille(book, 1, 75, 100);
+    CHECK(ch1 < quarter && quarter < three_quarters && three_quarters < ch2);
+
+    /* Places that are not in the book are held to it. */
+    CHECK(epub_permille(book, 1, 200, 100) == ch2);
+    CHECK(epub_permille(book, 1, 5, 0) == ch1);
+    CHECK(epub_permille(book, -1, 0, 1) == 0);
+    CHECK(epub_permille(book, 3, 0, 1) == 1000);
+    CHECK(epub_permille(NULL, 1, 0, 1) == 0);
     epub_close(book);
 }
 
@@ -298,6 +334,7 @@ int main(int argc, char **argv)
     test_epub2_chapter_text();
     test_stored_archive_with_comment();
     test_epub3_arabic_with_nav();
+    test_position_in_book();
     test_html_that_is_not_xml();
     test_broken_archives();
     test_html_text_directly();

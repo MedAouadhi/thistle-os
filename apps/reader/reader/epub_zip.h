@@ -22,3 +22,7 @@ void epub_zip_close(epub_zip_t *zip);
  * corrupt, larger than the Reader will load, or compressed with anything but
  * deflate. `len_out`, when given, receives the length without the NUL. */
 char *epub_zip_read(epub_zip_t *zip, const char *name, size_t *len_out);
+
+/* The size of the entry named `name` once inflated, as the archive's
+ * directory gives it, without reading it; 0 if there is no such entry. */
+size_t epub_zip_size(const epub_zip_t *zip, const char *name);

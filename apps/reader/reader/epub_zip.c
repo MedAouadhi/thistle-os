@@ -186,6 +186,12 @@ static const zip_entry_t *find_entry(const epub_zip_t *zip, const char *name)
     return NULL;
 }
 
+size_t epub_zip_size(const epub_zip_t *zip, const char *name)
+{
+    const zip_entry_t *e = zip && name ? find_entry(zip, name) : NULL;
+    return e ? e->size : 0;
+}
+
 static bool inflate_into(const uint8_t *src, size_t src_len, uint8_t *dst, size_t dst_len)
 {
     /* Its two Huffman trees make this 1.2 KB: off the caller's stack, which
