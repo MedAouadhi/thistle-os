@@ -48,6 +48,7 @@
 #include "thistle/sms.h"
 #include "thistle/msg_alert.h"
 #include "thistle/wifi_manager.h"
+#include "thistle/time_manager.h"
 #include "ui/theme.h"
 
 #include <stdatomic.h>
@@ -89,7 +90,7 @@ typedef enum {
 typedef struct {
     char         sender[CONV_NAME_MAX];
     char         text[MSG_MAX_TEXT];
-    char         time_str[8];   /* "HH:MM" */
+    char         time_str[12];  /* "14:05", or "2:05 PM" */
     bool         is_self;
     uint32_t     ref;           /* the transport's reference for it, 0 if none */
     msg_status_t status;
@@ -1338,8 +1339,8 @@ static void add_message_to_conv(int conv_idx, const char *sender, const char *te
     m->ref = ref;
     m->status = status;
 
-    char time_buf[8];
-    wifi_manager_get_time_str(time_buf, sizeof(time_buf));
+    char time_buf[12];
+    time_manager_format_time(time_buf, sizeof(time_buf));
     strncpy(m->time_str, time_buf, sizeof(m->time_str) - 1);
     m->time_str[sizeof(m->time_str) - 1] = '\0';
 

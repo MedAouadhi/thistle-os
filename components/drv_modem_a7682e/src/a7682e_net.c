@@ -356,6 +356,9 @@ static esp_err_t attach(TickType_t start, uint32_t timeout_ms)
     ESP_LOGI(TAG, "registered on %s, %d dBm",
              seen.operator_name[0] ? seen.operator_name : "(unnamed network)",
              (int)seen.rssi_dbm);
+    /* A network that sends its time does so as the module attaches; if it
+     * has not arrived yet, the next SMS fetch reads it. */
+    a7682e_clock_read();
     return ESP_OK;
 }
 
@@ -540,6 +543,7 @@ static const hal_net_driver_t s_net_driver = {
     .sms_send      = drv_a7682e_send_sms,
     .sms_due       = drv_a7682e_sms_due,
     .sms_fetch     = drv_a7682e_sms_fetch,
+    .get_network_time = drv_a7682e_get_network_time,
 };
 
 const hal_net_driver_t *drv_a7682e_net_driver(void)

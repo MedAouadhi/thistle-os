@@ -53,9 +53,6 @@ const char *net_get_transport_name(void);
  * Returns ESP_OK immediately if already connected. */
 esp_err_t net_connect_best(uint32_t timeout_ms);
 
-/* Sync time via NTP — requires an active connection */
-esp_err_t net_ntp_sync(void);
-
 /* List all registered transports.
  * Returns the number of transports copied into out[] (up to max). */
 int net_list_transports(const hal_net_driver_t **out, int max);

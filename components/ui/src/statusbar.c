@@ -1,6 +1,7 @@
 #include "ui/statusbar.h"
 #include "ui/theme.h"
 #include "thistle/wifi_manager.h"
+#include "thistle/time_manager.h"
 #include "thistle/net_manager.h"
 #include "thistle/mesh.h"
 #include "thistle/sms.h"
@@ -42,6 +43,25 @@ static lv_obj_t *s_time_label    = NULL;
 static lv_obj_t *s_messages_label = NULL;
 static lv_obj_t *s_battery_label = NULL;
 static lv_obj_t *s_wifi_label    = NULL;
+/* The widest time in the clock's format, which the time label is sized to. */
+static const char *s_time_widest = NULL;
+
+/* Never narrower than a time in the clock's format, so when the bar is
+ * crowded the title gives way rather than the clock wrapping onto a second
+ * line. Sized to the format rather than the text, so the bar does not shift
+ * each minute as the digits change. */
+static void fit_time_label(const char *time_str)
+{
+    const char *widest = strlen(time_str) > 5 ? "00:00 PM" : "00:00";
+    if (widest == s_time_widest) {
+        return;
+    }
+    s_time_widest = widest;
+    const lv_font_t *font = lv_obj_get_style_text_font(s_time_label, LV_PART_MAIN);
+    lv_obj_set_style_min_width(s_time_label,
+                               lv_text_get_width(widest, (uint32_t)strlen(widest), font, 0),
+                               LV_PART_MAIN);
+}
 
 static void messages_tap_cb(lv_event_t *e)
 {
@@ -95,22 +115,16 @@ esp_err_t statusbar_create(lv_obj_t *parent)
 
     /* Time label — center */
     s_time_label = lv_label_create(s_container);
-    {
-        char init_time[8];
-        wifi_manager_get_time_str(init_time, sizeof(init_time));
-        lv_label_set_text(s_time_label, init_time);
-    }
+    s_time_widest = NULL;
     lv_obj_set_style_text_color(s_time_label, colors->text, LV_PART_MAIN);
     lv_obj_set_flex_grow(s_time_label, 1);
     lv_obj_set_style_text_align(s_time_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-    /* Never narrower than a time, so when the bar is crowded the title gives
-     * way rather than the clock wrapping onto a second line. */
-    lv_obj_set_style_min_width(s_time_label,
-                               lv_text_get_width("00:00", 5,
-                                                 lv_obj_get_style_text_font(s_time_label,
-                                                                            LV_PART_MAIN),
-                                                 0),
-                               LV_PART_MAIN);
+    {
+        char init_time[12];
+        time_manager_format_time(init_time, sizeof(init_time));
+        lv_label_set_text(s_time_label, init_time);
+        fit_time_label(init_time);
+    }
 
     /* Right-side cluster: wifi + battery */
     lv_obj_t *right = lv_obj_create(s_container);
@@ -230,6 +244,7 @@ void statusbar_set_time_str(const char *time_str)
         return;
     }
     set_text_if_changed(s_time_label, time_str);
+    fit_time_label(time_str);
 }
 
 void statusbar_refresh_theme(void)
@@ -335,8 +350,8 @@ static void statusbar_update_cb(lv_timer_t *timer)
 {
     (void)timer;
 
-    char time_buf[8];
-    wifi_manager_get_time_str(time_buf, sizeof(time_buf));
+    char time_buf[12];
+    time_manager_format_time(time_buf, sizeof(time_buf));
     statusbar_set_time_str(time_buf);
 
     update_battery();

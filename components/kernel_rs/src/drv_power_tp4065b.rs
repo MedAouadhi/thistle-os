@@ -560,6 +560,9 @@ static POWER_DRIVER: HalPowerDriver = HalPowerDriver {
     is_charging: Some(tp4065b_is_charging),
     sleep: Some(tp4065b_sleep),
     name: b"TP4065B\0".as_ptr() as *const c_char,
+    // Its one status pin, CHRG, reads the same for a full battery on USB as
+    // for no USB at all.
+    is_plugged_in: None,
 };
 
 /// Return the TP4065B power driver vtable.

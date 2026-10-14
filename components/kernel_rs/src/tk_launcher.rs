@@ -54,7 +54,6 @@ extern "C" {
     fn thistle_ui_theme_text_secondary() -> u32;
     fn thistle_ui_theme_surface() -> u32;
     fn app_manager_list_apps(out: *mut *const CAppManifest, max_count: i32) -> i32;
-    fn wifi_manager_get_time_str(buf: *mut c_char, buf_len: usize);
 }
 
 // ---------------------------------------------------------------------------
@@ -89,10 +88,14 @@ struct LauncherState {
     status_clock: u32,
     drawer_visible: bool,
     folder_visible: bool,
-    last_time: [u8; 6],
+    /// The time on show, as time_manager_format_time() wrote it.
+    last_time: [u8; TIME_LEN],
     app_ids: Vec<CString>,
     app_buttons: Vec<u32>,
 }
+
+/// Room for "2:05 PM" and its NUL.
+const TIME_LEN: usize = 12;
 
 static LAUNCHER: Mutex<LauncherState> = Mutex::new(LauncherState {
     shell: 0,
@@ -103,7 +106,7 @@ static LAUNCHER: Mutex<LauncherState> = Mutex::new(LauncherState {
     status_clock: 0,
     drawer_visible: false,
     folder_visible: false,
-    last_time: [0; 6],
+    last_time: [0; TIME_LEN],
     app_ids: Vec::new(),
     app_buttons: Vec::new(),
 });
@@ -324,13 +327,13 @@ fn is_tool_app(app_id: &str) -> bool {
 /// static and does not mark the widget tree dirty.
 #[no_mangle]
 pub extern "C" fn tk_launcher_tick() {
-    let mut time_buf = [0 as c_char; 8];
-    unsafe { wifi_manager_get_time_str(time_buf.as_mut_ptr(), time_buf.len()) };
-
-    let mut display_time = [0u8; 6];
-    for (dst, src) in display_time.iter_mut().take(5).zip(time_buf.iter()) {
-        *dst = *src as u8;
-    }
+    let mut display_time = [0u8; TIME_LEN];
+    unsafe {
+        crate::time_manager::time_manager_format_time(
+            display_time.as_mut_ptr() as *mut c_char,
+            display_time.len(),
+        )
+    };
 
     let (clock, status_clock) = match LAUNCHER.lock() {
         Ok(mut state) => {
@@ -476,10 +479,11 @@ unsafe extern "C" fn on_create() -> i32 {
     thistle_ui_set_font_size(status_title, 10);
     thistle_ui_set_text_color(status_title, text_color);
 
-    let mut status_time_buf = [0 as c_char; 8];
-    wifi_manager_get_time_str(status_time_buf.as_mut_ptr(), status_time_buf.len());
+    let mut status_time_buf = [0 as c_char; TIME_LEN];
+    crate::time_manager::time_manager_format_time(status_time_buf.as_mut_ptr(), status_time_buf.len());
     let status_clock = thistle_ui_create_label(status_bar, status_time_buf.as_ptr());
-    thistle_ui_set_size(status_clock, 44, 18);
+    // Wide enough for a 12-hour "12:05 PM" at this size.
+    thistle_ui_set_size(status_clock, 56, 18);
     thistle_ui_set_font_size(status_clock, 10);
     thistle_ui_set_text_color(status_clock, text_color);
 
@@ -721,13 +725,7 @@ unsafe extern "C" fn on_create() -> i32 {
     state.status_clock = 0;
     state.drawer_visible = false;
     state.folder_visible = false;
-    state.last_time = [0; 6];
-    for (dst, src) in state
-        .last_time
-        .iter_mut()
-        .take(5)
-        .zip(status_time_buf.iter())
-    {
+    for (dst, src) in state.last_time.iter_mut().zip(status_time_buf.iter()) {
         *dst = *src as u8;
     }
     drop(state);
@@ -773,7 +771,7 @@ unsafe extern "C" fn on_destroy() {
         state.clock = 0;
         state.drawer_visible = false;
         state.folder_visible = false;
-        state.last_time = [0; 6];
+        state.last_time = [0; TIME_LEN];
         state.app_ids.clear();
         state.app_buttons.clear();
     }

@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // ThistleOS — NXP PCF8563 I2C Real-Time Clock driver (Rust)
 //
-// The PCF8563 is a battery-backed RTC found on the LilyGo T-Deck Pro at I2C
-// address 0x55 (some revisions use 0x51).  All time registers are BCD-encoded.
+// The PCF8563 is a battery-backed RTC at I2C address 0x51, its only one (A2h
+// to write, A3h to read). Board profiles declare it as
+// `com.thistle.drv.rtc-pcf8563`; the T-Deck Pro and Max have none, and 0x55
+// on them is the BQ27220 fuel gauge. All time registers are BCD-encoded.
 // The Voltage Low (VL) flag in the seconds register indicates that a power-loss
 // event may have corrupted the stored time; callers should treat the time as
 // unreliable until it has been explicitly set.
@@ -39,6 +41,9 @@ const PCF8563_REG_WEEKDAYS: u8 = 0x06;
 const PCF8563_REG_MONTHS: u8 = 0x07;
 /// Years (BCD, 00-99)
 const PCF8563_REG_YEARS: u8 = 0x08;
+
+/// The part's one I2C address.
+const DEFAULT_ADDRESS: u8 = 0x51;
 
 /// STOP bit in Control/Status 1 — set to stop the clock oscillator
 const PCF8563_CTRL1_STOP: u8 = 1 << 5;
@@ -96,7 +101,7 @@ pub fn bin_to_bcd(bin: u8) -> u8 {
 pub struct RtcPcf8563Config {
     /// i2c_master_bus_handle_t — shared bus handle from the HAL registry.
     pub i2c_bus: *mut c_void,
-    /// 7-bit I2C address.  T-Deck Pro uses 0x55; some boards use 0x51.
+    /// 7-bit I2C address: 0x51.
     pub i2c_addr: u8,
 }
 
@@ -252,7 +257,7 @@ impl RtcState {
             dev: std::ptr::null_mut(),
             cfg: RtcPcf8563Config {
                 i2c_bus: std::ptr::null_mut(),
-                i2c_addr: 0x55,
+                i2c_addr: DEFAULT_ADDRESS,
             },
             initialized: false,
         }
@@ -519,6 +524,58 @@ pub extern "C" fn drv_rtc_pcf8563_get() -> *const HalRtcDriver {
     &RTC_DRIVER
 }
 
+/// The bus index and address a board profile entry declares.
+fn parse_config(json: &str) -> (i32, u8) {
+    let bus = crate::manifest::json_get_int(json, "i2c_bus").unwrap_or(0) as i32;
+    (bus, parse_address(json, "i2c_addr").unwrap_or(DEFAULT_ADDRESS))
+}
+
+fn parse_address(json: &str, key: &str) -> Option<u8> {
+    let value = match crate::manifest::json_get_string(json, key) {
+        Some(text) => {
+            let text = text.trim().to_string();
+            match text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+                Some(hex) => i64::from_str_radix(hex, 16).ok()?,
+                None => text.parse().ok()?,
+            }
+        }
+        None => crate::manifest::json_get_int(json, key)?,
+    };
+    u8::try_from(value).ok()
+}
+
+/// Bring the chip up and register it as the RTC, taking the board profile
+/// entry's config, `{"i2c_bus": 0, "i2c_addr": "0x51"}`; both may be left
+/// out. The time manager reads it at boot and writes it back whenever a
+/// better source has set the clock.
+///
+/// # Safety
+/// Called from C. `config_json` must be null or a valid null-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn drv_rtc_pcf8563_register(config_json: *const c_char) -> i32 {
+    let json = if config_json.is_null() {
+        ""
+    } else {
+        match unsafe { std::ffi::CStr::from_ptr(config_json) }.to_str() {
+            Ok(json) => json,
+            Err(_) => return ESP_ERR_INVALID_ARG,
+        }
+    };
+    let (bus, i2c_addr) = parse_config(json);
+    let cfg = RtcPcf8563Config {
+        i2c_bus: crate::hal_registry::hal_bus_get_i2c(bus),
+        i2c_addr,
+    };
+    if cfg.i2c_bus.is_null() {
+        return ESP_ERR_INVALID_ARG;
+    }
+    let ret = unsafe { pcf8563_init(&cfg as *const RtcPcf8563Config as *const c_void) };
+    if ret != ESP_OK {
+        return ret;
+    }
+    unsafe { crate::hal_registry::hal_rtc_register(&RTC_DRIVER) }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -570,6 +627,23 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── Board profile ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn a_profile_entry_names_its_bus_and_address_or_takes_the_parts_own() {
+        assert_eq!(parse_config(r#"{"i2c_bus": 1, "i2c_addr": "0x51"}"#), (1, 0x51));
+        assert_eq!(parse_config(r#"{"i2c_addr": 81}"#), (0, 0x51));
+        assert_eq!(parse_config("{}"), (0, 0x51));
+        assert_eq!(parse_config(r#"{"i2c_addr": "0x1FF"}"#), (0, 0x51));
+    }
+
+    #[test]
+    fn registering_on_a_bus_the_board_lacks_is_refused() {
+        unsafe { reset_state() };
+        let json = c"{\"i2c_bus\": 7}";
+        assert_eq!(unsafe { drv_rtc_pcf8563_register(json.as_ptr()) }, ESP_ERR_INVALID_ARG);
     }
 
     // ── Vtable ────────────────────────────────────────────────────────────────

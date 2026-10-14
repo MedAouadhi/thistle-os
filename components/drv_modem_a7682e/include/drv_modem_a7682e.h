@@ -245,6 +245,19 @@ bool drv_a7682e_sms_due(void);
  */
 esp_err_t drv_a7682e_sms_fetch(hal_sms_rx_cb_t cb, void *user_data, int *kept);
 
+/**
+ * @brief The module's clock as last read, which the network sets (NITZ,
+ *        with AT+CTZU=1).
+ *
+ * Read after each registration and at each SMS fetch, never by interrupting
+ * a data session for it. A module whose clock nothing has set reports the
+ * epoch it counts from; the reader judges. Kept across a power-down, aging
+ * by esp_timer, which keeps counting through light sleep.
+ *
+ * @return ESP_OK, or ESP_ERR_NOT_FOUND until the clock has been read.
+ */
+esp_err_t drv_a7682e_get_network_time(hal_net_time_t *out);
+
 /* -------------------------------------------------------------------------
  * Network transport
  * ---------------------------------------------------------------------- */

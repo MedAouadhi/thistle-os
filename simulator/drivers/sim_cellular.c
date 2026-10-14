@@ -17,6 +17,7 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 static hal_sim_state_t s_card = HAL_SIM_READY;
@@ -188,6 +189,25 @@ static esp_err_t cell_sms_fetch(hal_sms_rx_cb_t cb, void *user_data, int *kept)
     return ESP_OK;
 }
 
+/* The network's time, as a network that sends it would give it once the
+ * "modem" is registered: the host's clock and the host's offset. */
+static esp_err_t cell_get_network_time(hal_net_time_t *out)
+{
+    if (!out) return ESP_ERR_INVALID_ARG;
+    if (!cell_ready()
+        || (s_info.reg != HAL_CELL_REG_HOME && s_info.reg != HAL_CELL_REG_ROAMING)) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    time_t now = time(NULL);
+    struct tm local;
+    localtime_r(&now, &local);
+    out->utc = (int64_t)now;
+    out->age_ms = 0;
+    out->utc_offset_min = (int16_t)(local.tm_gmtoff / 60);
+    out->offset_known = true;
+    return ESP_OK;
+}
+
 static const hal_net_driver_t s_sim_cellular = {
     .type          = HAL_NET_CELLULAR,
     .name          = "LTE",
@@ -202,6 +222,7 @@ static const hal_net_driver_t s_sim_cellular = {
     .sms_send      = cell_sms_send,
     .sms_due       = cell_sms_due,
     .sms_fetch     = cell_sms_fetch,
+    .get_network_time = cell_get_network_time,
 };
 
 esp_err_t sim_cellular_register(void)

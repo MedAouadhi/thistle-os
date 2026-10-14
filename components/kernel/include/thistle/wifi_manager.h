@@ -60,11 +60,5 @@ esp_err_t wifi_manager_save_credentials(const char *ssid, const char *password);
 /* Load saved WiFi credentials from system.json and attempt to connect */
 esp_err_t wifi_manager_auto_connect(void);
 
-/* Sync time via NTP (call after WiFi connected). Updates system time. */
-esp_err_t wifi_manager_ntp_sync(void);
-
-/* Get current time as formatted string "HH:MM" */
-void wifi_manager_get_time_str(char *buf, size_t buf_len);
-
-/* Get current date as formatted string "YYYY-MM-DD" */
-void wifi_manager_get_date_str(char *buf, size_t buf_len);
+/* The time of day and the date are thistle/time_manager.h's, which also
+ * keeps the clock set over WiFi and every other network. */

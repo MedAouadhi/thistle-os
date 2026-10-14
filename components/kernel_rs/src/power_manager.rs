@@ -464,6 +464,22 @@ fn power_info() -> Option<HalPowerInfo> {
     (unsafe { get(&mut info) } == ESP_OK).then_some(info)
 }
 
+/// The power driver's own answer to whether USB or an adapter is there, if
+/// it can give one.
+fn driver_says_plugged_in() -> Option<bool> {
+    let drv = unsafe { registry().power.as_ref() }?;
+    let is_plugged_in = drv.is_plugged_in?;
+    Some(unsafe { is_plugged_in() })
+}
+
+/// Whether the board runs from USB or an adapter: the driver's answer, or,
+/// from a driver that cannot tell, charging or charged. That guess misses a
+/// full battery whose charging has paused, which reads as not charging with
+/// the cable still in.
+fn plugged_in(driver: Option<bool>, state: Option<HalPowerState>) -> bool {
+    driver.unwrap_or_else(|| matches!(state, Some(HalPowerState::Charging | HalPowerState::Charged)))
+}
+
 impl Runtime {
     fn any_active(&self, pins: &[WakePin]) -> bool {
         pins.iter().any(|p| platform::active(*p))
@@ -477,8 +493,14 @@ impl Runtime {
                 return on;
             }
         }
-        let on = power_info()
-            .is_some_and(|i| matches!(i.state, HalPowerState::Charging | HalPowerState::Charged));
+        let on = plugged_in(driver_says_plugged_in(), power_info().map(|i| i.state));
+        if self.usb.map(|(_, was)| was) != Some(on) {
+            if on {
+                log!(ESP_LOG_INFO, b"plugged in\0");
+            } else {
+                log!(ESP_LOG_INFO, b"on battery\0");
+            }
+        }
         self.usb = Some((now, on));
         on
     }
@@ -1110,6 +1132,22 @@ mod tests {
         ],
         "deep_sleep_off": [{"expander": 0, "pin": 1}, {"expander": 0, "pin": 2}]
     }"#;
+
+    #[test]
+    fn a_driver_that_can_tell_says_whether_it_is_plugged_in() {
+        // The SY6970 on a full battery: not charging, yet on USB.
+        assert!(plugged_in(Some(true), Some(HalPowerState::Discharging)));
+        assert!(!plugged_in(Some(false), Some(HalPowerState::Charging)));
+    }
+
+    #[test]
+    fn without_the_drivers_answer_charging_or_charged_is_plugged_in() {
+        assert!(plugged_in(None, Some(HalPowerState::Charging)));
+        assert!(plugged_in(None, Some(HalPowerState::Charged)));
+        assert!(!plugged_in(None, Some(HalPowerState::Discharging)));
+        assert!(!plugged_in(None, Some(HalPowerState::NoBattery)));
+        assert!(!plugged_in(None, None));
+    }
 
     #[test]
     fn the_max_profile_reads_as_written() {

@@ -133,6 +133,12 @@ running of them in `power_manager.rs`; every ESP-IDF sleep call in
   plugged in" (default on) stops the idle timers on USB power, but the power
   key and Settings' "Sleep now" still sleep a plugged-in board. Deep sleep
   takes it off USB too, and waking from it is a restart.
+- **Plugged in is the charger's answer, not its charge state.** A full
+  battery whose charging has paused reads "not charging" with the cable in;
+  the SY6970 answers `is_plugged_in` (the last field of
+  `hal_power_driver_t`) from its power-good and bus status. A driver that
+  leaves it NULL, as the TP4065B's does, gets charging or charged taken for
+  plugged in. The power log says `plugged in` or `on battery` as it changes.
 - **Anything sleep would break holds the device awake**:
   `power_manager_hold()` / `power_manager_release()` (`thistle/power_manager.h`,
   `thistle_power.h` for drivers), or `HoldGuard` in Rust. An update, audio,
@@ -161,6 +167,49 @@ screen (`rs_msg_alert_set_viewing`). The buzz is played where the message is
 received, so a LoRa wake buzzes without the UI; the status bar takes the
 pop-up. The status bar's envelope counts unread SMS and mesh messages. The
 simulator's motor prints `[sim_haptic] message buzz`. Ticket 15.
+
+### The clock
+
+The kernel keeps the system clock in UTC and sets it from the best source it
+has: NTP over whatever network is up, then GPS while something has it on
+with a fix, then the mobile network's time (NITZ, read from the A7682E with
+`AT+CCLK?`), then a clock chip. A worse source corrects the clock only after
+an hour without a better one, and only beyond its own precision; up to 10 s
+is slewed, more is stepped. Decisions are in `time_policy.rs`, the running of
+them in `time_manager.rs` (`thistle/time_manager.h`), every ESP-IDF call in
+`components/kernel/src/time_platform.c`, which replaces ESP-IDF's weak
+`sntp_sync_time()` so NTP is judged like the rest (ADR-0007). Ticket 17.
+
+- **The T-Deck Max has no clock chip.** Its time survives sleep, deep sleep
+  and restarts, not a power-on or the reset button (EN resets the RTC
+  domain too); until a source answers, the status bar shows `--:--`.
+  Anything before 2026 counts as not set (`time_policy::FLOOR_S`).
+  Kept, it drifts: the RTC runs on the S3's internal RC oscillator, and a
+  20 s deep sleep left it 125 to 142 ms ahead, a reflash 3.9 s out. NTP
+  slews it back once a network is up.
+- **The zone is a POSIX rule in `TZ`**, so `localtime()` in C apps agrees with
+  the status bar. Settings → Date & time picks an IANA name from
+  `time_zones.rs`, or Automatic, the mobile network's offset (UTC without
+  one). A country that changes its rules needs its line there changed.
+  `thistle_os.time` holds `automatic`, `zone`, `format_24h`, `ntp_server`.
+- **Show the time with `time_manager_format_time()`**, "14:05" or "2:05 PM";
+  give it 12 bytes.
+- The boot log's clock line, `2026-10-13 18:29:27 UTC, from NTP; zone
+  Automatic (UTC+02:00), UTC+02:00 now`, says what set the clock and the
+  zone's offset as newlib reads its rule; each later correction logs its
+  source and size (`clock slewing by -125 ms, from NTP`). Like every Rust
+  module's on the device, these lines carry no tag and no newline.
+
+### LVGL's pool is 64 KB
+
+LVGL allocates every object and every local style property from its own
+64 KB pool (`CONFIG_LV_MEM_SIZE_KILOBYTES`), not the system heap. A page
+styled one property at a time costs over 1 KB a row, and Settings' zone
+picker ran the pool dry with a dozen rows on top of the page beneath it.
+LVGL's malloc assert then spins forever inside the layout code, which looks
+like a hang, not an out-of-memory error. Give a long list shared
+`lv_style_t`s, close the page beneath it, and measure with
+`lv_mem_monitor()`; the simulator's pool is the same size.
 
 ### Rust toolchains
 

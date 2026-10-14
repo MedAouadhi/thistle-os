@@ -4,13 +4,15 @@
 // Pure functions over the text a command returned, so they can be tested on
 // the host. Command forms are those of the A76XX Series AT Command Manual
 // V1.09: AT+CPIN? (6.2.2), AT+CEREG? (5.2.2), AT+CGREG? (5.2.1),
-// AT+CREG? (4.2.1), AT+COPS? (4.2.2) and AT+CGDCONT? (5.2.5).
+// AT+CREG? (4.2.1), AT+COPS? (4.2.2), AT+CGDCONT? (5.2.5) and AT+CCLK?
+// (3.2.10).
 #pragma once
 
 #include "hal/network.h"
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 /**
  * Whether an answer has ended: 1 once it holds an "OK" line, -1 once it holds
@@ -63,3 +65,14 @@ bool a7682e_parse_operator(const char *resp, char *out, size_t out_size);
  * its APN is empty.
  */
 bool a7682e_parse_context_apn(const char *resp, int cid, char *out, size_t out_size);
+
+/**
+ * The time in an AT+CCLK? answer, "+CCLK: \"yy/MM/dd,hh:mm:ss±zz\"" (3.2.10):
+ * the modem's clock in local time, and zz the offset from UTC in quarters of
+ * an hour, summer time included, which the network sets with AT+CTZU=1.
+ * `utc` is seconds since 1970 and `offset_min` local time minus UTC. Years
+ * 70 to 99 are read as 19yy and 00 to 69 as 20yy, so a clock counting from
+ * 1970 or 1980 reads as that. False for an answer without the offset, whose
+ * local time does not say what time it is.
+ */
+bool a7682e_parse_cclk(const char *resp, int64_t *utc, int *offset_min);

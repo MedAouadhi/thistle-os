@@ -43,6 +43,7 @@
 #include "thistle/power_manager.h"
 #include "thistle/net_manager.h"
 #include "thistle/wifi_manager.h"
+#include "thistle/time_manager.h"
 #include "ui/theme.h"
 #include "ui/toast.h"
 
@@ -85,7 +86,7 @@ static int s_msg_list_h = 226; /* s_app_h - HEADER_H - INPUT_BAR_H */
 
 typedef struct {
     assistant_turn_kind_t kind;
-    char time_str[8];       /* "HH:MM" */
+    char time_str[12];      /* "14:05", or "2:05 PM" */
     char *text;             /* owned; PSRAM where the board has it */
 } ai_message_t;
 
@@ -278,8 +279,8 @@ static void append_message(assistant_turn_kind_t kind, const char *time_str,
 
 static void add_message(assistant_turn_kind_t kind, const char *text)
 {
-    char time_buf[8];
-    wifi_manager_get_time_str(time_buf, sizeof(time_buf));
+    char time_buf[12];
+    time_manager_format_time(time_buf, sizeof(time_buf));
     append_message(kind, time_buf, text);
     if (s_ai.msg_list) {
         lv_obj_scroll_to_y(s_ai.msg_list, LV_COORD_MAX, LV_ANIM_ON);

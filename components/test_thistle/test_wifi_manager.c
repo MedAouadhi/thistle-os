@@ -16,6 +16,7 @@
 
 #include "unity.h"
 #include "thistle/wifi_manager.h"
+#include "thistle/time_manager.h"
 #include <string.h>
 #include <ctype.h>
 
@@ -91,17 +92,18 @@ TEST_CASE("test_wifi_get_state_initial: state is DISCONNECTED before init", "[wi
 }
 
 /* --------------------------------------------------------------------------
- * test_wifi_get_time_str
+ * test_time_format_time (the clock the WiFi page once kept)
  * -------------------------------------------------------------------------- */
 
-TEST_CASE("test_wifi_get_time_str: returns placeholder or valid HH:MM string", "[wifi]")
+TEST_CASE("test_time_format_time: returns placeholder or valid HH:MM string", "[time]")
 {
     char buf[16] = {0};
-    wifi_manager_get_time_str(buf, sizeof(buf));
+    time_manager_format_time(buf, sizeof(buf));
 
     /*
-     * In the test environment the system clock is either unset (year < 2024
-     * epoch threshold used by the implementation) or the host clock is valid.
+     * In the test environment the system clock is either unset (before 2026,
+     * which the time manager takes as never set) or it holds a time. The
+     * clock is on 24 hours until Settings says otherwise.
      * Both outcomes are acceptable; only a malformed string is a failure.
      */
     bool ok = is_placeholder_time(buf) || is_valid_time_str(buf);
@@ -109,13 +111,13 @@ TEST_CASE("test_wifi_get_time_str: returns placeholder or valid HH:MM string", "
 }
 
 /* --------------------------------------------------------------------------
- * test_wifi_get_date_str
+ * test_time_format_date
  * -------------------------------------------------------------------------- */
 
-TEST_CASE("test_wifi_get_date_str: returns placeholder or valid YYYY-MM-DD string", "[wifi]")
+TEST_CASE("test_time_format_date: returns placeholder or valid YYYY-MM-DD string", "[time]")
 {
     char buf[16] = {0};
-    wifi_manager_get_date_str(buf, sizeof(buf));
+    time_manager_format_date(buf, sizeof(buf));
 
     bool ok = is_placeholder_date(buf) || is_valid_date_str(buf);
     TEST_ASSERT_TRUE_MESSAGE(ok, "Date string is neither '----/--/--' nor a valid YYYY-MM-DD value");

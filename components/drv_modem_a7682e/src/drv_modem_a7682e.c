@@ -21,6 +21,7 @@
 #include "esp_netif_ppp.h"
 #include "esp_event.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "driver/gpio.h"
 #include "esp_attr.h"
 #include "esp_heap_caps.h"
@@ -448,13 +449,76 @@ static void use_fast_rate_locked(void)
 
 /* Echo off, so answers are only answers; verbose errors, so a missing SIM
  * says so; operator names in long form for AT+COPS?. A module that reset
- * itself has lost all three. */
+ * itself has lost all three. And the network's time and zone set the
+ * module's clock (AT+CTZU=1, which the module keeps). */
 void a7682e_configure_locked(void)
 {
     char resp[A7682E_AT_BUF];
     esp_modem_at(s_modem.dce, "ATE0", resp, 1000);
     esp_modem_at(s_modem.dce, "AT+CMEE=2", resp, 1000);
     esp_modem_at(s_modem.dce, "AT+COPS=3,0", resp, 1000);
+    esp_modem_at(s_modem.dce, "AT+CTZU=1", resp, 1000);
+}
+
+/* The module's clock as last read. */
+static struct {
+    bool    read;
+    int64_t utc;
+    int     offset_min;
+    int64_t read_at_us; /* esp_timer */
+} s_clock;
+static portMUX_TYPE s_clock_lock = portMUX_INITIALIZER_UNLOCKED;
+
+void a7682e_clock_read_locked(void)
+{
+    char resp[A7682E_EXCHANGE_BUF];
+    int64_t utc;
+    int offset;
+    if (a7682e_exchange_locked("AT+CCLK?\r", resp, sizeof(resp), 3000) != ESP_OK
+        || !a7682e_parse_cclk(resp, &utc, &offset)) {
+        return;
+    }
+    int64_t at = esp_timer_get_time();
+    taskENTER_CRITICAL(&s_clock_lock);
+    s_clock.read = true;
+    s_clock.utc = utc;
+    s_clock.offset_min = offset;
+    s_clock.read_at_us = at;
+    taskEXIT_CRITICAL(&s_clock_lock);
+}
+
+void a7682e_clock_read(void)
+{
+    if (!a7682e_lifecycle_begin_operation()) {
+        return;
+    }
+    if (s_modem.dce && s_modem.powered_on && !s_modem.asleep
+        && esp_modem_get_mode(s_modem.dce) != ESP_MODEM_MODE_DATA) {
+        a7682e_clock_read_locked();
+    }
+    a7682e_lifecycle_finish_operation();
+}
+
+esp_err_t drv_a7682e_get_network_time(hal_net_time_t *out)
+{
+    if (!out) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    taskENTER_CRITICAL(&s_clock_lock);
+    bool read = s_clock.read;
+    int64_t utc = s_clock.utc;
+    int offset = s_clock.offset_min;
+    int64_t at = s_clock.read_at_us;
+    taskEXIT_CRITICAL(&s_clock_lock);
+    if (!read) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    int64_t age_ms = (esp_timer_get_time() - at) / 1000;
+    out->utc = utc;
+    out->age_ms = age_ms > UINT32_MAX ? UINT32_MAX : (uint32_t)age_ms;
+    out->utc_offset_min = (int16_t)offset;
+    out->offset_known = true;
+    return ESP_OK;
 }
 
 esp_err_t a7682e_power_on_locked(void)
@@ -1220,6 +1284,7 @@ esp_err_t drv_a7682e_sms_fetch(hal_sms_rx_cb_t cb, void *user_data, int *kept)
     atomic_store(&s_modem.sms_ring, false);
     bool was_data = a7682e_enter_command_locked();
     esp_err_t ret = sms_fetch_locked(cb, user_data, kept);
+    a7682e_clock_read_locked();
     a7682e_restore_data_locked(was_data);
     s_modem.sms_fetched = true;
     s_modem.sms_fetched_at = xTaskGetTickCount();

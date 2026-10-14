@@ -54,8 +54,15 @@ const CHG_REG_ADC_CONTROL: u8 = 0x02;
 const CHG_REG_TERMINATION: u8 = 0x05;
 /// Charge termination and timer control, holding the I²C watchdog setting.
 const CHG_REG_TIMER_CONTROL: u8 = 0x07;
-/// System status: bus status in bits 7:5, charge status in bits 4:3.
+/// System status: bus status in bits 7:5, charge status in bits 4:3,
+/// power good in bit 2.
 const CHG_REG_STATUS: u8 = 0x0B;
+/// Power good: an input is there and the charger takes power from it.
+const STATUS_POWER_GOOD: u8 = 1 << 2;
+/// Bus status: no input. Both parts number their USB and adapter codes
+/// 1 to 6 and use 7 for OTG, where the board powers the bus itself.
+const BUS_NO_INPUT: u8 = 0b000;
+const BUS_OTG: u8 = 0b111;
 /// Battery voltage ADC conversion.
 const CHG_REG_BATTERY_VOLTAGE: u8 = 0x0E;
 /// Charge current ADC conversion.
@@ -257,6 +264,18 @@ pub fn charge_state(status: u8) -> HalPowerState {
         0b11 => HalPowerState::Charged,
         _ => HalPowerState::Charging,
     }
+}
+
+/// Whether USB or an adapter is there, from the charger's status register.
+///
+/// Not the charge state: a full battery whose charging has paused reads
+/// "not charging", as an unplugged one does, with the cable still in.
+/// Power good says the input is there; the bus status says what it is, and
+/// either is enough (`isPowerGood()` and `isVbusIn()` in the vendor's
+/// XPowersLib, `lib/XPowersLib/src/PowersSY6970.tpp`).
+pub fn plugged_in(status: u8) -> bool {
+    let bus = status >> 5;
+    status & STATUS_POWER_GOOD != 0 || (bus != BUS_NO_INPUT && bus != BUS_OTG)
 }
 
 /// Charge current in milliamps, from the charger's ADC conversion register.
@@ -1386,6 +1405,15 @@ unsafe extern "C" fn power_is_charging() -> bool {
     charger_status(&power).map(charge_state) == Some(HalPowerState::Charging)
 }
 
+/// # Safety
+/// Called from C via the HAL vtable.
+unsafe extern "C" fn power_is_plugged_in() -> bool {
+    let Ok(power) = POWER.lock() else {
+        return false;
+    };
+    charger_status(&power).is_some_and(plugged_in)
+}
+
 /// Sleep and wake are nothing to these two chips: the charger goes on
 /// charging with the SoC asleep, which is the point of it, and the gauge's own
 /// consumption is below what turning it off would save.
@@ -1408,6 +1436,7 @@ static POWER_DRIVER: HalPowerDriver = HalPowerDriver {
     sleep: Some(power_sleep),
     // One driver, two parts. Which one this board carries is in the init log.
     name: b"SY6970/BQ25896\0".as_ptr() as *const c_char,
+    is_plugged_in: Some(power_is_plugged_in),
 };
 
 // ── Registration ─────────────────────────────────────────────────────────────
@@ -1592,6 +1621,33 @@ mod tests {
         assert_eq!(charge_state(0b111_00_000), HalPowerState::Discharging);
         assert_eq!(charge_state(0b101_11_000), HalPowerState::Charged);
         assert_eq!(charge_state(0b011_10_111), HalPowerState::Charging);
+    }
+
+    // ── Plugged in ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn a_full_battery_on_usb_is_plugged_in_though_not_charging() {
+        // USB host, not charging, power good: the case that read as unplugged.
+        let status = 0b001_00_100;
+        assert_eq!(charge_state(status), HalPowerState::Discharging);
+        assert!(plugged_in(status));
+    }
+
+    #[test]
+    fn either_power_good_or_a_bus_code_means_plugged_in() {
+        assert!(plugged_in(0b000_00_100), "power good alone");
+        for bus in 1..=6u8 {
+            assert!(plugged_in(bus << 5), "bus status {bus} alone");
+        }
+        assert!(plugged_in(0b101_11_100), "adapter, charged");
+    }
+
+    #[test]
+    fn no_input_and_otg_are_not_plugged_in() {
+        assert!(!plugged_in(0b000_00_000));
+        assert!(!plugged_in(0b000_00_011), "bits below power good say nothing of it");
+        // OTG: the board powers the bus, nothing powers the board.
+        assert!(!plugged_in(0b111_00_000));
     }
 
     // ── Charge current ───────────────────────────────────────────────────────

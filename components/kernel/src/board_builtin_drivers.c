@@ -29,6 +29,7 @@
 #include "drv_audio_es8311.h"
 #include "drv_imu_bhi260ap.h"
 #include "drv_haptic_drv2605.h"
+#include "drv_rtc_pcf8563.h"
 #ifdef THISTLE_HAS_MODEM_A7682E
 #include "drv_modem_a7682e.h"
 #include "thistle/net_manager.h"
@@ -372,6 +373,14 @@ esp_err_t board_builtin_driver_init(const char *id, const char *hal_type,
     if (strcmp(id, "com.thistle.drv.haptic-drv2605") == 0) {
         ESP_LOGI(TAG, "haptic-drv2605: %s", config_json);
         return drv_haptic_drv2605_register(config_json);
+    }
+
+    // ── Clock: NXP PCF8563 ──────────────────────────────────────────────────
+    // A battery-backed clock, which the time manager reads at boot when the
+    // system clock has lost the time, and keeps set from better sources.
+    if (strcmp(id, "com.thistle.drv.rtc-pcf8563") == 0) {
+        ESP_LOGI(TAG, "rtc-pcf8563: %s", config_json);
+        return drv_rtc_pcf8563_register(config_json);
     }
 
 #ifdef THISTLE_HAS_MODEM_A7682E

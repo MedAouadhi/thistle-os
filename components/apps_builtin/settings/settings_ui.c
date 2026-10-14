@@ -31,6 +31,7 @@
 #include "thistle/radio_antenna.h"
 #include "thistle/refresh_prefs.h"
 #include "thistle/power_manager.h"
+#include "thistle/time_manager.h"
 #include "hal/board.h"
 #include "hal/sdcard_path.h"
 #include "ui/theme.h"
@@ -39,6 +40,7 @@
 #include "ui/statusbar.h"
 
 #include <stdio.h>
+#include <time.h>
 #include <inttypes.h>
 #include <string.h>
 #include <stdint.h>
@@ -71,6 +73,8 @@ typedef enum {
     SETTINGS_BLUETOOTH,
     SETTINGS_APPEARANCE,
     SETTINGS_POWER,
+    SETTINGS_TIME,
+    SETTINGS_TIME_ZONE,
     SETTINGS_ABOUT,
     SETTINGS_DRIVERS,
     SETTINGS_DRIVER_DETAIL,
@@ -142,6 +146,7 @@ static lv_timer_t *s_main_timer = NULL;
 
 static void ble_update_labels(void);
 static void wifi_update_status_label(void);
+static void time_forget_screen(void);
 static const char *wifi_main_value(void);
 static const char *cell_main_value(void);
 static void set_label_if_changed(lv_obj_t *label, const char *text);
@@ -190,6 +195,7 @@ static const settings_item_t s_items[] = {
     { "Bluetooth",   "Off" },
     { "Appearance",  NULL  },
     { "Power",       NULL  },
+    { "Date & time", NULL  },
     { "Drivers",     NULL  },
     { "About",       NULL  },
 };
@@ -381,6 +387,7 @@ static void back_to_main(lv_event_t *e)
 {
     (void)e;
     cell_forget_screen();
+    time_forget_screen();
     if (s_sub_screen) {
         lv_obj_delete(s_sub_screen);
         s_sub_screen = NULL;
@@ -588,7 +595,6 @@ static void wifi_pwd_connect_cb(lv_event_t *e)
     if (err == ESP_OK) {
         ESP_LOGI(TAG, "WiFi: connected to \"%s\"", ctx->ssid);
         wifi_manager_save_credentials(ctx->ssid, password);
-        wifi_manager_ntp_sync();
     } else if (err == ESP_ERR_NOT_SUPPORTED) {
         ESP_LOGI(TAG, "WiFi: connect not supported in simulator");
     } else {
@@ -737,7 +743,6 @@ static void wifi_network_clicked_cb(lv_event_t *e)
     if (err == ESP_OK) {
         ESP_LOGI(TAG, "WiFi: connected to \"%s\"", net->ssid);
         wifi_manager_save_credentials(net->ssid, NULL);
-        wifi_manager_ntp_sync();
     } else if (err == ESP_ERR_NOT_SUPPORTED) {
         ESP_LOGI(TAG, "WiFi: connect not supported in simulator");
     } else {
@@ -2936,6 +2941,358 @@ static void open_power_screen(void)
     }
 }
 
+/* ------------------------------------------------------------------ */
+/* Date & time sub-screen                                               */
+/* ------------------------------------------------------------------ */
+
+static lv_obj_t   *s_time_now_lbl    = NULL;  /* "2026-10-13  14:05" */
+static lv_obj_t   *s_time_from_lbl   = NULL;  /* "Set by NTP, 5 min ago" */
+static lv_obj_t   *s_time_zone_lbl   = NULL;
+static lv_obj_t   *s_time_manual     = NULL;  /* shown with automatic time off */
+static lv_obj_t   *s_time_ta         = NULL;
+static lv_timer_t *s_time_timer      = NULL;
+
+/* The regions the zone picker offers, from the zone names, "Europe" for
+ * "Europe/Oslo"; a zone with no region, "UTC", is offered on its own. */
+#define TIME_REGIONS_MAX 12
+static char s_time_regions[TIME_REGIONS_MAX][16];
+static int  s_time_region_count;
+
+static void time_forget_screen(void)
+{
+    if (s_time_timer) {
+        lv_timer_delete(s_time_timer);
+        s_time_timer = NULL;
+    }
+    s_time_now_lbl  = NULL;
+    s_time_from_lbl = NULL;
+    s_time_zone_lbl = NULL;
+    s_time_manual   = NULL;
+    s_time_ta       = NULL;
+}
+
+static void time_update_labels(void)
+{
+    if (!s_time_now_lbl) return;
+    char date[16], clock[12], line[48];
+    time_manager_format_date(date, sizeof(date));
+    time_manager_format_time(clock, sizeof(clock));
+    snprintf(line, sizeof(line), "%s  %s", date, clock);
+    set_label_if_changed(s_time_now_lbl, line);
+    time_manager_describe(line, sizeof(line));
+    set_label_if_changed(s_time_from_lbl, line);
+    time_manager_zone_label(line, sizeof(line));
+    set_label_if_changed(s_time_zone_lbl, line);
+    /* The status bar reads the clock every 10 s; a new zone or format
+     * shows there at once. */
+    statusbar_set_time_str(clock);
+}
+
+static void time_timer_cb(lv_timer_t *t)
+{
+    (void)t;
+    time_update_labels();
+}
+
+static void time_saved_or_warn(esp_err_t err)
+{
+    if (err != ESP_OK) {
+        toast_warn("Not saved for next boot");
+    }
+}
+
+/* The field the time is typed into: what the clock says now, as typed. */
+static void time_fill_field(void)
+{
+    time_status_t st;
+    if (!s_time_ta || time_manager_get_status(&st) != ESP_OK || !st.known) {
+        return;
+    }
+    time_t now = time(NULL);
+    struct tm local;
+    char text[24];
+    localtime_r(&now, &local);
+    strftime(text, sizeof(text), "%Y-%m-%d %H:%M", &local);
+    lv_textarea_set_text(s_time_ta, text);
+}
+
+static void time_auto_cb(lv_event_t *e)
+{
+    bool on = (bool)(uintptr_t)lv_event_get_user_data(e);
+    choice_check_only(lv_event_get_current_target(e));
+    time_saved_or_warn(time_manager_set_automatic(on));
+    if (s_time_manual) {
+        if (on) {
+            lv_obj_add_flag(s_time_manual, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            time_fill_field();
+            lv_obj_remove_flag(s_time_manual, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    time_update_labels();
+}
+
+static void time_24h_cb(lv_event_t *e)
+{
+    choice_check_only(lv_event_get_current_target(e));
+    time_saved_or_warn(time_manager_set_24h((bool)(uintptr_t)lv_event_get_user_data(e)));
+    time_update_labels();
+}
+
+static void time_set_cb(lv_event_t *e)
+{
+    (void)e;
+    if (!s_time_ta) return;
+    esp_err_t err = time_manager_set_local(lv_textarea_get_text(s_time_ta));
+    if (err == ESP_ERR_INVALID_ARG) {
+        toast_warn("Type it as 2026-10-13 14:05");
+    } else if (err != ESP_OK) {
+        toast_warn("Time not set");
+    } else {
+        toast_info("Time set");
+    }
+    time_update_labels();
+}
+
+/* The rows of the zone picker share two styles. Styled one property at a
+ * time, as the other pages are, each row cost over a kilobyte of LVGL's
+ * 64 KB pool (CONFIG_LV_MEM_SIZE_KILOBYTES), and a region's thirty-odd
+ * cities did not fit. Set again for each page, so they follow the theme;
+ * nothing uses them by then, as each page is built after the last is gone. */
+static lv_style_t s_pick_style;
+static lv_style_t s_pick_pressed_style;
+static bool       s_pick_styles_ready;
+
+static void pick_styles_init(void)
+{
+    if (s_pick_styles_ready) {
+        lv_style_reset(&s_pick_style);
+        lv_style_reset(&s_pick_pressed_style);
+    }
+    lv_style_init(&s_pick_style);
+    lv_style_init(&s_pick_pressed_style);
+    s_pick_styles_ready = true;
+
+    const theme_colors_t *tc = theme_get_colors();
+    int32_t pad = (ITEM_H - lv_font_get_line_height(&lv_font_montserrat_14)) / 2;
+    lv_style_set_width(&s_pick_style, LV_PCT(100));
+    lv_style_set_pad_left(&s_pick_style, ITEM_PAD_LEFT);
+    lv_style_set_pad_right(&s_pick_style, ITEM_PAD_RIGHT);
+    lv_style_set_pad_top(&s_pick_style, pad);
+    lv_style_set_pad_bottom(&s_pick_style, pad);
+    lv_style_set_text_font(&s_pick_style, &lv_font_montserrat_14);
+    lv_style_set_text_color(&s_pick_style, tc->text);
+    lv_style_set_bg_color(&s_pick_style, tc->bg);
+    lv_style_set_bg_opa(&s_pick_style, LV_OPA_COVER);
+    lv_style_set_border_side(&s_pick_style, LV_BORDER_SIDE_BOTTOM);
+    lv_style_set_border_color(&s_pick_style, tc->text);
+    lv_style_set_border_width(&s_pick_style, 1);
+    lv_style_set_bg_color(&s_pick_pressed_style, tc->primary);
+    lv_style_set_text_color(&s_pick_pressed_style, tc->bg);
+}
+
+/* A row that opens or picks something, one label, with ">" when it opens.
+ * Returns the label. */
+static lv_obj_t *create_pick_row(lv_obj_t *content, const char *text, bool opens,
+                                 lv_event_cb_t cb, void *user_data)
+{
+    lv_obj_t *row = lv_label_create(content);
+    lv_label_set_text(row, text);
+    lv_obj_add_style(row, &s_pick_style, LV_PART_MAIN);
+    lv_obj_add_style(row, &s_pick_pressed_style, LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(row, cb, LV_EVENT_CLICKED, user_data);
+    if (opens) {
+        /* Takes the row's font and colour, pressed or not. */
+        lv_obj_t *chev = lv_label_create(row);
+        lv_label_set_text(chev, ">");
+        lv_obj_align(chev, LV_ALIGN_RIGHT_MID, 0, 0);
+    }
+    return row;
+}
+
+static void open_zone_screen(const char *region);
+static void open_time_screen(void);
+
+/* "Europe/Oslo" in the region "Europe": its part after the region, with
+ * spaces for the underscores: "Oslo", "Argentina/Buenos Aires". */
+static void zone_city(const char *zone, size_t region_len, char *out, size_t out_size)
+{
+    snprintf(out, out_size, "%s", zone + region_len + 1);
+    for (char *p = out; *p; p++) {
+        if (*p == '_') *p = ' ';
+    }
+}
+
+static bool zone_in_region(const char *zone, const char *region)
+{
+    size_t n = strlen(region);
+    return strncmp(zone, region, n) == 0 && zone[n] == '/';
+}
+
+/* The zone picker is a page of its own, and Date & time is closed while it
+ * is open, which leaves the pool room for a region's cities. Leaving it goes
+ * from a region's cities to the regions, and from the regions to Date & time. */
+static void zone_leave(bool to_regions)
+{
+    if (s_sub_screen) {
+        lv_obj_delete(s_sub_screen);
+        s_sub_screen = NULL;
+    }
+    if (to_regions) {
+        open_zone_screen(NULL);
+    } else {
+        open_time_screen();
+    }
+}
+
+/* The back bar carries the region whose cities are on show, or NULL. */
+static void zone_back_cb(lv_event_t *e)
+{
+    zone_leave(lv_event_get_user_data(e) != NULL);
+}
+
+static void zone_pick_cb(lv_event_t *e)
+{
+    const char *zone = (const char *)lv_event_get_user_data(e);
+    time_saved_or_warn(time_manager_set_zone(zone ? zone : ""));
+    zone_leave(false);
+}
+
+static void zone_region_cb(lv_event_t *e)
+{
+    const char *region = (const char *)lv_event_get_user_data(e);
+    if (s_sub_screen) {
+        lv_obj_delete(s_sub_screen);
+        s_sub_screen = NULL;
+    }
+    open_zone_screen(region);
+}
+
+/* The regions, with Automatic and UTC first, or the cities of one region.
+ * The zone in use is ticked, and so is its region. */
+static void open_zone_screen(const char *region)
+{
+    time_status_t st;
+    if (time_manager_get_status(&st) != ESP_OK) {
+        st.zone[0] = '\0';
+    }
+    pick_styles_init();
+    lv_obj_t *content = alloc_sub_screen(s_root, region ? region : "Time zone",
+                                         zone_back_cb, (void *)region, &s_sub_screen);
+    s_current_screen = SETTINGS_TIME_ZONE;
+    char text[64];
+    size_t count = time_manager_zone_count();
+
+    if (region) {
+        size_t n = strlen(region);
+        for (size_t i = 0; i < count; i++) {
+            const char *zone = time_manager_zone_name(i);
+            if (!zone_in_region(zone, region)) continue;
+            char city[48];
+            zone_city(zone, n, city, sizeof(city));
+            bool current = strcmp(zone, st.zone) == 0;
+            snprintf(text, sizeof(text), "%s%s", current ? LV_SYMBOL_OK " " : "", city);
+            create_pick_row(content, text, false, zone_pick_cb, (void *)zone);
+        }
+        return;
+    }
+
+    snprintf(text, sizeof(text), "%sAutomatic (mobile network)",
+             st.zone[0] == '\0' ? LV_SYMBOL_OK " " : "");
+    create_pick_row(content, text, false, zone_pick_cb, (void *)"");
+    s_time_region_count = 0;
+    for (size_t i = 0; i < count; i++) {
+        const char *zone = time_manager_zone_name(i);
+        const char *slash = strchr(zone, '/');
+        if (!slash) {
+            bool current = strcmp(zone, st.zone) == 0;
+            snprintf(text, sizeof(text), "%s%s", current ? LV_SYMBOL_OK " " : "", zone);
+            create_pick_row(content, text, false, zone_pick_cb, (void *)zone);
+            continue;
+        }
+        size_t n = (size_t)(slash - zone);
+        if (s_time_region_count > 0
+            && strlen(s_time_regions[s_time_region_count - 1]) == n
+            && strncmp(s_time_regions[s_time_region_count - 1], zone, n) == 0) {
+            continue;  /* the zones are sorted, so a region's come together */
+        }
+        if (s_time_region_count == TIME_REGIONS_MAX || n >= sizeof(s_time_regions[0])) continue;
+        char *r = s_time_regions[s_time_region_count++];
+        memcpy(r, zone, n);
+        r[n] = '\0';
+        bool current = zone_in_region(st.zone, r);
+        snprintf(text, sizeof(text), "%s%s", current ? LV_SYMBOL_OK " " : "", r);
+        create_pick_row(content, text, true, zone_region_cb, r);
+    }
+}
+
+static void time_zone_open_cb(lv_event_t *e)
+{
+    (void)e;
+    time_forget_screen();
+    zone_leave(true);
+}
+
+static void open_time_screen(void)
+{
+    lv_obj_t *content = create_sub_screen("Date & time");
+    s_current_screen = SETTINGS_TIME;
+
+    time_status_t st;
+    if (time_manager_get_status(&st) != ESP_OK) {
+        create_note(content, "The clock has not started.");
+        return;
+    }
+
+    s_time_now_lbl  = create_live_row(content, "");
+    s_time_from_lbl = create_live_row(content, "");
+    if (!st.has_rtc) {
+        create_note(content, "No clock chip: sleep and restarts keep the time, "
+                             "losing power does not.");
+    }
+    create_separator(content);
+
+    create_info_row(content, "Set automatically");
+    create_on_off(content, st.automatic, time_auto_cb);
+    create_note(content, "From the internet, else GPS or the mobile network.");
+
+    /* Typed in, with automatic time off. */
+    s_time_manual = lv_obj_create(content);
+    style_panel(s_time_manual);
+    lv_obj_set_size(s_time_manual, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(s_time_manual, LV_FLEX_FLOW_COLUMN);
+    create_info_row(s_time_manual, "Local time, as 2026-10-13 14:05");
+    lv_obj_t *row = create_choice_row(s_time_manual);
+    s_time_ta = lv_textarea_create(row);
+    lv_textarea_set_one_line(s_time_ta, true);
+    lv_textarea_set_max_length(s_time_ta, 19);
+    lv_textarea_set_accepted_chars(s_time_ta, "0123456789-: ");
+    lv_textarea_set_placeholder_text(s_time_ta, "2026-10-13 14:05");
+    lv_obj_set_flex_grow(s_time_ta, 1);
+    lv_obj_set_height(s_time_ta, ITEM_H - 4);
+    lv_obj_set_style_text_font(s_time_ta, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_pad_ver(s_time_ta, 2, LV_PART_MAIN);
+    create_choice_button(row, "Set", time_set_cb, 0, false);
+    if (st.automatic) {
+        lv_obj_add_flag(s_time_manual, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        time_fill_field();
+    }
+    create_separator(content);
+
+    create_info_row(content, "Time zone");
+    pick_styles_init();
+    s_time_zone_lbl = create_pick_row(content, "", true, time_zone_open_cb, NULL);
+    create_separator(content);
+
+    create_info_row(content, "24-hour clock");
+    create_on_off(content, st.format_24h, time_24h_cb);
+
+    time_update_labels();
+    s_time_timer = lv_timer_create(time_timer_cb, 2000, NULL);
+}
+
 static void item_clicked_cb(lv_event_t *e)
 {
     const char *name = (const char *)lv_event_get_user_data(e);
@@ -2956,6 +3313,9 @@ static void item_clicked_cb(lv_event_t *e)
     } else if (strcmp(name, "Power") == 0) {
         lv_obj_add_flag(s_main_list, LV_OBJ_FLAG_HIDDEN);
         open_power_screen();
+    } else if (strcmp(name, "Date & time") == 0) {
+        lv_obj_add_flag(s_main_list, LV_OBJ_FLAG_HIDDEN);
+        open_time_screen();
     } else if (strcmp(name, "Drivers") == 0) {
         lv_obj_add_flag(s_main_list, LV_OBJ_FLAG_HIDDEN);
         open_drivers_screen();
@@ -3168,6 +3528,7 @@ void settings_ui_destroy(void)
     }
 
     cell_forget_screen();
+    time_forget_screen();
 
     /* Nullify label pointers — LVGL will clean up widgets when s_root is deleted */
     s_wifi_value_label   = NULL;

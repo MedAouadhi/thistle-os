@@ -256,6 +256,10 @@ pub extern "C" fn kernel_init() -> i32 {
         }
     }
 
+    // The clock, once a clock chip would be registered and esp_netif is up:
+    // the zone, the chip's time if the clock lost it, and NTP.
+    crate::time_manager::start();
+
     // From here on the network coordinator keeps WiFi and mobile data up as
     // the user set them; esp_netif routes over WiFi whenever it is up.
     crate::net_coordinator::start();

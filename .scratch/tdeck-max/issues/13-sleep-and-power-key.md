@@ -101,6 +101,14 @@ woken, before the lights     0 / 0
 awake                       63 / 63
 ```
 
+### A plugged-in board that slept
+
+Seen during ticket 17's hardware run, 2026-10-13: a T-Deck Max on USB, battery at 100 %, slept at its 120 s idle time and dropped off USB; on the same firmware a boot before it had stayed awake for over five minutes. "Stay awake when plugged in" took plugged in from the charge state, Charging or Charged, and the SY6970's CHRG_STAT reads `00`, not charging, for a battery whose charging has paused as it does for no input at all. Which pause it was is not known: the log at the time had no power line.
+
+Fixed: `hal_power_driver_t` has a last field, `is_plugged_in`, and the SY6970 answers it from REG0B, power good (bit 2) or a bus status from 1 to 6 (7 is OTG), as the vendor's XPowersLib does (`isPowerGood()`, `isVbusIn()`, `lib/XPowersLib/src/PowersSY6970.tpp`); both parts number those bits alike. A driver that cannot tell, the TP4065B with its one CHRG pin, leaves it NULL, and the power manager falls back to the charge state. It logs `plugged in` and `on battery` as the answer changes; it reads the charger only once the idle time is due.
+
+On the Max, 2026-10-14, charging at 100 mA: `plugged in` at 140 s, and awake on USB for the six minutes watched. The paused-charge case itself was not brought about on the board; its register value is a host test (`a_full_battery_on_usb_is_plugged_in_though_not_charging`).
+
 ### Not done
 
 - Other boards: only the T-Deck Max profile has a `power` section. The T-Deck Pro has the same BOOT key and keyboard and would take the same section.

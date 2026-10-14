@@ -249,6 +249,9 @@ pub struct HalPowerDriver {
     pub is_charging: Option<unsafe extern "C" fn() -> bool>,
     pub sleep: Option<unsafe extern "C" fn(enter: bool) -> i32>,
     pub name: *const c_char,
+    /// USB or an adapter there, charging or not. None if the driver cannot
+    /// tell (hal/power.h).
+    pub is_plugged_in: Option<unsafe extern "C" fn() -> bool>,
 }
 
 unsafe impl Send for HalPowerDriver {}
@@ -1697,6 +1700,14 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
+    fn test_power_driver_matches_its_c_layout() {
+        // link_deps.c asserts the same offsets of hal_power_driver_t.
+        let ptr = std::mem::size_of::<*const c_void>();
+        assert_eq!(std::mem::offset_of!(HalPowerDriver, name), 7 * ptr);
+        assert_eq!(std::mem::offset_of!(HalPowerDriver, is_plugged_in), 8 * ptr);
+    }
+
+    #[test]
     fn test_power_registration() {
         reset_registry();
 
@@ -1709,6 +1720,7 @@ mod tests {
             is_charging: None,
             sleep: None,
             name: b"test-power\0".as_ptr() as *const c_char,
+            is_plugged_in: None,
         };
 
         let rc = unsafe { hal_power_register(&drv as *const HalPowerDriver, std::ptr::null()) };
@@ -1756,6 +1768,7 @@ mod tests {
             is_charging: None,
             sleep: None,
             name: b"test-power\0".as_ptr() as *const c_char,
+            is_plugged_in: None,
         };
 
         unsafe {

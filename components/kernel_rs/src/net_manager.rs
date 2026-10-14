@@ -87,6 +87,17 @@ pub struct HalNetDriver {
     pub sms_fetch: Option<
         unsafe extern "C" fn(cb: Option<SmsReceiver>, user_data: *mut c_void, kept: *mut i32) -> i32,
     >,
+    pub get_network_time: Option<unsafe extern "C" fn(out: *mut CNetTime) -> i32>,
+}
+
+/// hal_net_time_t: the modem's clock, which the mobile network sets.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CNetTime {
+    pub utc: i64,
+    pub age_ms: u32,
+    pub utc_offset_min: i16,
+    pub offset_known: bool,
 }
 
 /// hal_sms_t: an SMS a cellular transport received.
@@ -120,7 +131,6 @@ extern "C" {
     fn wifi_manager_get_state() -> u32;
     fn wifi_manager_get_ip() -> *const c_char;
     fn wifi_manager_get_rssi() -> i8;
-    fn wifi_manager_ntp_sync() -> i32;
 }
 
 // ---------------------------------------------------------------------------
@@ -163,6 +173,7 @@ static WIFI_NET_DRIVER: HalNetDriver = HalNetDriver {
     sms_send: None,
     sms_due: None,
     sms_fetch: None,
+    get_network_time: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -539,18 +550,6 @@ pub unsafe extern "C" fn net_connect_best(timeout_ms: u32) -> i32 {
     ESP_FAIL
 }
 
-/// Trigger NTP sync via the active network transport.
-///
-/// # Safety
-/// May be called from C.
-#[no_mangle]
-pub extern "C" fn net_ntp_sync() -> i32 {
-    if !net_is_connected() {
-        return ESP_ERR_INVALID_STATE;
-    }
-    unsafe { wifi_manager_ntp_sync() }
-}
-
 /// Fill `out` with up to `max` registered transport pointers.
 ///
 /// Returns the number of transports written.
@@ -651,6 +650,7 @@ mod tests {
         sms_send: None,
         sms_due: None,
         sms_fetch: None,
+        get_network_time: None,
     };
 
     static MOCK_CONNECTED: HalNetDriver = HalNetDriver {
@@ -670,6 +670,7 @@ mod tests {
         sms_send: None,
         sms_due: None,
         sms_fetch: None,
+        get_network_time: None,
     };
 
     static MOCK_VPN_CONNECTED: HalNetDriver = HalNetDriver {
@@ -689,6 +690,7 @@ mod tests {
         sms_send: None,
         sms_due: None,
         sms_fetch: None,
+        get_network_time: None,
     };
 
     // -----------------------------------------------------------------------
@@ -920,6 +922,7 @@ mod tests {
         sms_send: None,
         sms_due: None,
         sms_fetch: None,
+        get_network_time: None,
     };
 
     static MOCK_WIFI_CONNECTED: HalNetDriver = HalNetDriver {
@@ -939,6 +942,7 @@ mod tests {
         sms_send: None,
         sms_due: None,
         sms_fetch: None,
+        get_network_time: None,
     };
 
     static MOCK_WIFI_DISCONNECTED: HalNetDriver = HalNetDriver {
@@ -958,6 +962,7 @@ mod tests {
         sms_send: None,
         sms_due: None,
         sms_fetch: None,
+        get_network_time: None,
     };
 
     /// The modem registers while the drivers load, before WiFi does; WiFi
@@ -999,6 +1004,17 @@ mod tests {
         assert_eq!(std::mem::offset_of!(CCellInfo, reg), 8);
         assert_eq!(std::mem::offset_of!(CCellInfo, rssi_dbm), 12);
         assert_eq!(std::mem::offset_of!(CCellInfo, operator_name), 14);
+    }
+
+    #[test]
+    fn test_net_time_matches_the_c_layout() {
+        // int64_t, uint32_t, int16_t, bool, pad to 8.
+        assert_eq!(std::mem::size_of::<CNetTime>(), 16);
+        assert_eq!(std::mem::offset_of!(CNetTime, age_ms), 8);
+        assert_eq!(std::mem::offset_of!(CNetTime, utc_offset_min), 12);
+        assert_eq!(std::mem::offset_of!(CNetTime, offset_known), 14);
+        let ptr = std::mem::size_of::<*const c_void>();
+        assert_eq!(std::mem::offset_of!(HalNetDriver, get_network_time), 16 * ptr);
     }
 
     #[test]

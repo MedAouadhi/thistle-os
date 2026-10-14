@@ -194,9 +194,6 @@ extern "C" {
     fn esp_wifi_scan_get_ap_num(count: *mut u16) -> i32;
     fn esp_wifi_scan_get_ap_records(count: *mut u16, records: *mut c_void) -> i32;
     fn esp_wifi_sta_get_ap_info(info: *mut c_void) -> i32;
-    fn esp_netif_sntp_init(cfg: *const c_void) -> i32;
-    fn esp_netif_sntp_sync_wait(ticks: u32) -> i32;
-    fn esp_netif_sntp_deinit();
     fn calloc(count: usize, size: usize) -> *mut c_void;
     fn free(ptr: *mut c_void);
 }
@@ -936,172 +933,6 @@ pub extern "C" fn wifi_manager_get_rssi() -> i8 {
     0
 }
 
-/// Sync time via NTP (requires WiFi connection).
-///
-/// # Safety
-/// May be called from C.
-#[no_mangle]
-pub extern "C" fn wifi_manager_ntp_sync() -> i32 {
-    let connected = WIFI_STATE
-        .lock()
-        .map(|s| s.state == WIFI_STATE_CONNECTED)
-        .unwrap_or(false);
-
-    if !connected {
-        unsafe {
-            esp_log_write(
-                ESP_LOG_WARN,
-                TAG.as_ptr(),
-                b"Cannot sync NTP: not connected to WiFi\0".as_ptr(),
-            );
-        }
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    #[cfg(target_os = "espidf")]
-    unsafe {
-        esp_log_write(
-            ESP_LOG_INFO,
-            TAG.as_ptr(),
-            b"Starting NTP sync...\0".as_ptr(),
-        );
-        // NTP sync stub — implement with SNTP when needed
-        return ESP_OK;
-    }
-
-    #[cfg(not(target_os = "espidf"))]
-    {
-        unsafe {
-            esp_log_write(
-                ESP_LOG_WARN,
-                TAG.as_ptr(),
-                b"NTP sync: simulator stub\0".as_ptr(),
-            );
-        }
-        ESP_ERR_NOT_SUPPORTED
-    }
-}
-
-/// Write the current time as "HH:MM" into buf.
-///
-/// Writes "--:--" if the clock has not been set.
-///
-/// # Safety
-/// `buf` must point to at least `buf_len` bytes.
-#[no_mangle]
-pub unsafe extern "C" fn wifi_manager_get_time_str(buf: *mut c_char, buf_len: usize) {
-    if buf.is_null() || buf_len == 0 {
-        return;
-    }
-
-    let time_str = get_time_str_internal();
-    let bytes = time_str.as_bytes();
-    let len = bytes.len().min(buf_len - 1);
-    std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf as *mut u8, len);
-    *buf.add(len) = 0;
-}
-
-/// Write the current date as "YYYY-MM-DD" into buf.
-///
-/// # Safety
-/// `buf` must point to at least `buf_len` bytes.
-#[no_mangle]
-pub unsafe extern "C" fn wifi_manager_get_date_str(buf: *mut c_char, buf_len: usize) {
-    if buf.is_null() || buf_len == 0 {
-        return;
-    }
-
-    let date_str = get_date_str_internal();
-    let bytes = date_str.as_bytes();
-    let len = bytes.len().min(buf_len - 1);
-    std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf as *mut u8, len);
-    *buf.add(len) = 0;
-}
-
-// ---------------------------------------------------------------------------
-// Internal time helpers
-// ---------------------------------------------------------------------------
-
-fn get_time_str_internal() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-
-    // Very rough: if Unix time is before 2024-01-01, clock is unset
-    if secs < 1704067200 {
-        return "--:--".to_string();
-    }
-
-    let secs_in_day = secs % 86400;
-    let hh = secs_in_day / 3600;
-    let mm = (secs_in_day % 3600) / 60;
-    format!("{:02}:{:02}", hh, mm)
-}
-
-fn get_date_str_internal() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-
-    if secs < 1704067200 {
-        return "----/--/--".to_string();
-    }
-
-    // Basic Gregorian calendar calculation
-    let days = secs / 86400;
-    let (year, month, day) = days_to_ymd(days);
-    format!("{:04}-{:02}-{:02}", year, month, day)
-}
-
-fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
-    // Days since 1970-01-01
-    let mut year = 1970u64;
-    loop {
-        let leap = is_leap(year);
-        let days_in_year = if leap { 366 } else { 365 };
-        if days < days_in_year {
-            break;
-        }
-        days -= days_in_year;
-        year += 1;
-    }
-
-    let leap = is_leap(year);
-    let month_days: [u64; 12] = [
-        31,
-        if leap { 29 } else { 28 },
-        31,
-        30,
-        31,
-        30,
-        31,
-        31,
-        30,
-        31,
-        30,
-        31,
-    ];
-
-    let mut month = 1u64;
-    for &md in &month_days {
-        if days < md {
-            break;
-        }
-        days -= md;
-        month += 1;
-    }
-
-    (year, month, days + 1)
-}
-
-fn is_leap(year: u64) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
-}
-
 // ---------------------------------------------------------------------------
 // WiFi credential persistence — save/load from system.json
 // ---------------------------------------------------------------------------
@@ -1383,12 +1214,9 @@ pub unsafe extern "C" fn wifi_manager_set_state(new_state: u32, ip: *const c_cha
 //   wifi_manager_get_state()    — reads global Mutex, no C calls
 //   wifi_manager_set_state()    — writes global Mutex, no C calls
 //   wifi_manager_get_rssi()     — pure Rust on non-espidf
-//   get_time_str_internal()     — pure Rust std::time
-//   get_date_str_internal()     — pure Rust std::time
-//   is_leap() / days_to_ymd()  — pure helpers
 //
-// wifi_manager_init(), wifi_manager_connect(), wifi_manager_scan(), and
-// wifi_manager_ntp_sync() all call esp_log_write and are not tested here.
+// wifi_manager_init(), wifi_manager_connect() and wifi_manager_scan() call
+// esp_log_write and are not tested here.
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -1451,60 +1279,6 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // test_get_time_str_format
-    // Mirrors test_wifi_manager.c: get_time_str returns "--:--" or a valid HH:MM.
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_get_time_str_format() {
-        let s = get_time_str_internal();
-        // Either the clock-unset placeholder or a valid HH:MM
-        if s == "--:--" {
-            // Acceptable — system clock not set to a post-2024 value
-        } else {
-            // Must be exactly "HH:MM"
-            assert_eq!(s.len(), 5, "time string must be 5 chars: '{}'", s);
-            let bytes = s.as_bytes();
-            assert!(bytes[0].is_ascii_digit(), "H tens must be a digit");
-            assert!(bytes[1].is_ascii_digit(), "H units must be a digit");
-            assert_eq!(bytes[2], b':', "separator must be ':'");
-            assert!(bytes[3].is_ascii_digit(), "M tens must be a digit");
-            assert!(bytes[4].is_ascii_digit(), "M units must be a digit");
-
-            let hours: u32 = s[..2].parse().unwrap();
-            let mins: u32 = s[3..].parse().unwrap();
-            assert!(hours < 24, "hours must be < 24");
-            assert!(mins < 60, "minutes must be < 60");
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // test_get_date_str_format
-    // Mirrors test_wifi_manager.c: get_date_str returns "----/--/--" or valid YYYY-MM-DD.
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_get_date_str_format() {
-        let s = get_date_str_internal();
-        if s == "----/--/--" {
-            // Acceptable — clock unset
-        } else {
-            // Must be exactly "YYYY-MM-DD"
-            assert_eq!(s.len(), 10, "date string must be 10 chars: '{}'", s);
-            let bytes = s.as_bytes();
-            assert_eq!(bytes[4], b'-', "first separator must be '-'");
-            assert_eq!(bytes[7], b'-', "second separator must be '-'");
-
-            let year: u32 = s[..4].parse().unwrap();
-            let month: u32 = s[5..7].parse().unwrap();
-            let day: u32 = s[8..].parse().unwrap();
-            assert!(year >= 2024, "year must be >= 2024 if clock is set");
-            assert!(month >= 1 && month <= 12, "month must be 1..=12");
-            assert!(day >= 1 && day <= 31, "day must be 1..=31");
-        }
-    }
-
-    // -----------------------------------------------------------------------
     // test_rssi_zero_when_disconnected
     // wifi_manager_get_rssi() must return 0 when not connected.
     // -----------------------------------------------------------------------
@@ -1520,32 +1294,6 @@ mod tests {
 
         // Restore
         unsafe { wifi_manager_set_state(original, std::ptr::null()) };
-    }
-
-    // -----------------------------------------------------------------------
-    // test_is_leap_helper
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_is_leap_helper() {
-        assert!(is_leap(2000), "2000 is a leap year");
-        assert!(is_leap(2024), "2024 is a leap year");
-        assert!(!is_leap(1900), "1900 is not a leap year");
-        assert!(!is_leap(2023), "2023 is not a leap year");
-        assert!(!is_leap(2100), "2100 is not a leap year");
-    }
-
-    // -----------------------------------------------------------------------
-    // test_days_to_ymd_epoch
-    // days_to_ymd(0) must return 1970-01-01.
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_days_to_ymd_epoch() {
-        let (year, month, day) = days_to_ymd(0);
-        assert_eq!(year, 1970, "epoch day 0 must be 1970");
-        assert_eq!(month, 1, "epoch day 0 must be January");
-        assert_eq!(day, 1, "epoch day 0 must be the 1st");
     }
 
     // -----------------------------------------------------------------------

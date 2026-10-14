@@ -52,3 +52,13 @@ A driver's declaration inside a board profile — its identifier, the HAL interf
 
 **Variant**:
 Two parts that are register-compatible enough to share one driver, distinguished at runtime by probing. A variant is not a separate driver.
+
+### Time
+
+**Time source**:
+Anything that can tell the kernel the time: a time server (NTP), the GPS receiver, the mobile network (NITZ), a clock chip, or the user with automatic time off. Ranked in that order, the user aside; the one that last set or confirmed the clock is what Settings names.
+_Avoid_: clock source, time provider, sync source
+
+**Clock chip**:
+A battery-backed real-time clock on the board, such as a PCF8563, registered as the RTC HAL interface. Distinct from the SoC's own RTC domain, which keeps the time through sleep and restarts but not through a power-on.
+_Avoid_: RTC (ambiguous between the two), hardware clock

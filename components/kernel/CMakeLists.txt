@@ -3,7 +3,7 @@
 set(KERNEL_SRCS
     "src/kernel_shims.c" "src/tk_wm_shims.c" "src/sdcard_shim.c"
     "src/link_deps.c" "src/board_fallback.c" "src/board_fingerprint.c"
-    "src/board_builtin_drivers.c" "src/power_platform.c"
+    "src/board_builtin_drivers.c" "src/power_platform.c" "src/time_platform.c"
 )
 set(KERNEL_REQUIRES
     thistle_hal kernel_rs esp_timer freertos esp_partition fatfs vfs app_update
@@ -18,7 +18,7 @@ set(KERNEL_PRIV_REQUIRES
     drv_crypto_mbedtls esp_driver_i2c esp_driver_uart esp_driver_spi esp_driver_gpio
     drv_epaper_gdeq031t10 drv_kbd_tca8418 drv_touch_cst328 drv_touch_cst66xx drv_sdcard
     drv_gps_mia_m10q drv_radio_sx1262 drv_audio_es8311 drv_imu_bhi260ap
-    pthread
+    pthread lwip esp_rom
 )
 # The A7682E modem rides on esp_modem, which no board on another target
 # carries; main links the S3-only components the same way.

@@ -26,4 +26,9 @@ typedef struct {
     bool (*is_charging)(void);
     esp_err_t (*sleep)(bool enter);
     const char *name;
+    /* Whether USB or an adapter powers the board, charging or not: a full
+     * battery whose charging has paused is still plugged in. NULL when the
+     * driver cannot tell; the kernel then takes charging or charged for
+     * plugged in. Last, so that no field before it moved. */
+    bool (*is_plugged_in)(void);
 } hal_power_driver_t;

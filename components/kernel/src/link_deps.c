@@ -115,6 +115,27 @@ _Static_assert(offsetof(hal_net_driver_t, get_cell_info) == 9 * sizeof(void *),
                "HalNetDriver.get_cell_info");
 _Static_assert(offsetof(hal_net_driver_t, sms_fetch) == 15 * sizeof(void *),
                "HalNetDriver.sms_fetch");
+_Static_assert(offsetof(hal_net_driver_t, get_network_time) == 16 * sizeof(void *),
+               "HalNetDriver.get_network_time");
+_Static_assert(offsetof(hal_net_time_t, age_ms) == 8, "CNetTime.age_ms");
+_Static_assert(offsetof(hal_net_time_t, utc_offset_min) == 12, "CNetTime.utc_offset_min");
+_Static_assert(offsetof(hal_net_time_t, offset_known) == 14, "CNetTime.offset_known");
+_Static_assert(sizeof(hal_net_time_t) == 16, "CNetTime size");
+
+// hal_registry.rs mirrors hal_power_driver_t as HalPowerDriver.
+#include "hal/power.h"
+_Static_assert(offsetof(hal_power_driver_t, name) == 7 * sizeof(void *), "HalPowerDriver.name");
+_Static_assert(offsetof(hal_power_driver_t, is_plugged_in) == 8 * sizeof(void *),
+               "HalPowerDriver.is_plugged_in");
+
+// time_manager.rs mirrors time_status_t as CTimeStatus.
+#include "thistle/time_manager.h"
+_Static_assert(sizeof(time_source_t) == 4, "CTimeStatus.source is read as a u32");
+_Static_assert(offsetof(time_status_t, source) == 4, "CTimeStatus.source");
+_Static_assert(offsetof(time_status_t, synced_at) == 8, "CTimeStatus.synced_at");
+_Static_assert(offsetof(time_status_t, has_rtc) == 18, "CTimeStatus.has_rtc");
+_Static_assert(offsetof(time_status_t, zone) == 19, "CTimeStatus.zone");
+_Static_assert(sizeof(time_status_t) == 72, "CTimeStatus size");
 
 // net_manager.rs mirrors hal_sms_t as CHalSms; sms_manager.rs mirrors
 // sms_message_t as CSmsMessage.

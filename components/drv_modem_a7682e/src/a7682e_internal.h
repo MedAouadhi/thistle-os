@@ -49,6 +49,14 @@ esp_err_t a7682e_sleep_locked(bool enter);
  *  resets itself, so set again before each connection. */
 void a7682e_configure_locked(void);
 
+/** Read the module's clock (AT+CCLK?) for drv_a7682e_get_network_time().
+ *  In command mode only. */
+void a7682e_clock_read_locked(void);
+
+/** The same, taking the driver itself, for a module answering commands;
+ *  a data session is left alone. */
+void a7682e_clock_read(void);
+
 /** Leave a data session for command mode, if the DCE is in one. Returns
  *  whether it was, for a7682e_restore_data_locked(). */
 bool a7682e_enter_command_locked(void);

@@ -237,3 +237,74 @@ bool a7682e_parse_context_apn(const char *resp, int cid, char *out, size_t out_s
     }
     return false;
 }
+
+/* Days from 1970-01-01 to a date of the Gregorian calendar (Howard Hinnant's
+ * days_from_civil). */
+static int64_t days_from_civil(int64_t y, int m, int d)
+{
+    y -= m <= 2;
+    int64_t era = (y >= 0 ? y : y - 399) / 400;
+    int64_t yoe = y - era * 400;
+    int64_t doy = (153 * (m > 2 ? m - 3 : m + 9) + 2) / 5 + d - 1;
+    int64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+
+static bool is_digit(char c)
+{
+    return c >= '0' && c <= '9';
+}
+
+static int days_in_month(int y, int m)
+{
+    static const int days[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    bool leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    return m == 2 && leap ? 29 : days[m - 1];
+}
+
+bool a7682e_parse_cclk(const char *resp, int64_t *utc, int *offset_min)
+{
+    if (!resp || !utc || !offset_min) {
+        return false;
+    }
+    const char *p = strstr(resp, "+CCLK:");
+    if (!p) {
+        return false;
+    }
+    p += strlen("+CCLK:");
+    while (*p == ' ') {
+        p++;
+    }
+    if (*p != '"') {
+        return false;
+    }
+    /* "yy/MM/dd,hh:mm:ss", each field two digits. */
+    static const char seps[] = "//,::";
+    int field[6];
+    p++;
+    for (int i = 0; i < 6; i++) {
+        if (!is_digit(p[0]) || !is_digit(p[1]) || (i < 5 && p[2] != seps[i])) {
+            return false;
+        }
+        field[i] = (p[0] - '0') * 10 + (p[1] - '0');
+        p += i < 5 ? 3 : 2;
+    }
+    int yy = field[0], mo = field[1], dd = field[2], hh = field[3], mi = field[4], ss = field[5];
+    if (*p != '+' && *p != '-') {
+        return false;
+    }
+    char *end;
+    long quarters = strtol(p, &end, 10);
+    if (end == p + 1 || *end != '"' || quarters < -96 || quarters > 96) {
+        return false;
+    }
+    int year = yy < 70 ? 2000 + yy : 1900 + yy;
+    if (mo < 1 || mo > 12 || dd < 1 || dd > days_in_month(year, mo)
+        || hh > 23 || mi > 59 || ss > 59) {
+        return false;
+    }
+    int64_t local = days_from_civil(year, mo, dd) * 86400 + hh * 3600 + mi * 60 + ss;
+    *offset_min = (int)quarters * 15;
+    *utc = local - (int64_t)*offset_min * 60;
+    return true;
+}

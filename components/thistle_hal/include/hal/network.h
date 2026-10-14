@@ -71,6 +71,16 @@ typedef struct {
     uint8_t  parts;
 } hal_sms_t;
 
+/* The time a cellular transport last read from its modem's clock, which the
+ * mobile network sets (NITZ). Whether the network did is for the reader to
+ * judge: a modem's clock that nothing has set counts from its own epoch. */
+typedef struct {
+    int64_t  utc;             /* seconds since 1970, UTC, as read */
+    uint32_t age_ms;          /* how long ago it was read */
+    int16_t  utc_offset_min;  /* local time minus UTC, summer time included */
+    bool     offset_known;    /* the network gave the offset */
+} hal_net_time_t;
+
 /* Return true once the message is kept: only then is it deleted from the
  * modem. Called with the driver held: it must not call the driver. */
 typedef bool (*hal_sms_rx_cb_t)(const hal_sms_t *sms, void *user_data);
@@ -117,4 +127,9 @@ typedef struct {
      * delete each one cb kept; *kept says how many. A data session is
      * interrupted for the length of the exchange. */
     esp_err_t (*sms_fetch)(hal_sms_rx_cb_t cb, void *user_data, int *kept);
+    /* Cellular only, optional: the modem's clock as last read, which the
+     * driver does while the modem answers commands anyway, never by
+     * interrupting a data session. ESP_ERR_NOT_FOUND until it has been read
+     * since the modem powered on. Appended last, so no field above moves. */
+    esp_err_t (*get_network_time)(hal_net_time_t *out);
 } hal_net_driver_t;

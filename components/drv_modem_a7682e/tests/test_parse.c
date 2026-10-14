@@ -137,6 +137,46 @@ static void test_context_apn(void)
     assert(!a7682e_parse_context_apn(NULL, 1, apn, sizeof(apn)));
 }
 
+static void test_clock(void)
+{
+    int64_t utc = 0;
+    int offset = -1;
+    // 14:05:09 at UTC+2 (+08 quarters) is 12:05:09 UTC, 13 October 2026.
+    assert(a7682e_parse_cclk("\r\n+CCLK: \"26/10/13,14:05:09+08\"\r\n\r\nOK\r\n", &utc, &offset));
+    assert(utc == 1791893109 && offset == 120);
+    // As esp_modem_at() hands it over, without the line ends.
+    assert(a7682e_parse_cclk("+CCLK: \"26/10/13,14:05:09+08\"", &utc, &offset));
+    assert(utc == 1791893109);
+
+    // West of Greenwich, half-hour zones, and a local date that is not UTC's.
+    assert(a7682e_parse_cclk("+CCLK: \"26/01/15,07:00:00-20\"", &utc, &offset));
+    assert(utc == 1768478400 && offset == -300);
+    assert(a7682e_parse_cclk("+CCLK: \"26/10/13,17:35:09+22\"", &utc, &offset));
+    assert(utc == 1791893109 && offset == 330);
+    assert(a7682e_parse_cclk("+CCLK: \"26/01/01,01:00:00+08\"", &utc, &offset));
+    assert(utc == 1767222000);
+    assert(a7682e_parse_cclk("+CCLK: \"26/10/13,12:05:09+00\"", &utc, &offset));
+    assert(utc == 1791893109 && offset == 0);
+
+    // A clock nothing has set reads as the epoch it counts from, for the
+    // kernel to reject.
+    assert(a7682e_parse_cclk("+CCLK: \"70/01/01,00:00:12+00\"", &utc, &offset));
+    assert(utc == 12);
+    assert(a7682e_parse_cclk("+CCLK: \"80/01/06,00:00:00+00\"", &utc, &offset));
+    assert(utc == 315964800);
+
+    // Local time without its offset says nothing about UTC.
+    assert(!a7682e_parse_cclk("+CCLK: \"26/10/13,14:05:09\"", &utc, &offset));
+    assert(!a7682e_parse_cclk("+CCLK: \"26/13/13,14:05:09+08\"", &utc, &offset));
+    assert(!a7682e_parse_cclk("+CCLK: \"26/02/30,14:05:09+08\"", &utc, &offset));
+    assert(!a7682e_parse_cclk("+CCLK: \"26/10/13,24:05:09+08\"", &utc, &offset));
+    assert(!a7682e_parse_cclk("+CCLK: \"26/10/13,14:05:09+97\"", &utc, &offset));
+    assert(!a7682e_parse_cclk("+CCLK: \"26/10/13,14:05:09+08", &utc, &offset));
+    assert(!a7682e_parse_cclk("+CCLK: 26/10/13,14:05:09+08", &utc, &offset));
+    assert(!a7682e_parse_cclk("\r\nOK\r\n", &utc, &offset));
+    assert(!a7682e_parse_cclk(NULL, &utc, &offset));
+}
+
 int main(void)
 {
     test_final_result();
@@ -145,6 +185,7 @@ int main(void)
     test_best_registration();
     test_operator();
     test_context_apn();
+    test_clock();
     puts("a7682e parse tests passed");
     return 0;
 }
