@@ -18,6 +18,9 @@
 #define LV_USE_BIDI 1
 #define LV_BIDI_BASE_DIR_DEF LV_BASE_DIR_AUTO
 
+/* QR codes, for the Tailscale app's sign-in link (CONFIG_LV_USE_QRCODE on the device) */
+#define LV_USE_QRCODE 1
+
 /* Features */
 #define LV_USE_LOG 1
 #define LV_LOG_LEVEL LV_LOG_LEVEL_WARN

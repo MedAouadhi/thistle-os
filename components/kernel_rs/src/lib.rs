@@ -92,6 +92,8 @@ pub mod sms_manager;
 pub mod sos_beacon;
 pub mod syscall_table;
 pub mod system_json;
+pub mod tailnet_manager;
+pub mod tailnet_policy;
 pub mod thistle_shell;
 pub mod time_manager;
 pub mod time_policy;

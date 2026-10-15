@@ -4,6 +4,7 @@ set(KERNEL_SRCS
     "src/kernel_shims.c" "src/tk_wm_shims.c" "src/sdcard_shim.c"
     "src/link_deps.c" "src/board_fallback.c" "src/board_fingerprint.c"
     "src/board_builtin_drivers.c" "src/power_platform.c" "src/time_platform.c"
+    "src/tailnet_platform.c"
 )
 set(KERNEL_REQUIRES
     thistle_hal kernel_rs esp_timer freertos esp_partition fatfs vfs app_update
@@ -24,6 +25,10 @@ set(KERNEL_PRIV_REQUIRES
 # carries; main links the S3-only components the same way.
 if(IDF_TARGET STREQUAL "esp32s3")
     list(APPEND KERNEL_PRIV_REQUIRES drv_modem_a7682e)
+    # The Tailscale client, from idf_component.yml. It wants PSRAM, which
+    # only the S3 boards have; elsewhere tailnet_platform.c answers as a
+    # board without it.
+    list(APPEND KERNEL_PRIV_REQUIRES microlink)
 endif()
 
 idf_component_register(
@@ -34,5 +39,10 @@ idf_component_register(
 )
 
 if(IDF_TARGET STREQUAL "esp32s3")
-    target_compile_definitions(${COMPONENT_LIB} PRIVATE THISTLE_HAS_MODEM_A7682E=1)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE
+        THISTLE_HAS_MODEM_A7682E=1
+        THISTLE_HAS_TAILNET=1)
+    # lwIP calls the tailnet's name hook (tailnet_platform.c) from its own
+    # library, which the linker reads after this one has been passed over.
+    target_link_libraries(${COMPONENT_LIB} INTERFACE "-u lwip_hook_netconn_external_resolve")
 endif()

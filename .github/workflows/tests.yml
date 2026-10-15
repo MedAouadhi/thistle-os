@@ -389,6 +389,10 @@ jobs:
         working-directory: simulator
         run: python3 tests/test_file_transfer.py --sim build/thistle_sim
 
+      - name: Run Tailscale sign-in, key file and quick panel tests
+        working-directory: simulator
+        run: python3 tests/test_tailscale.py --sim build/thistle_sim
+
       - name: Upload launcher framebuffer failures
         if: failure()
         uses: actions/upload-artifact@v4

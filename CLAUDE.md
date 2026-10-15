@@ -304,6 +304,62 @@ reasons, and what the hardware has yet to confirm.
   `/tmp/thistle_spiffs`; and it prints the password, as a device never does.
   `simulator/tests/test_file_transfer.py`, `apps/filexfer/tests/run_tests.sh`.
 
+### Tailscale
+
+While the user has it on, the device joins their tailnet over WiFi or
+mobile data; any socket then reaches a peer's 100.x.y.z address through
+the tunnel, and `getaddrinfo("homelab")` resolves a peer by name (lwIP's
+`LWIP_HOOK_NETCONN_EXT_RESOLVE_CUSTOM`, in `tailnet_platform.c`).
+Internet traffic does not go through it. `apps/tailscale/` shows and
+switches it; the quick panel has a tile; the Terminal has `tailscale`
+(status, peers, up, down, `ping NAME [PORT]`, a timed TCP connect).
+`.scratch/tailscale/spec.md` has the reasons, ADR-0009 the choice of
+client.
+
+- **The client is MicroLink**, from `MedAouadhi/microlink` branch
+  `thistle`, pinned by commit in `components/kernel/idf_component.yml`, S3
+  only. The fork is the one hermes_esp32 pins plus six commits; read them
+  before moving the pin, and delete `dependencies.lock` when you do (which
+  also lets other components move: put back what you did not mean to).
+  Decisions are in `tailnet_policy.rs`, the running of them in
+  `tailnet_manager.rs` (`thistle/tailnet.h`), every MicroLink call in
+  `components/kernel/src/tailnet_platform.c`.
+- **Pairing compiles nothing in.** A device that has not joined signs in
+  at a URL the control plane gives, shown as a QR code, and joins as the
+  signing-in user's device. After that it rejoins with its own identity,
+  MicroLink's NVS namespaces `microlink` and `ml_peers`; `tailnet` holds
+  whether it has joined. Sign out erases them; the device stays in the
+  admin console until removed there. NVS is not encrypted. There is no
+  auth-key path, by choice for now; MicroLink still takes a key.
+- **A packet that finds no WireGuard session starts one** (MicroLink's WG
+  manager, through DERP and DISCO's direct path) and is dropped: a first
+  connect to a peer takes a TCP retransmit, about a second.
+- **It needs a network and the clock**: a WireGuard handshake carries the
+  time. It is restarted whenever the underlay changes, WiFi to LTE, a new
+  address, or a sleep, and stopped while there is none.
+- **It costs about 31 KB of internal RAM while on**, MicroLink's four task
+  stacks most of it, and about 2 KB off. The log says
+  `connected as thistle-a1b2c3, 100.101.102.103; internal RAM 110 KB free`.
+  MicroLink's chattiest tags are turned down to WARN (`ml_derp` to ERROR)
+  in `tailnet_platform_start()`; raise them there to debug it.
+- **Start and stop run on a FreeRTOS task, not a `std::thread`.** On
+  ESP-IDF a Rust thread leaves its `Thread` handle behind when it ends,
+  about 150 bytes of internal RAM, which a heap trace caught at two
+  threads a restart; the task leaves nothing. (`call_manager.rs` still
+  spawns one per call.)
+- **The kernel worker polls the client once a second**, in one try of the
+  platform's lock (`tailnet_platform_poll`), and keeps what it read for
+  the status, the peers and the Terminal, so none of them touch the
+  client. A client whose stop timed out is kept, not freed, and stopped
+  again before anything starts.
+- **The home DERP region is measured**, by timing a TCP connect to each
+  region, and kept in NVS (`derp_home`): MicroLink's default is Dallas.
+- The simulator's client is pretend (`THISTLE_SIM_TAILNET` = `login`,
+  `approval` or `refuse`; `THISTLE_SIM_TAILNET_LOGIN_S`;
+  `THISTLE_SIM_TAILNET_PEERS=host` takes the host's own peers from
+  `tailscale status --json`); whether it has joined is a file in
+  `THISTLE_SIM_SPIFFS`. `simulator/tests/test_tailscale.py`.
+
 ### LVGL's pool is 64 KB
 
 LVGL allocates every object and every local style property from its own
@@ -372,8 +428,8 @@ The kernel is **100% Rust and hardware-independent**. It never calls ESP-IDF har
 - **Kernel (Rust)** (`components/kernel_rs/`): 100% Rust. 57 modules: manifest parser, permissions, IPC, events, app manager, version, crypto, HAL registry, driver manager, WM, app store, wifi/ble/net managers, OTA, and more. 1231 tests.
 - **Display Server** (`components/kernel/src/display_server.c`): Surface management, compositor, WM vtable interface.
 - **UI** (`components/ui/`): thistle-tk WM (default). LVGL-based WM also available. Both loadable as `.wm.elf`.
-- **Apps**: 17 apps, migrating to `.app.elf` on SPIFFS. Five remain in
-  `components/apps_builtin/`; the other twelve are their own components under
+- **Apps**: 18 apps, migrating to `.app.elf` on SPIFFS. Five remain in
+  `components/apps_builtin/`; the other thirteen are their own components under
   `apps/`, listed once in `cmake/thistle_apps.cmake` for the simulators and
   found by `EXTRA_COMPONENT_DIRS` for the firmware.
 - **App Store** (`components/kernel_rs/src/tk_appstore.rs`): Browsable Rust app. Rich catalog with ratings, categories, download counts, changelogs, and component-level driver matching for arch-aware installs.
@@ -444,8 +500,8 @@ launching them under thistle-tk segfaults. App Store and Flashlight exist in
 both toolkits under the same IDs, and the app manager keeps the first
 registration of an ID, so each manager registers only its own:
 `lvgl_apps_register_builtin()` under LVGL, `tk_native_apps_register()` under
-thistle-tk. All seventeen apps are reachable by default on every S3 board;
-naming `thistle-tk` trades fourteen of them for its refresh behaviour.
+thistle-tk. All eighteen apps are reachable by default on every S3 board;
+naming `thistle-tk` trades fifteen of them for its refresh behaviour.
 
 `simulator/tests/test_app_matrix.py` launches every app on every simulated
 device profile, and the simulator's `--wm NAME` overrides `system.json` for a

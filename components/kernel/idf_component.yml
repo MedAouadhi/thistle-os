@@ -1,0 +1,37 @@
+dependencies:
+  # The Tailscale client (tailnet_platform.c), only on the S3, which has the
+  # PSRAM it allocates from. It is MicroLink as forked for hermes_esp32,
+  # with eight commits on top for ThistleOS on branch `thistle`, pinned to an
+  # exact object so an upstream change cannot arrive without somebody
+  # choosing it:
+  #
+  # - built against mbedTLS 3 (ESP-IDF 5.5) as well as mbedTLS 4;
+  # - microlink_stop() waits for the client's tasks, so the tailnet can be
+  #   switched off and on without freeing a context a task still uses, and
+  #   a stop frees what the tasks left: sockets, TLS state, queued packets,
+  #   the WireGuard device;
+  # - a node without an auth key signs in at a URL (ML_STATE_NEEDS_LOGIN),
+  #   and a refused or expired registration is reported, not retried for
+  #   ever;
+  # - the home DERP region is the nearest one measured, not Dallas;
+  # - a packet that finds no WireGuard session starts one, so a plain
+  #   socket reaches a peer that has not reached this device first;
+  # - a stop ends waits it used to sit out, and the netif is added and
+  #   removed on the TCPIP thread; DERP regions are measured once an hour,
+  #   and a stale sign-in URL is given up for a new one.
+  #
+  # wireguard_lwip is named too because MicroLink lists it under
+  # PRIV_REQUIRES, which the component manager does not follow. Moving the
+  # pin on a tree that has built needs dependencies.lock deleted as well.
+  microlink:
+    git: https://github.com/MedAouadhi/microlink.git
+    path: components/microlink
+    version: ac85bc0f030ab32d5ca694e48472296256708797
+    rules:
+      - if: "target == esp32s3"
+  wireguard_lwip:
+    git: https://github.com/MedAouadhi/microlink.git
+    path: components/microlink/components/wireguard_lwip
+    version: ac85bc0f030ab32d5ca694e48472296256708797
+    rules:
+      - if: "target == esp32s3"

@@ -14,6 +14,7 @@
 #include "thistle/light_prefs.h"
 #include "thistle/mesh.h"
 #include "thistle/net_manager.h"
+#include "thistle/tailnet.h"
 #include "thistle/wifi_manager.h"
 
 #include "lvgl.h"
@@ -72,6 +73,35 @@ static const quick_toggle_t s_mobile = {
     .available = net_cellular_present,
     .is_on     = mobile_is_on,
     .set_on    = mobile_set,
+};
+
+/* --- Tailscale: the tailnet. A device that has never joined has to sign in
+ * once, which only the app can show. --- */
+
+static const char *tailnet_set(bool on)
+{
+    esp_err_t err = tailnet_set_enabled(on);
+    if (err == ESP_ERR_NOT_SUPPORTED) {
+        return "No Tailscale on this board";
+    }
+    const char *said = outcome(tailnet_is_enabled(), on, err,
+                               "Tailscale did not start", "Tailscale did not stop");
+    if (said || !on) {
+        return said;
+    }
+    tailnet_status_t st;
+    if (tailnet_get_status(&st) == ESP_OK && !st.joined) {
+        return "Open Tailscale to sign in";
+    }
+    return NULL;
+}
+
+static const quick_toggle_t s_tailnet = {
+    .symbol    = LV_SYMBOL_SHUFFLE,
+    .label     = "Tailscale",
+    .available = tailnet_available,
+    .is_on     = tailnet_is_enabled,
+    .set_on    = tailnet_set,
 };
 
 /* --- GPS --- */
@@ -195,6 +225,7 @@ void quick_panel_add_builtin(void)
 {
     quick_panel_add_toggle(&s_wifi);
     quick_panel_add_toggle(&s_mobile);
+    quick_panel_add_toggle(&s_tailnet);
     quick_panel_add_toggle(&s_gps);
     quick_panel_add_toggle(&s_lora);
     quick_panel_add_toggle(&s_keys);

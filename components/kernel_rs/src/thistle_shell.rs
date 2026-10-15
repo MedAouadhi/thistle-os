@@ -613,6 +613,14 @@ fn cmd_wifi(args: &[&str], print: PrintFn, ctx: *mut c_void) -> i32 {
     }
 }
 
+fn cmd_tailscale(args: &[&str], print: PrintFn, ctx: *mut c_void) -> i32 {
+    let (ret, lines) = crate::tailnet_manager::shell(args);
+    for line in lines {
+        shell_print(print, ctx, &line);
+    }
+    ret
+}
+
 fn cmd_ble(args: &[&str], print: PrintFn, ctx: *mut c_void) -> i32 {
     let subcmd = if args.len() > 1 { args[1] } else { "status" };
     match subcmd {
@@ -766,6 +774,11 @@ static COMMANDS: &[ShellCmd] = &[
         name: "ble",
         help: "BLE status",
         func: cmd_ble,
+    },
+    ShellCmd {
+        name: "tailscale",
+        help: "Tailnet status/peers/ping",
+        func: cmd_tailscale,
     },
     ShellCmd {
         name: "help",

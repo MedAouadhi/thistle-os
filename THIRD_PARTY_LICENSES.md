@@ -656,6 +656,51 @@ org.
 
 ---
 
+## MicroLink
+
+**License:** MIT
+**Source:** https://github.com/CamM2325/microlink, as forked at https://github.com/MedAouadhi/microlink (branch `thistle`)
+**Used for:** The Tailscale client: the control plane, DERP, DISCO and STUN, behind `components/kernel/src/tailnet_platform.c`. S3 boards only.
+
+```
+MIT License
+
+Copyright (c) 2025-2026 Cameron Malone
+```
+
+Full text: https://github.com/MedAouadhi/microlink/blob/thistle/LICENSE
+
+It carries an X25519 implementation under the MIT License, Copyright (c) 2015-2016 Cryptography Research, Inc. (`x25519-license.txt` in its repository).
+
+---
+
+## wireguard-lwip
+
+**License:** BSD-3-Clause
+**Source:** https://github.com/smartalock/wireguard-lwip, as carried in MicroLink (`components/microlink/components/wireguard_lwip`)
+**Used for:** WireGuard over lwIP: the tunnel netif the tailnet's traffic goes through.
+
+```
+Copyright (c) 2021 Daniel Hope (www.floorsense.nz)
+All rights reserved.
+```
+
+Full text: `LICENSE` in that directory of MicroLink.
+
+---
+
+## cJSON
+
+**License:** MIT
+**Source:** https://github.com/DaveGamble/cJSON, as the `espressif/cjson` component
+**Used for:** MicroLink's control-plane messages.
+
+```
+Copyright (c) 2009-2017 Dave Gamble and cJSON contributors
+```
+
+---
+
 ## License Compatibility Summary
 
 All dependencies are compatible with the ThistleOS BSD 3-Clause license:
@@ -663,8 +708,8 @@ All dependencies are compatible with the ThistleOS BSD 3-Clause license:
 | License | Compatible with BSD 3-Clause | Components |
 |---------|------------------------------|------------|
 | Apache-2.0 | Yes | ESP-IDF, esp_lvgl_port, esp_modem, esp_codec_dev, elf_loader, NimBLE, mbedTLS |
-| MIT | Yes | LVGL, FreeRTOS, RadioLib, libcurl, Unity, esp-rs crates, Expat, CrossPoint Reader, diy-esp32-epub-reader |
-| BSD-3-Clause | Yes | Bosch BHI260AP firmware and BHY2 SensorAPI |
+| MIT | Yes | LVGL, FreeRTOS, RadioLib, libcurl, Unity, esp-rs crates, Expat, CrossPoint Reader, diy-esp32-epub-reader, MicroLink, cJSON |
+| BSD-3-Clause | Yes | Bosch BHI260AP firmware and BHY2 SensorAPI, wireguard-lwip |
 | BSD-2-Clause | Yes | Monocypher |
 | zlib | Yes | SDL2, uzlib |
 | CC0-1.0 | Yes | minimp3 |

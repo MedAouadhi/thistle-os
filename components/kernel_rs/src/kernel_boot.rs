@@ -275,6 +275,10 @@ pub extern "C" fn kernel_init() -> i32 {
     // makes calls, now registered with the drivers.
     crate::call_manager::start();
 
+    // The tailnet, if the user has it on: a kernel worker job joins it once
+    // there is a network and the clock is set (tailnet_manager.rs).
+    crate::tailnet_manager::start();
+
     // Publish SYSTEM_BOOT event
     crate::event::event_publish_simple(0); // EVENT_SYSTEM_BOOT = 0
 

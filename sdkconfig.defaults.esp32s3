@@ -47,3 +47,40 @@ CONFIG_BT_NIMBLE_SM_LEGACY=n
 CONFIG_BT_NIMBLE_SM_SC=y
 CONFIG_BT_NIMBLE_SM_SC_ONLY=1
 CONFIG_BT_NIMBLE_SM_LVL=4
+
+# The Tailscale client (MicroLink, components/kernel/src/tailnet_platform.c).
+# The control plane speaks Noise with ChaCha20-Poly1305, which mbedTLS
+# leaves out unless asked.
+CONFIG_MBEDTLS_CHACHA20_C=y
+CONFIG_MBEDTLS_POLY1305_C=y
+CONFIG_MBEDTLS_CHACHAPOLY_C=y
+# MicroLink's own HTTP configuration server stays off: it would serve the
+# auth key to the tailnet, and it is the only way to point the client at a
+# control plane other than Tailscale's. Its build-time credentials are
+# pinned empty, because a key compiled in is a key in every copy of the
+# image; pairing is by a sign-in URL (tailnet_manager.rs).
+CONFIG_ML_ENABLE_CONFIG_HTTPD=n
+CONFIG_ML_TAILSCALE_AUTH_KEY=""
+CONFIG_ML_WIFI_SSID=""
+CONFIG_ML_WIFI_PASSWORD=""
+CONFIG_ML_DEVICE_NAME=""
+# The network coordinator owns WiFi and the modem; the client's own
+# switching between them stays off.
+CONFIG_ML_ENABLE_CELLULAR=n
+# The control plane's map of the tailnet arrives in one buffer and is parsed
+# in another, both in PSRAM: 512 KB each by default, for tailnets of hundreds.
+# 128 KB holds about 80 peers.
+CONFIG_ML_H2_BUFFER_SIZE_KB=128
+CONFIG_ML_JSON_BUFFER_SIZE_KB=128
+# Peers are cached in NVS, 92 bytes each, and NVS is 24 KB, shared with WiFi.
+CONFIG_ML_NVS_MAX_PEERS=32
+# getaddrinfo() asks the tailnet first, so "homelab" reaches a peer by name.
+CONFIG_LWIP_HOOK_NETCONN_EXT_RESOLVE_CUSTOM=y
+# The client times a TCP connect to each DERP region, about 30 a start, and
+# closes each with a reset (SO_LINGER 0), so none waits two minutes in
+# TIME_WAIT holding a PCB.
+CONFIG_LWIP_SO_LINGER=y
+# The client holds up to six sockets of its own (control, DERP, and STUN and
+# disco over IPv4 and IPv6), on top of the File Transfer server's and any
+# app's.
+CONFIG_LWIP_MAX_SOCKETS=16

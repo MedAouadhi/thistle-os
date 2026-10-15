@@ -47,6 +47,9 @@ CONFIG_LV_FONT_MONTSERRAT_22=y
 # Arabic letters itself (apps/reader/reader/arabic_shape.c says why).
 CONFIG_LV_USE_BIDI=y
 
+# QR codes, for the Tailscale app's sign-in link.
+CONFIG_LV_USE_QRCODE=y
+
 # PPP for cellular data (required by drv_modem_a7682e esp_modem backend)
 CONFIG_LWIP_PPP_SUPPORT=y
 CONFIG_LWIP_PPP_PAP_SUPPORT=y
