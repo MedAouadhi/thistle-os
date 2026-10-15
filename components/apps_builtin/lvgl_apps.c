@@ -25,6 +25,9 @@
 #ifndef THISTLE_HAVE_FILEMGR
 #define THISTLE_HAVE_FILEMGR 1
 #endif
+#ifndef THISTLE_HAVE_FILEXFER
+#define THISTLE_HAVE_FILEXFER 1
+#endif
 #ifndef THISTLE_HAVE_READER
 #define THISTLE_HAVE_READER 1
 #endif
@@ -73,6 +76,9 @@
 #endif
 #if THISTLE_HAVE_FILEMGR
 #include "file_manager/filemgr_app.h"
+#endif
+#if THISTLE_HAVE_FILEXFER
+#include "filexfer/filexfer_app.h"
 #endif
 #if THISTLE_HAVE_READER
 #include "reader/reader_app.h"
@@ -134,6 +140,9 @@ esp_err_t lvgl_apps_register_builtin(bool has_radio, bool has_gps)
 #endif
 #if THISTLE_HAVE_FILEMGR
     REGISTER(filemgr_app_register);
+#endif
+#if THISTLE_HAVE_FILEXFER
+    REGISTER(filexfer_app_register);
 #endif
 #if THISTLE_HAVE_READER
     REGISTER(reader_app_register);

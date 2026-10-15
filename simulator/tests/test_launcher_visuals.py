@@ -59,13 +59,14 @@ CASES = (
         "6252a062110e486fccf484112b1163290d1f6a6529d1a3b56acc719dc6c0c87d",
         True,
     ),
-    # The LCD hashes cover all sixteen apps. The nine that live under apps/
+    # The LCD hashes cover all seventeen apps. The nine that live under apps/
     # were absent from the simulator until its CMakeLists stopped looking for
     # them under components/apps_builtin, so both the dock's favourites and
     # this grid changed when they came back. It changed again when App Store
     # and Flashlight stopped appearing twice: the thistle-tk versions had
     # claimed both IDs, and the listing still showed the LVGL manifests. And
-    # again when Podcasts joined, after the Reader, and Phone after Podcasts.
+    # again when Podcasts joined, after the Reader, and Phone after Podcasts,
+    # and File Transfer after Files.
     Case(
         "lcd-apps",
         "tdeck",
@@ -73,14 +74,14 @@ CASES = (
         "159,215",
         320,
         240,
-        "85f9282a817372bbde9d4f6cdf9a91a1a415e62dc3dbf2a8c6e9dd62f50a8f55",
+        "2ff5542ed3932f90de075b8a31be289810eb218b7fca67b881dfa49f374f7580",
     ),
     # What an e-paper board boots by default: the LVGL grid, three columns
     # wide on a 240 px screen. Its first hash had the tile under the tap
     # point drawn pressed: the pointer went back to PRESSED after the tap.
     # It changed again when the 1-bit conversion moved its cut from a third
     # of white to half, which inks more of each letter's antialiased edge,
-    # and when Podcasts joined the grid, and Phone.
+    # and when Podcasts joined the grid, Phone, and File Transfer.
     Case(
         "eink-lvgl-apps",
         "tdeck-max",
@@ -88,7 +89,7 @@ CASES = (
         "120,294",
         240,
         320,
-        "0bcd6c4858de81dfe50c53048972dddba0396339c809933b1351b7b8591d4c37",
+        "fa862c854309cba6da4246b84e03f39eb0db01cbd1ec3acc6e70a505c2d63ba7",
     ),
 )
 

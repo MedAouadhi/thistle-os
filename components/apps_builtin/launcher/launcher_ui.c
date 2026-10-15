@@ -58,6 +58,7 @@ static const char *app_icon_symbol(const char *app_id)
 {
     if (strstr(app_id, "settings"))    return LV_SYMBOL_SETTINGS;
     if (strstr(app_id, "filemgr"))     return LV_SYMBOL_DIRECTORY;
+    if (strstr(app_id, "filexfer"))    return LV_SYMBOL_UPLOAD;
     if (strstr(app_id, "reader"))      return LV_SYMBOL_FILE;
     if (strstr(app_id, "messenger"))   return LV_SYMBOL_ENVELOPE;
     if (strstr(app_id, "phone"))       return LV_SYMBOL_CALL;

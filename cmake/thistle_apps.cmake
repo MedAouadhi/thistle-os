@@ -13,6 +13,7 @@
 set(THISTLE_OPTIONAL_APPS
     "appstore|APPSTORE|appstore"
     "file_manager|FILEMGR|filemgr"
+    "filexfer|FILEXFER|filexfer"
     "flashlight|FLASHLIGHT|flashlight"
     "navigator|NAVIGATOR|navigator"
     "notes|NOTES|notes"

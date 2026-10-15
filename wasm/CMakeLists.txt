@@ -112,6 +112,8 @@ set(WASM_SRCS
     ${SIM_DIR}/sim_assert.c
     ${SIM_DIR}/board_simulator.c
     ${SIM_DIR}/platform/sim_vfs.c
+    # HTTP server stubs: nothing can listen in a browser
+    ${SIM_DIR}/platform/sim_httpd.c
 )
 
 add_executable(thistle_wasm ${WASM_SRCS} ${THISTLE_WASM_SRCS} ${LVGL_SRCS})
@@ -152,6 +154,7 @@ target_compile_definitions(thistle_wasm PRIVATE
     THISTLE_HAVE_LAUNCHER=${THISTLE_HAVE_LAUNCHER}
     THISTLE_HAVE_SETTINGS=${THISTLE_HAVE_SETTINGS}
     THISTLE_HAVE_FILEMGR=${THISTLE_HAVE_FILEMGR}
+    THISTLE_HAVE_FILEXFER=${THISTLE_HAVE_FILEXFER}
     THISTLE_HAVE_READER=${THISTLE_HAVE_READER}
     THISTLE_HAVE_PODCASTS=${THISTLE_HAVE_PODCASTS}
     THISTLE_HAVE_MESSENGER=${THISTLE_HAVE_MESSENGER}

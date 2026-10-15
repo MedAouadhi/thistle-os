@@ -277,6 +277,33 @@ spec is `.scratch/podcasts/spec.md`.
 - `simulator/tests/test_podcasts.py` runs the app against a fake PodcastIndex
   and podcast host; `apps/podcasts/tests/run_tests.sh` has the host tests.
 
+### File Transfer
+
+`apps/filexfer/` shares the SD card and SPIFFS with a browser on the same
+WiFi, at `http://thistledev.local` (mDNS, `espressif/mdns`) or the device's
+address: list, upload, download, rename, delete, and edit text in the page,
+which checks JSON before saving it. `.scratch/file-transfer/spec.md` has the
+reasons, and what the hardware has yet to confirm.
+
+- **The server runs while the app is open.** Opening it starts the server
+  with a new password, shown on the device; leaving the app, Stop, or 15
+  minutes without a request stops it. Meanwhile it holds the device awake.
+- **Only on WiFi.** With mobile data on, the server listens on the modem's
+  link too; `on_open` in `xfer_server.c` closes any connection that did not
+  come in on the WiFi address.
+- **Every path goes through `xfer_path_parse()`**, which keeps a request
+  inside `/sdcard` and `/spiffs`. SPIFFS has no folders and holds 31 bytes
+  of name, the leading `/` included (`xfer_fs.h`).
+- **The page is `apps/filexfer/web/index.html`**, embedded by `web.cmake`;
+  it fetches nothing from elsewhere. A change needs the session cookie and
+  `X-Thistle-Request`, or the password as Basic authentication, which a
+  script can use: `curl -u :ABCD-EFGH -T a.txt
+  'http://thistledev.local/api/file?path=/sdcard/a.txt'`.
+- The simulator's server listens on 127.0.0.1, port `THISTLE_SIM_HTTPD_PORT`
+  or 8080; its SPIFFS is the folder `THISTLE_SIM_SPIFFS`, or
+  `/tmp/thistle_spiffs`; and it prints the password, as a device never does.
+  `simulator/tests/test_file_transfer.py`, `apps/filexfer/tests/run_tests.sh`.
+
 ### LVGL's pool is 64 KB
 
 LVGL allocates every object and every local style property from its own
@@ -345,8 +372,8 @@ The kernel is **100% Rust and hardware-independent**. It never calls ESP-IDF har
 - **Kernel (Rust)** (`components/kernel_rs/`): 100% Rust. 57 modules: manifest parser, permissions, IPC, events, app manager, version, crypto, HAL registry, driver manager, WM, app store, wifi/ble/net managers, OTA, and more. 1231 tests.
 - **Display Server** (`components/kernel/src/display_server.c`): Surface management, compositor, WM vtable interface.
 - **UI** (`components/ui/`): thistle-tk WM (default). LVGL-based WM also available. Both loadable as `.wm.elf`.
-- **Apps**: 16 apps, migrating to `.app.elf` on SPIFFS. Five remain in
-  `components/apps_builtin/`; the other eleven are their own components under
+- **Apps**: 17 apps, migrating to `.app.elf` on SPIFFS. Five remain in
+  `components/apps_builtin/`; the other twelve are their own components under
   `apps/`, listed once in `cmake/thistle_apps.cmake` for the simulators and
   found by `EXTRA_COMPONENT_DIRS` for the firmware.
 - **App Store** (`components/kernel_rs/src/tk_appstore.rs`): Browsable Rust app. Rich catalog with ratings, categories, download counts, changelogs, and component-level driver matching for arch-aware installs.
@@ -417,8 +444,8 @@ launching them under thistle-tk segfaults. App Store and Flashlight exist in
 both toolkits under the same IDs, and the app manager keeps the first
 registration of an ID, so each manager registers only its own:
 `lvgl_apps_register_builtin()` under LVGL, `tk_native_apps_register()` under
-thistle-tk. All sixteen apps are reachable by default on every S3 board;
-naming `thistle-tk` trades thirteen of them for its refresh behaviour.
+thistle-tk. All seventeen apps are reachable by default on every S3 board;
+naming `thistle-tk` trades fourteen of them for its refresh behaviour.
 
 `simulator/tests/test_app_matrix.py` launches every app on every simulated
 device profile, and the simulator's `--wm NAME` overrides `system.json` for a

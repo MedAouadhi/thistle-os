@@ -188,6 +188,9 @@ jobs:
       - name: Test Phone app times and numbers under sanitizers
         run: apps/phone/tests/run_tests.sh
 
+      - name: Test File Transfer paths, password and files under sanitizers
+        run: apps/filexfer/tests/run_tests.sh
+
       - name: Test secure signing-key generation
         run: |
           python3 -m pip install -r tools/requirements.txt
@@ -381,6 +384,10 @@ jobs:
       - name: Run Phone app contacts, favourites and keypad tests
         working-directory: simulator
         run: python3 tests/test_phone_app.py --sim build/thistle_sim
+
+      - name: Run File Transfer web server tests
+        working-directory: simulator
+        run: python3 tests/test_file_transfer.py --sim build/thistle_sim
 
       - name: Upload launcher framebuffer failures
         if: failure()

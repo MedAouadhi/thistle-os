@@ -82,6 +82,7 @@ set(SIM_SRCS
     platform/platform_stubs.c
     platform/sim_vfs.c
     platform/sim_http.c
+    platform/sim_httpd.c
     platform/sim_i2c_bus.c
     platform/sim_spi_bus.c
     devices/dev_pcf8563.c
@@ -147,6 +148,7 @@ target_compile_definitions(thistle_sim PRIVATE
     # Disable ESP-IDF specific features
     SIMULATOR_BUILD=1
     THISTLE_HAVE_FILEMGR=${THISTLE_HAVE_FILEMGR}
+    THISTLE_HAVE_FILEXFER=${THISTLE_HAVE_FILEXFER}
     THISTLE_HAVE_READER=${THISTLE_HAVE_READER}
     THISTLE_HAVE_PODCASTS=${THISTLE_HAVE_PODCASTS}
     THISTLE_HAVE_NAVIGATOR=${THISTLE_HAVE_NAVIGATOR}
@@ -166,6 +168,11 @@ target_compile_definitions(thistle_sim PRIVATE
 include(${THISTLE_DIR}/apps/podcasts/credentials.cmake)
 thistle_podcasts_credentials("${CMAKE_CURRENT_BINARY_DIR}/podcasts")
 target_include_directories(thistle_sim PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/podcasts")
+
+# File Transfer's web page, into a header in this build directory.
+include(${THISTLE_DIR}/apps/filexfer/web.cmake)
+thistle_filexfer_web("${CMAKE_CURRENT_BINARY_DIR}/filexfer")
+target_include_directories(thistle_sim PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/filexfer")
 
 # Build Rust kernel for host target
 set(KERNEL_RS_DIR "${THISTLE_DIR}/components/kernel_rs")

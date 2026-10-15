@@ -1,0 +1,7 @@
+{
+  "id": "com.thistle.filexfer",
+  "name": "File Transfer",
+  "version": "0.1.0",
+  "allow_background": false,
+  "permissions": ["network", "storage"]
+}
