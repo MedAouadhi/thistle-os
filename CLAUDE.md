@@ -430,6 +430,49 @@ client.
   `tailscale status --json`); whether it has joined is a file in
   `THISTLE_SIM_SPIFFS`. `simulator/tests/test_tailscale.py`.
 
+### Hermes
+
+`apps/hermes/` is a Hermes Device Bridge client, the user's Hermes agent as
+hermes_esp32's device has it: one conversation, Markdown replies, tool
+calls as activity rows, Stop and New conversation, the Command panel, the
+drawer's Hermes Sessions and Scheduled Runs. `.scratch/hermes/spec.md` has
+the reasons; hermes_esp32's `protocol/README.md` and its plugin's
+`bridge/service.py` are the authority on the protocol (version 1).
+
+- **Over the tailnet only.** The app says what Tailscale is waiting for
+  until the device is on the tailnet, then opens a WebSocket to the bridge,
+  `ws://100.125.204.43:8765` on homelab. The address is `.env`'s
+  `HERMES_BRIDGE_URL` (`apps/hermes/bridge_url.cmake`) or the card's
+  `config/hermes.json`, which the app's Address page writes, listing the
+  tailnet's peers.
+- **The bridge admits a node by its tag, `tag:hermes-device`**, and reads
+  no credential. This device joins as its user's, untagged, so the bridge
+  answers `AUTHENTICATION_FAILED` until the tag is given in the Tailscale
+  admin console, and the tailnet's policy lets the tag reach the port; the
+  app says so and tries every 30 s. A first admitted connection is the
+  device's registration.
+- **Typed or dictated, sent as text.** The compose field is an ordinary
+  text field, so the mic key dictates into it (Dictation, above); HELLO
+  does not ask for `spoken_message`.
+- **The session lives while the app is open**, on a FreeRTOS task with an
+  8 KB internal stack (`hermes_bridge.c`); the chat state, a 64 KB receive
+  buffer and the outbox are one PSRAM allocation. The screens read a copy
+  and queue what they send; nothing is queued while the link is down.
+  Lost, it is opened again a second later, then up to 30 s apart. The
+  device is held awake while a turn is in flight, ten minutes at most.
+- **The WebSocket is the app's own** (`hermes_ws.c`, `hermes_ws_conn.c`):
+  `ws://` only, BSD sockets, so the simulator runs the same code. The
+  handshake's SHA-1 and the JSON reader are the Podcasts app's
+  (`pod_sha1.c`, `pod_json.c`).
+- **Markdown is md4c 0.5.2 with hermes_esp32's `hermes_markdown.c`**; a
+  table wider than the screen becomes `Header: value` groups. Labels point
+  at text kept in a PSRAM arena per item (`lv_label_set_text_static`), not
+  LVGL's pool. `hermes_glyphs.c` writes what Montserrat lacks as ASCII or
+  LVGL symbols (quotes, dashes, accented letters, a few emoji).
+- `apps/hermes/tests/run_tests.sh` has the host tests;
+  `simulator/tests/test_hermes.py` runs the app against
+  `fake_hermes_bridge.py`, a stdlib bridge that speaks as the plugin does.
+
 ### LVGL's pool is 64 KB
 
 LVGL allocates every object and every local style property from its own
@@ -439,7 +482,10 @@ picker ran the pool dry with a dozen rows on top of the page beneath it.
 LVGL's malloc assert then spins forever inside the layout code, which looks
 like a hang, not an out-of-memory error. Give a long list shared
 `lv_style_t`s, close the page beneath it, and measure with
-`lv_mem_monitor()`; the simulator's pool is the same size.
+`lv_mem_monitor()`; the simulator's pool is the same size. The launcher
+deletes its app drawer before opening an app from it: its nineteen tiles,
+styled a property at a time, once left Files too little for a card of
+nine folders.
 
 ### Rust toolchains
 
@@ -498,7 +544,7 @@ The kernel is **100% Rust and hardware-independent**. It never calls ESP-IDF har
 - **Kernel (Rust)** (`components/kernel_rs/`): 100% Rust. 57 modules: manifest parser, permissions, IPC, events, app manager, version, crypto, HAL registry, driver manager, WM, app store, wifi/ble/net managers, OTA, and more. 1231 tests.
 - **Display Server** (`components/kernel/src/display_server.c`): Surface management, compositor, WM vtable interface.
 - **UI** (`components/ui/`): thistle-tk WM (default). LVGL-based WM also available. Both loadable as `.wm.elf`.
-- **Apps**: 18 apps, migrating to `.app.elf` on SPIFFS. Five remain in
+- **Apps**: 19 apps, migrating to `.app.elf` on SPIFFS. Five remain in
   `components/apps_builtin/`; the other thirteen are their own components under
   `apps/`, listed once in `cmake/thistle_apps.cmake` for the simulators and
   found by `EXTRA_COMPONENT_DIRS` for the firmware.
@@ -570,8 +616,8 @@ launching them under thistle-tk segfaults. App Store and Flashlight exist in
 both toolkits under the same IDs, and the app manager keeps the first
 registration of an ID, so each manager registers only its own:
 `lvgl_apps_register_builtin()` under LVGL, `tk_native_apps_register()` under
-thistle-tk. All eighteen apps are reachable by default on every S3 board;
-naming `thistle-tk` trades fifteen of them for its refresh behaviour.
+thistle-tk. All nineteen apps are reachable by default on every S3 board;
+naming `thistle-tk` trades sixteen of them for its refresh behaviour.
 
 `simulator/tests/test_app_matrix.py` launches every app on every simulated
 device profile, and the simulator's `--wm NAME` overrides `system.json` for a

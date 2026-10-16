@@ -64,6 +64,9 @@
 #ifndef THISTLE_HAVE_TAILSCALE
 #define THISTLE_HAVE_TAILSCALE 1
 #endif
+#ifndef THISTLE_HAVE_HERMES
+#define THISTLE_HAVE_HERMES 1
+#endif
 
 #if THISTLE_HAVE_LAUNCHER
 #include "launcher/launcher_app.h"
@@ -119,6 +122,9 @@
 #if THISTLE_HAVE_TAILSCALE
 #include "tailscale/tailscale_app.h"
 #endif
+#if THISTLE_HAVE_HERMES
+#include "hermes/hermes_app.h"
+#endif
 
 /* Keep the first failure and carry on: one app failing to register is no
  * reason to leave the rest of the launcher empty. */
@@ -153,6 +159,10 @@ esp_err_t lvgl_apps_register_builtin(bool has_radio, bool has_gps)
 #if THISTLE_HAVE_TAILSCALE
     /* On every board: on one without the client it says so. */
     REGISTER(tailscale_app_register);
+#endif
+#if THISTLE_HAVE_HERMES
+    /* On every board: on one without the tailnet it says so. */
+    REGISTER(hermes_app_register);
 #endif
 #if THISTLE_HAVE_READER
     REGISTER(reader_app_register);

@@ -16,10 +16,15 @@ pointer, which is what a short tap looks like to a UI task that is busy.
 from __future__ import annotations
 
 import argparse
+import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+
+SIM_DIR = Path(__file__).resolve().parent.parent
 
 
 @dataclass(frozen=True)
@@ -29,6 +34,8 @@ class Case:
     taps: tuple[str, ...]
     hold_ms: int
     expected: str
+    # Folders added to a scratch copy of the card, for an app that lists them.
+    folders: int = 0
 
 
 # Dock and grid positions are the launcher's own layout on each screen.
@@ -43,6 +50,12 @@ CASES = (
          "(filemgr) on_create"),
     Case("eink-quick-second-tap-elsewhere", "tdeck-max", ("120,294", "120,95"), 0,
          "(filemgr) on_create"),
+    # Files from the drawer, over a card with twelve more folders: while the
+    # drawer was only hidden, its nineteen tiles and these rows ran LVGL's
+    # pool dry, which hangs the UI in LVGL's allocator and the run never
+    # reaches its timeout.
+    Case("eink-files-from-the-drawer-over-a-full-card", "tdeck-max", ("120,294", "120,95"), 100,
+         "Simulator timeout reached", folders=12),
 )
 
 
@@ -52,8 +65,16 @@ def run_case(simulator: Path, case: Case) -> None:
                "--tap-hold", str(case.hold_ms)]
     for tap in case.taps:
         command.extend(("--tap", tap))
-    run = subprocess.run(command, text=True, capture_output=True,
-                         check=False, timeout=60)
+    env = dict(os.environ)
+    with tempfile.TemporaryDirectory(prefix="thistle-taps-") as tmp:
+        if case.folders:
+            card = Path(tmp) / "card"
+            shutil.copytree(SIM_DIR / "sdcard", card)
+            for i in range(case.folders):
+                (card / f"folder-{i:02d}").mkdir()
+            env["THISTLE_SIM_SDCARD"] = str(card)
+        run = subprocess.run(command, text=True, capture_output=True,
+                             check=False, timeout=60, env=env)
     if run.returncode != 0:
         raise AssertionError(f"simulator exited {run.returncode}")
     if case.expected not in run.stdout + run.stderr:

@@ -15,6 +15,7 @@ set(THISTLE_OPTIONAL_APPS
     "file_manager|FILEMGR|filemgr"
     "filexfer|FILEXFER|filexfer"
     "flashlight|FLASHLIGHT|flashlight"
+    "hermes|HERMES|hermes"
     "navigator|NAVIGATOR|navigator"
     "notes|NOTES|notes"
     "phone|PHONE|phone"

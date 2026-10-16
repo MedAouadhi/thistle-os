@@ -59,14 +59,15 @@ CASES = (
         "6252a062110e486fccf484112b1163290d1f6a6529d1a3b56acc719dc6c0c87d",
         True,
     ),
-    # The LCD hashes cover all eighteen apps. The nine that live under apps/
+    # The LCD hashes cover all nineteen apps. The nine that live under apps/
     # were absent from the simulator until its CMakeLists stopped looking for
     # them under components/apps_builtin, so both the dock's favourites and
     # this grid changed when they came back. It changed again when App Store
     # and Flashlight stopped appearing twice: the thistle-tk versions had
     # claimed both IDs, and the listing still showed the LVGL manifests. And
     # again when Podcasts joined, after the Reader, and Phone after Podcasts,
-    # and File Transfer after Files, and Tailscale after File Transfer.
+    # and File Transfer after Files, Tailscale after File Transfer, and
+    # Hermes after Tailscale.
     Case(
         "lcd-apps",
         "tdeck",
@@ -74,14 +75,15 @@ CASES = (
         "159,215",
         320,
         240,
-        "b8ee191511b4bfa9877761b3b4f63f5e0b236c09b007a2e738ec459ad0543ade",
+        "d346d6aac57fa703711f5aae84c44f278df146e95f4c50c1c98f6ada6090453d",
     ),
     # What an e-paper board boots by default: the LVGL grid, three columns
     # wide on a 240 px screen. Its first hash had the tile under the tap
     # point drawn pressed: the pointer went back to PRESSED after the tap.
     # It changed again when the 1-bit conversion moved its cut from a third
     # of white to half, which inks more of each letter's antialiased edge,
-    # and when Podcasts joined the grid, Phone, File Transfer and Tailscale.
+    # and when Podcasts joined the grid, Phone, File Transfer, Tailscale and
+    # Hermes.
     Case(
         "eink-lvgl-apps",
         "tdeck-max",
@@ -89,7 +91,7 @@ CASES = (
         "120,294",
         240,
         320,
-        "cdf9feb141930f4486d2831ff120e195dfeba55092608fa1209ade73e5f41fc3",
+        "cd9c9a7b6e88a55c3f1f1d2bb5bf847023485456154abfe8c11d043f4f7abe7b",
     ),
 )
 

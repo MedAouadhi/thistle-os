@@ -60,6 +60,7 @@ static const char *app_icon_symbol(const char *app_id)
     if (strstr(app_id, "filemgr"))     return LV_SYMBOL_DIRECTORY;
     if (strstr(app_id, "filexfer"))    return LV_SYMBOL_UPLOAD;
     if (strstr(app_id, "tailscale"))   return LV_SYMBOL_SHUFFLE;
+    if (strstr(app_id, "hermes"))      return LV_SYMBOL_CHARGE;
     if (strstr(app_id, "reader"))      return LV_SYMBOL_FILE;
     if (strstr(app_id, "messenger"))   return LV_SYMBOL_ENVELOPE;
     if (strstr(app_id, "phone"))       return LV_SYMBOL_CALL;
@@ -98,6 +99,26 @@ static void close_app_drawer(void);
 static void close_folder(void);
 static void apps_btn_clicked_cb(lv_event_t *e);
 
+/* Out of the tile's own click, the drawer it was in can be deleted at once,
+ * so the app opened from it has the drawer's share of LVGL's pool from its
+ * first object. (A deletion left to lv_obj_delete_async() would come after
+ * the app: LVGL runs the newest async call first.) */
+static void launch_from_grid_cb(void *arg)
+{
+    const char *app_id = arg;
+    if (s_app_drawer) {
+        lv_obj_delete(s_app_drawer);
+        s_app_drawer = NULL;
+        s_drawer_grid = NULL;
+    }
+    ESP_LOGI(TAG, "Launching app from launcher: %s", app_id);
+    esp_err_t ret = app_manager_launch(app_id);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to launch %s: %s", app_id, esp_err_to_name(ret));
+        toast_warn("App not available");
+    }
+}
+
 static void app_cell_clicked_cb(lv_event_t *e)
 {
     const char *app_id = (const char *)lv_obj_get_user_data(lv_event_get_target(e));
@@ -106,15 +127,11 @@ static void app_cell_clicked_cb(lv_event_t *e)
         return;
     }
 
-    close_app_drawer();
+    /* Hidden now, deleted once this click is over. */
+    if (s_app_drawer) lv_obj_add_flag(s_app_drawer, LV_OBJ_FLAG_HIDDEN);
+    s_drawer_visible = false;
     close_folder();
-
-    ESP_LOGI(TAG, "Launching app from launcher: %s", app_id);
-    esp_err_t ret = app_manager_launch(app_id);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to launch %s: %s", app_id, esp_err_to_name(ret));
-        toast_warn("App not available");
-    }
+    lv_async_call(launch_from_grid_cb, (void *)app_id);
 }
 
 static void dock_icon_clicked_cb(lv_event_t *e)
@@ -264,8 +281,8 @@ static lv_obj_t *create_dock_icon(lv_obj_t *parent, const char *label,
 
 static void populate_app_drawer(void)
 {
-    const app_manifest_t *apps[20];
-    int count = app_manager_list_apps(apps, 20);
+    const app_manifest_t *apps[32];
+    int count = app_manager_list_apps(apps, 32);
 
     /* As many CELL_SIZE columns as fit, then stretched to fill the row: the
      * spare pixels are worth more to a label than to the right margin. */
@@ -369,10 +386,17 @@ static void open_app_drawer(void)
     s_drawer_visible = true;
 }
 
+/* Deleted rather than hidden: its tiles take a share of LVGL's 64 KB pool
+ * that an app opened over it needs (CLAUDE.md). The Files app, opened from
+ * here over a card of nine folders, once ran the pool dry with all nineteen
+ * tiles still standing beneath it. Asynchronously, as the close can come
+ * from a click inside it. Opening the drawer builds it again. */
 static void close_app_drawer(void)
 {
     if (s_app_drawer) {
-        lv_obj_add_flag(s_app_drawer, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_delete_async(s_app_drawer);
+        s_app_drawer = NULL;
+        s_drawer_grid = NULL;
     }
     s_drawer_visible = false;
 }
@@ -444,8 +468,8 @@ static void open_folder(void)
         lv_obj_set_flex_align(s_folder_grid, LV_FLEX_ALIGN_CENTER,
                               LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START);
 
-        const app_manifest_t *apps[20];
-        int count = app_manager_list_apps(apps, 20);
+        const app_manifest_t *apps[32];
+        int count = app_manager_list_apps(apps, 32);
         int cell_w = (panel_w - 28) / 3;
         int cell_h = panel_h > 170 ? 66 : 58;
         for (int i = 0; i < count; i++) {

@@ -701,6 +701,30 @@ Copyright (c) 2009-2017 Dave Gamble and cJSON contributors
 
 ---
 
+## md4c
+
+**License:** MIT
+**Source:** https://github.com/mity/md4c, release `release-0.5.2`, unmodified
+**Used for:** Parsing Hermes's Markdown replies in the Hermes app, as hermes_esp32's firmware does. `md4c.c` and `md4c.h` are vendored in `apps/hermes/third_party/md4c/` with their `LICENSE.md`.
+
+```
+Copyright © 2016-2024 Martin Mitáš
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+```
+
+Full text: `apps/hermes/third_party/md4c/LICENSE.md`
+
+---
+
 ## License Compatibility Summary
 
 All dependencies are compatible with the ThistleOS BSD 3-Clause license:
@@ -708,7 +732,7 @@ All dependencies are compatible with the ThistleOS BSD 3-Clause license:
 | License | Compatible with BSD 3-Clause | Components |
 |---------|------------------------------|------------|
 | Apache-2.0 | Yes | ESP-IDF, esp_lvgl_port, esp_modem, esp_codec_dev, elf_loader, NimBLE, mbedTLS |
-| MIT | Yes | LVGL, FreeRTOS, RadioLib, libcurl, Unity, esp-rs crates, Expat, CrossPoint Reader, diy-esp32-epub-reader, MicroLink, cJSON |
+| MIT | Yes | LVGL, FreeRTOS, RadioLib, libcurl, Unity, esp-rs crates, Expat, CrossPoint Reader, diy-esp32-epub-reader, MicroLink, cJSON, md4c |
 | BSD-3-Clause | Yes | Bosch BHI260AP firmware and BHY2 SensorAPI, wireguard-lwip |
 | BSD-2-Clause | Yes | Monocypher |
 | zlib | Yes | SDL2, uzlib |

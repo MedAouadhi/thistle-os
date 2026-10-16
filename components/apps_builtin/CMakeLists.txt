@@ -21,6 +21,6 @@ idf_component_register(
     # lvgl_apps.c is the only caller of the apps that live as their own
     # components under apps/, and lvgl_apps.h exposes none of them, so this
     # dependency is an implementation detail rather than part of the interface.
-    PRIV_REQUIRES appstore file_manager filexfer flashlight navigator notes phone
-                  podcasts reader tailscale vault weather wifiscanner
+    PRIV_REQUIRES appstore file_manager filexfer flashlight hermes navigator notes
+                  phone podcasts reader tailscale vault weather wifiscanner
 )

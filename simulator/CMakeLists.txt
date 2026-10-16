@@ -169,6 +169,7 @@ target_compile_definitions(thistle_sim PRIVATE
     THISTLE_HAVE_WEATHER=${THISTLE_HAVE_WEATHER}
     THISTLE_HAVE_VAULT=${THISTLE_HAVE_VAULT}
     THISTLE_HAVE_TAILSCALE=${THISTLE_HAVE_TAILSCALE}
+    THISTLE_HAVE_HERMES=${THISTLE_HAVE_HERMES}
     CONFIG_LOG_DEFAULT_LEVEL=3
     # SD card path for simulator — points to local sdcard directory
     THISTLE_SDCARD_PATH="/tmp/thistle_sdcard"
@@ -184,6 +185,11 @@ target_include_directories(thistle_sim PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/podc
 include(${THISTLE_DIR}/components/ui/dictation_credentials.cmake)
 thistle_dictation_credentials("${CMAKE_CURRENT_BINARY_DIR}/dictation")
 target_include_directories(thistle_sim PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/dictation")
+
+# The Hermes app's bridge address, from .env when there is one, the same way.
+include(${THISTLE_DIR}/apps/hermes/bridge_url.cmake)
+thistle_hermes_bridge_url("${CMAKE_CURRENT_BINARY_DIR}/hermes")
+target_include_directories(thistle_sim PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/hermes")
 
 # File Transfer's web page, into a header in this build directory.
 include(${THISTLE_DIR}/apps/filexfer/web.cmake)

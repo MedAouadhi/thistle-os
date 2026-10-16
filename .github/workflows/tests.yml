@@ -191,6 +191,9 @@ jobs:
       - name: Test File Transfer paths, password and files under sanitizers
         run: apps/filexfer/tests/run_tests.sh
 
+      - name: Test the Hermes app's WebSocket, protocol and glyphs under sanitizers
+        run: apps/hermes/tests/run_tests.sh
+
       - name: Test secure signing-key generation
         run: |
           python3 -m pip install -r tools/requirements.txt
@@ -392,6 +395,10 @@ jobs:
       - name: Run Tailscale sign-in, key file and quick panel tests
         working-directory: simulator
         run: python3 tests/test_tailscale.py --sim build/thistle_sim
+
+      - name: Run Hermes Bridge Session tests against a fake bridge
+        working-directory: simulator
+        run: python3 tests/test_hermes.py --sim build/thistle_sim
 
       - name: Upload launcher framebuffer failures
         if: failure()

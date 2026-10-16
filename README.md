@@ -193,7 +193,7 @@ See the [Board Support](https://wan0net.github.io/esp32-os/docs/board-support.ht
 
 ## Built-in Apps
 
-ThistleOS ships with 18 apps that demonstrate the platform. All are built-in but follow the same patterns as external apps — they use the syscall table, HAL vtables, and permissions system.
+ThistleOS ships with 19 apps that demonstrate the platform. All are built-in but follow the same patterns as external apps — they use the syscall table, HAL vtables, and permissions system.
 
 | App | What it does |
 |-----|-------------|
@@ -202,6 +202,7 @@ ThistleOS ships with 18 apps that demonstrate the platform. All are built-in but
 | **File Manager** | SD card browser with directory navigation |
 | **File Transfer** | Shares the SD card and SPIFFS with a browser on the same WiFi, at `http://thistledev.local`, behind a password the device shows: upload, download, rename, delete, and edit text files in the browser |
 | **Tailscale** | Joins your tailnet over WiFi or mobile data, signed in once with a QR code: your own devices and services, reachable by name from apps and the Terminal (`tailscale ping homelab 22`). A tile in the quick panel switches it |
+| **Hermes** | Your Hermes agent, as the Hermes Agent Device has it, over the tailnet: one conversation with Markdown replies, tool calls as rows, Stop and New conversation, its slash commands, earlier Hermes Sessions, and Scheduled Runs. Type or dictate with the mic key |
 | **Reader** | EPUB and text books, Arabic included; recent books first, each opened where it was left |
 | **Podcasts** | PodcastIndex search, trending and categories; streams MP3 episodes, saves them to the SD card to play offline; starred, recently viewed, continue listening |
 | **Phone** | Voice calls through the A7682E modem; contacts from the SD card's vCards, favourites and recent calls |
