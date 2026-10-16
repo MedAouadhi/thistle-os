@@ -100,6 +100,10 @@ pub const HAL_KEY_BACK: u16 = 0x0101;
 /// or closes the quick panel.
 pub const HAL_KEY_QUICK: u16 = 0x0102;
 
+/// Mirrors `HAL_KEY_MIC` in hal/input.h: a key that types nothing, held down
+/// to dictate into the focused text field. Both its edges matter.
+pub const HAL_KEY_MIC: u16 = 0x0103;
+
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct HalInputTouchData {

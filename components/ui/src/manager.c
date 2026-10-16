@@ -7,6 +7,7 @@
 #include "ui/pull_gesture.h"
 #include "ui/quick_panel.h"
 #include "ui/call_ui.h"
+#include "ui/dictation.h"
 #include "thistle/power_manager.h"
 #include "hal/board.h"
 #include "hal/input.h"
@@ -241,6 +242,12 @@ static void ui_input_hal_cb(const hal_input_event_t *event, void *user_data)
             break;
         case HAL_INPUT_EVENT_KEY_DOWN:
         case HAL_INPUT_EVENT_KEY_UP: {
+            /* The microphone key types nothing either; dictation wants both
+             * of its edges. */
+            if (event->key.keycode == HAL_KEY_MIC) {
+                dictation_key(event->type == HAL_INPUT_EVENT_KEY_DOWN);
+                break;
+            }
             /* Home, Back and the quick key type nothing, so they never reach
              * LVGL's keypad. */
             if (event->key.keycode == HAL_KEY_HOME || event->key.keycode == HAL_KEY_BACK ||
@@ -604,6 +611,9 @@ esp_err_t ui_manager_init(ui_flush_fn_t flush_cb, bool use_deferred_refresh)
 
     /* 4b1d. The call screen, over everything, while a call is up */
     call_ui_init();
+
+    /* 4b1e. Dictation, held on the microphone key */
+    dictation_init();
 
     /* Touch stays in TIMER mode — LVGL polls at each lv_timer_handler call */
 

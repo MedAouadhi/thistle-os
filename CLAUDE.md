@@ -253,6 +253,46 @@ host tests. LVGL window managers only; thistle-tk has none.
 - `simulator/tests/test_quick_panel.py`; the simulator's `--drag` and
   `--tap quick` drive it.
 
+### Dictation
+
+Holding the microphone key (`HAL_KEY_MIC`, left of Space on the T-Deck Max)
+records while a text field has the keyboard's focus; letting go sends the
+recording to Cohere and inserts the transcript at that field's cursor
+(`components/ui/src/dictation.c`, `ui/dictation.h`). It is not tied to any
+app, Hermes or the tailnet. `.scratch/dictation/spec.md` has the rules.
+
+- **The same provider as the Hermes agent**: `POST
+  https://api.cohere.com/v2/audio/transcriptions`, model
+  `cohere-transcribe-arabic-07-2026`, a 16 kHz mono WAV. The key is
+  `COHERE_API_TOKEN` in the repository's `.env`, read into the build
+  directory as the Podcasts key is
+  (`components/ui/dictation_credentials.cmake`); a card's
+  `config/dictation.json` overrides `api_key`, `model`, `url`.
+- **The user picks the language**: Cohere detects none, and told `ar` it
+  answers some English in Arabic, translated. Arabic unless the quick
+  panel's Dictation tile (EN) is on; `thistle_os.dictation.language` in
+  system.json, `dictation_prefs.rs`. Arabic is inserted but drawn as boxes:
+  the font is Latin only (`.scratch/dictation/issues/05-*`).
+- **No focused text field, no recording**; password fields, calls and no
+  network are refused with a toast, and under 300 ms of audio is a tap.
+  60 s at most.
+- **What needs no hardware is in `dictation_core.c`**, host-tested in
+  `simulator/tests/test_dictation_core.c`: the WAV, the multipart form, the
+  answer's JSON, how the transcript joins the text before the cursor.
+- **The whole recording is in PSRAM** (1.9 MB for 60 s, freed after), and
+  each dictation has a FreeRTOS task with an 8 KB internal stack, gone when
+  the transcript is in. The device is held awake meanwhile.
+- **A player pauses while anything records**: `rs_audio_capture_begin()` /
+  `_end()` / `rs_audio_capturing()` (`thistle/audio_volume.h`). The
+  microphone hears the speaker, and the codec runs both directions at one
+  rate, so a player sets its own format again after. The Podcasts player
+  plays on once the recording ends.
+- The codec drops its first 400 ms after opening, so the pill says
+  Listening only once audio arrives.
+- `simulator/tests/test_dictation.py` runs it against a fake Cohere;
+  `THISTLE_SIM_MIC=FILE.wav` is what the simulator's microphone hears, and
+  `--tap mic:MS` holds the key.
+
 ### Podcasts
 
 `apps/podcasts/` browses PodcastIndex (search, trending, categories), streams

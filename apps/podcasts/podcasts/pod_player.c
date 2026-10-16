@@ -31,6 +31,7 @@
 #include "third_party/minimp3/minimp3.h"
 
 #include "hal/board.h"
+#include "thistle/audio_volume.h"
 #include "thistle/call.h"
 #include "thistle/power_manager.h"
 
@@ -103,6 +104,7 @@ static EXT_RAM_BSS_ATTR struct {
     int      kbps;
     bool     paused;
     int64_t  paused_at_us;
+    bool     paused_for_capture;      /* by a recording, to play on after it */
     bool     buffering;
     uint32_t hold;                    /* power_manager_hold() while playing */
 } s;
@@ -497,6 +499,7 @@ static void decode_task(void *arg)
         }
         bool paused = s.paused;
         int64_t paused_at = s.paused_at_us;
+        bool play_on = paused && s.paused_for_capture && !rs_audio_capturing();
         if (!paused && have < WINDOW) have += ring_pop_locked(window + have, WINDOW - have);
         bool drained = s.fill == 0;
         bool at_end = s.eof && drained;
@@ -511,6 +514,23 @@ static void decode_task(void *arg)
             ESP_LOGI(TAG, "a call is up; pausing");
             pod_player_pause();
             vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
+
+        /* Dictation has the microphone, which hears the speaker, and the
+         * codec, at its own rate: pause, and play on when it is done. */
+        if (!paused && rs_audio_capturing()) {
+            ESP_LOGI(TAG, "recording; pausing");
+            pod_player_pause();
+            pthread_mutex_lock(&s_lock);
+            if (s.session == me && s.paused) s.paused_for_capture = true;
+            pthread_mutex_unlock(&s_lock);
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
+        if (play_on) {
+            ESP_LOGI(TAG, "recording done; playing on");
+            pod_player_resume();
             continue;
         }
 
@@ -720,6 +740,7 @@ const char *pod_player_play(const pod_episode_t *episode, int32_t from)
     s.hz = 0;
     s.kbps = 0;
     s.paused = false;
+    s.paused_for_capture = false;
     restart_at_locked(from);
     hold_locked(true);
     bool started = start_locked();
@@ -738,6 +759,8 @@ void pod_player_pause(void)
 {
     snapshot_t *snap = NULL;
     pthread_mutex_lock(&s_lock);
+    /* Paused by the user: stays paused after a recording. */
+    s.paused_for_capture = false;
     if (s.loaded && (s.state == POD_PLAYER_PLAYING || s.state == POD_PLAYER_LOADING)) {
         s.paused = true;
         s.paused_at_us = now_us();
@@ -754,6 +777,7 @@ void pod_player_pause(void)
 void pod_player_resume(void)
 {
     pthread_mutex_lock(&s_lock);
+    s.paused_for_capture = false;
     if (!s.loaded) {
         pthread_mutex_unlock(&s_lock);
         return;
@@ -839,6 +863,7 @@ void pod_player_stop(void)
     s.loaded = false;
     s.state = POD_PLAYER_IDLE;
     s.paused = false;
+    s.paused_for_capture = false;
     s.buffering = false;
     hold_locked(false);
     /* The threads of the session that passed touch the ring only under the

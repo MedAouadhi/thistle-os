@@ -10,8 +10,12 @@
 //! and on every change. Muting keeps the volume, so unmuting goes back to it.
 //! An app that sets the volume through the `thistle_audio_set_volume` syscall
 //! sets this one, unsaved, so the quick panel shows what is playing at.
+//!
+//! Also whether something is recording, which a player pauses for: the
+//! microphone hears the speaker, and the codec runs both directions at one
+//! rate, so a recording's would play the music at the wrong speed.
 
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 
 use crate::hal_registry::registry;
 
@@ -29,6 +33,8 @@ const ESP_ERR_NOT_SUPPORTED: i32 = 0x106;
 
 static VOLUME: AtomicU8 = AtomicU8::new(DEFAULT_VOLUME);
 static MUTED: AtomicBool = AtomicBool::new(false);
+/// Recordings under way.
+static CAPTURES: AtomicU32 = AtomicU32::new(0);
 
 /// What the driver is given.
 pub(crate) fn effective_level(volume: u8, muted: bool) -> u8 {
@@ -131,9 +137,50 @@ pub extern "C" fn rs_audio_set_muted(muted: bool) -> i32 {
     crate::system_json::save(SECTION, MUTED_KEY, serde_json::Value::Bool(muted))
 }
 
+/// A recording has taken the microphone. Each is ended by one
+/// `rs_audio_capture_end()`.
+#[no_mangle]
+pub extern "C" fn rs_audio_capture_begin() {
+    CAPTURES.fetch_add(1, Ordering::AcqRel);
+}
+
+/// A recording is done with the microphone. One too many is ignored.
+#[no_mangle]
+pub extern "C" fn rs_audio_capture_end() {
+    let _ = CAPTURES.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1));
+}
+
+/// Whether anything is recording: a player pauses meanwhile.
+#[no_mangle]
+pub extern "C" fn rs_audio_capturing() -> bool {
+    CAPTURES.load(Ordering::Acquire) > 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capturing_lasts_until_every_recording_has_ended() {
+        CAPTURES.store(0, Ordering::Relaxed);
+        assert!(!rs_audio_capturing());
+        rs_audio_capture_begin();
+        rs_audio_capture_begin();
+        rs_audio_capture_end();
+        assert!(rs_audio_capturing());
+        rs_audio_capture_end();
+        assert!(!rs_audio_capturing());
+    }
+
+    #[test]
+    fn an_end_with_no_recording_does_not_make_one_owed() {
+        CAPTURES.store(0, Ordering::Relaxed);
+        rs_audio_capture_end();
+        rs_audio_capture_begin();
+        assert!(rs_audio_capturing());
+        rs_audio_capture_end();
+        assert!(!rs_audio_capturing());
+    }
 
     #[test]
     fn muted_plays_at_nothing_whatever_the_volume() {

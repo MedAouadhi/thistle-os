@@ -23,7 +23,10 @@ from typing import Callable, Optional
 SYSTEM_JSON = Path(__file__).resolve().parent.parent / "sdcard" / "config" / "system.json"
 
 WIFI_TILE = "42,52"
-VOLUME_SLIDER = "200,184"
+# The third row, which only dictation's tile is on.
+DICTATION_TILE = "42,152"
+VOLUME_SLIDER = "200,236"
+SETTINGS_BUTTON = "50,271"
 BELOW_PANEL = "120,300"
 
 
@@ -57,6 +60,10 @@ CASES = (
          ("--tap", "quick", "--tap", WIFI_TILE), 2,
          expected=("(quick_panel) WiFi -> off",),
          saved=lambda s: thistle_os(s).get("wifi", {}).get("radio_off") is True),
+    Case("the-dictation-tile-picks-english", "tdeck-max",
+         ("--tap", "quick", "--tap", DICTATION_TILE), 2,
+         expected=("(quick_panel) Dictation -> on",),
+         saved=lambda s: thistle_os(s).get("dictation", {}).get("language") == "en"),
     Case("a-slider-sets-and-saves-the-volume", "tdeck-max",
          ("--tap", "quick", "--tap", VOLUME_SLIDER), 2,
          expected=("(quick_panel) Volume -> ",),
@@ -72,7 +79,7 @@ CASES = (
          expected=("(notes) on_create", "(quick_panel) open", "(quick_panel) closed"),
          absent=("(notes) on_destroy",)),
     Case("settings-button-opens-settings", "tdeck-max",
-         ("--tap", "quick", "--tap", "50,220"), 2,
+         ("--tap", "quick", "--tap", SETTINGS_BUTTON), 2,
          expected=("(quick_panel) closed", "(settings) on_create")),
 )
 

@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::hal_registry::{
     HalInputCb, HalInputDriver, HalInputEvent, HalInputEventData, HalInputEventType,
-    HalInputKeyData,
+    HalInputKeyData, HAL_KEY_MIC,
 };
 
 // ── ESP error codes ──────────────────────────────────────────────────────────
@@ -228,12 +228,13 @@ macro_rules! kbd_logw {
 // Alt, Sym and the microphone key — because a key that decodes to nothing is
 // a key the driver cannot act on.
 
-/// Keys that type nothing on their own, and so never leave the driver. Shift,
-/// Alt and Sym change what the next key types, and the microphone key types
-/// only the `0` its symbol layer gives it. They used to be sent on as they
-/// are, and LVGL read them as keys of its own: Sym (0x02) as Home and Shift
-/// (0x03) as End, jumping the cursor in a text field, while Alt and the
-/// microphone key went into the text as control characters.
+/// Keys that type nothing on their own. Shift, Alt and Sym change what the
+/// next key types, and never leave the driver. The microphone key types the
+/// `0` its symbol layer gives it, and otherwise goes out as `HAL_KEY_MIC`,
+/// held to dictate. These codes used to be sent on as they are, and LVGL read
+/// them as keys of its own: Sym (0x02) as Home and Shift (0x03) as End,
+/// jumping the cursor in a text field, while Alt and the microphone key went
+/// into the text as control characters.
 const KEY_ALT: u16 = 0x01;
 const KEY_SYM: u16 = 0x02;
 const KEY_SHIFT: u16 = 0x03;
@@ -692,11 +693,11 @@ impl KbdState {
             KEY_SHIFT => &mut self.shift,
             KEY_ALT | KEY_SYM => &mut self.symbol,
             _ if pressed => {
-                let code = layered_code(row, col, self.shift.active(), self.symbol.active());
+                let mut code = layered_code(row, col, self.shift.active(), self.symbol.active());
                 self.shift.spend();
                 self.symbol.spend();
                 if code == KEY_MIC {
-                    return None;
+                    code = HAL_KEY_MIC;
                 }
                 self.down_code[pos] = code;
                 return Some(code);
@@ -1509,9 +1510,46 @@ mod tests {
     }
 
     #[test]
-    fn the_microphone_key_types_its_zero_under_alt_and_nothing_without() {
+    fn the_microphone_key_types_its_zero_under_alt_and_dictates_without() {
         assert_eq!(typed(&[tap(ALT), tap(MIC)].concat()), "0");
-        assert!(press_keys(&tap(MIC)).is_empty());
+        assert_eq!(
+            press_keys(&tap(MIC)),
+            vec![
+                (HalInputEventType::KeyDown, HAL_KEY_MIC),
+                (HalInputEventType::KeyUp, HAL_KEY_MIC),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_microphone_key_held_across_other_keys_comes_up_once() {
+        // Dictation listens for the release to stop recording. A letter typed
+        // while the key is held must not end it, nor the key's release go
+        // missing because another key came between.
+        let keys = [down(MIC), down(Q), up(Q), up(MIC)];
+        assert_eq!(
+            press_keys(&keys),
+            vec![
+                (HalInputEventType::KeyDown, HAL_KEY_MIC),
+                (HalInputEventType::KeyDown, b'q' as u16),
+                (HalInputEventType::KeyUp, b'q' as u16),
+                (HalInputEventType::KeyUp, HAL_KEY_MIC),
+            ]
+        );
+    }
+
+    #[test]
+    fn sym_let_go_while_the_microphone_key_is_down_still_releases_the_zero() {
+        // The release names what the press sent, whatever the layer is by
+        // then: a `0` that went down comes up as `0`, not as HAL_KEY_MIC.
+        let keys = [down(SYM), down(MIC), up(SYM), up(MIC)];
+        assert_eq!(
+            press_keys(&keys),
+            vec![
+                (HalInputEventType::KeyDown, b'0' as u16),
+                (HalInputEventType::KeyUp, b'0' as u16),
+            ]
+        );
     }
 
     #[test]
@@ -1531,15 +1569,10 @@ mod tests {
     fn the_modifier_keys_themselves_never_reach_the_window_manager() {
         // LVGL reads 0x02 as Home and 0x03 as End, and types 0x01 and 0x04
         // into a text field as control characters.
-        let keys = [
-            tap(LEFT_SHIFT),
-            tap(ALT),
-            tap(SYM),
-            tap(RIGHT_SHIFT),
-            tap(MIC),
-        ]
-        .concat();
+        let keys = [tap(LEFT_SHIFT), tap(ALT), tap(SYM), tap(RIGHT_SHIFT)].concat();
         assert_eq!(press_keys(&keys), Vec::new());
+        let heard: Vec<u16> = press_keys(&tap(MIC)).iter().map(|e| e.1).collect();
+        assert!(!heard.contains(&KEY_MIC), "0x04 reached the window manager");
     }
 
     #[test]

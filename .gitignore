@@ -56,6 +56,9 @@ simulator/sdcard/data/podcasts/
 simulator/sdcard/podcasts/
 simulator/sdcard/config/podcasts.json
 
+# Dictation's Cohere key, if one is put on the simulator's SD card
+simulator/sdcard/config/dictation.json
+
 # The phonebook's stars and the call log the simulator writes (phonebook.rs,
 # call_log.rs), which the Phone app's tests make
 simulator/sdcard/phone/

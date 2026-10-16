@@ -24,3 +24,12 @@ bool rs_audio_is_muted(void);
 
 /* Mute or unmute, and remember it. */
 esp_err_t rs_audio_set_muted(bool muted);
+
+/* Whether something is recording (audio_volume.rs). A recording calls
+ * begin when it takes the microphone and end when it is done with it, and a
+ * player pauses meanwhile: the microphone hears the speaker, and the codec
+ * runs both directions at one rate, so a recording's format plays the music
+ * at the wrong speed. Then the player sets its own format again. */
+void rs_audio_capture_begin(void);
+void rs_audio_capture_end(void);
+bool rs_audio_capturing(void);

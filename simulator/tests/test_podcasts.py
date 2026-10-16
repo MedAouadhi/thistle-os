@@ -19,7 +19,9 @@ through it, and checks:
 - a search sends the query and lists what it finds;
 - a podcast starred is in the library, starred;
 - skipping ahead asks the host for the byte that far into the audio;
-- an episode goes on playing, to its end, after the app is left.
+- an episode goes on playing, to its end, after the app is left;
+- an episode pauses while the user dictates, and plays on after at its own
+  format, which dictation's 16 kHz replaced.
 
 The real PodcastIndex is never asked: the card's key replaces any built in.
 """
@@ -62,6 +64,7 @@ EPISODE_SAVE = "170,148"
 TITLE_STAR = "220,39"
 PLAYER_AHEAD = "197,236"       # +30
 HOME_SEARCH = "100,69"
+HOME_SEARCH_PLAYING = "100,121"  # below the Now playing row
 
 
 def silent_mp3(seconds: int) -> bytes:
@@ -98,6 +101,18 @@ class FakeIndex:
                 with index.lock:
                     index.requests.append({"path": self.path, "headers": headers})
                 index.answer(self, headers)
+
+            def do_POST(self) -> None:  # noqa: N802 (http.server API)
+                # Cohere's transcription API, for dictation into the search.
+                self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                with index.lock:
+                    index.requests.append({"path": self.path, "headers": {}})
+                body = json.dumps({"text": "test talk"}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
 
             def log_message(self, *args) -> None:
                 pass
@@ -359,6 +374,29 @@ def test_plays_on_after_leaving(simulator: Path, index: FakeIndex, root: Path) -
     expect(episode is not None and episode["finished"] == 1, f"not recorded as finished: {episode}")
 
 
+def test_pauses_while_dictating(simulator: Path, index: FakeIndex, root: Path) -> None:
+    card = Card(root, "dictate", index.base)
+    (card.path / "config" / "dictation.json").write_text(json.dumps(
+        {"api_key": "TESTKEY", "url": f"{index.base}/v2/audio/transcriptions"}))
+    out = run_sim(simulator, card,
+                  (HOME_TRENDING, FIRST_ROW, PODCAST_FIRST_EPISODE, EPISODE_PLAY,
+                   "back", "back", "back", "back", HOME_SEARCH_PLAYING, "mic:1500"),
+                  text="", timeout_ms=2250 + 1500 * 10 + 5000)
+    expect_in('Focused text: "test talk"', out)
+    playing = out.find(f"playing {EPISODE_ID} from 0 s, streamed")
+    expect(playing >= 0, "the episode did not play")
+    # The player notices the recording as dictation sets its format, in
+    # either order; it plays on only after both, at its own format again.
+    paused = out.find("recording; pausing", playing)
+    dictating = out.find("[sim_audio] configure sample_rate=16000 bits=16 channels=1", playing)
+    expect(paused >= 0, "the episode did not pause for the recording")
+    expect(dictating >= 0, "dictation did not record at 16 kHz")
+    played_on = out.find("recording done; playing on", max(paused, dictating))
+    expect(played_on >= 0, "the episode did not play on after the recording")
+    again = out.find("[sim_audio] configure sample_rate=44100 bits=16 channels=1", played_on)
+    expect(again >= 0, "the episode played on without setting its own format again")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--sim", type=Path, default=SIM_DIR / "build" / "thistle_sim")
@@ -379,6 +417,7 @@ def main() -> int:
             ("star", lambda: test_star(simulator, index, root)),
             ("skip_ahead_asks_for_a_range", lambda: test_skip_ahead_asks_for_a_range(simulator, index, root)),
             ("plays_on_after_leaving", lambda: test_plays_on_after_leaving(simulator, index, root)),
+            ("pauses_while_dictating", lambda: test_pauses_while_dictating(simulator, index, root)),
         ]
         for name, case in cases:
             try:

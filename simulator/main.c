@@ -51,14 +51,16 @@ static const char *s_wm_override = NULL;
  * held for s_tap_hold_ms; 0 delivers the press and the release before LVGL
  * next reads the pointer, as a short tap does on hardware whose UI task is
  * busy refreshing a panel. */
-#define SIM_MAX_TAPS   8
+#define SIM_MAX_TAPS   12
 #define SIM_TAP_GAP_MS 1500u
-/* keycode is HAL_KEY_HOME, HAL_KEY_BACK or HAL_KEY_QUICK for a press of that
+/* keycode is HAL_KEY_HOME, HAL_KEY_BACK, HAL_KEY_QUICK or HAL_KEY_MIC for a press of that
  * key in place of a tap, and 0 for a tap at x,y. A drag goes down at x,y and
  * moves to x2,y2 over SIM_DRAG_MS before it lifts. A step is done in place
  * of a tap, at its turn: "wait" (nothing), "dial:NUMBER" or
  * "compose:NUMBER[:NAME]". */
-static struct { int x, y, x2, y2; uint16_t keycode; bool drag; const char *step; } s_taps[SIM_MAX_TAPS];
+/* hold_ms, when not -1, is how long this one is held, in place of
+ * s_tap_hold_ms: "mic:MS". */
+static struct { int x, y, x2, y2; uint16_t keycode; bool drag; const char *step; int hold_ms; } s_taps[SIM_MAX_TAPS];
 static int s_tap_count = 0;
 static int s_tap_hold_ms = 100;
 #define SIM_DRAG_MS 300u
@@ -127,20 +129,31 @@ static bool add_tap(const char *spec)
         s_taps[s_tap_count].drag = false;
         s_taps[s_tap_count].keycode = 0;
         s_taps[s_tap_count].step = spec;
+        s_taps[s_tap_count].hold_ms = -1;
         s_tap_count++;
         return true;
     }
     if (s_tap_count < SIM_MAX_TAPS) {
         s_taps[s_tap_count].step = NULL;
         s_taps[s_tap_count].drag = false;
+        s_taps[s_tap_count].hold_ms = -1;
+        int hold;
+        char end;
+        if (sscanf(spec, "mic:%d%c", &hold, &end) == 1 && hold >= 0) {
+            s_taps[s_tap_count].keycode = HAL_KEY_MIC;
+            s_taps[s_tap_count].hold_ms = hold;
+            s_tap_count++;
+            return true;
+        }
         s_taps[s_tap_count].keycode = strcmp(spec, "home") == 0  ? HAL_KEY_HOME
                                     : strcmp(spec, "back") == 0  ? HAL_KEY_BACK
-                                    : strcmp(spec, "quick") == 0 ? HAL_KEY_QUICK : 0;
+                                    : strcmp(spec, "quick") == 0 ? HAL_KEY_QUICK
+                                    : strcmp(spec, "mic") == 0   ? HAL_KEY_MIC : 0;
     }
     if (s_tap_count >= SIM_MAX_TAPS ||
         (s_taps[s_tap_count].keycode == 0 &&
          sscanf(spec, "%d,%d", &s_taps[s_tap_count].x, &s_taps[s_tap_count].y) != 2)) {
-        fprintf(stderr, "Invalid --tap value; expected X,Y, home, back, quick, wait, "
+        fprintf(stderr, "Invalid --tap value; expected X,Y, home, back, quick, mic, wait, "
                         "dial:NUMBER or compose:NUMBER[:NAME] (at most %d taps)\n",
                 SIM_MAX_TAPS);
         return false;
@@ -162,6 +175,7 @@ static bool add_drag(const char *spec)
     s_taps[s_tap_count].keycode = 0;
     s_taps[s_tap_count].drag = true;
     s_taps[s_tap_count].step = NULL;
+    s_taps[s_tap_count].hold_ms = -1;
     s_tap_count++;
     return true;
 }
@@ -348,6 +362,8 @@ int main(int argc, char **argv)
             printf("  --tap X,Y           Inject a native-coordinate tap after startup;\n");
             printf("                      repeat for more, %u ms apart\n", SIM_TAP_GAP_MS);
             printf("  --tap home|back|quick  Press the Home, Back or quick key instead\n");
+            printf("  --tap mic[:MS]      Hold the microphone key, to dictate (F4 in a\n");
+            printf("                      window), for MS or else --tap-hold\n");
             printf("  --tap wait          Take a tap's turn doing nothing\n");
             printf("  --tap dial:NUMBER   Place a call to NUMBER instead (rs_call_dial)\n");
             printf("  --tap compose:NUMBER[:NAME]\n");
@@ -545,7 +561,8 @@ int main(int argc, char **argv)
             uint16_t ty = (uint16_t)s_taps[tap_index].y;
             uint16_t key = s_taps[tap_index].keycode;
             uint32_t tap_down_ms = taps_base_ms + (uint32_t)tap_index * SIM_TAP_GAP_MS;
-            uint32_t tap_up_ms = tap_down_ms + (uint32_t)s_tap_hold_ms;
+            int hold_ms = s_taps[tap_index].hold_ms >= 0 ? s_taps[tap_index].hold_ms : s_tap_hold_ms;
+            uint32_t tap_up_ms = tap_down_ms + (uint32_t)hold_ms;
             if (tap_phase == 0 && since_start > tap_down_ms &&
                 (key ? sim_input_inject_key(key, true) : sim_input_inject_touch(tx, ty, true))) {
                 tap_phase = 1;

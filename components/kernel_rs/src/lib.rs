@@ -31,6 +31,7 @@ pub mod call_manager;
 pub mod contact_manager;
 pub mod crypto;
 pub mod data_logger;
+pub mod dictation_prefs;
 pub mod display_server;
 pub mod driver_loader;
 pub mod driver_manager;

@@ -57,6 +57,33 @@ extern void test_epaper_policy_requested_full_restarts_the_auto_run(void);
 extern void test_epaper_policy_unknown_value_falls_back_to_fast(void);
 extern void test_epaper_policy_init_forgets_the_policy_and_any_request(void);
 
+/* test_dictation_core.c */
+extern void test_dictation_wav_header_says_16k_mono_16_bit_pcm(void);
+extern void test_dictation_a_minute_fits_the_buffer_it_is_given(void);
+extern void test_dictation_form_carries_the_model_the_language_and_the_file(void);
+extern void test_dictation_form_refuses_values_that_would_break_it(void);
+extern void test_dictation_reads_the_text_of_an_answer(void);
+extern void test_dictation_reads_arabic_sent_as_it_is_or_escaped(void);
+extern void test_dictation_reads_a_surrogate_pair_as_one_character(void);
+extern void test_dictation_reads_escapes(void);
+extern void test_dictation_finds_the_key_past_other_members_of_any_kind(void);
+extern void test_dictation_cuts_a_long_text_between_characters(void);
+extern void test_dictation_finds_nothing_in_what_is_not_an_answer(void);
+extern void test_dictation_reads_the_message_of_a_refusal(void);
+extern void test_dictation_says_what_a_refusal_means(void);
+extern void test_dictation_config_defaults_are_the_hermes_agents(void);
+extern void test_dictation_config_takes_what_the_card_gives(void);
+extern void test_dictation_config_keeps_defaults_for_empty_or_oversized_values(void);
+extern void test_dictation_config_ignores_a_file_that_is_not_json(void);
+extern void test_dictation_joins_a_word_before_the_cursor_with_a_space(void);
+extern void test_dictation_adds_no_space_at_the_start_or_after_one(void);
+extern void test_dictation_adds_no_space_before_punctuation(void);
+extern void test_dictation_takes_an_arabic_letter_before_the_cursor_for_a_word(void);
+extern void test_dictation_trims_the_transcript(void);
+extern void test_dictation_keeps_line_breaks_in_a_text_area_and_not_in_a_line(void);
+extern void test_dictation_cuts_a_long_join_between_characters(void);
+extern void test_dictation_finds_the_byte_before_a_cursor_counted_in_characters(void);
+
 /* test_pull_gesture.c */
 extern void test_pull_threshold_is_an_eighth_of_the_screen(void);
 extern void test_pull_threshold_has_a_floor_on_a_short_screen(void);
@@ -162,6 +189,33 @@ int main(void)
     RUN_TEST(epaper_policy_requested_full_restarts_the_auto_run);
     RUN_TEST(epaper_policy_unknown_value_falls_back_to_fast);
     RUN_TEST(epaper_policy_init_forgets_the_policy_and_any_request);
+
+    printf("\n[dictation_core]\n");
+    RUN_TEST(dictation_wav_header_says_16k_mono_16_bit_pcm);
+    RUN_TEST(dictation_a_minute_fits_the_buffer_it_is_given);
+    RUN_TEST(dictation_form_carries_the_model_the_language_and_the_file);
+    RUN_TEST(dictation_form_refuses_values_that_would_break_it);
+    RUN_TEST(dictation_reads_the_text_of_an_answer);
+    RUN_TEST(dictation_reads_arabic_sent_as_it_is_or_escaped);
+    RUN_TEST(dictation_reads_a_surrogate_pair_as_one_character);
+    RUN_TEST(dictation_reads_escapes);
+    RUN_TEST(dictation_finds_the_key_past_other_members_of_any_kind);
+    RUN_TEST(dictation_cuts_a_long_text_between_characters);
+    RUN_TEST(dictation_finds_nothing_in_what_is_not_an_answer);
+    RUN_TEST(dictation_reads_the_message_of_a_refusal);
+    RUN_TEST(dictation_says_what_a_refusal_means);
+    RUN_TEST(dictation_config_defaults_are_the_hermes_agents);
+    RUN_TEST(dictation_config_takes_what_the_card_gives);
+    RUN_TEST(dictation_config_keeps_defaults_for_empty_or_oversized_values);
+    RUN_TEST(dictation_config_ignores_a_file_that_is_not_json);
+    RUN_TEST(dictation_joins_a_word_before_the_cursor_with_a_space);
+    RUN_TEST(dictation_adds_no_space_at_the_start_or_after_one);
+    RUN_TEST(dictation_adds_no_space_before_punctuation);
+    RUN_TEST(dictation_takes_an_arabic_letter_before_the_cursor_for_a_word);
+    RUN_TEST(dictation_trims_the_transcript);
+    RUN_TEST(dictation_keeps_line_breaks_in_a_text_area_and_not_in_a_line);
+    RUN_TEST(dictation_cuts_a_long_join_between_characters);
+    RUN_TEST(dictation_finds_the_byte_before_a_cursor_counted_in_characters);
 
     printf("\n[pull_gesture]\n");
     RUN_TEST(pull_threshold_is_an_eighth_of_the_screen);

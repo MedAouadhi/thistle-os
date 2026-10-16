@@ -44,6 +44,8 @@ set(THISTLE_SRCS
     ${THISTLE_DIR}/components/ui/src/quick_panel.c
     ${THISTLE_DIR}/components/ui/src/quick_panel_tiles.c
     ${THISTLE_DIR}/components/ui/src/call_ui.c
+    ${THISTLE_DIR}/components/ui/src/dictation.c
+    ${THISTLE_DIR}/components/ui/src/dictation_core.c
     # Built-in apps
     ${THISTLE_DIR}/components/apps_builtin/lvgl_apps.c
     ${THISTLE_DIR}/components/apps_builtin/launcher/launcher_app.c
@@ -170,6 +172,11 @@ include(${THISTLE_DIR}/apps/podcasts/credentials.cmake)
 thistle_podcasts_credentials("${CMAKE_CURRENT_BINARY_DIR}/podcasts")
 target_include_directories(thistle_sim PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/podcasts")
 
+# Dictation's Cohere key, from .env when there is one, the same way.
+include(${THISTLE_DIR}/components/ui/dictation_credentials.cmake)
+thistle_dictation_credentials("${CMAKE_CURRENT_BINARY_DIR}/dictation")
+target_include_directories(thistle_sim PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/dictation")
+
 # File Transfer's web page, into a header in this build directory.
 include(${THISTLE_DIR}/apps/filexfer/web.cmake)
 thistle_filexfer_web("${CMAKE_CURRENT_BINARY_DIR}/filexfer")
@@ -247,6 +254,8 @@ add_executable(thistle_sim_tests
     ${THISTLE_DIR}/components/ui/src/epaper_refresh.c
     tests/test_pull_gesture.c
     ${THISTLE_DIR}/components/ui/src/pull_gesture.c
+    tests/test_dictation_core.c
+    ${THISTLE_DIR}/components/ui/src/dictation_core.c
     tests/test_xl9555.c
     tests/test_board_fingerprint.c
     tests/test_http_client_shim.c
