@@ -34,11 +34,11 @@
 #include "podcasts/pod_player.h"
 #include "podcasts/pod_text.h"
 #include "podcasts/pod_ui.h"
-#include "reader/arabic_shape.h"
 
 #include "hal/board.h"
 #include "hal/sdcard_path.h"
 #include "thistle/app_manager.h"
+#include "ui/arabic_shape.h"
 #include "ui/manager.h"
 #include "ui/theme.h"
 #include "ui/toast.h"

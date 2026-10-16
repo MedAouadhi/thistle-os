@@ -60,7 +60,7 @@ Full text: https://github.com/FreeRTOS/FreeRTOS-Kernel/blob/main/LICENSE.md
 **License:** MIT
 **Version:** 9.2
 **Source:** https://github.com/lvgl/lvgl
-**Used for:** UI rendering, widgets, animations, font rendering, touch input handling. The Reader's Arabic shaping, `apps/reader/reader/arabic_shape.c`, is a port of LVGL's `lv_text_ap.c`.
+**Used for:** UI rendering, widgets, animations, font rendering, touch input handling. The Arabic shaping every label and text field uses, `components/ui/src/arabic_shape.c`, is a port of LVGL's `lv_text_ap.c`.
 
 ```
 MIT License
@@ -606,7 +606,7 @@ Full text: https://github.com/lieff/minimp3/blob/master/LICENSE
 **License:** Bitstream Vera Fonts license; DejaVu changes are in the public domain
 **Version:** 2.37
 **Source:** https://dejavu-fonts.github.io/
-**Used for:** `apps/reader/reader/reader_font_16.c` and `reader_font_16_mono.c`, the bitmap fonts the Reader sets books in on colour screens and on e-paper, made from DejaVu Sans by `apps/reader/tools/gen_reader_font.sh`, which the Podcasts app sets its text in too; and `apps/podcasts/podcasts/pod_symbols_16.c` and `pod_symbols_16_mono.c`, its two stars, made from DejaVu Sans by `apps/podcasts/tools/gen_symbols_font.sh`. LVGL's `lv_font_dejavu_16_persian_hebrew` is made from the same font.
+**Used for:** `apps/reader/reader/reader_font_16.c` and `reader_font_16_mono.c`, the bitmap fonts the Reader sets books in on colour screens and on e-paper, made from DejaVu Sans by `apps/reader/tools/gen_reader_font.sh`, which the Podcasts app sets its text in too; `components/ui/src/fonts/arabic_font_{14,18,22}.c` and their `_mono` cuts, the Arabic every label and text field falls back to, made from DejaVu Sans by `components/ui/tools/gen_arabic_fonts.sh`; and `apps/podcasts/podcasts/pod_symbols_16.c` and `pod_symbols_16_mono.c`, its two stars, made from DejaVu Sans by `apps/podcasts/tools/gen_symbols_font.sh`. LVGL's `lv_font_dejavu_16_persian_hebrew` is made from the same font.
 
 ```
 Copyright (c) 2003 by Bitstream, Inc. All Rights Reserved. Bitstream Vera is

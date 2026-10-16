@@ -20,12 +20,12 @@
  * book_progress.h.
  */
 #include "reader/reader_app.h"
-#include "reader/arabic_shape.h"
 #include "reader/book_progress.h"
 #include "reader/book_title.h"
 #include "reader/epub.h"
 #include "reader/epub_port.h"
 
+#include "ui/arabic_shape.h"
 #include "ui/manager.h"
 #include "ui/theme.h"
 #include "ui/toast.h"

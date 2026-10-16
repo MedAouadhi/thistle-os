@@ -14,7 +14,6 @@ set(THISTLE_READER_THIRD_PARTY_SRCS
 )
 
 set(THISTLE_READER_SRCS
-    reader/arabic_shape.c
     reader/book_progress.c
     reader/book_title.c
     reader/epub.c

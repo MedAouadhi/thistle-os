@@ -16,7 +16,9 @@ WAV into the simulated microphone (THISTLE_SIM_MIC). It checks:
   lost or out of order;
 - with no text field focused, nothing records and nothing is sent;
 - a tap of the key sends nothing;
-- a refusal leaves the field as it was, and says why.
+- a refusal leaves the field as it was, and says why;
+- Arabic is drawn as Arabic in Notes: in glyphs, not boxes, its letters
+  joined, read from the right, and the cursor where it ends.
 
 The real Cohere is never asked: the card's URL replaces the built-in one.
 """
@@ -120,12 +122,19 @@ def make_card(root: Path, name: str, url: str, language: str | None = None) -> P
 
 
 def run_sim(simulator: Path, card: Path, mic: Path, hold_ms: int,
-            app: str | None = "com.thistle.terminal") -> str:
+            app: str | None = "com.thistle.terminal", taps: tuple[str, ...] = (),
+            screenshot: Path | None = None) -> str:
+    """Runs the simulator with `app` in front, makes `taps` (1.5 s apart, the
+    simulator's gap), then holds the mic key for `hold_ms`."""
     command = [str(simulator), "--headless", "--device", "tdeck-max",
-               "--timeout", str(2250 + hold_ms + 3500),
-               "--tap", "mic", "--tap-hold", str(hold_ms), "--type", ""]
+               "--timeout", str(2250 + 1500 * len(taps) + hold_ms + 3500)]
+    for tap in taps:
+        command.extend(("--tap", tap))
+    command.extend(("--tap", f"mic:{hold_ms}", "--type", ""))
     if app:
         command.extend(("--launch-app", app))
+    if screenshot:
+        command.extend(("--screenshot", str(screenshot)))
     env = dict(os.environ, THISTLE_SIM_SDCARD=str(card), THISTLE_SIM_MIC=str(mic))
     run = subprocess.run(command, env=env, text=True, capture_output=True,
                          check=False, timeout=120)
@@ -144,6 +153,21 @@ def expect_in(needle: str, out: str) -> None:
     if needle not in out:
         tail = "\n".join(out.splitlines()[-25:])
         raise AssertionError(f"{needle!r} not in the simulator's output; it ended:\n{tail}")
+
+
+def read_ppm(path: Path) -> tuple[int, int, bytes]:
+    """The simulator's screenshot: width, height and RGB bytes."""
+    data = path.read_bytes()
+    magic, width, height, depth, pixels = data.split(maxsplit=4)
+    expect(magic == b"P6" and depth == b"255", f"{path} is not an 8-bit PPM")
+    return int(width), int(height), pixels
+
+
+def ink_columns(shot: tuple[int, int, bytes], rows: range, columns: range) -> list[int]:
+    """The columns where anything dark is drawn in `rows`."""
+    width, _, pixels = shot
+    return [x for x in columns
+            if any(pixels[(y * width + x) * 3] < 128 for y in rows)]
 
 
 def form_parts(request: dict) -> dict[str, tuple[dict, bytes]]:
@@ -259,6 +283,41 @@ def test_a_refusal_changes_nothing(simulator: Path, cohere: FakeCohere, root: Pa
     expect(len(cohere.take()) == 1, "the recording was not sent once")
 
 
+def test_arabic_is_drawn_as_arabic(simulator: Path, cohere: FakeCohere, root: Path) -> None:
+    """A word, and the same letters kept apart by zero-width non-joiners, in a
+    new note: the first drawn joined, so narrower; both from the right."""
+    mic = root / "speech.wav"
+    make_wav(mic, 4.0)
+    card = make_card(root, "arabic", cohere.url)
+    shot_path = root / "arabic.ppm"
+    cohere.take()
+    joined, apart = "سلام", "\u200c".join("سلام")
+    cohere.status, cohere.answer = 200, {"text": f"{joined}\n{apart}"}
+    try:
+        out = run_sim(simulator, card, mic, hold_ms=1500, app="com.thistle.notes",
+                      taps=("190,30",), screenshot=shot_path)
+    finally:
+        cohere.answer = {"text": TRANSCRIPT}
+    expect_in(f'Focused text: "{joined}\n{apart}"', out)
+    expect("no glyph for" not in out, "a character of the transcript has no glyph")
+
+    cursor = [line for line in out.splitlines() if line.startswith("Focused cursor: ")]
+    expect(len(cursor) == 1, "no cursor reported")
+    cx, cy = (int(v) for v in cursor[0].split(": ", 1)[1].split(","))
+    shot = read_ppm(shot_path)
+    text_area = range(12, shot[0] - 4)
+    first = ink_columns(shot, range(cy - 20, cy), text_area)
+    second = ink_columns(shot, range(cy, cy + 20), text_area)
+    expect(first and second, "nothing drawn on one of the note's two lines")
+    first_w, second_w = first[-1] - first[0], second[-1] - second[0]
+    expect(first_w * 10 < second_w * 9,
+           f"joined letters drawn {first_w} px wide, apart {second_w} px: not joined")
+    expect(abs(first[-1] - second[-1]) <= 1 and first[-1] > shot[0] * 3 // 4,
+           f"the lines end at x {first[-1]} and {second[-1]}, not both at the right")
+    expect(abs(cx - second[0]) <= 2,
+           f"cursor at x {cx}, the text ends at x {second[0]}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--sim", type=Path, default=SIM_DIR / "build" / "thistle_sim")
@@ -279,6 +338,7 @@ def main() -> int:
             ("no_field_records_nothing", lambda: test_no_field_records_nothing(simulator, cohere, root)),
             ("a_tap_sends_nothing", lambda: test_a_tap_sends_nothing(simulator, cohere, root)),
             ("a_refusal_changes_nothing", lambda: test_a_refusal_changes_nothing(simulator, cohere, root)),
+            ("arabic_is_drawn_as_arabic", lambda: test_arabic_is_drawn_as_arabic(simulator, cohere, root)),
         ]
         for name, case in cases:
             try:

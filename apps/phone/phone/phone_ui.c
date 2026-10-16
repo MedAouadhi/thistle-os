@@ -17,7 +17,6 @@
 #include "phone/phone_app.h"
 #include "phone/phone_text.h"
 #include "phone/phone_ui.h"
-#include "reader/arabic_shape.h"
 
 #include "hal/board.h"
 #include "thistle/app_manager.h"
@@ -25,6 +24,7 @@
 #include "thistle/net_manager.h"
 #include "thistle/phonebook.h"
 #include "thistle/sms.h"
+#include "ui/arabic_shape.h"
 #include "ui/manager.h"
 #include "ui/theme.h"
 #include "ui/toast.h"

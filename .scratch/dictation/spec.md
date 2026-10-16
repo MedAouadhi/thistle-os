@@ -96,14 +96,11 @@ The same provider, model and language as the Hermes agent on `homelab`
 - 03: playback pauses for dictation.
 - 04: the simulator dictates: a WAV file or the host's microphone, and a
   fake Cohere in the tests.
-- 05: Arabic text on screen.
+- 05: Arabic text on screen, in every label and text field.
 
 ## Out of scope
 
 - A Settings page for the key and model (the card's
   `config/dictation.json` does it for now).
-- Showing Arabic: the only font is Montserrat, Latin only, and LVGL is built
-  without Arabic shaping or right-to-left text, so an Arabic transcript is
-  inserted correctly but drawn as boxes. Ticket 05.
 - Dictation into thistle-tk.
 - Offline transcription.

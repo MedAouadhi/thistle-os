@@ -612,9 +612,19 @@ int main(int argc, char **argv)
             printf("Simulator timeout reached (%d ms)\n", s_timeout_ms);
             if (s_type_text && !use_tk_wm) {
                 lv_obj_t *focused = lv_group_get_focused(lv_group_get_default());
-                printf("Focused text: \"%s\"\n",
-                       focused && lv_obj_check_type(focused, &lv_textarea_class)
-                           ? lv_textarea_get_text(focused) : "");
+                bool is_ta = focused && lv_obj_check_type(focused, &lv_textarea_class);
+                printf("Focused text: \"%s\"\n", is_ta ? lv_textarea_get_text(focused) : "");
+                if (is_ta) {
+                    /* Where the cursor is, on the screen, found as the
+                     * text area finds it. */
+                    lv_obj_t *label = lv_textarea_get_label(focused);
+                    lv_point_t at;
+                    lv_area_t content;
+                    lv_label_get_letter_pos(label, lv_textarea_get_cursor_pos(focused), &at);
+                    lv_obj_get_content_coords(label, &content);
+                    printf("Focused cursor: %d,%d\n", (int)(content.x1 + at.x),
+                           (int)(content.y1 + at.y));
+                }
             }
             if (s_report_offscreen && !use_tk_wm) {
                 int32_t display_w = lv_display_get_horizontal_resolution(NULL);

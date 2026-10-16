@@ -27,7 +27,7 @@ Requires SDL2 (`brew install sdl2` / `apt install libsdl2-dev`) and a prior ESP-
 | `--tap mic`, `--tap mic:MS` | Hold the microphone key, to dictate, for `--tap-hold` or MS milliseconds (F4 in the window). `THISTLE_SIM_MIC=FILE.wav` is what the microphone hears, a 16 kHz mono WAV; without it a windowed run hears the host's microphone, a headless one silence |
 | `--drag X1,Y1,X2,Y2` | Drag from one point to another over 0.3 s, in turn with the taps; `--drag 120,8,120,160` opens the quick panel on the T-Deck Max |
 | `--tap-hold MS` | How long each tap is held (default 100; `0` delivers press and release before LVGL next reads the pointer) |
-| `--type TEXT` | Type TEXT after the taps, every key pressed and released before LVGL next reads the keypad; prints `Focused text: "..."` on exit |
+| `--type TEXT` | Type TEXT after the taps, every key pressed and released before LVGL next reads the keypad; prints `Focused text: "..."` on exit, and `Focused cursor: X,Y`, where its cursor is on the screen |
 | `--type-rollover` | With `--type`, press each key before releasing the one before it |
 | `--mesh-message "SENDER: TEXT"` | The mesh hears TEXT on its Public channel at startup, before any app opens; the simulator has no radio |
 | `--mesh-direct "SENDER: TEXT"` | The same, as a direct message from SENDER; up to 8 messages of either kind |

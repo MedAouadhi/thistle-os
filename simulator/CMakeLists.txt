@@ -46,6 +46,14 @@ set(THISTLE_SRCS
     ${THISTLE_DIR}/components/ui/src/call_ui.c
     ${THISTLE_DIR}/components/ui/src/dictation.c
     ${THISTLE_DIR}/components/ui/src/dictation_core.c
+    ${THISTLE_DIR}/components/ui/src/arabic_shape.c
+    ${THISTLE_DIR}/components/ui/src/arabic_text.c
+    ${THISTLE_DIR}/components/ui/src/fonts/arabic_font_14.c
+    ${THISTLE_DIR}/components/ui/src/fonts/arabic_font_14_mono.c
+    ${THISTLE_DIR}/components/ui/src/fonts/arabic_font_18.c
+    ${THISTLE_DIR}/components/ui/src/fonts/arabic_font_18_mono.c
+    ${THISTLE_DIR}/components/ui/src/fonts/arabic_font_22.c
+    ${THISTLE_DIR}/components/ui/src/fonts/arabic_font_22_mono.c
     # Built-in apps
     ${THISTLE_DIR}/components/apps_builtin/lvgl_apps.c
     ${THISTLE_DIR}/components/apps_builtin/launcher/launcher_app.c
@@ -225,6 +233,14 @@ target_include_directories(thistle_sim PRIVATE
 target_link_directories(thistle_sim PRIVATE ${SDL2_LIBRARY_DIRS})
 target_link_libraries(thistle_sim PRIVATE ${SDL2_LIBRARIES} ${RUST_HOST_LIB} pthread m curl dl)
 
+# Arabic in every label and text field: arabic_text.c stands in for these
+# LVGL functions, as components/ui/CMakeLists.txt has the firmware's link do.
+foreach(fn IN ITEMS lv_font_get_glyph_dsc lv_font_get_glyph_width lv_draw_label
+                    lv_text_get_size lv_label_get_letter_pos lv_label_get_letter_on
+                    lv_label_is_char_under_pos)
+    target_link_options(thistle_sim PRIVATE "LINKER:--wrap=${fn}")
+endforeach()
+
 # Export symbols so dlopen'd modules can resolve syscall functions
 if(NOT APPLE)
     target_link_options(thistle_sim PRIVATE -rdynamic)
@@ -256,6 +272,8 @@ add_executable(thistle_sim_tests
     ${THISTLE_DIR}/components/ui/src/pull_gesture.c
     tests/test_dictation_core.c
     ${THISTLE_DIR}/components/ui/src/dictation_core.c
+    tests/test_arabic_shape.c
+    ${THISTLE_DIR}/components/ui/src/arabic_shape.c
     tests/test_xl9555.c
     tests/test_board_fingerprint.c
     tests/test_http_client_shim.c

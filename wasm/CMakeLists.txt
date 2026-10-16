@@ -32,6 +32,8 @@ set(THISTLE_SRCS
     ${THISTLE_DIR}/components/ui/src/toast.c
     ${THISTLE_DIR}/components/ui/src/power_ui.c
     ${THISTLE_DIR}/components/ui/src/wm_select.c
+    # Arabic shaping, which the Reader, Phone and Podcasts use
+    ${THISTLE_DIR}/components/ui/src/arabic_shape.c
     # Built-in apps
     ${THISTLE_DIR}/components/apps_builtin/lvgl_apps.c
     ${THISTLE_DIR}/components/apps_builtin/launcher/launcher_app.c

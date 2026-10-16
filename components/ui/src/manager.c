@@ -1,4 +1,5 @@
 #include "ui/manager.h"
+#include "ui/arabic_text.h"
 #include "ui/theme.h"
 #include "ui/statusbar.h"
 #include "ui/epaper_refresh.h"
@@ -661,6 +662,9 @@ esp_err_t ui_manager_init(ui_flush_fn_t flush_cb, bool use_deferred_refresh)
     /* 7. Build screen layout (LVGL task starts AFTER layout is complete) */
     s_screen = lv_display_get_screen_active(s_display);
     lv_obj_set_size(s_screen, s_display_w, s_display_h);
+
+    /* 7a. Arabic in every label and text field, in fonts for this display */
+    arabic_text_init(s_display);
 
     /* Status bar container — top 24 px */
     s_statusbar_cont = lv_obj_create(s_screen);

@@ -271,8 +271,7 @@ app, Hermes or the tailnet. `.scratch/dictation/spec.md` has the rules.
 - **The user picks the language**: Cohere detects none, and told `ar` it
   answers some English in Arabic, translated. Arabic unless the quick
   panel's Dictation tile (EN) is on; `thistle_os.dictation.language` in
-  system.json, `dictation_prefs.rs`. Arabic is inserted but drawn as boxes:
-  the font is Latin only (`.scratch/dictation/issues/05-*`).
+  system.json, `dictation_prefs.rs`. Arabic is drawn as below.
 - **No focused text field, no recording**; password fields, calls and no
   network are refused with a toast, and under 300 ms of audio is a tap.
   60 s at most.
@@ -292,6 +291,37 @@ app, Hermes or the tailnet. `.scratch/dictation/spec.md` has the rules.
 - `simulator/tests/test_dictation.py` runs it against a fake Cohere;
   `THISTLE_SIM_MIC=FILE.wav` is what the simulator's microphone hears, and
   `--tap mic:MS` holds the key.
+
+### Arabic text
+
+Every LVGL label and text field draws Arabic joined and right to left,
+whatever font it was given; no app does anything for it
+(`components/ui/src/arabic_text.c`, `.scratch/dictation/issues/05-*`).
+
+- **It works beneath the widgets, by `-Wl,--wrap`**: `arabic_text.c` stands
+  in for `lv_font_get_glyph_dsc`/`_width` (a glyph in the Arabic blocks that
+  the font lacks comes from DejaVu Sans' Arabic at the nearest of 14, 18 and
+  22 px, one bit a pixel on e-paper), `lv_draw_label` and `lv_text_get_size`
+  (text shaped as it is drawn and measured), and `lv_label_get_letter_pos`,
+  `_get_letter_on`, `_is_char_under_pos` (a text area's cursor found in the
+  shaped text). The list is in `components/ui/CMakeLists.txt` and the
+  simulator's; change both. A wrap catches calls from another file only.
+- **What a widget holds is never shaped**, so apps read back, save and send
+  the letters, not their presentation forms. The shaper is
+  `components/ui/src/arabic_shape.c`, a port of LVGL's `lv_text_ap.c`;
+  LVGL's own (`LV_USE_ARABIC_PERSIAN_CHARS`) stays off, as it allocates 8
+  bytes a character from the 64 KB pool unchecked.
+- **Each text finds its own direction**: `base_dir` is auto on the screen and
+  layers, inherited by everything, so Arabic alone is right-aligned with its
+  cursor at the left. LVGL's default is left to right.
+- The fonts are `components/ui/src/fonts/`, made by
+  `components/ui/tools/gen_arabic_fonts.sh`. The Reader, Phone and Podcasts
+  shape their own text and use the Reader's 16 px font; text already shaped
+  is drawn as it is.
+- `simulator/tests/test_arabic_shape.c`, and `test_dictation.py`'s
+  `arabic_is_drawn_as_arabic`, which reads a screenshot; the simulator's
+  `--type` runs print `Focused cursor: X,Y`. A character in the Arabic blocks
+  that no font has is logged once, `no glyph for U+XXXX`.
 
 ### Podcasts
 

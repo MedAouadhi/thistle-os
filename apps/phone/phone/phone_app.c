@@ -7,10 +7,10 @@
  * app remembers only which tab was open and the number being typed.
  */
 #include "phone/phone_app.h"
-#include "reader/arabic_shape.h"
 
 #include "hal/board.h"
 #include "thistle/app_manager.h"
+#include "ui/arabic_shape.h"
 #include "ui/call_ui.h"
 #include "ui/manager.h"
 #include "ui/statusbar.h"

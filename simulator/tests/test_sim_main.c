@@ -84,6 +84,17 @@ extern void test_dictation_keeps_line_breaks_in_a_text_area_and_not_in_a_line(vo
 extern void test_dictation_cuts_a_long_join_between_characters(void);
 extern void test_dictation_finds_the_byte_before_a_cursor_counted_in_characters(void);
 
+/* test_arabic_shape.c */
+extern void test_arabic_letters_take_their_joined_forms(void);
+extern void test_arabic_lam_and_alef_make_one_ligature(void);
+extern void test_arabic_marks_and_tatweel_keep_the_join(void);
+extern void test_arabic_shaping_leaves_everything_else_as_it_is(void);
+extern void test_arabic_shaping_moves_positions_with_the_text(void);
+extern void test_arabic_present_finds_the_arabic_block(void);
+extern void test_arabic_needs_shaping_only_for_letters_not_yet_joined(void);
+extern void test_arabic_logical_offset_finds_the_letters_a_place_came_from(void);
+extern void test_arabic_a_place_shaped_and_found_again_is_where_it_was(void);
+
 /* test_pull_gesture.c */
 extern void test_pull_threshold_is_an_eighth_of_the_screen(void);
 extern void test_pull_threshold_has_a_floor_on_a_short_screen(void);
@@ -216,6 +227,17 @@ int main(void)
     RUN_TEST(dictation_keeps_line_breaks_in_a_text_area_and_not_in_a_line);
     RUN_TEST(dictation_cuts_a_long_join_between_characters);
     RUN_TEST(dictation_finds_the_byte_before_a_cursor_counted_in_characters);
+
+    printf("\n[arabic_shape]\n");
+    RUN_TEST(arabic_letters_take_their_joined_forms);
+    RUN_TEST(arabic_lam_and_alef_make_one_ligature);
+    RUN_TEST(arabic_marks_and_tatweel_keep_the_join);
+    RUN_TEST(arabic_shaping_leaves_everything_else_as_it_is);
+    RUN_TEST(arabic_shaping_moves_positions_with_the_text);
+    RUN_TEST(arabic_present_finds_the_arabic_block);
+    RUN_TEST(arabic_needs_shaping_only_for_letters_not_yet_joined);
+    RUN_TEST(arabic_logical_offset_finds_the_letters_a_place_came_from);
+    RUN_TEST(arabic_a_place_shaped_and_found_again_is_where_it_was);
 
     printf("\n[pull_gesture]\n");
     RUN_TEST(pull_threshold_is_an_eighth_of_the_screen);
