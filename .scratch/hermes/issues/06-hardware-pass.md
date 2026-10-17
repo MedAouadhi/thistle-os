@@ -13,7 +13,10 @@ Status: in-review
 - [ ] Stop during a long tool call; New conversation
 - [ ] The drawer's sessions, a switch, and back
 - [ ] A Scheduled Run read
-- [ ] Out of WiFi range on mobile data; a sleep and a wake mid-session
+- [ ] Out of WiFi range on mobile data; a sleep and a wake mid-session.
+      Mobile data works since MicroLink 1bceac7 (2026-10-17): before it the
+      bridge never answered over LTE (the tailnet's fault, not the app's).
+      Sleep and wake not yet tried.
 - [ ] Internal RAM with the app open and after it closes
 
 **Blocked by:** 01 to 05

@@ -105,7 +105,12 @@ the Terminal has `tailscale status|peers|up|down|ping NAME [PORT]`.
 
 ## What the hardware has to confirm
 
-- [ ] Over mobile data, with WiFi off: joins, and relays through fra.
+- [x] Over mobile data, with WiFi off: joins, and relays through fra.
+      Only since MicroLink 1bceac7 (2026-10-17): before it, with no
+      session the WireGuard netif went link-down and a socket's packets
+      left by the modem, and a session a peer started sent its data to the
+      peer's advertised address, not DERP. Now a connect from a fresh start
+      is up in 1.3 s, and a peer's pings are answered.
 - [ ] A switch between WiFi and mobile data, and a light sleep and wake:
       back on the tailnet within seconds.
 - [ ] Waiting for an admin's approval, on a tailnet that requires it.

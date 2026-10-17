@@ -388,7 +388,7 @@ client.
 
 - **The client is MicroLink**, from `MedAouadhi/microlink` branch
   `thistle`, pinned by commit in `components/kernel/idf_component.yml`, S3
-  only. The fork is the one hermes_esp32 pins plus six commits; read them
+  only. The fork is the one hermes_esp32 pins plus ten commits; read them
   before moving the pin, and delete `dependencies.lock` when you do (which
   also lets other components move: put back what you did not mean to).
   Decisions are in `tailnet_policy.rs`, the running of them in
@@ -404,6 +404,19 @@ client.
 - **A packet that finds no WireGuard session starts one** (MicroLink's WG
   manager, through DERP and DISCO's direct path) and is dropped: a first
   connect to a peer takes a TCP retransmit, about a second.
+- **Data goes through DERP until a direct path is proven**, by a DISCO pong
+  or a packet that came straight from the peer; over mobile data, behind
+  the carrier's NAT, it always does. The WireGuard netif's link stays up
+  with no session: wireguard-lwip took it down, and lwIP then sent tailnet
+  packets out of the modem or WiFi, unencrypted, where nothing started a
+  session: over mobile data no peer could be reached unless it had
+  reached the device first.
+- **A session lapses once idle**, as Tailscale's do: no persistent
+  keepalive, and a handshake is one attempt, not a peer kept connected for
+  good. Before, every peer that had had a session kept one, with a
+  keepalive every 25 s. Even so, MicroLink wakes the modem every 15 to
+  23 s while the tailnet is on: DISCO probes each peer for a direct path
+  every 15 s, and STUN every 23 s, each answer sent to the control plane.
 - **It needs a network and the clock**: a WireGuard handshake carries the
   time. It is restarted whenever the underlay changes, WiFi to LTE, a new
   address, or a sleep, and stopped while there is none.

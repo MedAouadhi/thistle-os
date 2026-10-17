@@ -1,7 +1,7 @@
 dependencies:
   # The Tailscale client (tailnet_platform.c), only on the S3, which has the
   # PSRAM it allocates from. It is MicroLink as forked for hermes_esp32,
-  # with eight commits on top for ThistleOS on branch `thistle`, pinned to an
+  # with ten commits on top for ThistleOS on branch `thistle`, pinned to an
   # exact object so an upstream change cannot arrive without somebody
   # choosing it:
   #
@@ -18,7 +18,12 @@ dependencies:
   #   socket reaches a peer that has not reached this device first;
   # - a stop ends waits it used to sit out, and the netif is added and
   #   removed on the TCPIP thread; DERP regions are measured once an hour,
-  #   and a stale sign-in URL is given up for a new one.
+  #   and a stale sign-in URL is given up for a new one;
+  # - the WireGuard netif's link stays up with no session, so a packet for
+  #   a peer still asks for one, and data goes through DERP until a direct
+  #   path is proven, which over mobile data it never is;
+  # - a session lapses once idle, with no keepalive to keep it, and a
+  #   handshake to a peer with a direct path goes both ways at once.
   #
   # wireguard_lwip is named too because MicroLink lists it under
   # PRIV_REQUIRES, which the component manager does not follow. Moving the
@@ -26,12 +31,12 @@ dependencies:
   microlink:
     git: https://github.com/MedAouadhi/microlink.git
     path: components/microlink
-    version: ac85bc0f030ab32d5ca694e48472296256708797
+    version: 6baf8a42c46112c5a6a12ff5e3e27dbeb6646e76
     rules:
       - if: "target == esp32s3"
   wireguard_lwip:
     git: https://github.com/MedAouadhi/microlink.git
     path: components/microlink/components/wireguard_lwip
-    version: ac85bc0f030ab32d5ca694e48472296256708797
+    version: 6baf8a42c46112c5a6a12ff5e3e27dbeb6646e76
     rules:
       - if: "target == esp32s3"
