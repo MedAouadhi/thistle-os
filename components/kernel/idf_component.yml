@@ -1,8 +1,8 @@
 dependencies:
   # The Tailscale client (tailnet_platform.c), only on the S3, which has the
   # PSRAM it allocates from. It is MicroLink as forked for hermes_esp32,
-  # with ten commits on top for ThistleOS on branch `thistle`, pinned to an
-  # exact object so an upstream change cannot arrive without somebody
+  # with eleven commits on top for ThistleOS on branch `thistle`, pinned to
+  # an exact object so an upstream change cannot arrive without somebody
   # choosing it:
   #
   # - built against mbedTLS 3 (ESP-IDF 5.5) as well as mbedTLS 4;
@@ -23,7 +23,11 @@ dependencies:
   #   a peer still asks for one, and data goes through DERP until a direct
   #   path is proven, which over mobile data it never is;
   # - a session lapses once idle, with no keepalive to keep it, and a
-  #   handshake to a peer with a direct path goes both ways at once.
+  #   handshake to a peer with a direct path goes both ways at once;
+  # - an idle tailnet is quiet: no keep-alives of its own to the control
+  #   plane or DERP, which are reconnected after 120 s of silence instead;
+  #   DISCO only to a peer whose session is in use; STUN every 23 s while
+  #   one is and every 5 minutes otherwise; endpoints sent only when new.
   #
   # wireguard_lwip is named too because MicroLink lists it under
   # PRIV_REQUIRES, which the component manager does not follow. Moving the
@@ -31,12 +35,12 @@ dependencies:
   microlink:
     git: https://github.com/MedAouadhi/microlink.git
     path: components/microlink
-    version: 6baf8a42c46112c5a6a12ff5e3e27dbeb6646e76
+    version: 709ba05ff5a3d27a96258b33cea379964c752940
     rules:
       - if: "target == esp32s3"
   wireguard_lwip:
     git: https://github.com/MedAouadhi/microlink.git
     path: components/microlink/components/wireguard_lwip
-    version: 6baf8a42c46112c5a6a12ff5e3e27dbeb6646e76
+    version: 709ba05ff5a3d27a96258b33cea379964c752940
     rules:
       - if: "target == esp32s3"

@@ -102,6 +102,11 @@ the Terminal has `tailscale status|peers|up|down|ping NAME [PORT]`.
       did not do it.
 - [x] Internal RAM: about 110 KB free while connected, about 141 KB at
       boot with it off.
+- [x] Idle, it sends next to nothing (MicroLink 709ba05, 2026-10-17): on
+      LTE 1.4 packets a minute, where it sent 158, mostly DISCO to every
+      peer and a PING every 5 s; it stays online, a peer's ping is
+      answered after 12 minutes idle, and Hermes connects in 1.3 s.
+      Ticket 01.
 
 ## What the hardware has to confirm
 

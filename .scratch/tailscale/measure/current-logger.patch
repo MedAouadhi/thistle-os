@@ -1,0 +1,58 @@
+diff --git a/components/kernel_rs/src/drv_power_sy6970.rs b/components/kernel_rs/src/drv_power_sy6970.rs
+index 77c91db..3d737d8 100644
+--- a/components/kernel_rs/src/drv_power_sy6970.rs
++++ b/components/kernel_rs/src/drv_power_sy6970.rs
+@@ -1330,9 +1330,53 @@ unsafe extern "C" fn power_init(_config: *const c_void) -> i32 {
+         full
+     );
+ 
++    // MEASURE (test build only, not to be committed): the gauge's current,
++    // which it integrates over each second, once a second to the card.
++    if !power.gauge.is_null() {
++        let _ = std::thread::Builder::new()
++            .stack_size(6144)
++            .spawn(measure_current_to_card);
++    }
++
+     ESP_OK
+ }
+ 
++// MEASURE (test build only): appends "uptime_s,current_ma,millivolts" to
++// /sdcard/current.csv every 10 s, one row a second; negative is discharge.
++// uptime_s counts from the driver's start, so it restarts at each boot.
++fn measure_current_to_card() {
++    use std::io::Write;
++    let start = std::time::Instant::now();
++    let mut rows = String::new();
++    loop {
++        std::thread::sleep(std::time::Duration::from_millis(1000));
++        let (ma, mv) = {
++            let Ok(power) = POWER.lock() else { continue };
++            (
++                read_gauge(power.gauge, GAUGE_CMD_CURRENT).map(gauge_current_ma),
++                read_gauge(power.gauge, GAUGE_CMD_VOLTAGE).map(gauge_voltage_mv),
++            )
++        };
++        let uptime_s = start.elapsed().as_secs();
++        rows.push_str(&format!(
++            "{},{},{}\n",
++            uptime_s,
++            ma.map_or(String::new(), |v| v.to_string()),
++            mv.map_or(String::new(), |v| v.to_string())
++        ));
++        if rows.len() > 150 {
++            if let Ok(mut f) = std::fs::OpenOptions::new()
++                .create(true)
++                .append(true)
++                .open("/sdcard/current.csv")
++            {
++                let _ = f.write_all(rows.as_bytes());
++            }
++            rows.clear();
++        }
++    }
++}
++
+ /// # Safety
+ /// Called from C via the HAL vtable.
+ unsafe extern "C" fn power_deinit() {

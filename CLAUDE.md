@@ -388,7 +388,7 @@ client.
 
 - **The client is MicroLink**, from `MedAouadhi/microlink` branch
   `thistle`, pinned by commit in `components/kernel/idf_component.yml`, S3
-  only. The fork is the one hermes_esp32 pins plus ten commits; read them
+  only. The fork is the one hermes_esp32 pins plus eleven commits; read them
   before moving the pin, and delete `dependencies.lock` when you do (which
   also lets other components move: put back what you did not mean to).
   Decisions are in `tailnet_policy.rs`, the running of them in
@@ -414,9 +414,18 @@ client.
 - **A session lapses once idle**, as Tailscale's do: no persistent
   keepalive, and a handshake is one attempt, not a peer kept connected for
   good. Before, every peer that had had a session kept one, with a
-  keepalive every 25 s. Even so, MicroLink wakes the modem every 15 to
-  23 s while the tailnet is on: DISCO probes each peer for a direct path
-  every 15 s, and STUN every 23 s, each answer sent to the control plane.
+  keepalive every 25 s.
+- **An idle tailnet is quiet**, as Tailscale's own client is. DISCO looks
+  for a direct path only to a peer whose session carried a packet in the
+  last 45 s; STUN goes every 23 s while one does and every 5 minutes
+  otherwise; an endpoint update goes only with something new in it, and
+  a STUN port alone is new only while a session is in use (idle, a mobile
+  network's NAT hands each probe a new one). Nothing is sent to keep the
+  control connection or DERP: their servers send keep-alives about once
+  a minute each, and either is reconnected after 120 s without a word.
+  Idle on LTE it sends 1.4 packets a minute, where it sent 158; the two
+  servers' keep-alives still wake the modem about twice a minute.
+  `.scratch/tailscale/issues/01-*` has the counts and how to take them.
 - **It needs a network and the clock**: a WireGuard handshake carries the
   time. It is restarted whenever the underlay changes, WiFi to LTE, a new
   address, or a sleep, and stopped while there is none.
