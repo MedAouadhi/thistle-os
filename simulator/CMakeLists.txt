@@ -58,6 +58,9 @@ set(THISTLE_SRCS
     ${THISTLE_DIR}/components/apps_builtin/lvgl_apps.c
     ${THISTLE_DIR}/components/apps_builtin/launcher/launcher_app.c
     ${THISTLE_DIR}/components/apps_builtin/launcher/launcher_ui.c
+    ${THISTLE_DIR}/components/apps_builtin/launcher/home_core.c
+    ${THISTLE_DIR}/components/apps_builtin/launcher/fonts/home_clock_44.c
+    ${THISTLE_DIR}/components/apps_builtin/launcher/fonts/home_clock_44_mono.c
     ${THISTLE_DIR}/components/apps_builtin/settings/settings_app.c
     ${THISTLE_DIR}/components/apps_builtin/settings/settings_ui.c
     ${THISTLE_DIR}/components/apps_builtin/messenger/messenger_app.c
@@ -276,6 +279,8 @@ add_executable(thistle_sim_tests
     ${THISTLE_DIR}/components/ui/src/epaper_refresh.c
     tests/test_pull_gesture.c
     ${THISTLE_DIR}/components/ui/src/pull_gesture.c
+    tests/test_home_core.c
+    ${THISTLE_DIR}/components/apps_builtin/launcher/home_core.c
     tests/test_dictation_core.c
     ${THISTLE_DIR}/components/ui/src/dictation_core.c
     tests/test_arabic_shape.c
@@ -301,6 +306,7 @@ add_executable(thistle_sim_tests
 
 target_include_directories(thistle_sim_tests PRIVATE
     ${THISTLE_DIR}/components/ui/include
+    ${THISTLE_DIR}/components/apps_builtin/launcher
     ${CMAKE_CURRENT_SOURCE_DIR}/platform
     ${CMAKE_CURRENT_SOURCE_DIR}/drivers
     ${CMAKE_CURRENT_SOURCE_DIR}/devices

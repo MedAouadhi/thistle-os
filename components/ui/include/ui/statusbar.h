@@ -13,6 +13,10 @@ void statusbar_set_title(const char *title);
 void statusbar_set_time(uint8_t hour, uint8_t minute);
 void statusbar_set_time_str(const char *time_str);
 
+/* Show or leave out the bar's clock. Home leaves it out while it shows the
+ * time large; every other screen has it. */
+void statusbar_set_clock_visible(bool visible);
+
 /* Get status bar height in pixels */
 uint16_t statusbar_get_height(void);
 

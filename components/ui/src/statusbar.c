@@ -38,6 +38,9 @@ static const char *TAG = "statusbar";
 /* Where a tap on the unread-message count goes. */
 #define MESSENGER_APP_ID "com.thistle.messenger"
 
+/* The battery when the power driver cannot say. */
+#define BATTERY_UNKNOWN "--% " LV_SYMBOL_BATTERY_EMPTY
+
 static void statusbar_update_cb(lv_timer_t *timer);
 static void statusbar_messages_cb(lv_timer_t *timer);
 static lv_timer_t *s_update_timer   = NULL;
@@ -180,11 +183,11 @@ esp_err_t statusbar_create(lv_obj_t *parent)
     lv_obj_add_event_cb(s_messages_label, messages_tap_cb, LV_EVENT_CLICKED, NULL);
 
     s_wifi_label = lv_label_create(right);
-    lv_label_set_text(s_wifi_label, "--");
+    lv_label_set_text(s_wifi_label, "");
     lv_obj_set_style_text_color(s_wifi_label, colors->text, LV_PART_MAIN);
 
     s_battery_label = lv_label_create(right);
-    lv_label_set_text(s_battery_label, "BAT:--%");
+    lv_label_set_text(s_battery_label, BATTERY_UNKNOWN);
     lv_obj_set_style_text_color(s_battery_label, colors->text, LV_PART_MAIN);
 
     /* An LVGL timer rather than an esp_timer, so the readings are written
@@ -212,32 +215,35 @@ static void set_text_if_changed(lv_obj_t *label, const char *text)
     }
 }
 
+/* A battery with as many bars as it has charge. */
+static const char *battery_symbol(uint8_t percent)
+{
+    if (percent >= 90) return LV_SYMBOL_BATTERY_FULL;
+    if (percent >= 65) return LV_SYMBOL_BATTERY_3;
+    if (percent >= 40) return LV_SYMBOL_BATTERY_2;
+    if (percent >= 15) return LV_SYMBOL_BATTERY_1;
+    return LV_SYMBOL_BATTERY_EMPTY;
+}
+
+/* "72%" and a battery, or a lightning bolt while it charges. */
 void statusbar_set_battery(uint8_t percent, bool charging)
 {
     if (s_battery_label == NULL) {
         return;
     }
     char buf[16];
-    if (charging) {
-        snprintf(buf, sizeof(buf), "CHG:%d%%", percent);
-    } else {
-        snprintf(buf, sizeof(buf), "BAT:%d%%", percent);
-    }
+    snprintf(buf, sizeof(buf), "%d%% %s", percent,
+             charging ? LV_SYMBOL_CHARGE : battery_symbol(percent));
     set_text_if_changed(s_battery_label, buf);
 }
 
 void statusbar_set_wifi(bool connected, int rssi)
 {
+    (void)rssi;
     if (s_wifi_label == NULL) {
         return;
     }
-    if (connected) {
-        char buf[16];
-        snprintf(buf, sizeof(buf), "W:%d", rssi);
-        lv_label_set_text(s_wifi_label, buf);
-    } else {
-        lv_label_set_text(s_wifi_label, "--");
-    }
+    set_text_if_changed(s_wifi_label, connected ? LV_SYMBOL_WIFI : "");
 }
 
 void statusbar_set_title(const char *title)
@@ -305,7 +311,7 @@ static void update_battery(void)
         hal_power_info_t info = {0};
         if (reg->power->get_info(&info) != ESP_OK ||
             info.state == HAL_POWER_STATE_NO_BATTERY) {
-            set_text_if_changed(s_battery_label, "BAT:--%");
+            set_text_if_changed(s_battery_label, BATTERY_UNKNOWN);
             return;
         }
         statusbar_set_battery(info.percent, info.state == HAL_POWER_STATE_CHARGING);
@@ -349,6 +355,11 @@ static void set_hidden(lv_obj_t *obj, bool hide)
             lv_obj_clear_flag(obj, LV_OBJ_FLAG_HIDDEN);
         }
     }
+}
+
+void statusbar_set_clock_visible(bool visible)
+{
+    set_hidden(s_time_label, !visible);
 }
 
 /* The call chip (call_ui.h), shown, rewritten and hidden only on change. On
@@ -412,14 +423,19 @@ static void statusbar_update_cb(lv_timer_t *timer)
 
     update_battery();
 
-    /* Network indicator — active transport name + RSSI */
+    /* The network traffic takes, not the tailnet over it: WiFi's symbol, or
+     * the mobile network's name ("LTE"), or nothing while there is none. The
+     * simulator's host network shows as WiFi. */
     if (s_wifi_label) {
-        if (net_is_connected()) {
-            char buf[24];
-            snprintf(buf, sizeof(buf), "%s:%d", net_get_transport_name(), (int)net_get_rssi());
-            set_text_if_changed(s_wifi_label, buf);
-        } else {
-            set_text_if_changed(s_wifi_label, "--");
+        const hal_net_driver_t *net = net_is_connected() ? net_get_active_underlay() : NULL;
+        char buf[24] = "";
+        if (net && net->type == HAL_NET_CELLULAR) {
+            snprintf(buf, sizeof(buf), "%s", net->name ? net->name : "LTE");
+        } else if (net && net->type == HAL_NET_BLE) {
+            snprintf(buf, sizeof(buf), "%s", LV_SYMBOL_BLUETOOTH);
+        } else if (net) {
+            snprintf(buf, sizeof(buf), "%s", LV_SYMBOL_WIFI);
         }
+        set_text_if_changed(s_wifi_label, buf);
     }
 }

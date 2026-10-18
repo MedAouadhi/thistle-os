@@ -113,6 +113,23 @@ extern void test_pull_a_move_with_no_press_starts_a_touch(void);
 extern void test_pull_a_lift_with_no_press_does_nothing(void);
 extern void test_pull_each_touch_starts_afresh(void);
 
+/* test_home_core.c */
+extern void test_home_tdeck_max_has_the_clock_the_new_rows_and_two_rows_of_three(void);
+extern void test_home_tdeck_lcd_has_one_row_of_four(void);
+extern void test_home_tdisplay_gives_up_the_new_rows_first(void);
+extern void test_home_cardputer_gives_up_the_clock_too(void);
+extern void test_home_an_oled_has_room_for_the_bar_alone(void);
+extern void test_home_a_tall_screen_stops_at_two_rows(void);
+extern void test_home_cells_share_the_whole_width(void);
+extern void test_home_pins_the_preferred_apps_in_their_order(void);
+extern void test_home_fills_the_place_of_a_missing_app_from_the_rest(void);
+extern void test_home_pins_no_more_than_asked_for(void);
+extern void test_home_pins_an_app_once_though_preferred_twice(void);
+extern void test_home_writes_the_date_on_one_line(void);
+extern void test_home_writes_the_weekday_on_its_own_line_when_asked(void);
+extern void test_home_writes_nothing_for_a_date_out_of_range(void);
+extern void test_home_cuts_the_date_to_the_buffer(void);
+
 /* test_xl9555.c */
 extern void test_xl9555_resets_to_all_inputs_with_its_latches_high(void);
 extern void test_xl9555_records_every_write_in_order(void);
@@ -256,6 +273,23 @@ int main(void)
     RUN_TEST(pull_a_move_with_no_press_starts_a_touch);
     RUN_TEST(pull_a_lift_with_no_press_does_nothing);
     RUN_TEST(pull_each_touch_starts_afresh);
+
+    printf("\n[home_core]\n");
+    RUN_TEST(home_tdeck_max_has_the_clock_the_new_rows_and_two_rows_of_three);
+    RUN_TEST(home_tdeck_lcd_has_one_row_of_four);
+    RUN_TEST(home_tdisplay_gives_up_the_new_rows_first);
+    RUN_TEST(home_cardputer_gives_up_the_clock_too);
+    RUN_TEST(home_an_oled_has_room_for_the_bar_alone);
+    RUN_TEST(home_a_tall_screen_stops_at_two_rows);
+    RUN_TEST(home_cells_share_the_whole_width);
+    RUN_TEST(home_pins_the_preferred_apps_in_their_order);
+    RUN_TEST(home_fills_the_place_of_a_missing_app_from_the_rest);
+    RUN_TEST(home_pins_no_more_than_asked_for);
+    RUN_TEST(home_pins_an_app_once_though_preferred_twice);
+    RUN_TEST(home_writes_the_date_on_one_line);
+    RUN_TEST(home_writes_the_weekday_on_its_own_line_when_asked);
+    RUN_TEST(home_writes_nothing_for_a_date_out_of_range);
+    RUN_TEST(home_cuts_the_date_to_the_buffer);
 
     printf("\n[xl9555]\n");
     RUN_TEST(xl9555_resets_to_all_inputs_with_its_latches_high);

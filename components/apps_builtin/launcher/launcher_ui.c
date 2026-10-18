@@ -1,16 +1,26 @@
 #include "launcher/launcher_app.h"
+#include "launcher/home_core.h"
 
 #include "lvgl.h"
 #include "esp_log.h"
+#include "hal/board.h"
 #include "thistle/app_manager.h"
+#include "thistle/time_manager.h"
 #include "thistle/wifi_manager.h"
 #include "ui/manager.h"
+#include "ui/statusbar.h"
 #include "ui/toast.h"
 #include "ui/theme.h"
 
 #include <string.h>
+#include <time.h>
 
 static const char *TAG = "launcher_ui";
+
+/* The Home clock: the digits of time_manager_format_time() at 44 px, one bit
+ * a pixel for e-paper (tools/gen_clock_font.sh). */
+LV_FONT_DECLARE(home_clock_44);
+LV_FONT_DECLARE(home_clock_44_mono);
 
 /* ------------------------------------------------------------------ */
 /* Layout constants                                                     */
@@ -19,22 +29,30 @@ static const char *TAG = "launcher_ui";
 /* App-area dimensions — set from parent in launcher_ui_create() */
 static int s_app_w = 240;
 static int s_app_h = 296;
-#define DOCK_H           50
-#define ICON_SIZE        38
 #define CELL_SIZE        70
+#define ICON_BOX         36   /* a pinned app's icon */
+#define NAME_PAD          3   /* either side of its name */
+#define FOCUS_ROOM        4   /* the colour focus ring, outside the icon */
+
+/* How often Home looks at the clock. Its labels are rewritten only when the
+ * minute or the day changes, so on e-paper a look that finds nothing new
+ * costs no refresh. */
+#define CLOCK_POLL_MS    1000
 
 /* ------------------------------------------------------------------ */
-/* Favorites config                                                     */
+/* Pinned apps                                                          */
 /* ------------------------------------------------------------------ */
 
-#define MAX_DOCK_FAVORITES 6
-static const char *s_dock_favorites[MAX_DOCK_FAVORITES] = {
-    "com.thistle.settings",
-    "com.thistle.filemgr",
+/* The apps Home pins, first to last, as many as the screen has room for. One
+ * that is not installed gives its place to the next installed app that is
+ * not a tool. */
+static const char *const s_pin_preference[] = {
+    "com.thistle.phone",
     "com.thistle.messenger",
+    "com.thistle.hermes",
+    "com.thistle.podcasts",
+    "com.thistle.notes",
     "com.thistle.reader",
-    NULL,
-    NULL,
 };
 
 /* ------------------------------------------------------------------ */
@@ -48,6 +66,14 @@ static lv_obj_t *s_folder      = NULL;
 static lv_obj_t *s_folder_grid = NULL;
 static bool      s_drawer_visible = false;
 static bool      s_folder_visible = false;
+
+/* Home */
+static lv_obj_t   *s_home        = NULL;   /* its widgets, while it is in front */
+static home_layout_t s_layout;
+static bool        s_mono        = false;  /* e-paper: outlines and inversion */
+static lv_obj_t   *s_clock_label = NULL;   /* NULL on a screen with no room */
+static lv_obj_t   *s_date_label  = NULL;
+static lv_timer_t *s_clock_timer = NULL;
 
 /* ------------------------------------------------------------------ */
 /* Stable semantic icon mapping.  LVGL's built-in symbols keep the
@@ -89,6 +115,18 @@ static bool is_tool_app(const char *app_id)
 {
     return strstr(app_id, "settings") || strstr(app_id, "terminal") ||
            strstr(app_id, "wifiscanner") || strstr(app_id, "flashlight");
+}
+
+static bool pin_eligible(const char *app_id)
+{
+    return !is_launcher(app_id) && !is_tool_app(app_id);
+}
+
+/* The status bar leaves its clock out while Home shows the time large: not
+ * over the app drawer, which covers it, nor on a screen too short for it. */
+static void show_bar_clock(bool show)
+{
+    statusbar_set_clock_visible(show || s_clock_label == NULL);
 }
 
 /* ------------------------------------------------------------------ */
@@ -134,19 +172,24 @@ static void app_cell_clicked_cb(lv_event_t *e)
     lv_async_call(launch_from_grid_cb, (void *)app_id);
 }
 
-static void dock_icon_clicked_cb(lv_event_t *e)
+static void launch_pinned_cb(void *arg)
 {
-    const char *app_id = (const char *)lv_obj_get_user_data(lv_event_get_target(e));
-    if (!app_id) {
-        ESP_LOGW(TAG, "dock icon pressed: app not installed");
-        return;
-    }
-
-    ESP_LOGI(TAG, "Launching app from dock: %s", app_id);
+    const char *app_id = arg;
+    ESP_LOGI(TAG, "Launching app from Home: %s", app_id);
     esp_err_t ret = app_manager_launch(app_id);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to launch %s: %s", app_id, esp_err_to_name(ret));
         toast_warn("App not available");
+    }
+}
+
+/* Launched once this click is over: leaving Home deletes its tiles, this one
+ * among them (launcher_ui_hide). */
+static void pinned_clicked_cb(lv_event_t *e)
+{
+    const char *app_id = (const char *)lv_obj_get_user_data(lv_event_get_current_target(e));
+    if (app_id) {
+        lv_async_call(launch_pinned_cb, (void *)app_id);
     }
 }
 
@@ -235,44 +278,314 @@ static lv_obj_t *create_app_cell(lv_obj_t *parent, const char *symbol,
 }
 
 /* ------------------------------------------------------------------ */
-/* Dock icon helper                                                    */
+/* Home: the clock, the pinned apps and the All apps button            */
 /* ------------------------------------------------------------------ */
 
-static lv_obj_t *create_dock_icon(lv_obj_t *parent, const char *label,
-                                   const char *app_id)
+/* Shared by every tile, so each costs LVGL's pool a few objects rather than
+ * a style property apiece (CLAUDE.md, "LVGL's pool is 64 KB"). */
+static lv_style_t s_st_tile;
+static lv_style_t s_st_box;
+static lv_style_t s_st_name;
+static lv_style_t s_st_name_focus;
+static lv_style_t s_st_bar;
+static lv_style_t s_st_pressed;
+static lv_style_t s_st_focus;
+static bool       s_styles_ready = false;
+
+static void init_home_styles(const theme_colors_t *c)
 {
-    const theme_colors_t *colors = theme_get_colors();
+    lv_style_t *const all[] = {
+        &s_st_tile, &s_st_box, &s_st_name, &s_st_name_focus,
+        &s_st_bar, &s_st_pressed, &s_st_focus,
+    };
+    for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++) {
+        if (s_styles_ready) {
+            lv_style_reset(all[i]);
+        }
+        lv_style_init(all[i]);
+    }
+    s_styles_ready = true;
 
-    lv_obj_t *btn = lv_button_create(parent);
-    lv_obj_set_size(btn, ICON_SIZE, ICON_SIZE);
+    /* A pinned app: a button holding its icon in a box, and its name. */
+    lv_style_set_width(&s_st_tile, s_layout.cell_w);
+    lv_style_set_height(&s_st_tile, s_layout.cell_h);
+    lv_style_set_bg_opa(&s_st_tile, LV_OPA_TRANSP);
+    lv_style_set_layout(&s_st_tile, LV_LAYOUT_FLEX);
+    lv_style_set_flex_flow(&s_st_tile, LV_FLEX_FLOW_COLUMN);
+    lv_style_set_flex_main_place(&s_st_tile, LV_FLEX_ALIGN_CENTER);
+    lv_style_set_flex_cross_place(&s_st_tile, LV_FLEX_ALIGN_CENTER);
+    lv_style_set_flex_track_place(&s_st_tile, LV_FLEX_ALIGN_CENTER);
+    lv_style_set_pad_row(&s_st_tile, 4);
 
-    lv_obj_set_style_bg_color(btn, colors->surface, LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_border_color(btn, colors->text, LV_PART_MAIN);
-    lv_obj_set_style_border_width(btn, 1, LV_PART_MAIN);
-    lv_obj_set_style_radius(btn, 0, LV_PART_MAIN);
-    lv_obj_set_style_shadow_width(btn, 0, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(btn, 0, LV_PART_MAIN);
+    /* On e-paper an outline, inverted when pressed or focused. In colour a
+     * filled tile, its colour set per tile, lit when pressed and ringed when
+     * focused. */
+    lv_style_set_width(&s_st_box, ICON_BOX);
+    lv_style_set_height(&s_st_box, ICON_BOX);
+    lv_style_set_radius(&s_st_box, 6);
+    lv_style_set_bg_opa(&s_st_box, LV_OPA_COVER);
+    lv_style_set_bg_color(&s_st_box, s_mono ? c->bg : c->surface);
+    lv_style_set_border_width(&s_st_box, s_mono ? 1 : 0);
+    lv_style_set_border_color(&s_st_box, c->text);
+    lv_style_set_text_color(&s_st_box, c->text);
+    lv_style_set_text_font(&s_st_box, &lv_font_montserrat_22);
 
-    /* Pressed state */
-    lv_obj_set_style_bg_color(btn, colors->primary, LV_STATE_PRESSED);
-    lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, LV_STATE_PRESSED);
-
-    lv_obj_t *lbl = lv_label_create(btn);
-    lv_label_set_text(lbl, label);
-    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_18, LV_PART_MAIN);
-    lv_obj_set_style_text_color(lbl, colors->text, LV_PART_MAIN);
-    lv_obj_set_style_text_color(lbl, lv_color_white(), LV_STATE_PRESSED);
-    lv_obj_center(lbl);
-
-    if (app_id) {
-        lv_obj_set_user_data(btn, (void *)app_id);
-        lv_obj_add_event_cb(btn, dock_icon_clicked_cb, LV_EVENT_CLICKED, NULL);
-    } else {
-        lv_obj_add_event_cb(btn, apps_btn_clicked_cb, LV_EVENT_CLICKED, NULL);
+    lv_style_set_text_font(&s_st_name, &lv_font_montserrat_14);
+    lv_style_set_height(&s_st_name, lv_font_get_line_height(&lv_font_montserrat_14));
+    lv_style_set_text_color(&s_st_name, c->text);
+    lv_style_set_text_align(&s_st_name, LV_TEXT_ALIGN_CENTER);
+    lv_style_set_pad_hor(&s_st_name, NAME_PAD);
+    lv_style_set_radius(&s_st_name, 3);
+    if (s_mono) {
+        lv_style_set_bg_opa(&s_st_name_focus, LV_OPA_COVER);
+        lv_style_set_bg_color(&s_st_name_focus, c->text);
+        lv_style_set_text_color(&s_st_name_focus, c->bg);
     }
 
-    return btn;
+    /* All apps, as wide as the grid above it. */
+    lv_style_set_radius(&s_st_bar, 6);
+    lv_style_set_bg_opa(&s_st_bar, LV_OPA_COVER);
+    lv_style_set_bg_color(&s_st_bar, s_mono ? c->bg : c->surface);
+    lv_style_set_border_width(&s_st_bar, s_mono ? 1 : 0);
+    lv_style_set_border_color(&s_st_bar, c->text);
+    lv_style_set_text_color(&s_st_bar, c->text);
+    lv_style_set_text_font(&s_st_bar, &lv_font_montserrat_14);
+
+    if (s_mono) {
+        lv_style_set_bg_color(&s_st_pressed, c->text);
+        lv_style_set_text_color(&s_st_pressed, c->bg);
+        lv_style_set_bg_color(&s_st_focus, c->text);
+        lv_style_set_text_color(&s_st_focus, c->bg);
+    } else {
+        lv_style_set_bg_color(&s_st_pressed, c->primary);
+        lv_style_set_outline_width(&s_st_focus, 2);
+        lv_style_set_outline_color(&s_st_focus, c->primary);
+        lv_style_set_outline_pad(&s_st_focus, 2);
+    }
+}
+
+/* In colour the tiles take turns: mineral blue, violet, graphite. The violet
+ * is darker than the focus ring's, and the graphite a fifth of the text's
+ * colour over the background: the theme's surface is too near the
+ * background to show. */
+static lv_color_t tile_color(const theme_colors_t *c, int index)
+{
+    switch (index % 3) {
+    case 0:  return c->secondary;
+    case 1:  return lv_color_darken(c->primary, LV_OPA_30);
+    default: return lv_color_mix(c->text, c->bg, LV_OPA_20);
+    }
+}
+
+/* A tile's box and name show the tile's own press and keyboard focus, which
+ * LVGL gives to the button alone. LVGL has set the state by the time a
+ * callback hears of it. */
+static void tile_state_cb(lv_event_t *e)
+{
+    lv_obj_t *tile = lv_event_get_current_target(e);
+    const lv_state_t shown = LV_STATE_PRESSED | LV_STATE_FOCUS_KEY;
+    const lv_state_t now = lv_obj_get_state(tile) & shown;
+    for (uint32_t i = 0; i < lv_obj_get_child_count(tile); i++) {
+        lv_obj_t *child = lv_obj_get_child(tile, (int32_t)i);
+        lv_obj_remove_state(child, shown & ~now);
+        lv_obj_add_state(child, now);
+    }
+}
+
+static void tile_ext_draw_cb(lv_event_t *e)
+{
+    lv_event_set_ext_draw_size(e, FOCUS_ROOM);
+}
+
+static void create_pinned_tile(lv_obj_t *parent, const app_manifest_t *app,
+                               int index, const theme_colors_t *c)
+{
+    /* The colour screens' focus ring is drawn outside the box, above the
+     * tile's top edge: LVGL clips a child to its parent's area and what its
+     * parent says it draws past that. */
+    lv_obj_t *tile = lv_button_create(parent);
+    lv_obj_remove_style_all(tile);
+    lv_obj_add_style(tile, &s_st_tile, LV_PART_MAIN);
+    lv_obj_add_flag(tile, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
+    lv_obj_add_event_cb(tile, tile_ext_draw_cb, LV_EVENT_REFR_EXT_DRAW_SIZE, NULL);
+    lv_obj_refresh_ext_draw_size(tile);
+    lv_obj_set_user_data(tile, (void *)app->id);
+    lv_obj_add_event_cb(tile, pinned_clicked_cb, LV_EVENT_CLICKED, NULL);
+    static const lv_event_code_t STATE_EVENTS[] = {
+        LV_EVENT_PRESSED, LV_EVENT_RELEASED, LV_EVENT_PRESS_LOST,
+        LV_EVENT_FOCUSED, LV_EVENT_DEFOCUSED,
+    };
+    for (size_t i = 0; i < sizeof(STATE_EVENTS) / sizeof(STATE_EVENTS[0]); i++) {
+        lv_obj_add_event_cb(tile, tile_state_cb, STATE_EVENTS[i], NULL);
+    }
+
+    /* Neither the box nor the labels take the touch: it reaches the tile. */
+    lv_obj_t *box = lv_obj_create(tile);
+    lv_obj_remove_style_all(box);
+    lv_obj_add_style(box, &s_st_box, LV_PART_MAIN);
+    lv_obj_add_style(box, &s_st_pressed, LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_add_style(box, &s_st_focus, LV_PART_MAIN | LV_STATE_FOCUS_KEY);
+    lv_obj_clear_flag(box, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    if (!s_mono) {
+        lv_obj_set_style_bg_color(box, tile_color(c, index), LV_PART_MAIN);
+    }
+
+    /* Without the theme's label style, the glyph takes the box's colour in
+     * each state. */
+    lv_obj_t *glyph = lv_label_create(box);
+    lv_obj_remove_style_all(glyph);
+    lv_label_set_text(glyph, app_icon_symbol(app->id));
+    lv_obj_center(glyph);
+
+    /* As wide as its name, so focus inverts the name alone, but no wider than
+     * the tile, past which it is cut. A label sized to its text cannot be
+     * cut, so the text is measured. A name that fits only without its
+     * padding goes without. */
+    lv_obj_t *name = lv_label_create(tile);
+    lv_obj_remove_style_all(name);
+    lv_obj_add_style(name, &s_st_name, LV_PART_MAIN);
+    lv_obj_add_style(name, &s_st_name_focus, LV_PART_MAIN | LV_STATE_FOCUS_KEY);
+    lv_label_set_text(name, app->name);
+    lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
+    const lv_font_t *font = &lv_font_montserrat_14;
+    int32_t text_w = lv_text_get_width(app->name, (uint32_t)strlen(app->name), font, 0);
+    int32_t name_w = text_w + 2 * NAME_PAD;
+    if (name_w > s_layout.cell_w) {
+        lv_obj_set_style_pad_hor(name, 0, LV_PART_MAIN);
+        name_w = LV_MIN(text_w, s_layout.cell_w);
+    }
+    lv_obj_set_width(name, name_w);
+}
+
+/* The time and the date, rewritten only when they change: on e-paper every
+ * rewrite is a refresh. No date until the clock is set. */
+static void set_text_if_changed(lv_obj_t *label, const char *text)
+{
+    if (label && strcmp(lv_label_get_text(label), text) != 0) {
+        lv_label_set_text(label, text);
+    }
+}
+
+static void update_clock(void)
+{
+    if (s_clock_label == NULL) {
+        return;
+    }
+    char time_buf[12];
+    time_manager_format_time(time_buf, sizeof(time_buf));
+    set_text_if_changed(s_clock_label, time_buf);
+
+    char date_buf[40] = "";
+    time_status_t st;
+    if (time_manager_get_status(&st) == ESP_OK && st.known) {
+        time_t now = time(NULL);
+        struct tm tm;
+        localtime_r(&now, &tm);
+        home_format_date(tm.tm_wday, tm.tm_mday, tm.tm_mon, s_layout.landscape,
+                         date_buf, sizeof(date_buf));
+    }
+    set_text_if_changed(s_date_label, date_buf);
+}
+
+static void clock_timer_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    if (s_root && !lv_obj_has_flag(s_root, LV_OBJ_FLAG_HIDDEN)) {
+        update_clock();
+    }
+}
+
+/* The time large, and the date under it, or beside it on a wide screen. */
+static void create_clock(lv_obj_t *parent, const theme_colors_t *c)
+{
+    lv_obj_t *band = lv_obj_create(parent);
+    lv_obj_remove_style_all(band);
+    lv_obj_clear_flag(band, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_pos(band, 12, s_layout.clock_y + 8);
+    lv_obj_set_size(band, s_app_w - 24, s_layout.clock_h - 8);
+    lv_obj_set_flex_flow(band, s_layout.landscape ? LV_FLEX_FLOW_ROW : LV_FLEX_FLOW_COLUMN);
+    /* Beside the time, the date's two lines are centred on it. */
+    lv_obj_set_flex_align(band, LV_FLEX_ALIGN_START,
+                          s_layout.landscape ? LV_FLEX_ALIGN_CENTER : LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START);
+    lv_obj_set_style_pad_row(band, 6, LV_PART_MAIN);
+    lv_obj_set_style_pad_column(band, 12, LV_PART_MAIN);
+
+    s_clock_label = lv_label_create(band);
+    lv_obj_set_style_text_font(s_clock_label, s_mono ? &home_clock_44_mono : &home_clock_44,
+                               LV_PART_MAIN);
+    lv_obj_set_style_text_color(s_clock_label, c->text, LV_PART_MAIN);
+    lv_label_set_text(s_clock_label, "");
+
+    s_date_label = lv_label_create(band);
+    lv_obj_set_style_text_font(s_date_label, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_color(s_date_label, c->text_secondary, LV_PART_MAIN);
+    lv_label_set_text(s_date_label, "");
+
+    update_clock();
+    if (s_clock_timer == NULL) {
+        s_clock_timer = lv_timer_create(clock_timer_cb, CLOCK_POLL_MS, NULL);
+    }
+}
+
+/* The apps pinned to Home, centred in their band. */
+static void create_pinned_grid(lv_obj_t *parent, const theme_colors_t *c)
+{
+    int slots = s_layout.cols * s_layout.rows;
+    if (slots > HOME_MAX_PINS) {
+        slots = HOME_MAX_PINS;
+    }
+    if (slots == 0) {
+        return;
+    }
+
+    const app_manifest_t *apps[32];
+    const char *ids[32];
+    int count = app_manager_list_apps(apps, 32);
+    for (int i = 0; i < count; i++) {
+        ids[i] = apps[i]->id;
+    }
+    int picked[HOME_MAX_PINS];
+    int n = home_pick_pins(s_pin_preference,
+                           sizeof(s_pin_preference) / sizeof(s_pin_preference[0]),
+                           ids, (size_t)count, pin_eligible, picked, slots);
+
+    /* Room above and below the tiles for the focus ring: across, the icons
+     * are well inside their cells. */
+    const int grid_w = s_layout.cols * s_layout.cell_w;
+    const int grid_h = s_layout.rows * s_layout.cell_h;
+    lv_obj_t *grid = lv_obj_create(parent);
+    lv_obj_remove_style_all(grid);
+    lv_obj_clear_flag(grid, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_pad_ver(grid, FOCUS_ROOM, LV_PART_MAIN);
+    lv_obj_set_size(grid, grid_w, grid_h + 2 * FOCUS_ROOM);
+    lv_obj_set_pos(grid, (s_app_w - grid_w) / 2,
+                   s_layout.grid_y + (s_layout.grid_h - grid_h) / 2 - FOCUS_ROOM);
+    lv_obj_set_flex_flow(grid, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_flex_align(grid, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START);
+
+    for (int i = 0; i < n; i++) {
+        create_pinned_tile(grid, apps[picked[i]], i, c);
+    }
+}
+
+/* All apps, along the bottom. */
+static void create_apps_bar(lv_obj_t *parent)
+{
+    lv_obj_t *btn = lv_button_create(parent);
+    lv_obj_remove_style_all(btn);
+    lv_obj_add_style(btn, &s_st_bar, LV_PART_MAIN);
+    lv_obj_add_style(btn, &s_st_pressed, LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_add_style(btn, &s_st_focus, LV_PART_MAIN | LV_STATE_FOCUS_KEY);
+    lv_obj_set_pos(btn, HOME_MARGIN, s_layout.bar_y + 4);
+    lv_obj_set_size(btn, s_app_w - 2 * HOME_MARGIN, s_layout.bar_h - 8);
+    lv_obj_add_event_cb(btn, apps_btn_clicked_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *lbl = lv_label_create(btn);
+    lv_obj_remove_style_all(lbl);
+    lv_label_set_text(lbl, LV_SYMBOL_LIST "  All apps");
+    lv_obj_center(lbl);
 }
 
 /* ------------------------------------------------------------------ */
@@ -384,6 +697,7 @@ static void open_app_drawer(void)
     lv_obj_clear_flag(s_app_drawer, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(s_app_drawer);
     s_drawer_visible = true;
+    show_bar_clock(true);
 }
 
 /* Deleted rather than hidden: its tiles take a share of LVGL's 64 KB pool
@@ -399,6 +713,7 @@ static void close_app_drawer(void)
         s_drawer_grid = NULL;
     }
     s_drawer_visible = false;
+    show_bar_clock(false);
 }
 
 /* ------------------------------------------------------------------ */
@@ -546,76 +861,28 @@ esp_err_t launcher_ui_create(lv_obj_t *parent)
 
     const theme_colors_t *colors = theme_get_colors();
 
-    /* Root container — fills the entire app area */
+    const hal_registry_t *reg = hal_get_registry();
+    s_mono = reg && reg->display && reg->display->type == HAL_DISPLAY_TYPE_EPAPER;
+    home_layout((int16_t)s_app_w, (int16_t)s_app_h, &s_layout);
+    init_home_styles(colors);
+
+    /* Root container — fills the entire app area, in the theme's background:
+     * the app area under it is not painted. */
     s_root = lv_obj_create(parent);
     lv_obj_set_size(s_root, LV_PCT(100), LV_PCT(100));
     lv_obj_set_pos(s_root, 0, 0);
-    lv_obj_set_style_bg_opa(s_root, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_root, colors->bg, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(s_root, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_border_width(s_root, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_all(s_root, 0, LV_PART_MAIN);
     lv_obj_set_style_radius(s_root, 0, LV_PART_MAIN);
     lv_obj_clear_flag(s_root, LV_OBJ_FLAG_SCROLLABLE);
 
-    /* Home deliberately has no app grid. The system status bar and persistent
-     * bottom dock are the only chrome; Apps in the dock opens the full grid. */
-    const app_manifest_t *apps[28];
-    int app_count = app_manager_list_apps(apps, 28);
-
-    /* ------------------------------------------------------------------
-     * Favorites dock — bottom DOCK_H px, 1px top border
-     * ------------------------------------------------------------------ */
-    lv_obj_t *dock = lv_obj_create(s_root);
-    lv_obj_set_pos(dock, 0, s_app_h - DOCK_H);
-    lv_obj_set_size(dock, s_app_w, DOCK_H);
-    lv_obj_set_style_bg_color(dock, colors->surface, LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(dock, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_border_side(dock, LV_BORDER_SIDE_TOP, LV_PART_MAIN);
-    lv_obj_set_style_border_color(dock, colors->text_secondary, LV_PART_MAIN);
-    lv_obj_set_style_border_width(dock, 1, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(dock, 6, LV_PART_MAIN);
-    lv_obj_set_style_radius(dock, 0, LV_PART_MAIN);
-    lv_obj_clear_flag(dock, LV_OBJ_FLAG_SCROLLABLE);
-
-    lv_obj_set_flex_flow(dock, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(dock,
-                          LV_FLEX_ALIGN_CENTER,
-                          LV_FLEX_ALIGN_CENTER,
-                          LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_column(dock, 8, LV_PART_MAIN);
-
-    /* Populate the dock only with installed apps, preserving the stable
-     * preference order. */
-    const char *dock_ids[4] = {NULL, NULL, NULL, NULL};
-    int dock_count = 0;
-    for (int i = 0; i < MAX_DOCK_FAVORITES; i++) {
-        if (!s_dock_favorites[i]) break;
-        for (int j = 0; j < app_count && dock_count < 4; j++) {
-            if (strcmp(s_dock_favorites[i], apps[j]->id) == 0) {
-                dock_ids[dock_count++] = apps[j]->id;
-                break;
-            }
-        }
-    }
-    for (int i = 0; i < app_count && dock_count < 4; i++) {
-        if (is_launcher(apps[i]->id) || is_tool_app(apps[i]->id)) continue;
-        bool duplicate = false;
-        for (int j = 0; j < dock_count; j++) {
-            if (strcmp(dock_ids[j], apps[i]->id) == 0) duplicate = true;
-        }
-        if (!duplicate) dock_ids[dock_count++] = apps[i]->id;
-    }
-    int apps_position = dock_count < 2 ? dock_count : 2;
-    for (int i = 0; i < dock_count; i++) {
-        if (i == apps_position) {
-            create_dock_icon(dock, LV_SYMBOL_LIST, NULL);
-        }
-        create_dock_icon(dock, app_icon_symbol(dock_ids[i]), dock_ids[i]);
-    }
-    if (apps_position == dock_count) {
-        create_dock_icon(dock, LV_SYMBOL_LIST, NULL);
-    }
-
-    /* Overlays start hidden and are created lazily on first open. */
+    /* Home itself is built when it comes to the front (launcher_ui_show).
+     * Overlays start hidden and are created lazily on first open. */
+    s_home          = NULL;
+    s_clock_label   = NULL;
+    s_date_label    = NULL;
     s_app_drawer    = NULL;
     s_drawer_grid   = NULL;
     s_folder        = NULL;
@@ -628,18 +895,58 @@ esp_err_t launcher_ui_create(lv_obj_t *parent)
     return ESP_OK;
 }
 
+/* Home, top to bottom: the clock, room for what is new (empty for now), the
+ * pinned apps and All apps (home_core.h); a band the screen has no room for
+ * is left out. Built when Home comes to the front and deleted when it
+ * leaves, so an app opened over it has Home's share of LVGL's pool, as one
+ * opened from the drawer has the drawer's: Files, over a card of twenty
+ * folders, ran the pool dry with Home's tiles still standing beneath it. */
+static void build_home(void)
+{
+    if (s_home || !s_root) {
+        return;
+    }
+    const theme_colors_t *colors = theme_get_colors();
+    s_home = lv_obj_create(s_root);
+    lv_obj_remove_style_all(s_home);
+    lv_obj_set_size(s_home, LV_PCT(100), LV_PCT(100));
+    lv_obj_clear_flag(s_home, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    if (s_layout.clock_h > 0) {
+        create_clock(s_home, colors);
+    }
+    create_pinned_grid(s_home, colors);
+    create_apps_bar(s_home);
+}
+
+/* Never from inside one of Home's own events: a pinned app launches once its
+ * click is over (pinned_clicked_cb). */
+static void destroy_home(void)
+{
+    if (s_home) {
+        lv_obj_delete(s_home);
+        s_home = NULL;
+    }
+    s_clock_label = NULL;
+    s_date_label  = NULL;
+}
+
 void launcher_ui_show(void)
 {
+    build_home();
     if (s_root) {
         lv_obj_clear_flag(s_root, LV_OBJ_FLAG_HIDDEN);
     }
+    update_clock();
+    show_bar_clock(false);
 }
 
 void launcher_ui_hide(void)
 {
     /* Close transient layers so returning always shows the home screen. */
     close_overlays();
+    destroy_home();
     if (s_root) {
         lv_obj_add_flag(s_root, LV_OBJ_FLAG_HIDDEN);
     }
+    show_bar_clock(true);
 }

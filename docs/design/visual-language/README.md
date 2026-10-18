@@ -3,6 +3,10 @@
 Status: proposed direction, not yet the implemented widget specification
 Last updated: 2026-08-07
 
+Home has since moved on from the "no default widgets" rule below: it shows
+the clock and what is new, from kernel state only. See
+[`.scratch/home/spec.md`](../../../.scratch/home/spec.md).
+
 Implementation backlog: [Phone-style launcher implementation TODO](IMPLEMENTATION-TODO.md)
 
 ThistleOS uses a familiar phone-style launcher. The e-paper and colour window

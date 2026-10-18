@@ -253,6 +253,31 @@ host tests. LVGL window managers only; thistle-tk has none.
 - `simulator/tests/test_quick_panel.py`; the simulator's `--drag` and
   `--tap quick` drive it.
 
+### Home
+
+The launcher's Home (`components/apps_builtin/launcher/`) is, top to
+bottom, the clock and the date, room for what is new, six pinned apps (four
+on a landscape screen) and All apps. `.scratch/home/spec.md` has the rest.
+LVGL window managers only; thistle-tk's launcher is its own.
+
+- **The bands are `home_core.c`'s**, host-tested in
+  `simulator/tests/test_home_core.c`: where each goes on a screen of a given
+  size, which apps are pinned, the date's text. A band the screen has no
+  room for is left out.
+- **What is new reads kernel state only**, as the status bar does: no app
+  has a hook in Home or code for it. Never `rs_msg_alert_take()` (it takes
+  the status bar's pop-up) nor `rs_call_missed_seen()` (the Phone app's).
+- **Home's widgets live only while it is in front**: built in
+  `launcher_ui_show()`, deleted in `launcher_ui_hide()`, so an app has
+  Home's share of LVGL's pool. A pinned app launches from an
+  `lv_async_call()`, never inside its own tile's click.
+- The status bar leaves its clock out while Home shows its own
+  (`statusbar_set_clock_visible()`). The clock font is
+  `launcher/fonts/home_clock_44{,_mono}.c`, made by
+  `launcher/tools/gen_clock_font.sh`.
+- `test_launcher_visuals.py` masks Home's clock band as it does the status
+  bar.
+
 ### Dictation
 
 Holding the microphone key (`HAL_KEY_MIC`, left of Space on the T-Deck Max)
@@ -507,7 +532,9 @@ like a hang, not an out-of-memory error. Give a long list shared
 `lv_mem_monitor()`; the simulator's pool is the same size. The launcher
 deletes its app drawer before opening an app from it: its nineteen tiles,
 styled a property at a time, once left Files too little for a card of
-nine folders.
+nine folders. Home's widgets go the same way whenever an app comes to the
+front; in the simulator a pool run dry shows as a segfault in
+`lv_draw_add_task`, not a hang.
 
 ### Rust toolchains
 

@@ -25,6 +25,9 @@ class Case:
     # None boots the device's default manager; the e-paper cases name
     # thistle-tk because that is no longer what an e-paper board defaults to.
     wm: str | None = None
+    # Rows under the status bar that change by the minute: Home's clock and
+    # date (home_core.c's clock band).
+    clock_rows: int = 0
 
 
 CASES = (
@@ -49,6 +52,7 @@ CASES = (
         "bb9c21d8d8ddf28b4c911c0d1eb8d38501267995c96eac0a9697b2c62bc1d8a1",
         wm="thistle-tk",
     ),
+    # Home: the clock and date, masked, then the pinned apps and All apps.
     Case(
         "lcd-home",
         "tdeck",
@@ -56,8 +60,18 @@ CASES = (
         None,
         320,
         240,
-        "6252a062110e486fccf484112b1163290d1f6a6529d1a3b56acc719dc6c0c87d",
-        True,
+        "3a2cf15080c00ca5572ddffb9bfc29125cc3f315a5dcf5beb7c1170048d769ae",
+        clock_rows=48,
+    ),
+    Case(
+        "eink-lvgl-home",
+        "tdeck-max",
+        2500,
+        None,
+        240,
+        320,
+        "c597a10c20af43abd63c225f53e03d140b055aadaacfd2c24c710d604295c7aa",
+        clock_rows=64,
     ),
     # The LCD hashes cover all nineteen apps. The nine that live under apps/
     # were absent from the simulator until its CMakeLists stopped looking for
@@ -72,7 +86,7 @@ CASES = (
         "lcd-apps",
         "tdeck",
         3000,
-        "159,215",
+        "160,222",
         320,
         240,
         "d346d6aac57fa703711f5aae84c44f278df146e95f4c50c1c98f6ada6090453d",
@@ -88,7 +102,7 @@ CASES = (
         "eink-lvgl-apps",
         "tdeck-max",
         2500,
-        "120,294",
+        "120,302",
         240,
         320,
         "cd9c9a7b6e88a55c3f1f1d2bb5bf847023485456154abfe8c11d043f4f7abe7b",
@@ -114,10 +128,12 @@ def read_ppm(path: Path) -> tuple[int, int, bytearray]:
     return width, height, bytearray(pixels)
 
 
-def masked_hash(width: int, pixels: bytearray) -> str:
-    # Clock and battery text are intentionally dynamic. Everything below the
-    # system bar is stable and remains under exact framebuffer comparison.
-    pixels[: width * STATUS_BAR_HEIGHT * 3] = bytes(width * STATUS_BAR_HEIGHT * 3)
+def masked_hash(width: int, pixels: bytearray, clock_rows: int = 0) -> str:
+    # Clock and battery text are intentionally dynamic, in the system bar and
+    # in Home's clock band under it. Everything else is stable and remains
+    # under exact framebuffer comparison.
+    rows = STATUS_BAR_HEIGHT + clock_rows
+    pixels[: width * rows * 3] = bytes(width * rows * 3)
     return hashlib.sha256(pixels).hexdigest()
 
 
@@ -166,7 +182,7 @@ def run_case(simulator: Path, output_dir: Path, case: Case) -> None:
     if case.empty_home:
         assert_empty_home(case, pixels)
 
-    actual = masked_hash(width, pixels)
+    actual = masked_hash(width, pixels, case.clock_rows)
     if actual != case.expected_sha256:
         raise AssertionError(
             f"framebuffer changed\n"

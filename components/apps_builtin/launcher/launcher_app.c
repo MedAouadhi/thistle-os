@@ -25,7 +25,7 @@ static int launcher_on_create(void)
 static void launcher_on_start(void)
 {
     ESP_LOGI(TAG, "on_start");
-    statusbar_set_title("Launcher");
+    statusbar_set_title("");
     launcher_ui_show();
 }
 
@@ -38,7 +38,7 @@ static void launcher_on_pause(void)
 static void launcher_on_resume(void)
 {
     ESP_LOGI(TAG, "on_resume");
-    statusbar_set_title("Launcher");
+    statusbar_set_title("");
     launcher_ui_show();
 }
 
