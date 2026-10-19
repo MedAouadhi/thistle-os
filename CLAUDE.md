@@ -157,8 +157,13 @@ data session an SMS is noticed by the modem's RI line and fetched by
 interrupting the session (ADR-0004). Every SMS and MeshCore message, in or
 out, is appended to `/sdcard/messages/{sms,mesh}/<conversation>.jsonl` by
 `msg_log.rs`, unless `thistle_os.messenger.save_history` is off (the
-Messenger's settings). The simulator's `--sms "SENDER: TEXT"` puts a message
-in its fake modem. Ticket 14 has what the hardware has yet to confirm.
+Messenger's settings). The Messenger reads them back the first time it opens
+after a restart (`rs_msg_log_read_back`): the 12 latest conversations, the
+last 20 messages of each. Only what earlier boots saved comes back, as this
+boot's messages reach it from the kernel's inboxes; `msg_log.rs` marks where
+each file ended before this boot first wrote to it. The simulator's
+`--sms "SENDER: TEXT"` puts a message in its fake modem. Ticket 14 has what
+the hardware has yet to confirm; `test_messenger_history.py`.
 
 Each message received also buzzes the vibration motor and pops up
 (`msg_alert.rs`, `thistle/msg_alert.h`), unless
@@ -534,7 +539,8 @@ deletes its app drawer before opening an app from it: its nineteen tiles,
 styled a property at a time, once left Files too little for a card of
 nine folders. Home's widgets go the same way whenever an app comes to the
 front; in the simulator a pool run dry shows as a segfault in
-`lv_draw_add_task`, not a hang.
+`lv_draw_add_task`, not a hang. A Messenger bubble costs about 0.75 KB even
+with shared styles, which is why a conversation keeps 20 messages.
 
 ### Rust toolchains
 

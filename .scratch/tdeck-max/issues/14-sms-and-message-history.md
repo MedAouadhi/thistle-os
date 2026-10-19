@@ -16,7 +16,7 @@
 - [x] The Messenger's settings (gear in its header) switch saving off and on (`thistle_os.messenger.save_history`, on by default)
 - [x] The status bar's envelope counts unread SMS as well as mesh messages, waiting in the kernel or held unread by the Messenger (`rs_sms_unread_count`)
 - [x] Verified on hardware: an SMS received and one sent on the T-Deck Max, with mobile data on
-- [ ] The Messenger shows the saved history after a restart. Not done: it is saved, not read back.
+- [x] The Messenger shows the saved history after a restart (`rs_msg_log_read_back`; see "Reading the history back" below)
 
 ## Comments
 
@@ -62,6 +62,37 @@ To try it: switch mobile data off, leave Receive SMS on, send an SMS to the SIM,
 ```
 
 They are plain text on a removable card. An SMS that came encrypted by `msg_crypto` is saved as it arrived, still encrypted; the Messenger decrypts only for display.
+
+### Reading the history back
+
+The first time the Messenger opens after a restart it reads the card
+(`rs_msg_log_read_back`, `msg_log.rs`): the 12 conversations whose last
+message is the latest, each with its last 20 messages, all read. A file is
+read backwards from its end a 4 KB block at a time, and one conversation's
+lines are in memory at a time, so a long history costs no more than a short
+one.
+
+Only what earlier boots saved is read back. A message saved since the
+restart, an SMS fetched before the Messenger was first opened say, is also
+waiting in the kernel's inbox, and would otherwise show twice. `msg_log.rs`
+marks where each file ended before this boot first wrote to it, and reads up
+to the mark.
+
+The Messenger now keeps 20 messages a conversation, not 50. Each is a bubble
+when the conversation is open, and 50 bubbles ran LVGL's 64 KB pool dry: at
+about 1 KB each, the simulator hung once a conversation reached 27 messages,
+whether read back or received. Shared styles and the message's own text
+(`lv_label_set_text_static`) bring a bubble to about 0.75 KB in the 64-bit
+simulator; a conversation of 20 opens with 14 KB of the pool to spare, and
+the quick panel still opens over it. A message beyond the 20th replaces the
+oldest bubble. The rest stay on the card.
+
+An SMS conversation is named by the phonebook once the phonebook has been
+read: the read-back is often its first use, which starts the reading.
+`simulator/tests/test_messenger_history.py`.
+
+On the T-Deck Max the conversations came back after a reflash, and the
+board booted to `ThistleOS ready; internal RAM 134 KB free`.
 
 ### Left as they were
 

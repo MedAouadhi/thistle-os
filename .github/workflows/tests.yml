@@ -388,6 +388,10 @@ jobs:
         working-directory: simulator
         run: python3 tests/test_phone_app.py --sim build/thistle_sim
 
+      - name: Run Messenger history tests
+        working-directory: simulator
+        run: python3 tests/test_messenger_history.py --sim build/thistle_sim
+
       - name: Run File Transfer web server tests
         working-directory: simulator
         run: python3 tests/test_file_transfer.py --sim build/thistle_sim

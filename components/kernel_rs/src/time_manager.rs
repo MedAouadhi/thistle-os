@@ -619,6 +619,14 @@ pub unsafe extern "C" fn time_manager_format_time(buf: *mut c_char, len: usize) 
     copy_out(&face, buf, len);
 }
 
+/// The time of day it was at `secs` since 1970, as
+/// time_manager_format_time() shows the present: for a message's time.
+pub(crate) fn clock_face_at(secs: i64) -> Option<String> {
+    let t = libc_time::local(secs)?;
+    let h24 = with(|s| s.settings.format_24h).unwrap_or(true);
+    Some(time_policy::clock_face(t.hour, t.minute, h24))
+}
+
 /// The date, "2026-10-13", or "----/--/--" before the clock has been set.
 ///
 /// # Safety

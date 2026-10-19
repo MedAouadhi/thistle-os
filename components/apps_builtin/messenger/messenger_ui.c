@@ -22,7 +22,8 @@
  *
  *   SCREEN_SETTINGS
  *     Whether every message is saved to the SD card (thistle/msg_log.h).
- *     The kernel saves them as they come and go, Messenger open or not.
+ *     The kernel saves them as they come and go, Messenger open or not;
+ *     the Messenger reads them back the first time it opens after a restart.
  *
  *   SCREEN_CHAT
  *     Classic message-bubble chat view.  The header shows the conversation
@@ -65,8 +66,12 @@ static atomic_int s_pending_rx = 0;
 /* ------------------------------------------------------------------ */
 
 #define MSG_MAX_TEXT     200
-#define MSG_HISTORY      50
+/* Messages a conversation keeps, each a bubble when it is open: about
+ * 0.75 KB of LVGL's pool apiece in the simulator, which has 29 KB to spare
+ * there. Older ones stay on the card (thistle/msg_log.h). */
+#define MSG_HISTORY      20
 #define MAX_CONVS        16
+#define HISTORY_CONVS    12   /* read back from the card, leaving room for new ones */
 #define CONV_NAME_MAX         32
 #define MAX_PICKER       32   /* mesh contacts offered on the new-conversation screen */
 
@@ -163,9 +168,12 @@ static EXT_RAM_BSS_ATTR struct {
 /* Conversations, allocated as they start: each holds its history. They
  * outlive the widgets above. The app manager destroys the Messenger whenever
  * another app comes to the front, and messages taken from the mesh, read or
- * not, must still be here when it is opened again. A reboot loses them. */
+ * not, must still be here when it is opened again. After a restart, the
+ * first opening reads them back from the card (thistle/msg_log.h). */
 static conversation_t *s_convs[MAX_CONVS];
 static int             s_conv_count;
+static bool            s_history_read;
+static uint32_t        s_book_seq;     /* the phonebook as SMS conversations were named */
 
 /* LVGL periodic timer for kernel tick integration */
 static lv_timer_t *s_tick_timer;
@@ -328,6 +336,25 @@ static void sms_name_for(const char *number, char *out, size_t size)
     }
 }
 
+/* An SMS's text as the user reads it: decrypted into `buf` if the contact
+ * manager has an encrypted chat with `number`, otherwise as it came, which
+ * is also what shows if decryption fails. A mesh direct message is already
+ * end-to-end encrypted by MeshCore. */
+static const char *sms_plain_text(const char *number, const char *text,
+                                  char *buf, size_t size)
+{
+    CContactInfo contact;
+    if (rs_contact_find_by_phone(number, &contact) != 0 ||
+        !rs_msg_crypto_is_active(contact.id)) {
+        return text;
+    }
+    int len = rs_msg_crypto_decrypt(contact.id, (const uint8_t *)text, strlen(text),
+                                    (uint8_t *)buf, size - 1);
+    if (len <= 0) return text;
+    buf[len] = '\0';
+    return buf;
+}
+
 /* ------------------------------------------------------------------ */
 /* Receiving                                                            */
 /* ------------------------------------------------------------------ */
@@ -341,38 +368,20 @@ static void deliver_message(msg_transport_t transport, const char *conv,
     if (!text) text = "";
 
     /* Contact resolution: an SMS sender is a phone number, which the
-     * phonebook, or the older contact manager, may know a name for. The
-     * contact manager's entry also says whether the chat is encrypted. */
+     * phonebook, or the older contact manager, may know a name for. */
     const char *display_name = sender;
     char resolved_name[CONV_NAME_MAX];
-    CContactInfo contact;
-    memset(&contact, 0, sizeof(contact));
-    bool have_contact = false;
+    const char *final_text = text;
+    char decrypted[MSG_MAX_TEXT];
 
     if (transport == MSG_TRANSPORT_SMS) {
-        have_contact = (rs_contact_find_by_phone(sender, &contact) == 0);
         sms_name_for(sender, resolved_name, sizeof(resolved_name));
         display_name = resolved_name;
+        final_text = sms_plain_text(sender, text, decrypted, sizeof(decrypted));
     }
 
     int ci = ensure_conversation(transport, conv, display_name);
     if (ci < 0) return;
-
-    /* Decrypt if an encrypted channel is active for this contact. A mesh
-     * direct message is already end-to-end encrypted by MeshCore. */
-    const char *final_text = text;
-    char decrypted[MSG_MAX_TEXT];
-    if (have_contact && rs_msg_crypto_is_active(contact.id)) {
-        int pt_len = rs_msg_crypto_decrypt(
-            contact.id,
-            (const uint8_t *)text, strlen(text),
-            (uint8_t *)decrypted, sizeof(decrypted) - 1);
-        if (pt_len > 0) {
-            decrypted[pt_len] = '\0';
-            final_text = decrypted;
-        }
-        /* If decryption fails, fall through and show raw text */
-    }
 
     add_message_to_conv(ci, display_name, final_text, false, 0, MSG_STATUS_NONE);
 
@@ -461,6 +470,13 @@ static void transport_status_cb(msg_transport_t transport, uint32_t ref, msg_sta
 
 static void show_screen(app_screen_t screen)
 {
+    /* The bubbles live only while the chat shows: they take up to 15 KB of
+     * LVGL's pool, and point at the history's slots, which new messages
+     * reuse. open_conversation() makes them again. */
+    if (s_msg.screen == SCREEN_CHAT && screen != SCREEN_CHAT && s_msg.msg_list) {
+        lv_obj_clean(s_msg.msg_list);
+    }
+
     /* Hide all sub-screens first */
     if (s_msg.conv_list_screen)
         lv_obj_add_flag(s_msg.conv_list_screen, LV_OBJ_FLAG_HIDDEN);
@@ -659,10 +675,13 @@ static void refresh_conv_list(void)
             name_w -= 32;
         }
 
+        /* One line each: LONG_DOT cuts only at a fixed height, and wraps
+         * into the line below at the content's. */
+        int32_t line_h = lv_font_get_line_height(&lv_font_montserrat_14);
         lv_obj_t *name_lbl = lv_label_create(item);
         lv_label_set_text(name_lbl, top_str);
         lv_label_set_long_mode(name_lbl, LV_LABEL_LONG_DOT);
-        lv_obj_set_width(name_lbl, name_w);
+        lv_obj_set_size(name_lbl, name_w, line_h);
         lv_obj_set_style_text_font(name_lbl, &lv_font_montserrat_14, LV_PART_MAIN);
         lv_obj_set_style_text_color(name_lbl,
             avail ? colors->text : colors->text_secondary,
@@ -678,7 +697,7 @@ static void refresh_conv_list(void)
             lv_obj_t *prev_lbl = lv_label_create(item);
             lv_label_set_text(prev_lbl, preview);
             lv_label_set_long_mode(prev_lbl, LV_LABEL_LONG_DOT);
-            lv_obj_set_width(prev_lbl, DISP_W - 16);
+            lv_obj_set_size(prev_lbl, DISP_W - 16, line_h);
             lv_obj_set_style_text_font(prev_lbl, &lv_font_montserrat_14, LV_PART_MAIN);
             lv_obj_set_style_text_color(prev_lbl, colors->text_secondary, LV_PART_MAIN);
             lv_obj_set_pos(prev_lbl, 0, 18);
@@ -1238,6 +1257,16 @@ static uint32_t conv_text_limit(const conversation_t *cv)
 /* Open a conversation (switch to chat screen and start receiving)     */
 /* ------------------------------------------------------------------ */
 
+/* The chat's header: "Public [MeshCore]". */
+static void show_chat_header(const conversation_t *cv)
+{
+    const msg_transport_driver_t *drv = messenger_get_transport(cv->transport);
+    if (!s_msg.chat_header_label || !drv) return;
+    char hdr[64];
+    snprintf(hdr, sizeof(hdr), "%s [%s]", conv_title(cv), drv->name);
+    lv_label_set_text(s_msg.chat_header_label, hdr);
+}
+
 static void open_conversation(int conv_idx)
 {
     if (conv_idx < 0 || conv_idx >= s_conv_count) return;
@@ -1246,13 +1275,7 @@ static void open_conversation(int conv_idx)
     conversation_t *cv = s_convs[conv_idx];
     const msg_transport_driver_t *drv = messenger_get_transport(cv->transport);
     mark_read(conv_idx);
-
-    /* Update header label: "Public [MeshCore]" */
-    if (s_msg.chat_header_label && drv) {
-        char hdr[64];
-        snprintf(hdr, sizeof(hdr), "%s [%s]", conv_title(cv), drv->name);
-        lv_label_set_text(s_msg.chat_header_label, hdr);
-    }
+    show_chat_header(cv);
 
     /* Dim send controls if transport unavailable */
     const theme_colors_t *colors = theme_get_colors();
@@ -1278,6 +1301,13 @@ static void open_conversation(int conv_idx)
     show_screen(SCREEN_CHAT);
     rebuild_bubbles();
 
+    /* What the bubbles left of LVGL's pool (MSG_HISTORY). */
+    lv_mem_monitor_t mon;
+    lv_mem_monitor(&mon);
+    ESP_LOGI(TAG, "open %s: %d messages; LVGL pool %u KB free, largest block %u KB",
+             conv_title(cv), cv->msg_count < MSG_HISTORY ? cv->msg_count : MSG_HISTORY,
+             (unsigned)(mon.free_size / 1024), (unsigned)(mon.free_biggest_size / 1024));
+
     /* The physical keyboard types into the message straight away. */
     lv_group_t *grp = lv_group_get_default();
     if (grp && s_msg.input_ta) {
@@ -1301,30 +1331,63 @@ static const char *status_text(msg_status_t status)
     }
 }
 
+/* The bubbles' looks, shared by all of them. Set on each bubble a property
+ * at a time, they cost LVGL's 64 KB pool a kilobyte a message, and a
+ * conversation read back from the card ran it dry. */
+static lv_style_t s_bubble_style;      /* every bubble */
+static lv_style_t s_mine_style;        /* the user's own: filled, at the right */
+static lv_style_t s_theirs_style;
+static lv_style_t s_line_style;        /* both its lines: the font, its width */
+static lv_style_t s_mine_line_style;   /* white on the fill */
+static lv_style_t s_from_style;        /* who wrote theirs, and when */
+static lv_style_t s_said_style;        /* what they wrote */
+
+/* Set from the theme as the Messenger opens. */
+static void init_bubble_styles(void)
+{
+    static bool ready;
+    if (!ready) {
+        lv_style_init(&s_bubble_style);
+        lv_style_init(&s_mine_style);
+        lv_style_init(&s_theirs_style);
+        lv_style_init(&s_line_style);
+        lv_style_init(&s_mine_line_style);
+        lv_style_init(&s_from_style);
+        lv_style_init(&s_said_style);
+        ready = true;
+    }
+    const theme_colors_t *colors = theme_get_colors();
+
+    lv_style_set_width(&s_bubble_style, LV_PCT(90));
+    lv_style_set_height(&s_bubble_style, LV_SIZE_CONTENT);
+    lv_style_set_pad_all(&s_bubble_style, 6);
+    lv_style_set_pad_row(&s_bubble_style, 2);
+    lv_style_set_radius(&s_bubble_style, 6);
+    lv_style_set_border_width(&s_bubble_style, 1);
+    lv_style_set_border_color(&s_bubble_style, colors->text_secondary);
+    lv_style_set_bg_opa(&s_bubble_style, LV_OPA_COVER);
+    lv_style_set_layout(&s_bubble_style, LV_LAYOUT_FLEX);
+    lv_style_set_flex_flow(&s_bubble_style, LV_FLEX_FLOW_COLUMN);
+
+    lv_style_set_bg_color(&s_mine_style, colors->primary);
+    lv_style_set_align(&s_mine_style, LV_ALIGN_RIGHT_MID);
+    lv_style_set_bg_color(&s_theirs_style, colors->surface);
+
+    lv_style_set_width(&s_line_style, LV_PCT(100));
+    lv_style_set_text_font(&s_line_style, &lv_font_montserrat_14);
+    lv_style_set_text_color(&s_mine_line_style, lv_color_white());
+    lv_style_set_text_color(&s_from_style, colors->text_secondary);
+    lv_style_set_text_color(&s_said_style, colors->text);
+}
+
 static void create_message_bubble(const chat_message_t *msg)
 {
     if (!s_msg.msg_list) return;
-    const theme_colors_t *colors = theme_get_colors();
 
     lv_obj_t *bubble = lv_obj_create(s_msg.msg_list);
-    lv_obj_set_width(bubble, LV_PCT(90));
-    lv_obj_set_height(bubble, LV_SIZE_CONTENT);
-    lv_obj_set_style_pad_all(bubble, 6, LV_PART_MAIN);
-    lv_obj_set_style_radius(bubble, 6, LV_PART_MAIN);
-    lv_obj_set_style_border_width(bubble, 1, LV_PART_MAIN);
-    lv_obj_set_style_border_color(bubble, colors->text_secondary, LV_PART_MAIN);
+    lv_obj_add_style(bubble, &s_bubble_style, LV_PART_MAIN);
+    lv_obj_add_style(bubble, msg->is_self ? &s_mine_style : &s_theirs_style, LV_PART_MAIN);
     lv_obj_clear_flag(bubble, LV_OBJ_FLAG_SCROLLABLE);
-
-    if (msg->is_self) {
-        lv_obj_set_style_bg_color(bubble, colors->primary, LV_PART_MAIN);
-        lv_obj_set_align(bubble, LV_ALIGN_RIGHT_MID);
-    } else {
-        lv_obj_set_style_bg_color(bubble, colors->surface, LV_PART_MAIN);
-    }
-    lv_obj_set_style_bg_opa(bubble, LV_OPA_COVER, LV_PART_MAIN);
-
-    lv_obj_set_flex_flow(bubble, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(bubble, 2, LV_PART_MAIN);
 
     /* Sender + timestamp, and for the user's own what became of it */
     lv_obj_t *hdr_lbl = lv_label_create(bubble);
@@ -1333,21 +1396,16 @@ static void create_message_bubble(const chat_message_t *msg)
              msg->is_self ? status_text(msg->status) : "");
     lv_label_set_text(hdr_lbl, hdr);
     lv_label_set_long_mode(hdr_lbl, LV_LABEL_LONG_DOT);
-    lv_obj_set_width(hdr_lbl, LV_PCT(100));
-    lv_obj_set_style_text_font(hdr_lbl, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_obj_set_style_text_color(hdr_lbl,
-        msg->is_self ? lv_color_white() : colors->text_secondary,
-        LV_PART_MAIN);
+    lv_obj_add_style(hdr_lbl, &s_line_style, LV_PART_MAIN);
+    lv_obj_add_style(hdr_lbl, msg->is_self ? &s_mine_line_style : &s_from_style, LV_PART_MAIN);
 
-    /* Message body */
+    /* Message body: the history's own copy, not one in LVGL's pool. The
+     * bubble goes before its slot is reused (add_message_to_conv). */
     lv_obj_t *body = lv_label_create(bubble);
-    lv_label_set_text(body, msg->text);
+    lv_label_set_text_static(body, msg->text);
     lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(body, LV_PCT(100));
-    lv_obj_set_style_text_font(body, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_obj_set_style_text_color(body,
-        msg->is_self ? lv_color_white() : colors->text,
-        LV_PART_MAIN);
+    lv_obj_add_style(body, &s_line_style, LV_PART_MAIN);
+    lv_obj_add_style(body, msg->is_self ? &s_mine_line_style : &s_said_style, LV_PART_MAIN);
 }
 
 /* Redraw the open conversation from its history. */
@@ -1369,12 +1427,12 @@ static void rebuild_bubbles(void)
 /* Add message to a conversation's history and (optionally) the UI     */
 /* ------------------------------------------------------------------ */
 
-static void add_message_to_conv(int conv_idx, const char *sender, const char *text,
-                                bool is_self, uint32_t ref, msg_status_t status)
+/* Keep a message in its conversation's history, the oldest giving way, and
+ * show it as the conversation's last. */
+static chat_message_t *keep_message(conversation_t *cv, const char *sender, const char *text,
+                                    bool is_self, uint32_t ref, msg_status_t status,
+                                    const char *time_str)
 {
-    if (conv_idx < 0 || conv_idx >= s_conv_count) return;
-
-    conversation_t *cv = s_convs[conv_idx];
     chat_message_t *m = &cv->messages[cv->msg_count % MSG_HISTORY];
 
     strncpy(m->sender, sender, sizeof(m->sender) - 1);
@@ -1384,10 +1442,7 @@ static void add_message_to_conv(int conv_idx, const char *sender, const char *te
     m->is_self = is_self;
     m->ref = ref;
     m->status = status;
-
-    char time_buf[12];
-    time_manager_format_time(time_buf, sizeof(time_buf));
-    strncpy(m->time_str, time_buf, sizeof(m->time_str) - 1);
+    strncpy(m->time_str, time_str, sizeof(m->time_str) - 1);
     m->time_str[sizeof(m->time_str) - 1] = '\0';
 
     cv->msg_count++;
@@ -1395,16 +1450,87 @@ static void add_message_to_conv(int conv_idx, const char *sender, const char *te
     /* Update conversation list preview */
     strncpy(cv->last_preview, text, sizeof(cv->last_preview) - 1);
     cv->last_preview[sizeof(cv->last_preview) - 1] = '\0';
-    strncpy(cv->last_time, time_buf, sizeof(cv->last_time) - 1);
+    strncpy(cv->last_time, time_str, sizeof(cv->last_time) - 1);
     cv->last_time[sizeof(cv->last_time) - 1] = '\0';
+    return m;
+}
+
+static void add_message_to_conv(int conv_idx, const char *sender, const char *text,
+                                bool is_self, uint32_t ref, msg_status_t status)
+{
+    if (conv_idx < 0 || conv_idx >= s_conv_count) return;
+
+    /* The oldest message's slot is about to be reused, and its bubble,
+     * the first, shows the text in it. */
+    conversation_t *cv = s_convs[conv_idx];
+    bool shown = s_msg.screen == SCREEN_CHAT && s_msg.active_conv == conv_idx;
+    if (shown && s_msg.msg_list && cv->msg_count >= MSG_HISTORY &&
+        lv_obj_get_child_count(s_msg.msg_list) >= MSG_HISTORY) {
+        lv_obj_delete(lv_obj_get_child(s_msg.msg_list, 0));
+    }
+
+    char time_buf[12];
+    time_manager_format_time(time_buf, sizeof(time_buf));
+    chat_message_t *m = keep_message(cv, sender, text, is_self, ref, status, time_buf);
 
     /* If this conversation is the active chat, add a bubble immediately */
-    if (s_msg.screen == SCREEN_CHAT && s_msg.active_conv == conv_idx) {
+    if (shown) {
         create_message_bubble(m);
         if (s_msg.msg_list) {
             lv_obj_scroll_to_y(s_msg.msg_list, LV_COORD_MAX, LV_ANIM_ON);
         }
     }
+}
+
+/* ------------------------------------------------------------------ */
+/* The history on the card                                              */
+/* ------------------------------------------------------------------ */
+
+/* Reading back, from one message to the next. They come a conversation at
+ * a time, so each conversation's name is looked up once. */
+typedef struct {
+    int  convs;
+    int  transport;
+    char conv[32];
+    char name[CONV_NAME_MAX];
+} read_back_t;
+
+/* A message read back from the card (rs_msg_log_read_back), named as it
+ * would be arriving now, and read. */
+static void saved_message(void *ctx, int transport, const char *conv, bool sent,
+                          const char *peer, const char *text, const char *time)
+{
+    read_back_t *rb = ctx;
+    msg_transport_t t = transport == MSG_LOG_SMS ? MSG_TRANSPORT_SMS : MSG_TRANSPORT_LORA;
+
+    if (rb->convs == 0 || rb->transport != transport || strcmp(rb->conv, conv) != 0) {
+        rb->convs++;
+        rb->transport = transport;
+        strncpy(rb->conv, conv, sizeof(rb->conv) - 1);
+        rb->conv[sizeof(rb->conv) - 1] = '\0';
+        if (t == MSG_TRANSPORT_SMS) sms_name_for(conv, rb->name, sizeof(rb->name));
+    }
+
+    /* A mesh contact goes by the name it last had; the Public channel by
+     * the transport's own. */
+    const char *who = t == MSG_TRANSPORT_SMS ? rb->name : peer;
+    char plain[MSG_MAX_TEXT];
+    if (t == MSG_TRANSPORT_SMS) text = sms_plain_text(conv, text, plain, sizeof(plain));
+
+    int ci = ensure_conversation(t, conv, who);
+    if (ci < 0) return;
+    keep_message(s_convs[ci], sent ? "You" : who, text, sent, 0, MSG_STATUS_NONE, time);
+}
+
+/* After a restart, the conversations as the card kept them. What arrived
+ * since is still to come from the kernel's inboxes, unread. */
+static void read_back_history(void)
+{
+    read_back_t rb;
+    memset(&rb, 0, sizeof(rb));
+    int n = rs_msg_log_read_back(HISTORY_CONVS, MSG_HISTORY, saved_message, &rb);
+    ESP_LOGI(TAG, "history: %d messages in %d conversations from %s",
+             n, rb.convs, rs_msg_log_dir());
 }
 
 /* ------------------------------------------------------------------ */
@@ -1581,6 +1707,40 @@ static void take_compose_request(void)
     start_conversation(MSG_TRANSPORT_SMS, dest, title);
 }
 
+/* Name SMS conversations by the phonebook once it has changed. The first
+ * look-up starts the card's reading and finds no name until it ends, which
+ * a conversation read back from the card at the first opening always meets. */
+static void name_sms_conversations(void)
+{
+    uint32_t seq = rs_phonebook_seq();
+    if (seq == s_book_seq) return;
+    s_book_seq = seq;
+
+    bool renamed = false;
+    for (int i = 0; i < s_conv_count; i++) {
+        conversation_t *cv = s_convs[i];
+        char found[PB_NAME_MAX];
+        if (cv->transport != MSG_TRANSPORT_SMS ||
+            !rs_phonebook_name_for(cv->dest, found, sizeof(found)) || found[0] == '\0') {
+            continue;
+        }
+        char name[CONV_NAME_MAX];
+        copy_utf8(name, sizeof(name), found);
+        if (strcmp(name, cv->title) == 0) continue;
+        memcpy(cv->title, name, sizeof(cv->title));
+        int count = cv->msg_count < MSG_HISTORY ? cv->msg_count : MSG_HISTORY;
+        for (int m = 0; m < count; m++) {
+            if (!cv->messages[m].is_self) memcpy(cv->messages[m].sender, name, sizeof(name));
+        }
+        renamed = true;
+        if (s_msg.screen == SCREEN_CHAT && s_msg.active_conv == i) {
+            show_chat_header(cv);
+            rebuild_bubbles();
+        }
+    }
+    if (renamed && s_msg.screen == SCREEN_CONV_LIST) refresh_conv_list();
+}
+
 static void kernel_tick_cb(lv_timer_t *timer)
 {
     (void)timer;
@@ -1588,6 +1748,7 @@ static void kernel_tick_cb(lv_timer_t *timer)
 
     take_compose_request();
     poll_transports();
+    name_sms_conversations();
 
     /* Advance burn timers and check for expired messages */
     rs_burn_timer_tick(now_ms);
@@ -1692,19 +1853,25 @@ esp_err_t messenger_ui_create(lv_obj_t *parent)
     lv_obj_clear_flag(s_msg.root, LV_OBJ_FLAG_SCROLLABLE);
 
     /* Build all sub-screens (each starts hidden) */
+    init_bubble_styles();
     build_conv_list_screen();
     build_new_conv_screen();
     build_chat_screen();
     build_settings_screen();
 
-    /* Each ready transport's own conversation, then anything that arrived
-     * while the messenger was closed. SMS have none of their own: each is
-     * with a number. */
+    /* Each ready transport's own conversation, then, the first time after a
+     * restart, the history the card kept, then anything that arrived while
+     * the messenger was closed. SMS have none of their own: each is with a
+     * number. */
     for (int t = 0; t < MSG_TRANSPORT_COUNT; t++) {
         if (t == MSG_TRANSPORT_SMS) continue;
         const msg_transport_driver_t *drv = messenger_get_transport((msg_transport_t)t);
         if (!drv || !drv->is_available()) continue;
         (void)ensure_conversation((msg_transport_t)t, "", NULL);
+    }
+    if (!s_history_read) {
+        s_history_read = true;
+        read_back_history();
     }
     poll_transports();
 
