@@ -360,6 +360,10 @@ jobs:
         working-directory: simulator
         run: python3 tests/test_touch_taps.py --sim build/thistle_sim
 
+      - name: Run Home's what-is-new tests
+        working-directory: simulator
+        run: python3 tests/test_home.py --sim build/thistle_sim
+
       - name: Run quick panel tests
         working-directory: simulator
         run: python3 tests/test_quick_panel.py --sim build/thistle_sim

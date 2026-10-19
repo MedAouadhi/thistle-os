@@ -7,6 +7,7 @@
 #include "thistle/mesh.h"
 #include "thistle/sms.h"
 #include "thistle/msg_alert.h"
+#include "thistle/tailnet.h"
 #include "ui/toast.h"
 #include "thistle/app_manager.h"
 #include "hal/board.h"
@@ -24,10 +25,11 @@ static const char *TAG = "statusbar";
  * nothing new costs no refresh. */
 #define STATUSBAR_UPDATE_MS 10000
 
-/* How often the unread-message count and the call chip are checked. Each is
- * a number or two read from the kernel, and a label is only touched when it
- * changes, so a message shows within a second at no cost while none arrive,
- * and a call's time on e-paper, in whole minutes, costs a refresh a minute. */
+/* How often the unread-message count, the call chip and the tailnet are
+ * checked. Each is a number or two read from the kernel, and a label is
+ * only touched when it changes, so a message shows within a second at no
+ * cost while none arrive, and a call's time on e-paper, in whole minutes,
+ * costs a refresh a minute. */
 #define STATUSBAR_MESSAGES_MS 1000
 
 /* Narrower than this, the bar has no room for the call chip beside the
@@ -54,6 +56,7 @@ static lv_obj_t *s_messages_label = NULL;
 static lv_obj_t *s_call_label    = NULL;
 static lv_obj_t *s_battery_label = NULL;
 static lv_obj_t *s_wifi_label    = NULL;
+static lv_obj_t *s_tailnet_label = NULL;
 /* The widest time in the clock's format, which the time label is sized to. */
 static const char *s_time_widest = NULL;
 
@@ -186,6 +189,13 @@ esp_err_t statusbar_create(lv_obj_t *parent)
     lv_label_set_text(s_wifi_label, "");
     lv_obj_set_style_text_color(s_wifi_label, colors->text, LV_PART_MAIN);
 
+    /* On the tailnet: Tailscale's symbol, as in the drawer and the quick
+     * panel, beside the network it runs over; hidden otherwise. */
+    s_tailnet_label = lv_label_create(right);
+    lv_label_set_text(s_tailnet_label, LV_SYMBOL_SHUFFLE);
+    lv_obj_set_style_text_color(s_tailnet_label, colors->text, LV_PART_MAIN);
+    lv_obj_add_flag(s_tailnet_label, LV_OBJ_FLAG_HIDDEN);
+
     s_battery_label = lv_label_create(right);
     lv_label_set_text(s_battery_label, BATTERY_UNKNOWN);
     lv_obj_set_style_text_color(s_battery_label, colors->text, LV_PART_MAIN);
@@ -291,6 +301,7 @@ void statusbar_refresh_theme(void)
     if (s_call_label)    lv_obj_set_style_text_color(s_call_label,    colors->text, LV_PART_MAIN);
     if (s_battery_label) lv_obj_set_style_text_color(s_battery_label, colors->text, LV_PART_MAIN);
     if (s_wifi_label)    lv_obj_set_style_text_color(s_wifi_label,    colors->text, LV_PART_MAIN);
+    if (s_tailnet_label) lv_obj_set_style_text_color(s_tailnet_label, colors->text, LV_PART_MAIN);
 }
 
 /* ------------------------------------------------------------------ */
@@ -380,8 +391,26 @@ static void update_call_chip(void)
                shown && lv_obj_get_width(s_container) < STATUSBAR_ROOMY_W);
 }
 
+/* Tailscale's symbol while the device is on the tailnet. On a narrow screen
+ * it gives way to the call chip, as the network does: a call suspends the
+ * data session the tailnet runs over. */
+static void update_tailnet(void)
+{
+    if (s_tailnet_label == NULL) {
+        return;
+    }
+    bool connected = tailnet_is_connected();
+    bool call_shown = !lv_obj_has_flag(s_call_label, LV_OBJ_FLAG_HIDDEN);
+    bool hide = !connected || (call_shown && lv_obj_get_width(s_container) < STATUSBAR_ROOMY_W);
+    if (hide != lv_obj_has_flag(s_tailnet_label, LV_OBJ_FLAG_HIDDEN)) {
+        ESP_LOGI(TAG, "tailnet %s", hide ? "hidden" : "shown");
+        set_hidden(s_tailnet_label, hide);
+    }
+}
+
 /* Show how many mesh messages and SMS are unread, or nothing when none are,
- * and pop up any message that has just arrived; and the call chip. */
+ * and pop up any message that has just arrived; and the call chip and the
+ * tailnet, which each read a value or two from the kernel. */
 static void statusbar_messages_cb(lv_timer_t *timer)
 {
     (void)timer;
@@ -391,6 +420,7 @@ static void statusbar_messages_cb(lv_timer_t *timer)
 
     show_message_alert();
     update_call_chip();
+    update_tailnet();
 
     uint32_t unread = rs_mesh_unread_count() + rs_sms_unread_count();
     bool hidden = lv_obj_has_flag(s_messages_label, LV_OBJ_FLAG_HIDDEN);

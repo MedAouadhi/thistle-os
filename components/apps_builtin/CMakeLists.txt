@@ -6,6 +6,8 @@ idf_component_register(
         "launcher/home_core.c"
         "launcher/fonts/home_clock_44.c"
         "launcher/fonts/home_clock_44_mono.c"
+        "launcher/fonts/home_latin_14.c"
+        "launcher/fonts/home_latin_14_mono.c"
         "settings/settings_app.c"
         "settings/settings_ui.c"
         "messenger/messenger_app.c"

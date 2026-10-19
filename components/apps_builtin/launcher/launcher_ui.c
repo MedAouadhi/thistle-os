@@ -2,9 +2,15 @@
 #include "launcher/home_core.h"
 
 #include "lvgl.h"
+#include "esp_attr.h"
 #include "esp_log.h"
 #include "hal/board.h"
 #include "thistle/app_manager.h"
+#include "thistle/call.h"
+#include "thistle/mesh.h"
+#include "thistle/phonebook.h"
+#include "thistle/sms.h"
+#include "thistle/tailnet.h"
 #include "thistle/time_manager.h"
 #include "thistle/wifi_manager.h"
 #include "ui/manager.h"
@@ -12,6 +18,8 @@
 #include "ui/toast.h"
 #include "ui/theme.h"
 
+#include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include <time.h>
 
@@ -21,6 +29,14 @@ static const char *TAG = "launcher_ui";
  * a pixel for e-paper (tools/gen_clock_font.sh). */
 LV_FONT_DECLARE(home_clock_44);
 LV_FONT_DECLARE(home_clock_44_mono);
+
+/* What Montserrat 14 lacks of Latin-1 and Latin Extended-A, in the same face,
+ * for a missed caller's name from the phonebook (tools/gen_latin_font.sh).
+ * The detail line of what is new is Montserrat 14 with this as its
+ * fallback. */
+LV_FONT_DECLARE(home_latin_14);
+LV_FONT_DECLARE(home_latin_14_mono);
+static lv_font_t s_detail_font;
 
 /* ------------------------------------------------------------------ */
 /* Layout constants                                                     */
@@ -38,6 +54,12 @@ static int s_app_h = 296;
  * minute or the day changes, so on e-paper a look that finds nothing new
  * costs no refresh. */
 #define CLOCK_POLL_MS    1000
+
+/* How often Home reads what is new. A row is rewritten only when what it
+ * says changes. */
+#define NOW_POLL_MS      1000
+#define NOW_GAP             4   /* between two rows on a colour screen */
+#define NOW_RULE            1   /* above, between and below the rows on e-paper */
 
 /* ------------------------------------------------------------------ */
 /* Pinned apps                                                          */
@@ -74,6 +96,39 @@ static bool        s_mono        = false;  /* e-paper: outlines and inversion */
 static lv_obj_t   *s_clock_label = NULL;   /* NULL on a screen with no room */
 static lv_obj_t   *s_date_label  = NULL;
 static lv_timer_t *s_clock_timer = NULL;
+static lv_obj_t   *s_apps_btn    = NULL;   /* All apps */
+
+/* What is new: HOME_NOW_ROWS rows, built with Home and filled from
+ * home_now_rows(). A row is a button holding its icon, title and detail,
+ * and beside it, for a missed call, a button that calls back. */
+typedef struct {
+    lv_obj_t *row;
+    lv_obj_t *main;
+    lv_obj_t *icon;
+    lv_obj_t *title;
+    lv_obj_t *detail;
+    lv_obj_t *back;
+} now_slot_t;
+
+static lv_obj_t      *s_now_band = NULL;   /* NULL on a screen with no room */
+static now_slot_t     s_now[HOME_NOW_ROWS];
+/* What the rows show. Like s_missed, read by the LVGL task alone, so in
+ * PSRAM (CLAUDE.md, "Internal RAM runs out first"). */
+static EXT_RAM_BSS_ATTR home_now_row_t s_now_rows[HOME_NOW_ROWS];
+static int            s_now_count = -1;    /* -1: nothing shown yet */
+static lv_timer_t    *s_now_timer = NULL;
+
+/* The newest missed call, read from the log when the log changes, and its
+ * name from the phonebook when either changes. */
+static EXT_RAM_BSS_ATTR struct {
+    bool             read;
+    uint32_t         log_seq;
+    bool             found;
+    call_log_entry_t entry;
+    bool             named;
+    uint32_t         book_seq;
+    char             name[PB_NAME_MAX];
+} s_missed;
 
 /* ------------------------------------------------------------------ */
 /* Stable semantic icon mapping.  LVGL's built-in symbols keep the
@@ -290,13 +345,146 @@ static lv_style_t s_st_name_focus;
 static lv_style_t s_st_bar;
 static lv_style_t s_st_pressed;
 static lv_style_t s_st_focus;
+static lv_style_t s_st_now_band;
+static lv_style_t s_st_now_row;
+static lv_style_t s_st_now_rule;
+static lv_style_t s_st_now_main;
+static lv_style_t s_st_now_icon;
+static lv_style_t s_st_now_text;
+static lv_style_t s_st_now_title;
+static lv_style_t s_st_now_detail;
+static lv_style_t s_st_now_back;
+static lv_style_t s_st_now_pressed;
+static lv_style_t s_st_now_ring;
 static bool       s_styles_ready = false;
+
+/* A row of what is new in colour: a card a fifth of the accent's colour over
+ * the background, as the mockup's. */
+static lv_color_t now_card(const theme_colors_t *c)
+{
+    return lv_color_mix(c->primary, c->bg, LV_OPA_20);
+}
+
+static void init_now_styles(const theme_colors_t *c)
+{
+    const bool wide = s_layout.landscape;
+    const lv_font_t *title_font = &lv_font_montserrat_18;
+    /* A copy, so LVGL's own Montserrat 14 keeps no fallback. */
+    s_detail_font = lv_font_montserrat_14;
+    s_detail_font.fallback = s_mono ? &home_latin_14_mono : &home_latin_14;
+    const lv_font_t *detail_font = &s_detail_font;
+
+    /* On e-paper the rows are ruled above, between and below; in colour each
+     * is a card, NOW_GAP from the next. One row alone sits in the middle. */
+    const int row_h = (s_layout.now_h - (s_mono ? 2 * NOW_RULE : NOW_GAP)) / HOME_NOW_ROWS;
+    lv_style_set_layout(&s_st_now_band, LV_LAYOUT_FLEX);
+    lv_style_set_flex_flow(&s_st_now_band, LV_FLEX_FLOW_COLUMN);
+    lv_style_set_flex_main_place(&s_st_now_band, LV_FLEX_ALIGN_CENTER);
+    lv_style_set_pad_row(&s_st_now_band, s_mono ? 0 : NOW_GAP);
+    if (s_mono) {
+        lv_style_set_border_side(&s_st_now_band, LV_BORDER_SIDE_TOP | LV_BORDER_SIDE_BOTTOM);
+        lv_style_set_border_width(&s_st_now_band, NOW_RULE);
+        lv_style_set_border_color(&s_st_now_band, c->text);
+    }
+
+    lv_style_set_width(&s_st_now_row, lv_pct(100));
+    lv_style_set_height(&s_st_now_row, row_h);
+    lv_style_set_layout(&s_st_now_row, LV_LAYOUT_FLEX);
+    lv_style_set_flex_flow(&s_st_now_row, LV_FLEX_FLOW_ROW);
+    lv_style_set_flex_cross_place(&s_st_now_row, LV_FLEX_ALIGN_CENTER);
+    lv_style_set_flex_track_place(&s_st_now_row, LV_FLEX_ALIGN_CENTER);
+    lv_style_set_pad_column(&s_st_now_row, 4);
+    if (!s_mono) {
+        lv_style_set_bg_opa(&s_st_now_row, LV_OPA_COVER);
+        lv_style_set_bg_color(&s_st_now_row, now_card(c));
+        lv_style_set_radius(&s_st_now_row, 6);
+        lv_style_set_pad_right(&s_st_now_row, 3);
+    }
+    /* On e-paper, the rule between two rows, on the second. */
+    lv_style_set_border_side(&s_st_now_rule, LV_BORDER_SIDE_TOP);
+    lv_style_set_border_width(&s_st_now_rule, NOW_RULE);
+    lv_style_set_border_color(&s_st_now_rule, c->text);
+
+    /* The row's own button: its icon, then its title and detail, under one
+     * another on a tall screen and on one line on a wide one. The labels take
+     * the button's text colour, so a press or focus inverts them on e-paper. */
+    lv_style_set_flex_grow(&s_st_now_main, 1);
+    lv_style_set_height(&s_st_now_main, lv_pct(100));
+    lv_style_set_layout(&s_st_now_main, LV_LAYOUT_FLEX);
+    lv_style_set_flex_flow(&s_st_now_main, LV_FLEX_FLOW_ROW);
+    lv_style_set_flex_cross_place(&s_st_now_main, LV_FLEX_ALIGN_CENTER);
+    lv_style_set_flex_track_place(&s_st_now_main, LV_FLEX_ALIGN_CENTER);
+    lv_style_set_pad_hor(&s_st_now_main, 4);
+    lv_style_set_pad_column(&s_st_now_main, 8);
+    lv_style_set_radius(&s_st_now_main, s_mono ? 3 : 6);
+    lv_style_set_bg_opa(&s_st_now_main, LV_OPA_COVER);
+    lv_style_set_bg_color(&s_st_now_main, s_mono ? c->bg : now_card(c));
+    lv_style_set_text_color(&s_st_now_main, c->text);
+
+    lv_style_set_text_font(&s_st_now_icon, title_font);
+    lv_style_set_width(&s_st_now_icon, 22);
+    lv_style_set_text_align(&s_st_now_icon, LV_TEXT_ALIGN_CENTER);
+
+    lv_style_set_flex_grow(&s_st_now_text, 1);
+    lv_style_set_height(&s_st_now_text, LV_SIZE_CONTENT);
+    lv_style_set_layout(&s_st_now_text, LV_LAYOUT_FLEX);
+    lv_style_set_flex_flow(&s_st_now_text, wide ? LV_FLEX_FLOW_ROW : LV_FLEX_FLOW_COLUMN);
+    /* On one line, the two sizes of text share a foot rather than a middle. */
+    lv_style_set_flex_cross_place(&s_st_now_text, wide ? LV_FLEX_ALIGN_END : LV_FLEX_ALIGN_START);
+    lv_style_set_pad_column(&s_st_now_text, 8);
+
+    /* Each cut short with "..." at the width it is given: under one another
+     * the whole width, on one line the title its own and the detail the
+     * rest. A label as wide as its text and cut with "..." draws "..." alone
+     * (ticket 02), so the title on one line is clipped instead, and titles
+     * are short. */
+    lv_style_set_text_font(&s_st_now_title, title_font);
+    lv_style_set_height(&s_st_now_title, lv_font_get_line_height(title_font));
+    lv_style_set_text_font(&s_st_now_detail, detail_font);
+    lv_style_set_height(&s_st_now_detail, lv_font_get_line_height(detail_font));
+    if (wide) {
+        lv_style_set_flex_grow(&s_st_now_detail, 1);
+    } else {
+        lv_style_set_width(&s_st_now_title, lv_pct(100));
+        lv_style_set_width(&s_st_now_detail, lv_pct(100));
+    }
+    if (!s_mono) {
+        lv_style_set_text_color(&s_st_now_detail, c->text_secondary);
+    }
+
+    /* Call back, at the end of a missed call's row. */
+    const int back = wide ? 24 : 32;
+    lv_style_set_width(&s_st_now_back, back);
+    lv_style_set_height(&s_st_now_back, back);
+    lv_style_set_radius(&s_st_now_back, wide ? 4 : 6);
+    lv_style_set_bg_opa(&s_st_now_back, LV_OPA_COVER);
+    lv_style_set_bg_color(&s_st_now_back, s_mono ? c->bg : lv_color_mix(c->text, c->bg, LV_OPA_20));
+    lv_style_set_border_width(&s_st_now_back, s_mono ? 1 : 0);
+    lv_style_set_border_color(&s_st_now_back, c->text);
+    lv_style_set_text_color(&s_st_now_back, c->text);
+    lv_style_set_text_font(&s_st_now_back, wide ? detail_font : title_font);
+
+    /* Pressed, inverted on e-paper; in colour a deeper card, under which an
+     * icon in the accent's colour still shows. Focused, inverted on e-paper;
+     * in colour a ring inside the button, which its row would clip outside. */
+    if (s_mono) {
+        lv_style_set_bg_color(&s_st_now_pressed, c->text);
+        lv_style_set_text_color(&s_st_now_pressed, c->bg);
+    } else {
+        lv_style_set_bg_color(&s_st_now_pressed, lv_color_mix(c->primary, c->bg, LV_OPA_40));
+        lv_style_set_border_width(&s_st_now_ring, 2);
+        lv_style_set_border_color(&s_st_now_ring, c->primary);
+    }
+}
 
 static void init_home_styles(const theme_colors_t *c)
 {
     lv_style_t *const all[] = {
         &s_st_tile, &s_st_box, &s_st_name, &s_st_name_focus,
         &s_st_bar, &s_st_pressed, &s_st_focus,
+        &s_st_now_band, &s_st_now_row, &s_st_now_rule, &s_st_now_main,
+        &s_st_now_icon, &s_st_now_text, &s_st_now_title, &s_st_now_detail,
+        &s_st_now_back, &s_st_now_pressed, &s_st_now_ring,
     };
     for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++) {
         if (s_styles_ready) {
@@ -362,6 +550,8 @@ static void init_home_styles(const theme_colors_t *c)
         lv_style_set_outline_color(&s_st_focus, c->primary);
         lv_style_set_outline_pad(&s_st_focus, 2);
     }
+
+    init_now_styles(c);
 }
 
 /* In colour the tiles take turns: mineral blue, violet, graphite. The violet
@@ -528,6 +718,354 @@ static void create_clock(lv_obj_t *parent, const theme_colors_t *c)
     }
 }
 
+/* ------------------------------------------------------------------ */
+/* What is new                                                          */
+/* ------------------------------------------------------------------ */
+
+/* Each reads public kernel state that the status bar or the call chip
+ * already reads, and changes none of it: never rs_msg_alert_take(), which
+ * takes the status bar's pop-up, nor rs_call_missed_seen(), which is the
+ * Phone app's Recents'. */
+
+/* The newest missed call and the phonebook's name for it. Asked only while a
+ * call is missed: the call log is read from the card on its first use, and
+ * the phonebook searches the whole card on its first. */
+static void read_missed_call(home_now_in_t *in)
+{
+    uint32_t log_seq = rs_call_log_seq();
+    if (!s_missed.read || s_missed.log_seq != log_seq) {
+        s_missed.read = true;
+        s_missed.log_seq = log_seq;
+        s_missed.found = false;
+        s_missed.named = false;
+        uint32_t count = rs_call_log_count();
+        for (uint32_t i = 0; i < count && !s_missed.found; i++) {
+            s_missed.found = rs_call_log_get(i, &s_missed.entry) &&
+                             s_missed.entry.kind == CALL_LOG_MISSED;
+        }
+    }
+    if (!s_missed.found) {
+        return;
+    }
+
+    const char *number = s_missed.entry.number;
+    if (number[0] == '\0') {
+        s_missed.name[0] = '\0';
+    } else {
+        /* The phonebook reads the card on a thread of its own and knows no
+         * name until it is done, so the name is asked again whenever the
+         * phonebook changes. */
+        uint32_t book_seq = rs_phonebook_seq();
+        if (!s_missed.named || s_missed.book_seq != book_seq) {
+            s_missed.named = true;
+            s_missed.book_seq = book_seq;
+            if (!rs_phonebook_name_for(number, s_missed.name, sizeof(s_missed.name))) {
+                s_missed.name[0] = '\0';
+            }
+        }
+    }
+    in->missed_number = number;
+    in->missed_name = s_missed.name;
+
+    /* In local time, as the status bar's clock: localtime_r() reads the
+     * zone the kernel keeps in TZ. */
+    if (s_missed.entry.time != 0) {
+        time_t when = (time_t)s_missed.entry.time;
+        struct tm tm;
+        if (localtime_r(&when, &tm)) {
+            in->missed_hour = (int8_t)tm.tm_hour;
+            in->missed_minute = (int8_t)tm.tm_min;
+        }
+        time_status_t st;
+        if (time_manager_get_status(&st) == ESP_OK) {
+            in->format_24h = st.format_24h;
+        }
+    }
+}
+
+static home_tailnet_t read_tailnet(void)
+{
+    if (!tailnet_is_enabled()) {
+        return HOME_TAILNET_QUIET;
+    }
+    tailnet_status_t st;
+    if (tailnet_get_status(&st) != ESP_OK) {
+        return HOME_TAILNET_QUIET;
+    }
+    switch (st.state) {
+    case TAILNET_NEEDS_LOGIN:    return HOME_TAILNET_LOGIN;
+    case TAILNET_NEEDS_APPROVAL: return HOME_TAILNET_APPROVAL;
+    default:                     return HOME_TAILNET_QUIET;
+    }
+}
+
+static void read_now(home_now_in_t *in)
+{
+    memset(in, 0, sizeof(*in));
+    in->missed_hour = -1;
+    in->format_24h = true;
+    in->sms_unread = rs_sms_unread_count();
+    in->mesh_unread = rs_mesh_unread_count();
+    in->missed_calls = rs_call_missed_count();
+    if (in->missed_calls > 0) {
+        read_missed_call(in);
+    }
+    in->tailnet = read_tailnet();
+    in->mesh_running = rs_mesh_is_running();
+    in->mesh_contacts = in->mesh_running ? rs_mesh_get_contact_count() : 0;
+}
+
+static const char *now_symbol(home_now_kind_t kind)
+{
+    switch (kind) {
+    case HOME_NOW_MESSAGES:    return LV_SYMBOL_ENVELOPE;
+    case HOME_NOW_MISSED_CALL: return LV_SYMBOL_CALL;
+    case HOME_NOW_TAILNET:     return LV_SYMBOL_SHUFFLE;   /* as in the drawer */
+    case HOME_NOW_MESH:        return LV_SYMBOL_LOOP;      /* as the quick panel's LoRa */
+    case HOME_NOW_CAUGHT_UP:
+    default:                   return LV_SYMBOL_OK;
+    }
+}
+
+/* What a tap on the row opens, as the status bar's envelope and the call
+ * chip do; NULL for a row that is not a button. */
+static const char *now_app(home_now_kind_t kind)
+{
+    switch (kind) {
+    case HOME_NOW_MESSAGES:
+    case HOME_NOW_MESH:        return "com.thistle.messenger";
+    case HOME_NOW_MISSED_CALL: return "com.thistle.phone";
+    case HOME_NOW_TAILNET:     return "com.thistle.tailscale";
+    case HOME_NOW_CAUGHT_UP:
+    default:                   return NULL;
+    }
+}
+
+/* In colour the icon takes the accent of what it is about. */
+static lv_color_t now_icon_color(const theme_colors_t *c, home_now_kind_t kind)
+{
+    switch (kind) {
+    case HOME_NOW_MESSAGES:    return c->primary;
+    case HOME_NOW_MISSED_CALL: return c->secondary;
+    default:                   return c->text;
+    }
+}
+
+/* Launched once this click is over, as a pinned app is: leaving Home deletes
+ * its rows, this one among them. */
+static void now_clicked_cb(lv_event_t *e)
+{
+    const char *app_id = (const char *)lv_obj_get_user_data(lv_event_get_current_target(e));
+    if (app_id) {
+        lv_async_call(launch_pinned_cb, (void *)app_id);
+    }
+}
+
+/* The call screen opens over Home as the kernel places the call, so nothing
+ * of Home is deleted here. */
+static void call_back_clicked_cb(lv_event_t *e)
+{
+    int index = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_current_target(e));
+    if (index < 0 || index >= s_now_count) {
+        return;
+    }
+    const char *number = s_now_rows[index].call_back;
+    if (number[0] == '\0') {
+        return;
+    }
+    esp_err_t err = rs_call_dial(number);
+    ESP_LOGI(TAG, "call back %s: %s", number, esp_err_to_name(err));
+    switch (err) {
+    case ESP_OK:
+        break;
+    case ESP_ERR_NOT_SUPPORTED:
+        toast_warn("This device cannot make calls");
+        break;
+    case ESP_ERR_INVALID_STATE:
+        toast_warn("Calls are not ready yet");
+        break;
+    default:
+        toast_warn("The call could not be placed");
+        break;
+    }
+}
+
+/* Hidden or shown only on a change: LVGL redraws an object it is told to
+ * show though it was showing, which on e-paper is a refresh. */
+static void set_hidden(lv_obj_t *obj, bool hidden)
+{
+    if (lv_obj_has_flag(obj, LV_OBJ_FLAG_HIDDEN) != hidden) {
+        lv_obj_update_flag(obj, LV_OBJ_FLAG_HIDDEN, hidden);
+    }
+}
+
+/* A button about to be hidden or made inert hands the keyboard's focus on. */
+static void leave_focus(lv_obj_t *obj)
+{
+    lv_group_t *group = lv_obj_get_group(obj);
+    if (group && lv_group_get_focused(group) == obj) {
+        lv_group_focus_next(group);
+    }
+}
+
+static lv_obj_t *now_label(lv_obj_t *parent, const lv_style_t *style)
+{
+    lv_obj_t *label = lv_label_create(parent);
+    lv_obj_remove_style_all(label);
+    lv_obj_add_style(label, style, LV_PART_MAIN);
+    lv_label_set_text(label, "");
+    return label;
+}
+
+/* A row, hidden until update_now() fills it. Its buttons join the keyboard's
+ * group as they are made, so Home's rows come before its pinned apps. */
+static void create_now_slot(lv_obj_t *band, int index)
+{
+    lv_style_t *focus = s_mono ? &s_st_focus : &s_st_now_ring;
+    now_slot_t *slot = &s_now[index];
+
+    slot->row = lv_obj_create(band);
+    lv_obj_remove_style_all(slot->row);
+    lv_obj_add_style(slot->row, &s_st_now_row, LV_PART_MAIN);
+    if (s_mono && index > 0) {
+        lv_obj_add_style(slot->row, &s_st_now_rule, LV_PART_MAIN);
+    }
+    lv_obj_clear_flag(slot->row, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(slot->row, LV_OBJ_FLAG_HIDDEN);
+
+    slot->main = lv_button_create(slot->row);
+    lv_obj_remove_style_all(slot->main);
+    lv_obj_add_style(slot->main, &s_st_now_main, LV_PART_MAIN);
+    lv_obj_add_style(slot->main, &s_st_now_pressed, LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_add_style(slot->main, focus, LV_PART_MAIN | LV_STATE_FOCUS_KEY);
+    lv_obj_add_event_cb(slot->main, now_clicked_cb, LV_EVENT_CLICKED, NULL);
+
+    /* Neither the labels nor the box holding title and detail take the
+     * touch: it reaches the button. */
+    slot->icon = now_label(slot->main, &s_st_now_icon);
+    lv_obj_t *text = lv_obj_create(slot->main);
+    lv_obj_remove_style_all(text);
+    lv_obj_add_style(text, &s_st_now_text, LV_PART_MAIN);
+    lv_obj_clear_flag(text, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    slot->title = now_label(text, &s_st_now_title);
+    slot->detail = now_label(text, &s_st_now_detail);
+    lv_label_set_long_mode(slot->title, s_layout.landscape ? LV_LABEL_LONG_CLIP : LV_LABEL_LONG_DOT);
+    lv_label_set_long_mode(slot->detail, LV_LABEL_LONG_DOT);
+
+    slot->back = lv_button_create(slot->row);
+    lv_obj_remove_style_all(slot->back);
+    lv_obj_add_style(slot->back, &s_st_now_back, LV_PART_MAIN);
+    lv_obj_add_style(slot->back, &s_st_now_pressed, LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_add_style(slot->back, focus, LV_PART_MAIN | LV_STATE_FOCUS_KEY);
+    lv_obj_set_user_data(slot->back, (void *)(intptr_t)index);
+    lv_obj_add_event_cb(slot->back, call_back_clicked_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_flag(slot->back, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_t *glyph = lv_label_create(slot->back);
+    lv_obj_remove_style_all(glyph);
+    lv_label_set_text(glyph, LV_SYMBOL_CALL);
+    lv_obj_center(glyph);
+}
+
+/* Fill the rows with `rows`, touching only what differs from what they
+ * show: on e-paper every change is a refresh of its area. */
+static void show_now(const home_now_row_t *rows, int n)
+{
+    const theme_colors_t *c = theme_get_colors();
+    for (int i = 0; i < HOME_NOW_ROWS; i++) {
+        now_slot_t *slot = &s_now[i];
+        if (i >= n) {
+            leave_focus(slot->main);
+            leave_focus(slot->back);
+            set_hidden(slot->row, true);
+            continue;
+        }
+        const home_now_row_t *row = &rows[i];
+        if (i >= s_now_count || s_now_rows[i].kind != row->kind) {
+            const char *app_id = now_app(row->kind);
+            set_text_if_changed(slot->icon, now_symbol(row->kind));
+            if (!s_mono) {
+                lv_obj_set_style_text_color(slot->icon, now_icon_color(c, row->kind), LV_PART_MAIN);
+            }
+            if (app_id == NULL) {
+                leave_focus(slot->main);
+            }
+            lv_obj_set_user_data(slot->main, (void *)app_id);
+            lv_obj_set_state(slot->main, LV_STATE_DISABLED, app_id == NULL);
+        }
+        set_text_if_changed(slot->title, row->title);
+        set_text_if_changed(slot->detail, row->detail);
+        bool back = row->call_back[0] != '\0';
+        if (!back) {
+            leave_focus(slot->back);
+        }
+        set_hidden(slot->back, !back);
+        set_hidden(slot->row, false);
+    }
+}
+
+static void log_now(const home_now_row_t *rows, int n)
+{
+    char line[2 * (HOME_NOW_TITLE_MAX + HOME_NOW_DETAIL_MAX + 8)];
+    size_t at = 0;
+    line[0] = '\0';
+    for (int i = 0; i < n && at < sizeof(line); i++) {
+        int w = snprintf(line + at, sizeof(line) - at, "%s%s (%s)",
+                         i ? " | " : "", rows[i].title, rows[i].detail);
+        if (w < 0) {
+            break;
+        }
+        at += (size_t)w;
+    }
+    ESP_LOGI(TAG, "now: %s", line);
+}
+
+/* Read what is new, and redraw the rows if it changed. */
+static void update_now(void)
+{
+    if (s_now_band == NULL) {
+        return;
+    }
+    home_now_in_t in;
+    read_now(&in);
+    home_now_row_t rows[HOME_NOW_ROWS];
+    int n = home_now_rows(&in, rows, HOME_NOW_ROWS);
+    if (n == s_now_count && memcmp(rows, s_now_rows, sizeof(rows)) == 0) {
+        return;
+    }
+    show_now(rows, n);
+    memcpy(s_now_rows, rows, sizeof(rows));
+    s_now_count = n;
+    log_now(rows, n);
+}
+
+static void now_timer_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    if (s_home) {
+        update_now();
+    }
+}
+
+/* The rows of what is new, under the clock. */
+static void create_now(lv_obj_t *parent)
+{
+    s_now_band = lv_obj_create(parent);
+    lv_obj_remove_style_all(s_now_band);
+    lv_obj_add_style(s_now_band, &s_st_now_band, LV_PART_MAIN);
+    lv_obj_clear_flag(s_now_band, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_pos(s_now_band, HOME_MARGIN, s_layout.now_y);
+    lv_obj_set_size(s_now_band, s_app_w - 2 * HOME_MARGIN, s_layout.now_h);
+    for (int i = 0; i < HOME_NOW_ROWS; i++) {
+        create_now_slot(s_now_band, i);
+    }
+
+    s_now_count = -1;
+    update_now();
+    if (s_now_timer == NULL) {
+        s_now_timer = lv_timer_create(now_timer_cb, NOW_POLL_MS, NULL);
+    }
+}
+
 /* The apps pinned to Home, centred in their band. */
 static void create_pinned_grid(lv_obj_t *parent, const theme_colors_t *c)
 {
@@ -574,6 +1112,7 @@ static void create_pinned_grid(lv_obj_t *parent, const theme_colors_t *c)
 static void create_apps_bar(lv_obj_t *parent)
 {
     lv_obj_t *btn = lv_button_create(parent);
+    s_apps_btn = btn;
     lv_obj_remove_style_all(btn);
     lv_obj_add_style(btn, &s_st_bar, LV_PART_MAIN);
     lv_obj_add_style(btn, &s_st_pressed, LV_PART_MAIN | LV_STATE_PRESSED);
@@ -883,6 +1422,9 @@ esp_err_t launcher_ui_create(lv_obj_t *parent)
     s_home          = NULL;
     s_clock_label   = NULL;
     s_date_label    = NULL;
+    s_now_band      = NULL;
+    s_now_count     = -1;
+    s_apps_btn      = NULL;
     s_app_drawer    = NULL;
     s_drawer_grid   = NULL;
     s_folder        = NULL;
@@ -895,9 +1437,9 @@ esp_err_t launcher_ui_create(lv_obj_t *parent)
     return ESP_OK;
 }
 
-/* Home, top to bottom: the clock, room for what is new (empty for now), the
- * pinned apps and All apps (home_core.h); a band the screen has no room for
- * is left out. Built when Home comes to the front and deleted when it
+/* Home, top to bottom: the clock, what is new, the pinned apps and All apps
+ * (home_core.h); a band the screen has no room for is left out. Built when
+ * Home comes to the front and deleted when it
  * leaves, so an app opened over it has Home's share of LVGL's pool, as one
  * opened from the drawer has the drawer's: Files, over a card of twenty
  * folders, ran the pool dry with Home's tiles still standing beneath it. */
@@ -914,12 +1456,16 @@ static void build_home(void)
     if (s_layout.clock_h > 0) {
         create_clock(s_home, colors);
     }
+    /* Before the pinned apps, so the keyboard reaches the rows first. */
+    if (s_layout.now_h > 0) {
+        create_now(s_home);
+    }
     create_pinned_grid(s_home, colors);
     create_apps_bar(s_home);
 }
 
-/* Never from inside one of Home's own events: a pinned app launches once its
- * click is over (pinned_clicked_cb). */
+/* Never from inside one of Home's own events: a pinned app, or a row, launches
+ * once its click is over (pinned_clicked_cb, now_clicked_cb). */
 static void destroy_home(void)
 {
     if (s_home) {
@@ -928,6 +1474,38 @@ static void destroy_home(void)
     }
     s_clock_label = NULL;
     s_date_label  = NULL;
+    s_now_band    = NULL;
+    memset(s_now, 0, sizeof(s_now));
+    s_now_count   = -1;
+    s_apps_btn    = NULL;
+}
+
+static bool within(lv_obj_t *obj, const lv_obj_t *ancestor)
+{
+    for (; obj; obj = lv_obj_get_parent(obj)) {
+        if (obj == ancestor) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* The keyboard's focus starts on All apps, Home's last button, unseen until
+ * a key is pressed, so the first Tab goes round to the first: a row of what
+ * is new, when one is a button. LVGL focuses the first button to join an
+ * empty group, and the first Tab moved on from it unseen; or, as the rows
+ * join hidden, nothing, and then a keypad does nothing at all. Focus that is
+ * outside Home stays where it is. */
+static void focus_home(void)
+{
+    lv_group_t *group = lv_group_get_default();
+    if (group == NULL || s_apps_btn == NULL) {
+        return;
+    }
+    lv_obj_t *focused = lv_group_get_focused(group);
+    if (focused == NULL || within(focused, s_home)) {
+        lv_group_focus_obj(s_apps_btn);
+    }
 }
 
 void launcher_ui_show(void)
@@ -937,7 +1515,9 @@ void launcher_ui_show(void)
         lv_obj_clear_flag(s_root, LV_OBJ_FLAG_HIDDEN);
     }
     update_clock();
+    update_now();
     show_bar_clock(false);
+    focus_home();
 }
 
 void launcher_ui_hide(void)

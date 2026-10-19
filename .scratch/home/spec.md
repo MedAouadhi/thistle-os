@@ -1,10 +1,10 @@
 # Home
 
-Status: in-progress (01 and 02 done in the simulator, not yet on hardware; 03 next, then 04 and 05)
+Status: in-progress (01 to 03 done in the simulator, not yet on hardware; 04 next, then 05)
 
 Mockups: https://claude.ai/artifact/EizLLcJZzzajZjo8dFrv1Q (the user's chosen design; its third row is what 02 built)
 
-An agent picking this up: read this spec, then `issues/03-what-is-new.md`, which has the files, the commands and what went wrong before. CLAUDE.md's Home section has the rules in short.
+An agent picking this up: read this spec, then `issues/03-what-is-new.md`, which has the files, the commands and what went wrong before, and its comments; then `issues/04-type-to-search.md`. CLAUDE.md's Home section has the rules in short.
 
 ## Problem Statement
 
@@ -92,3 +92,5 @@ and no board defaults to it.
   panel, and a focus move only the two tiles.
 - A tap on a pinned app, and on All apps, opens it the first time.
 - The mono clock font reads well on the panel.
+- A message arriving refreshes the rows of what is new alone, and the rows
+  read on the panel.

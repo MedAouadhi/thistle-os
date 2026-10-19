@@ -8,6 +8,9 @@ The simulator's client is a pretend one (tailnet_manager.rs, the host
 and whether the device has joined is a file in the simulator's SPIFFS, which
 each case gets fresh in a temporary directory.
 
+The status bar shows Tailscale's symbol while the device is connected, and
+logs "(statusbar) tailnet shown" and "hidden" as it comes and goes.
+
 Coordinates are the T-Deck Max's (240 x 320): the quick panel's third tile
 is Tailscale, and the app's Sign out button sits right of Switch off once
 connected.
@@ -75,7 +78,8 @@ CASES = (
     Case("signs-in-by-url", ("--launch-app", APP), 9000,
          env=(("THISTLE_SIM_TAILNET_LOGIN_S", "3"),),
          expected=("[tailnet] on", "(tailscale) on_create", "[tailnet] waiting for a sign-in",
-                   "[tailnet] connected as thistle-sim, 100.64.0.1"),
+                   "[tailnet] connected as thistle-sim, 100.64.0.1",
+                   "(statusbar) tailnet shown"),
          after=joined),
     Case("waits-for-an-admin-to-approve", ("--launch-app", APP), 9000,
          env=(("THISTLE_SIM_TAILNET", "approval"), ("THISTLE_SIM_TAILNET_LOGIN_S", "2")),
@@ -90,10 +94,10 @@ CASES = (
          # Not started again: a refusal waits for the switch
          once=("[tailnet] connecting",)),
     Case("rejoins-without-signing-in", (), 6000, joined=True,
-         expected=("[tailnet] connected as",),
+         expected=("[tailnet] connected as", "(statusbar) tailnet shown"),
          absent=("[tailnet] waiting for a sign-in",)),
     Case("stays-off-until-switched-on", (), 5000, enabled=False, joined=True,
-         absent=("[tailnet] connecting", "[tailnet] connected as")),
+         absent=("[tailnet] connecting", "[tailnet] connected as", "(statusbar) tailnet shown")),
     Case("the-quick-panel-switches-it-on", ("--tap", "quick", "--tap", TAILSCALE_TILE), 8000,
          enabled=False, joined=True,
          expected=("(quick_panel) open", "[tailnet] switched on",
@@ -102,7 +106,9 @@ CASES = (
     Case("sign-out-forgets-the-device",
          ("--launch-app", APP, "--tap", "wait", "--tap", "wait",
           "--tap", SIGN_OUT, "--tap", SIGN_OUT), 11000, joined=True,
-         expected=("[tailnet] connected as", "[tailnet] this device's tailnet identity is erased"),
+         expected=("[tailnet] connected as", "(statusbar) tailnet shown",
+                   "[tailnet] this device's tailnet identity is erased",
+                   "(statusbar) tailnet hidden"),
          after=signed_out),
 )
 

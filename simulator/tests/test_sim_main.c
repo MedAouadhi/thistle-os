@@ -129,6 +129,22 @@ extern void test_home_writes_the_date_on_one_line(void);
 extern void test_home_writes_the_weekday_on_its_own_line_when_asked(void);
 extern void test_home_writes_nothing_for_a_date_out_of_range(void);
 extern void test_home_cuts_the_date_to_the_buffer(void);
+extern void test_home_now_with_nothing_new_is_all_caught_up_alone(void);
+extern void test_home_now_with_nothing_new_adds_the_mesh_when_it_is_on(void);
+extern void test_home_now_counts_the_mesh_contacts_in_the_singular_and_none(void);
+extern void test_home_now_one_message_says_where_it_came_from(void);
+extern void test_home_now_messages_from_both_are_counted_apart(void);
+extern void test_home_now_a_missed_call_is_named_and_timed(void);
+extern void test_home_now_a_missed_call_takes_the_users_clock_format(void);
+extern void test_home_now_a_missed_call_with_no_time_leaves_it_out(void);
+extern void test_home_now_a_withheld_number_has_no_call_back(void);
+extern void test_home_now_several_missed_calls_name_the_last(void);
+extern void test_home_now_a_missed_call_gone_from_the_log_says_only_how_many(void);
+extern void test_home_now_the_tailnet_asks_for_a_sign_in_or_an_admin(void);
+extern void test_home_now_shows_the_first_two_that_apply_in_order(void);
+extern void test_home_now_something_new_leaves_out_caught_up_and_the_mesh(void);
+extern void test_home_now_keeps_to_the_room_it_is_given(void);
+extern void test_home_now_the_same_readings_give_the_same_bytes(void);
 
 /* test_xl9555.c */
 extern void test_xl9555_resets_to_all_inputs_with_its_latches_high(void);
@@ -290,6 +306,22 @@ int main(void)
     RUN_TEST(home_writes_the_weekday_on_its_own_line_when_asked);
     RUN_TEST(home_writes_nothing_for_a_date_out_of_range);
     RUN_TEST(home_cuts_the_date_to_the_buffer);
+    RUN_TEST(home_now_with_nothing_new_is_all_caught_up_alone);
+    RUN_TEST(home_now_with_nothing_new_adds_the_mesh_when_it_is_on);
+    RUN_TEST(home_now_counts_the_mesh_contacts_in_the_singular_and_none);
+    RUN_TEST(home_now_one_message_says_where_it_came_from);
+    RUN_TEST(home_now_messages_from_both_are_counted_apart);
+    RUN_TEST(home_now_a_missed_call_is_named_and_timed);
+    RUN_TEST(home_now_a_missed_call_takes_the_users_clock_format);
+    RUN_TEST(home_now_a_missed_call_with_no_time_leaves_it_out);
+    RUN_TEST(home_now_a_withheld_number_has_no_call_back);
+    RUN_TEST(home_now_several_missed_calls_name_the_last);
+    RUN_TEST(home_now_a_missed_call_gone_from_the_log_says_only_how_many);
+    RUN_TEST(home_now_the_tailnet_asks_for_a_sign_in_or_an_admin);
+    RUN_TEST(home_now_shows_the_first_two_that_apply_in_order);
+    RUN_TEST(home_now_something_new_leaves_out_caught_up_and_the_mesh);
+    RUN_TEST(home_now_keeps_to_the_room_it_is_given);
+    RUN_TEST(home_now_the_same_readings_give_the_same_bytes);
 
     printf("\n[xl9555]\n");
     RUN_TEST(xl9555_resets_to_all_inputs_with_its_latches_high);

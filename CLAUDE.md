@@ -261,17 +261,24 @@ host tests. LVGL window managers only; thistle-tk has none.
 ### Home
 
 The launcher's Home (`components/apps_builtin/launcher/`) is, top to
-bottom, the clock and the date, room for what is new, six pinned apps (four
-on a landscape screen) and All apps. `.scratch/home/spec.md` has the rest.
-LVGL window managers only; thistle-tk's launcher is its own.
+bottom, the clock and the date, up to two rows of what is new, six pinned
+apps (four on a landscape screen) and All apps. `.scratch/home/spec.md` has
+the rest. LVGL window managers only; thistle-tk's launcher is its own.
 
 - **The bands are `home_core.c`'s**, host-tested in
   `simulator/tests/test_home_core.c`: where each goes on a screen of a given
-  size, which apps are pinned, the date's text. A band the screen has no
+  size, which apps are pinned, the date's text, and which rows of what is
+  new show and what they say (`home_now_rows()`). A band the screen has no
   room for is left out.
 - **What is new reads kernel state only**, as the status bar does: no app
-  has a hook in Home or code for it. Never `rs_msg_alert_take()` (it takes
-  the status bar's pop-up) nor `rs_call_missed_seen()` (the Phone app's).
+  has a hook in Home or code for it. The rows are a fixed set: new messages,
+  a missed call (its button calls back with `rs_call_dial()`), the tailnet
+  waiting for a sign-in, else "All caught up" and the mesh. Never
+  `rs_msg_alert_take()` (it takes the status bar's pop-up) nor
+  `rs_call_missed_seen()` (the Phone app's), and the phonebook only for a
+  missed call's name. Read once a second; a label is rewritten only when its
+  text changes, as each rewrite is an e-paper refresh. The launcher logs
+  `(launcher_ui) now: ...` when the rows change; `test_home.py`.
 - **Home's widgets live only while it is in front**: built in
   `launcher_ui_show()`, deleted in `launcher_ui_hide()`, so an app has
   Home's share of LVGL's pool. A pinned app launches from an
@@ -279,9 +286,12 @@ LVGL window managers only; thistle-tk's launcher is its own.
 - The status bar leaves its clock out while Home shows its own
   (`statusbar_set_clock_visible()`). The clock font is
   `launcher/fonts/home_clock_44{,_mono}.c`, made by
-  `launcher/tools/gen_clock_font.sh`.
+  `launcher/tools/gen_clock_font.sh`; the rows' detail line falls back on
+  `home_latin_14{,_mono}.c` (`gen_latin_font.sh`) for a name's accents.
+- The keyboard's focus starts on All apps, unseen, so the first Tab goes
+  round to the first row.
 - `test_launcher_visuals.py` masks Home's clock band as it does the status
-  bar.
+  bar, and runs on a scratch copy of the card.
 
 ### Dictation
 
@@ -411,7 +421,9 @@ mobile data; any socket then reaches a peer's 100.x.y.z address through
 the tunnel, and `getaddrinfo("homelab")` resolves a peer by name (lwIP's
 `LWIP_HOOK_NETCONN_EXT_RESOLVE_CUSTOM`, in `tailnet_platform.c`).
 Internet traffic does not go through it. `apps/tailscale/` shows and
-switches it; the quick panel has a tile; the Terminal has `tailscale`
+switches it; the quick panel has a tile; the status bar shows
+`LV_SYMBOL_SHUFFLE` while it is connected (LVGL window managers); Home
+has a row while it waits for a sign-in; the Terminal has `tailscale`
 (status, peers, up, down, `ping NAME [PORT]`, a timed TCP connect).
 `.scratch/tailscale/spec.md` has the reasons, ADR-0009 the choice of
 client.

@@ -61,6 +61,8 @@ set(THISTLE_SRCS
     ${THISTLE_DIR}/components/apps_builtin/launcher/home_core.c
     ${THISTLE_DIR}/components/apps_builtin/launcher/fonts/home_clock_44.c
     ${THISTLE_DIR}/components/apps_builtin/launcher/fonts/home_clock_44_mono.c
+    ${THISTLE_DIR}/components/apps_builtin/launcher/fonts/home_latin_14.c
+    ${THISTLE_DIR}/components/apps_builtin/launcher/fonts/home_latin_14_mono.c
     ${THISTLE_DIR}/components/apps_builtin/settings/settings_app.c
     ${THISTLE_DIR}/components/apps_builtin/settings/settings_ui.c
     ${THISTLE_DIR}/components/apps_builtin/messenger/messenger_app.c

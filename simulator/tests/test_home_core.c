@@ -158,3 +158,233 @@ TEST(home_cuts_the_date_to_the_buffer) {
     home_format_date(5, 16, 9, false, buf, sizeof(buf));
     ASSERT_STR_EQ(buf, "Friday ");
 }
+
+/* ------------------------------------------------------------------ */
+/* What is new                                                          */
+/* ------------------------------------------------------------------ */
+
+#define DOT " \xE2\x80\xA2 "
+
+static home_now_row_t s_rows[HOME_NOW_ROWS];
+
+/* Nothing new, the clock unset, the tailnet quiet, the mesh off. */
+static home_now_in_t quiet(void)
+{
+    home_now_in_t in;
+    memset(&in, 0, sizeof(in));
+    in.missed_hour = -1;
+    in.format_24h = true;
+    return in;
+}
+
+TEST(home_now_with_nothing_new_is_all_caught_up_alone) {
+    home_now_in_t in = quiet();
+    ASSERT_EQ(home_now_rows(&in, s_rows, HOME_NOW_ROWS), 1);
+    ASSERT_EQ(s_rows[0].kind, HOME_NOW_CAUGHT_UP);
+    ASSERT_STR_EQ(s_rows[0].title, "All caught up");
+    ASSERT_STR_EQ(s_rows[0].detail, "No new messages or calls");
+    ASSERT_STR_EQ(s_rows[0].call_back, "");
+}
+
+TEST(home_now_with_nothing_new_adds_the_mesh_when_it_is_on) {
+    home_now_in_t in = quiet();
+    in.mesh_running = true;
+    in.mesh_contacts = 4;
+    ASSERT_EQ(home_now_rows(&in, s_rows, HOME_NOW_ROWS), 2);
+    ASSERT_EQ(s_rows[0].kind, HOME_NOW_CAUGHT_UP);
+    ASSERT_EQ(s_rows[1].kind, HOME_NOW_MESH);
+    ASSERT_STR_EQ(s_rows[1].title, "Mesh on");
+    ASSERT_STR_EQ(s_rows[1].detail, "4 contacts");
+}
+
+TEST(home_now_counts_the_mesh_contacts_in_the_singular_and_none) {
+    home_now_in_t in = quiet();
+    in.mesh_running = true;
+    in.mesh_contacts = 1;
+    home_now_rows(&in, s_rows, HOME_NOW_ROWS);
+    ASSERT_STR_EQ(s_rows[1].detail, "1 contact");
+    in.mesh_contacts = 0;
+    home_now_rows(&in, s_rows, HOME_NOW_ROWS);
+    ASSERT_STR_EQ(s_rows[1].detail, "No contacts yet");
+    in.mesh_contacts = -1;  /* the mesh's lock poisoned */
+    home_now_rows(&in, s_rows, HOME_NOW_ROWS);
+    ASSERT_STR_EQ(s_rows[1].detail, "No contacts yet");
+}
+
+TEST(home_now_one_message_says_where_it_came_from) {
+    home_now_in_t in = quiet();
+    in.sms_unread = 1;
+    ASSERT_EQ(home_now_rows(&in, s_rows, HOME_NOW_ROWS), 1);
+    ASSERT_EQ(s_rows[0].kind, HOME_NOW_MESSAGES);
+    ASSERT_STR_EQ(s_rows[0].title, "1 new message");
+    ASSERT_STR_EQ(s_rows[0].detail, "SMS");
+    in.sms_unread = 0;
+    in.mesh_unread = 1;
+    home_now_rows(&in, s_rows, HOME_NOW_ROWS);
+    ASSERT_STR_EQ(s_rows[0].title, "1 new message");
+    ASSERT_STR_EQ(s_rows[0].detail, "From the mesh");
+}
+
+TEST(home_now_messages_from_both_are_counted_apart) {
+    home_now_in_t in = quiet();
+    in.sms_unread = 1;
+    in.mesh_unread = 1;
+    home_now_rows(&in, s_rows, HOME_NOW_ROWS);
+    ASSERT_STR_EQ(s_rows[0].title, "2 new messages");
+    ASSERT_STR_EQ(s_rows[0].detail, "1 SMS" DOT "1 from the mesh");
+    in.sms_unread = 3;
+    in.mesh_unread = 0;
+    home_now_rows(&in, s_rows, HOME_NOW_ROWS);
+    ASSERT_STR_EQ(s_rows[0].title, "3 new messages");
+    ASSERT_STR_EQ(s_rows[0].detail, "SMS");
+}
+
+TEST(home_now_a_missed_call_is_named_and_timed) {
+    home_now_in_t in = quiet();
+    in.missed_calls = 1;
+    in.missed_number = "+4917612345678";
+    in.missed_name = "Reza Amini";
+    in.missed_hour = 13;
+    in.missed_minute = 52;
+    ASSERT_EQ(home_now_rows(&in, s_rows, HOME_NOW_ROWS), 1);
+    ASSERT_EQ(s_rows[0].kind, HOME_NOW_MISSED_CALL);
+    ASSERT_STR_EQ(s_rows[0].title, "Missed call");
+    ASSERT_STR_EQ(s_rows[0].detail, "Reza Amini" DOT "13:52");
+    ASSERT_STR_EQ(s_rows[0].call_back, "+4917612345678");
+}
+
+TEST(home_now_a_missed_call_takes_the_users_clock_format) {
+    home_now_in_t in = quiet();
+    in.missed_calls = 1;
+    in.missed_number = "+4917612345678";
+    in.missed_hour = 13;
+    in.missed_minute = 5;
+    in.format_24h = false;
+    home_now_rows(&in, s_rows, HOME_NOW_ROWS);
+    ASSERT_STR_EQ(s_rows[0].detail, "+4917612345678" DOT "1:05 PM");
+    in.missed_hour = 0;
+    home_now_rows(&in, s_rows, HOME_NOW_ROWS);
+    ASSERT_STR_EQ(s_rows[0].detail, "+4917612345678" DOT "12:05 AM");
+    in.format_24h = true;
+    home_now_rows(&in, s_rows, HOME_NOW_ROWS);
+    ASSERT_STR_EQ(s_rows[0].detail, "+4917612345678" DOT "00:05");
+}
+
+TEST(home_now_a_missed_call_with_no_time_leaves_it_out) {
+    home_now_in_t in = quiet();
+    in.missed_calls = 1;
+    in.missed_number = "0701234567";
+    in.missed_name = "";
+    home_now_rows(&in, s_rows, HOME_NOW_ROWS);
+    ASSERT_STR_EQ(s_rows[0].detail, "0701234567");
+    ASSERT_STR_EQ(s_rows[0].call_back, "0701234567");
+}
+
+TEST(home_now_a_withheld_number_has_no_call_back) {
+    home_now_in_t in = quiet();
+    in.missed_calls = 1;
+    in.missed_number = "";
+    in.missed_hour = 9;
+    in.missed_minute = 0;
+    home_now_rows(&in, s_rows, HOME_NOW_ROWS);
+    ASSERT_STR_EQ(s_rows[0].detail, "Withheld" DOT "09:00");
+    ASSERT_STR_EQ(s_rows[0].call_back, "");
+}
+
+TEST(home_now_several_missed_calls_name_the_last) {
+    home_now_in_t in = quiet();
+    in.missed_calls = 2;
+    in.missed_number = "+4917612345678";
+    in.missed_name = "Reza Amini";
+    in.missed_hour = 13;
+    in.missed_minute = 52;
+    home_now_rows(&in, s_rows, HOME_NOW_ROWS);
+    ASSERT_STR_EQ(s_rows[0].title, "2 missed calls");
+    ASSERT_STR_EQ(s_rows[0].detail, "Last: Reza Amini");
+    ASSERT_STR_EQ(s_rows[0].call_back, "+4917612345678");
+    in.missed_number = "";
+    in.missed_name = NULL;
+    home_now_rows(&in, s_rows, HOME_NOW_ROWS);
+    ASSERT_STR_EQ(s_rows[0].detail, "Last: Withheld");
+    ASSERT_STR_EQ(s_rows[0].call_back, "");
+}
+
+TEST(home_now_a_missed_call_gone_from_the_log_says_only_how_many) {
+    /* The count outlives a cleared log until Recents is seen. */
+    home_now_in_t in = quiet();
+    in.missed_calls = 1;
+    home_now_rows(&in, s_rows, HOME_NOW_ROWS);
+    ASSERT_STR_EQ(s_rows[0].title, "Missed call");
+    ASSERT_STR_EQ(s_rows[0].detail, "");
+    ASSERT_STR_EQ(s_rows[0].call_back, "");
+    in.missed_calls = 3;
+    home_now_rows(&in, s_rows, HOME_NOW_ROWS);
+    ASSERT_STR_EQ(s_rows[0].title, "3 missed calls");
+    ASSERT_STR_EQ(s_rows[0].detail, "");
+}
+
+TEST(home_now_the_tailnet_asks_for_a_sign_in_or_an_admin) {
+    home_now_in_t in = quiet();
+    in.tailnet = HOME_TAILNET_LOGIN;
+    ASSERT_EQ(home_now_rows(&in, s_rows, HOME_NOW_ROWS), 1);
+    ASSERT_EQ(s_rows[0].kind, HOME_NOW_TAILNET);
+    ASSERT_STR_EQ(s_rows[0].title, "Tailscale");
+    ASSERT_STR_EQ(s_rows[0].detail, "Sign in to join your tailnet");
+    in.tailnet = HOME_TAILNET_APPROVAL;
+    home_now_rows(&in, s_rows, HOME_NOW_ROWS);
+    ASSERT_STR_EQ(s_rows[0].detail, "Waiting for an admin's approval");
+}
+
+TEST(home_now_shows_the_first_two_that_apply_in_order) {
+    home_now_in_t in = quiet();
+    in.sms_unread = 1;
+    in.missed_calls = 1;
+    in.missed_number = "0701234567";
+    in.tailnet = HOME_TAILNET_LOGIN;
+    in.mesh_running = true;
+    ASSERT_EQ(home_now_rows(&in, s_rows, HOME_NOW_ROWS), 2);
+    ASSERT_EQ(s_rows[0].kind, HOME_NOW_MESSAGES);
+    ASSERT_EQ(s_rows[1].kind, HOME_NOW_MISSED_CALL);
+    in.sms_unread = 0;
+    ASSERT_EQ(home_now_rows(&in, s_rows, HOME_NOW_ROWS), 2);
+    ASSERT_EQ(s_rows[0].kind, HOME_NOW_MISSED_CALL);
+    ASSERT_EQ(s_rows[1].kind, HOME_NOW_TAILNET);
+}
+
+TEST(home_now_something_new_leaves_out_caught_up_and_the_mesh) {
+    home_now_in_t in = quiet();
+    in.tailnet = HOME_TAILNET_APPROVAL;
+    in.mesh_running = true;
+    in.mesh_contacts = 4;
+    ASSERT_EQ(home_now_rows(&in, s_rows, HOME_NOW_ROWS), 1);
+    ASSERT_EQ(s_rows[0].kind, HOME_NOW_TAILNET);
+}
+
+TEST(home_now_keeps_to_the_room_it_is_given) {
+    home_now_in_t in = quiet();
+    in.sms_unread = 1;
+    in.missed_calls = 1;
+    in.mesh_running = true;
+    ASSERT_EQ(home_now_rows(&in, s_rows, 1), 1);
+    ASSERT_EQ(s_rows[0].kind, HOME_NOW_MESSAGES);
+    ASSERT_EQ(home_now_rows(&in, s_rows, 0), 0);
+    in = quiet();
+    in.mesh_running = true;
+    ASSERT_EQ(home_now_rows(&in, s_rows, 1), 1);
+    ASSERT_EQ(s_rows[0].kind, HOME_NOW_CAUGHT_UP);
+}
+
+TEST(home_now_the_same_readings_give_the_same_bytes) {
+    /* The launcher compares two answers with memcmp() to know whether to
+     * redraw: nothing left over from an earlier, longer text may differ. */
+    home_now_row_t a[HOME_NOW_ROWS], b[HOME_NOW_ROWS];
+    home_now_in_t in = quiet();
+    in.missed_calls = 1;
+    in.missed_number = "+4917612345678";
+    in.missed_name = "Somebody With A Long Name";
+    home_now_rows(&in, a, HOME_NOW_ROWS);
+    in.missed_name = "Reza";
+    home_now_rows(&in, a, HOME_NOW_ROWS);
+    home_now_rows(&in, b, HOME_NOW_ROWS);
+    ASSERT_TRUE(memcmp(a, b, sizeof(a)) == 0);
+}

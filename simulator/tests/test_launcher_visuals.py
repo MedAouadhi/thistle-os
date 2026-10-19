@@ -5,8 +5,11 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,6 +31,9 @@ class Case:
     # Rows under the status bar that change by the minute: Home's clock and
     # date (home_core.c's clock band).
     clock_rows: int = 0
+
+
+SDCARD = Path(__file__).resolve().parent.parent / "sdcard"
 
 
 CASES = (
@@ -52,7 +58,11 @@ CASES = (
         "bb9c21d8d8ddf28b4c911c0d1eb8d38501267995c96eac0a9697b2c62bc1d8a1",
         wm="thistle-tk",
     ),
-    # Home: the clock and date, masked, then the pinned apps and All apps.
+    # Home: the clock and date, masked, then what is new, the pinned apps and
+    # All apps. What is new is "All caught up" alone: the card is a fresh copy
+    # (run_case), the tailnet is off in its system.json, and the simulated
+    # mesh never runs (mesh_manager.rs starts MeshCore on the device alone),
+    # so no row counts its contacts. The hashes changed when the rows came.
     Case(
         "lcd-home",
         "tdeck",
@@ -60,7 +70,7 @@ CASES = (
         None,
         320,
         240,
-        "3a2cf15080c00ca5572ddffb9bfc29125cc3f315a5dcf5beb7c1170048d769ae",
+        "23b1c230be4fac294a0f458d1ea0514074451ff351136119900ab97192f29c20",
         clock_rows=48,
     ),
     Case(
@@ -70,7 +80,7 @@ CASES = (
         None,
         240,
         320,
-        "c597a10c20af43abd63c225f53e03d140b055aadaacfd2c24c710d604295c7aa",
+        "0bc91973e2783f8dcf60b997805e3501d1620d6ccef1ed12601b19896a0ff0c8",
         clock_rows=64,
     ),
     # The LCD hashes cover all nineteen apps. The nine that live under apps/
@@ -168,7 +178,14 @@ def run_case(simulator: Path, output_dir: Path, case: Case) -> None:
     if case.wm:
         command.extend(("--wm", case.wm))
 
-    completed = subprocess.run(command, text=True, capture_output=True, check=False)
+    # On a scratch copy of the card, which the simulator writes to (the call
+    # log, the message history), so one run cannot change the next one's Home.
+    with tempfile.TemporaryDirectory(prefix="thistle-visuals-") as tmp:
+        card = Path(tmp) / "card"
+        shutil.copytree(SDCARD, card)
+        env = dict(os.environ, THISTLE_SIM_SDCARD=str(card))
+        completed = subprocess.run(command, text=True, capture_output=True, check=False,
+                                   env=env)
     if completed.returncode != 0:
         raise RuntimeError(
             f"simulator exited {completed.returncode}\n{completed.stdout}\n{completed.stderr}"

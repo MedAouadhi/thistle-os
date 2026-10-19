@@ -4,7 +4,7 @@
 
 **Blocked by:** 02 (done).
 
-**Status:** open
+**Status:** done in the simulator; not yet seen on hardware
 
 ## The rule that matters most
 
@@ -68,10 +68,35 @@ The other suites CI runs are listed in `.github/workflows/tests.yml`; all passed
 
 ## Checklist
 
-- [ ] The pure function and its host tests
-- [ ] The rows in `launcher_ui.c`, built and deleted with Home, polled once a second
-- [ ] Never `rs_msg_alert_take()`, `rs_call_missed_seen()`, nor the phonebook before a missed call needs a name
-- [ ] Call back through `rs_call_dial()`; taps launch through `lv_async_call()`
-- [ ] `test_home.py`, on a scratch card, and in CI
-- [ ] `test_launcher_visuals.py` hashes, deterministic
+- [x] The pure function and its host tests
+- [x] The rows in `launcher_ui.c`, built and deleted with Home, polled once a second
+- [x] Never `rs_msg_alert_take()`, `rs_call_missed_seen()`, nor the phonebook before a missed call needs a name
+- [x] Call back through `rs_call_dial()`; taps launch through `lv_async_call()`
+- [x] `test_home.py`, on a scratch card, and in CI
+- [x] `test_launcher_visuals.py` hashes, deterministic
+- [x] Firmware builds with ESP-IDF 5.5.1; 3,760,368 bytes, 79% of ota_1 (26 KB more than 02, 21.6 KB of it the Latin fallback font)
 - [ ] On the T-Deck Max: a message arriving refreshes the rows alone; the rows read on the panel
+
+## Comments
+
+**What was built, and where.**
+
+- `home_core.{c,h}`: `home_now_rows()`, fed a `home_now_in_t` of readings, writes up to `HOME_NOW_ROWS` `home_now_row_t`s (kind, title, detail, the number the button calls). Zeroed first, so the launcher compares two answers with `memcmp()`. 16 host tests in `test_home_core.c`.
+- `launcher_ui.c`: `create_now()` and `create_now_slot()` build two row slots in `build_home()`, between the clock and the grid; `read_now()` takes the readings; `show_now()` fills the slots, touching only what differs; `update_now()` runs from `s_now_timer` once a second and from `launcher_ui_show()`, and logs `(launcher_ui) now: TITLE (DETAIL) | ...` when the rows change. `read_missed_call()` finds the newest `CALL_LOG_MISSED` entry again only when `rs_call_log_seq()` changes, and its name only when that or `rs_phonebook_seq()` does; neither is asked while no call is missed. The rows' text and that cache are in PSRAM (`EXT_RAM_BSS_ATTR`).
+- `launcher/fonts/home_latin_14{,_mono}.c`, from `launcher/tools/gen_latin_font.sh`: see below.
+- Tests: `simulator/tests/test_home.py` (9 cases, each on a scratch card and an empty SPIFFS), a CI step for it, `test_launcher_visuals.py` on a scratch card with the two Home hashes renewed.
+
+**Decided along the way, not in the ticket.**
+
+- The slots are made once, hidden, and filled in place; nothing is rebuilt when the rows change. A button made later joins the keyboard's group at its end, after the pinned apps. "All caught up" is its slot's button with `LV_STATE_DISABLED`, which the group skips and input ignores. A slot's button that is about to be hidden or disabled hands its focus on (`leave_focus()`).
+- Focus starts on All apps, unseen (`focus_home()`). LVGL focuses the first button to join an empty group, unseen, so the first Tab moved on from it: in 02 the first Tab went to Messenger, not Phone. With the rows joining hidden it focused nothing, and LVGL's keypad does nothing with no focused object. From All apps the first Tab goes round to the first row, or to Phone when the row is "All caught up".
+- LVGL's Montserrat 14 has ASCII alone: "Ben Müller", a contact on the simulator's card, drew a box for the "ü". The detail line is a copy of Montserrat 14 whose fallback is the same face at 14 px with Latin-1 and Latin Extended-A (`home_latin_14`, 1 bit a pixel on e-paper). The status bar's pop-up and the Messenger still draw names in plain Montserrat.
+- The separator is U+2022, as the call screen's: Montserrat has no middle dot.
+- Details the ticket left open: a mesh with no contacts says "No contacts yet"; a missed call count with no missed call left in the log (cleared) has no detail and no button; several missed calls say "Last: NAME" without a time, as the ticket's example.
+- In colour each row is a card (a fifth of the primary colour over the background), the icon in the primary colour for messages and the secondary for a missed call; focus is a 2 px border inside the button, as an outline would be clipped by the row. On e-paper the band is ruled above and below, a rule between two rows, and press and focus invert.
+
+**What the simulator cannot show.** The mesh never runs in the simulator (`mesh_manager.rs` starts MeshCore on the device alone), so "Mesh on" is covered by the host tests only, and the visual hashes are of "All caught up" alone. `rs_call_missed_count()` is kept in memory and starts at 0 each boot, so a call log left on the card does not show on the next run; the tests use scratch cards anyway.
+
+**Measured in the simulator** (`--log-flushes`, T-Deck Max): a second with nothing new flushes nothing; the Tailscale row appearing flushed (8,112)-(39,143) and (42,109)-(228,146), inside the band. An arriving SMS also brings the status bar's toast, which flushes its own area.
+
+**Tests after this ticket.** `thistle_sim_tests` 141/141, and every simulator suite in `.github/workflows/tests.yml` plus `test_calls.py` and `test_dictation.py` pass, except `test_epaper_partial_flush.py`'s `eink-settings-values`, the failure noted on 02 (Settings opened directly; Home is not on screen). The firmware build's one new-looking warning, `folder_btn_clicked_cb` unused, is unchanged from 02.
