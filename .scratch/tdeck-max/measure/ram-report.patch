@@ -1,0 +1,222 @@
+diff --git a/main/main.c b/main/main.c
+index 4735bd9..0af5eae 100644
+--- a/main/main.c
++++ b/main/main.c
+@@ -247,6 +247,203 @@ static void system_event_toast(const event_t *event, void *user_data)
+ }
+ #endif
+ 
++/* ---- TEMPORARY internal RAM report: not for commit ----
++ * .scratch/tdeck-max/issues/18-internal-ram-with-the-tailnet-on.md */
++#include <stdlib.h>
++#include "esp_attr.h"
++#include "esp_memory_utils.h"
++#include "esp_private/freertos_debug.h"
++
++#define RD_MAX_BLOCKS 6000
++#define RD_MAX_TASKS  48
++#define RD_TOP        45
++
++typedef struct {
++    uintptr_t ptr;
++    uint32_t size;
++    int16_t task;
++    uint8_t kind; /* 0 other, 1 stack, 2 TCB */
++} rd_block_t;
++
++typedef struct {
++    char name[CONFIG_FREERTOS_MAX_TASK_NAME_LEN];
++    uintptr_t tcb, top, end;
++    uint32_t hwm;
++    int stack_block, tcb_block;
++} rd_task_t;
++
++typedef struct {
++    int n, dropped;
++    uint32_t used_bytes, free_bytes, free_n, largest_free;
++} rd_walk_t;
++
++static EXT_RAM_BSS_ATTR rd_block_t rd_blocks[RD_MAX_BLOCKS];
++static EXT_RAM_BSS_ATTR rd_task_t rd_tasks[RD_MAX_TASKS];
++static EXT_RAM_BSS_ATTR TaskSnapshot_t rd_snaps[RD_MAX_TASKS];
++static EXT_RAM_BSS_ATTR int rd_order[RD_MAX_TASKS];
++
++static bool rd_walker(walker_heap_into_t heap, walker_block_info_t block, void *user)
++{
++    rd_walk_t *w = user;
++    (void)heap;
++    if (!block.used) {
++        w->free_bytes += block.size;
++        w->free_n++;
++        if (block.size > w->largest_free) w->largest_free = block.size;
++        return true;
++    }
++    w->used_bytes += block.size;
++    if (w->n < RD_MAX_BLOCKS) {
++        rd_blocks[w->n++] = (rd_block_t){ (uintptr_t)block.ptr, (uint32_t)block.size, -1, 0 };
++    } else {
++        w->dropped++;
++    }
++    return true;
++}
++
++static int rd_find(int n, uintptr_t addr)
++{
++    for (int i = 0; i < n; i++) {
++        if (addr >= rd_blocks[i].ptr && addr < rd_blocks[i].ptr + rd_blocks[i].size) return i;
++    }
++    return -1;
++}
++
++static int rd_by_size(const void *a, const void *b)
++{
++    uint32_t sa = ((const rd_block_t *)a)->size, sb = ((const rd_block_t *)b)->size;
++    return sa < sb ? 1 : sa > sb ? -1 : 0;
++}
++
++static void rd_report(const char *when)
++{
++    static const char *T = "ramdiag";
++    const uint32_t caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
++    size_t total = heap_caps_get_total_size(caps);
++    size_t free_now = heap_caps_get_free_size(caps);
++    size_t min_free = heap_caps_get_minimum_free_size(caps);
++    size_t largest = heap_caps_get_largest_free_block(caps);
++
++    /* The snapshot takes no lock: this core's scheduler is stopped, but the
++     * other core can still create or delete a task meanwhile, a risk a
++     * diagnostic build takes. */
++    vTaskSuspendAll();
++    UBaseType_t tcb_size = 0;
++    UBaseType_t nt = uxTaskGetSnapshotAll(rd_snaps, RD_MAX_TASKS, &tcb_size);
++    for (UBaseType_t i = 0; i < nt; i++) {
++        TaskHandle_t h = (TaskHandle_t)rd_snaps[i].pxTCB;
++        rd_task_t *t = &rd_tasks[i];
++        strlcpy(t->name, pcTaskGetName(h), sizeof(t->name));
++        t->tcb = (uintptr_t)rd_snaps[i].pxTCB;
++        t->top = (uintptr_t)rd_snaps[i].pxTopOfStack;
++        t->end = (uintptr_t)rd_snaps[i].pxEndOfStack;
++        t->hwm = uxTaskGetStackHighWaterMark(h);
++    }
++    xTaskResumeAll();
++
++    rd_walk_t w = {0};
++    heap_caps_walk(caps, rd_walker, &w);
++
++    ESP_LOGI(T, "[%s] heap total %u, free %u (walk %u in %u blocks), min ever %u, largest %u (walk %u); "
++                "used %u in %d blocks (%d not listed); overhead %d; psram free %u",
++             when, (unsigned)total, (unsigned)free_now, (unsigned)w.free_bytes, (unsigned)w.free_n,
++             (unsigned)min_free, (unsigned)largest, (unsigned)w.largest_free,
++             (unsigned)w.used_bytes, w.n, w.dropped,
++             (int)total - (int)w.used_bytes - (int)w.free_bytes,
++             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
++
++    uint32_t stacks = 0, tcbs = 0;
++    for (UBaseType_t i = 0; i < nt; i++) {
++        rd_task_t *t = &rd_tasks[i];
++        t->stack_block = rd_find(w.n, t->top);
++        if (t->stack_block >= 0) {
++            rd_blocks[t->stack_block].kind = 1;
++            rd_blocks[t->stack_block].task = (int16_t)i;
++            stacks += rd_blocks[t->stack_block].size;
++        }
++        t->tcb_block = rd_find(w.n, t->tcb);
++        if (t->tcb_block >= 0 && t->tcb_block != t->stack_block) {
++            rd_blocks[t->tcb_block].kind = 2;
++            tcbs += rd_blocks[t->tcb_block].size;
++        }
++        rd_order[i] = (int)i;
++    }
++    /* Tasks by stack size, a stack outside the internal heap (static, or PSRAM) last. */
++    for (UBaseType_t i = 1; i < nt; i++) {
++        for (UBaseType_t j = i; j > 0; j--) {
++            const rd_task_t *a = &rd_tasks[rd_order[j - 1]], *b = &rd_tasks[rd_order[j]];
++            uint32_t sa = a->stack_block >= 0 ? rd_blocks[a->stack_block].size : 0;
++            uint32_t sb = b->stack_block >= 0 ? rd_blocks[b->stack_block].size : 0;
++            if (sa >= sb) break;
++            int tmp = rd_order[j - 1];
++            rd_order[j - 1] = rd_order[j];
++            rd_order[j] = tmp;
++        }
++    }
++    for (UBaseType_t k = 0; k < nt; k++) {
++        const rd_task_t *t = &rd_tasks[rd_order[k]];
++        const char *where = t->stack_block >= 0 ? "heap"
++                          : esp_ptr_external_ram((void *)t->top) ? "psram" : "static";
++        ESP_LOGI(T, "[%s] task %-16s stack %6u %-6s unused %5u tcb %s", when, t->name,
++                 t->stack_block >= 0 ? (unsigned)rd_blocks[t->stack_block].size : 0u, where,
++                 (unsigned)t->hwm, t->tcb_block >= 0 ? "heap" : "elsewhere");
++    }
++
++    static const uint32_t edges[] = { 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, UINT32_MAX };
++    uint32_t count[12] = {0}, bytes[12] = {0}, other = 0;
++    int other_n = 0;
++    for (int i = 0; i < w.n; i++) {
++        if (rd_blocks[i].kind) continue;
++        other += rd_blocks[i].size;
++        other_n++;
++        int b = 0;
++        while (rd_blocks[i].size > edges[b]) b++;
++        count[b]++;
++        bytes[b] += rd_blocks[i].size;
++    }
++    ESP_LOGI(T, "[%s] %u tasks: stacks %u, TCBs %u (TCB is %u); other %u in %d blocks",
++             when, (unsigned)nt, (unsigned)stacks, (unsigned)tcbs, (unsigned)tcb_size,
++             (unsigned)other, other_n);
++    for (int b = 0; b < 12; b++) {
++        ESP_LOGI(T, "[%s] other <= %5u: %4u blocks, %6u bytes", when,
++                 edges[b] == UINT32_MAX ? 99999u : (unsigned)edges[b],
++                 (unsigned)count[b], (unsigned)bytes[b]);
++    }
++
++    qsort(rd_blocks, w.n, sizeof(rd_blocks[0]), rd_by_size);
++    int shown = 0;
++    for (int i = 0; i < w.n && shown < RD_TOP; i++) {
++        const rd_block_t *b = &rd_blocks[i];
++        if (b->kind) continue;
++        const uint8_t *p = (const uint8_t *)b->ptr;
++        char hex[3 * 24 + 1], txt[24 + 1];
++        int m = b->size < 24 ? (int)b->size : 24;
++        for (int k = 0; k < m; k++) {
++            snprintf(hex + 3 * k, 4, "%02x ", p[k]);
++            txt[k] = (p[k] >= 0x20 && p[k] < 0x7f) ? (char)p[k] : '.';
++        }
++        hex[3 * m] = 0;
++        txt[m] = 0;
++        ESP_LOGI(T, "[%s] block %6u at %08x: %s|%s|", when, (unsigned)b->size, (unsigned)b->ptr, hex, txt);
++        shown++;
++    }
++    /* Repeated sizes among the rest: the same structure allocated many times. */
++    for (int i = 0; i < w.n;) {
++        int j = i;
++        int same = 0;
++        while (j < w.n && rd_blocks[j].size == rd_blocks[i].size) {
++            if (!rd_blocks[j].kind) same++;
++            j++;
++        }
++        if (same >= 3 && same * rd_blocks[i].size >= 1024) {
++            ESP_LOGI(T, "[%s] size %5u x %3d = %6u", when, (unsigned)rd_blocks[i].size, same,
++                     (unsigned)(same * rd_blocks[i].size));
++        }
++        i = j;
++    }
++}
++/* ---- end of TEMPORARY internal RAM report ---- */
++
+ void app_main(void)
+ {
+ #ifdef CONFIG_THISTLE_RUN_TESTS
+@@ -537,6 +734,13 @@ void app_main(void)
+              (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) / 1024),
+              (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) / 1024));
+ 
++    /* TEMPORARY: app_main's own stack stays counted in all three reports. */
++    rd_report("ready");
++    vTaskDelay(pdMS_TO_TICKS(20000));
++    rd_report("ready+20s");
++    vTaskDelay(pdMS_TO_TICKS(40000));
++    rd_report("ready+60s");
++
+     /* Returning ends this task and frees its stack, which only booting
+      * needed: from here on everything runs on tasks of its own or as jobs on
+      * the kernel worker (thistle/kworker.h). */
