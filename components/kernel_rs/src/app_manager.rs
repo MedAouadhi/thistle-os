@@ -23,8 +23,11 @@ const ESP_ERR_NOT_FOUND: i32 = 0x105;
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Maximum number of simultaneously-tracked app slots.
-pub const APP_SLOTS_MAX: usize = 20;
+/// Maximum number of simultaneously-tracked app slots: every built-in app
+/// takes one at boot, before any installed `.app.elf`, and the launcher lists
+/// up to 32. Twenty filled it once the To-do app came, and the last app to
+/// register, the Vault, was refused. A slot is 16 bytes of internal RAM.
+pub const APP_SLOTS_MAX: usize = 32;
 
 /// Free internal RAM below which LRU eviction is attempted before a launch.
 pub const APP_MEMORY_THRESHOLD_BYTES: usize = 50 * 1024;
@@ -221,32 +224,8 @@ struct AppManager {
 
 impl AppManager {
     const fn new() -> Self {
-        // AppSlot is not Copy, so we can't use array initialisation syntax with
-        // a non-Copy const. We initialise all slots by hand in a fixed-size
-        // array; APP_SLOTS_MAX = 20 so this is fully unrolled at compile time.
         Self {
-            slots: [
-                AppSlot::empty(),
-                AppSlot::empty(),
-                AppSlot::empty(),
-                AppSlot::empty(),
-                AppSlot::empty(),
-                AppSlot::empty(),
-                AppSlot::empty(),
-                AppSlot::empty(),
-                AppSlot::empty(),
-                AppSlot::empty(),
-                AppSlot::empty(),
-                AppSlot::empty(),
-                AppSlot::empty(),
-                AppSlot::empty(),
-                AppSlot::empty(),
-                AppSlot::empty(),
-                AppSlot::empty(),
-                AppSlot::empty(),
-                AppSlot::empty(),
-                AppSlot::empty(),
-            ],
+            slots: [const { AppSlot::empty() }; APP_SLOTS_MAX],
             slot_count: 0,
             foreground: APP_HANDLE_INVALID,
             next_handle: 0,
@@ -1075,6 +1054,36 @@ mod tests {
             mgr.slot_count, 1,
             "slot_count must be 1 after one registration"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // test_register_fills_every_slot_then_refuses
+    // Every built-in app takes a slot at boot; when they were twenty, the
+    // last of them to register, the Vault, was refused.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_register_fills_every_slot_then_refuses() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_manager();
+
+        let ids: Vec<std::ffi::CString> = (0..=APP_SLOTS_MAX)
+            .map(|i| std::ffi::CString::new(format!("app.slot{i}")).unwrap())
+            .collect();
+        let manifests: Vec<CAppManifest> =
+            ids.iter().map(|id| make_test_manifest(id.as_c_str())).collect();
+        let entries: Vec<CAppEntry> = manifests
+            .iter()
+            .map(|m| make_test_entry(m as *const CAppManifest))
+            .collect();
+
+        for entry in &entries[..APP_SLOTS_MAX] {
+            let rc = unsafe { register(entry as *const CAppEntry) };
+            assert_eq!(rc, ESP_OK, "every slot must take an app");
+        }
+        let rc = unsafe { register(&entries[APP_SLOTS_MAX] as *const CAppEntry) };
+        assert_eq!(rc, ESP_ERR_NO_MEM, "an app past the last slot must be refused");
+        assert_eq!(list_apps().len(), APP_SLOTS_MAX);
     }
 
     // -----------------------------------------------------------------------

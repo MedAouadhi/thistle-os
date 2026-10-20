@@ -147,6 +147,7 @@ static const char *app_icon_symbol(const char *app_id)
     if (strstr(app_id, "phone"))       return LV_SYMBOL_CALL;
     if (strstr(app_id, "navigator"))   return LV_SYMBOL_GPS;
     if (strstr(app_id, "notes"))       return LV_SYMBOL_EDIT;
+    if (strstr(app_id, "todo"))        return LV_SYMBOL_OK;
     if (strstr(app_id, "assistant"))   return LV_SYMBOL_EYE_OPEN;
     if (strstr(app_id, "appstore"))    return LV_SYMBOL_DOWNLOAD;
     if (strstr(app_id, "wifiscanner")) return LV_SYMBOL_WIFI;

@@ -175,6 +175,7 @@ target_compile_definitions(thistle_sim PRIVATE
     THISTLE_HAVE_VAULT=${THISTLE_HAVE_VAULT}
     THISTLE_HAVE_TAILSCALE=${THISTLE_HAVE_TAILSCALE}
     THISTLE_HAVE_HERMES=${THISTLE_HAVE_HERMES}
+    THISTLE_HAVE_TODO=${THISTLE_HAVE_TODO}
     CONFIG_LOG_DEFAULT_LEVEL=3
     # SD card path for simulator — points to local sdcard directory
     THISTLE_SDCARD_PATH="/tmp/thistle_sdcard"

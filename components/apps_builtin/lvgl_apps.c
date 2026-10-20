@@ -67,6 +67,9 @@
 #ifndef THISTLE_HAVE_HERMES
 #define THISTLE_HAVE_HERMES 1
 #endif
+#ifndef THISTLE_HAVE_TODO
+#define THISTLE_HAVE_TODO 1
+#endif
 
 #if THISTLE_HAVE_LAUNCHER
 #include "launcher/launcher_app.h"
@@ -103,6 +106,9 @@
 #endif
 #if THISTLE_HAVE_NOTES
 #include "notes/notes_app.h"
+#endif
+#if THISTLE_HAVE_TODO
+#include "todo/todo_app.h"
 #endif
 #if THISTLE_HAVE_APPSTORE
 #include "appstore/appstore_app.h"
@@ -187,6 +193,9 @@ esp_err_t lvgl_apps_register_builtin(bool has_radio, bool has_gps)
 #endif
 #if THISTLE_HAVE_NOTES
     REGISTER(notes_app_register);
+#endif
+#if THISTLE_HAVE_TODO
+    REGISTER(todo_app_register);
 #endif
 #if THISTLE_HAVE_APPSTORE
     REGISTER(appstore_app_register);

@@ -10,6 +10,7 @@ Each app is an independent ESP-IDF component today, on a path to becoming a sign
 | Directory      | App ID                     | Description                        |
 |----------------|----------------------------|------------------------------------|
 | `notes/`       | com.thistle.notes          | Text note editor with SD persistence |
+| `todo/`        | com.thistle.todo           | Checklist, kept as Markdown on the SD card |
 | `reader/`      | com.thistle.reader         | Document/ebook reader               |
 | `podcasts/`    | com.thistle.podcasts       | PodcastIndex podcast player         |
 | `vault/`       | com.thistle.vault          | Encrypted file vault                |

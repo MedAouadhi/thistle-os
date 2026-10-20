@@ -22,6 +22,7 @@ set(THISTLE_OPTIONAL_APPS
     "podcasts|PODCASTS|podcasts"
     "reader|READER|reader"
     "tailscale|TAILSCALE|tailscale"
+    "todo|TODO|todo"
     "vault|VAULT|vault"
     "weather|WEATHER|weather"
     "wifiscanner|WIFISCANNER|wifiscanner"

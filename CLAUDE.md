@@ -537,6 +537,29 @@ the reasons; hermes_esp32's `protocol/README.md` and its plugin's
   `simulator/tests/test_hermes.py` runs the app against
   `fake_hermes_bridge.py`, a stdlib bridge that speaks as the plugin does.
 
+### To-do
+
+`apps/todo/` is a checklist: type a task and press Enter, tap it when it is
+done, hold it to remove it; Clear done, in the title bar, removes what is
+ticked off. From the keys, Tab or Down reaches the list, Enter or Space
+ticks a task off, Backspace removes it, and typing goes back to the field.
+
+- **The list is `/sdcard/todo.md`, a Markdown checklist** (`- [ ] Buy
+  milk`, `- [x] Pay the rent`), saved whole at each change by way of
+  `todo.md.tmp`, so File Transfer's page can edit it too; a line with no box
+  reads as a task not done. The list and the format are `todo_core.c`'s,
+  host-tested by `apps/todo/tests/run_tests.sh`.
+- **The tasks are one `lv_table`**, as Phone's lists are, the tick box and
+  the strikethrough drawn in its `LV_EVENT_DRAW_TASK_ADDED`
+  (`table_draw_cb`). A row of three widgets cost 1.2 KB of LVGL's pool and
+  ran it dry at about thirty tasks; a table row costs its text. At most 50
+  tasks, of 80 characters each.
+- **A tap leaves the keyboard in the field**, so tasks are typed one after
+  another; the table takes it only from Tab or Down.
+- `simulator/tests/test_todo.py`. `--type` fills a 32-event key queue, so a
+  run types one short task, and a case that needs a list writes `todo.md`
+  first.
+
 ### LVGL's pool is 64 KB
 
 LVGL allocates every object and every local style property from its own
@@ -611,10 +634,13 @@ The kernel is **100% Rust and hardware-independent**. It never calls ESP-IDF har
 - **Kernel (Rust)** (`components/kernel_rs/`): 100% Rust. 57 modules: manifest parser, permissions, IPC, events, app manager, version, crypto, HAL registry, driver manager, WM, app store, wifi/ble/net managers, OTA, and more. 1231 tests.
 - **Display Server** (`components/kernel/src/display_server.c`): Surface management, compositor, WM vtable interface.
 - **UI** (`components/ui/`): thistle-tk WM (default). LVGL-based WM also available. Both loadable as `.wm.elf`.
-- **Apps**: 19 apps, migrating to `.app.elf` on SPIFFS. Five remain in
-  `components/apps_builtin/`; the other thirteen are their own components under
+- **Apps**: 20 apps, migrating to `.app.elf` on SPIFFS. Five remain in
+  `components/apps_builtin/`; the other fifteen are their own components under
   `apps/`, listed once in `cmake/thistle_apps.cmake` for the simulators and
-  found by `EXTRA_COMPONENT_DIRS` for the firmware.
+  found by `EXTRA_COMPONENT_DIRS` for the firmware. The app manager has 32
+  slots (`APP_SLOTS_MAX`), the built-in apps taking theirs at boot before any
+  installed `.app.elf`; an app past the last is refused, which
+  `test_app_matrix.py` shows as one that does not launch.
 - **App Store** (`components/kernel_rs/src/tk_appstore.rs`): Browsable Rust app. Rich catalog with ratings, categories, download counts, changelogs, and component-level driver matching for arch-aware installs.
 - **Recovery** (`recovery/`): Rust. WiFi AP + captive portal, OTA flashing, I2C/SPI/UART hardware scanning, multi-arch chip detection, 3-step web UI provisioning flow.
 - **Simulator** (`simulator/`): SDL2, real kernel code, fake WiFi/BLE, libcurl HTTP.
@@ -683,8 +709,8 @@ launching them under thistle-tk segfaults. App Store and Flashlight exist in
 both toolkits under the same IDs, and the app manager keeps the first
 registration of an ID, so each manager registers only its own:
 `lvgl_apps_register_builtin()` under LVGL, `tk_native_apps_register()` under
-thistle-tk. All nineteen apps are reachable by default on every S3 board;
-naming `thistle-tk` trades sixteen of them for its refresh behaviour.
+thistle-tk. All twenty apps are reachable by default on every S3 board;
+naming `thistle-tk` trades seventeen of them for its refresh behaviour.
 
 `simulator/tests/test_app_matrix.py` launches every app on every simulated
 device profile, and the simulator's `--wm NAME` overrides `system.json` for a

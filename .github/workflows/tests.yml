@@ -194,6 +194,9 @@ jobs:
       - name: Test the Hermes app's WebSocket, protocol and glyphs under sanitizers
         run: apps/hermes/tests/run_tests.sh
 
+      - name: Test the To-do app's list and checklist file under sanitizers
+        run: apps/todo/tests/run_tests.sh
+
       - name: Test secure signing-key generation
         run: |
           python3 -m pip install -r tools/requirements.txt
@@ -407,6 +410,10 @@ jobs:
       - name: Run Hermes Bridge Session tests against a fake bridge
         working-directory: simulator
         run: python3 tests/test_hermes.py --sim build/thistle_sim
+
+      - name: Run To-do add, tick, remove and clear tests
+        working-directory: simulator
+        run: python3 tests/test_todo.py --sim build/thistle_sim
 
       - name: Upload launcher framebuffer failures
         if: failure()

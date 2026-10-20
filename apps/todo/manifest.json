@@ -1,0 +1,7 @@
+{
+  "id": "com.thistle.todo",
+  "name": "To-do",
+  "version": "0.1.0",
+  "allow_background": false,
+  "permissions": ["storage"]
+}

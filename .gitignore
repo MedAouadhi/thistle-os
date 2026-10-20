@@ -62,3 +62,7 @@ simulator/sdcard/config/dictation.json
 # The phonebook's stars and the call log the simulator writes (phonebook.rs,
 # call_log.rs), which the Phone app's tests make
 simulator/sdcard/phone/
+
+# The To-do app's list, which a run of the simulator writes (apps/todo/)
+simulator/sdcard/todo.md
+simulator/sdcard/todo.md.tmp
