@@ -128,6 +128,7 @@ static lv_obj_t   *s_gps_status_lbl = NULL;
 static lv_obj_t   *s_gps_lat_lbl    = NULL;
 static lv_obj_t   *s_gps_lon_lbl    = NULL;
 static lv_obj_t   *s_gps_sat_lbl    = NULL;
+static lv_obj_t   *s_gps_sig_lbl    = NULL;
 
 /* IMU detail live-update timer: one label per axis, accelerometer then gyro */
 #define IMU_AXES 6
@@ -347,6 +348,7 @@ static void back_to_drivers(lv_event_t *e)
         s_gps_lat_lbl    = NULL;
         s_gps_lon_lbl    = NULL;
         s_gps_sat_lbl    = NULL;
+        s_gps_sig_lbl    = NULL;
     }
     if (s_imu_timer) {
         lv_timer_delete(s_imu_timer);
@@ -2232,6 +2234,7 @@ static void gps_timer_cb(lv_timer_t *timer)
         lv_label_set_text(s_gps_lat_lbl,    "Lat: --");
         lv_label_set_text(s_gps_lon_lbl,    "Lon: --");
         lv_label_set_text(s_gps_sat_lbl,    "Satellites: --");
+        lv_label_set_text(s_gps_sig_lbl,    "Signal: --");
         return;
     }
 
@@ -2246,8 +2249,26 @@ static void gps_timer_cb(lv_timer_t *timer)
         lv_label_set_text(s_gps_lat_lbl,    "Lat: --");
         lv_label_set_text(s_gps_lon_lbl,    "Lon: --");
     }
-    snprintf(buf, sizeof(buf), "Satellites: %u", pos.satellites);
-    lv_label_set_text(s_gps_sat_lbl, buf);
+
+    /* What it hears says more than the satellites in use, which stay at 0
+     * until the fix whether it needs a better view or hears nothing. */
+    hal_gps_sky_t sky;
+    if (reg->gps->get_sky && reg->gps->get_sky(&sky) == ESP_OK) {
+        snprintf(buf, sizeof(buf), "Satellites: %u used, %u in view",
+                 pos.satellites, sky.in_view);
+        lv_label_set_text(s_gps_sat_lbl, buf);
+        if (sky.heard) {
+            snprintf(buf, sizeof(buf), "Signal: %u heard, best %u dB-Hz",
+                     sky.heard, sky.best_cno);
+        } else {
+            snprintf(buf, sizeof(buf), "Signal: none heard");
+        }
+        lv_label_set_text(s_gps_sig_lbl, buf);
+    } else {
+        snprintf(buf, sizeof(buf), "Satellites: %u", pos.satellites);
+        lv_label_set_text(s_gps_sat_lbl, buf);
+        lv_label_set_text(s_gps_sig_lbl, "Signal: --");
+    }
 }
 
 static void gps_toggle_cb(lv_event_t *e)
@@ -2285,6 +2306,8 @@ static void open_detail_gps(lv_obj_t *content)
     s_gps_lon_lbl    = create_live_row(content, "Lon: --");
     create_separator(content);
     s_gps_sat_lbl    = create_live_row(content, "Satellites: --");
+    create_separator(content);
+    s_gps_sig_lbl    = create_live_row(content, "Signal: --");
     create_separator(content);
 
     /* Enable / Disable button */
@@ -3528,6 +3551,7 @@ void settings_ui_destroy(void)
         s_gps_lat_lbl    = NULL;
         s_gps_lon_lbl    = NULL;
         s_gps_sat_lbl    = NULL;
+        s_gps_sig_lbl    = NULL;
     }
     if (s_imu_timer) {
         lv_timer_delete(s_imu_timer);

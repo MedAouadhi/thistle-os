@@ -4,15 +4,20 @@
 // Rust port of components/drv_gps_mia_m10q/src/drv_gps_mia_m10q.c.
 //
 // Communicates with the U-blox MIA-M10Q via UART. A job on the kernel worker
-// reads NMEA sentences byte-by-byte, parses $GNRMC and $GNGGA, and fires the
-// registered callback on a valid fix. Supports UBX-RXM-PMREQ sleep/wake.
+// reads NMEA sentences byte-by-byte, parses $GNRMC and $GNGGA for the fix and
+// each constellation's GSV for what the receiver hears, and fires the
+// registered callback on a valid fix.
+//
+// The receiver goes into software standby (UBX-RXM-PMREQ) while GPS is off
+// and while the device sleeps, keeping what it knows of the sky for a quick
+// start, and an edge on its UART RX wakes it. So anything sent to it wakes it.
 
 #![allow(non_upper_case_globals)]
 
 use std::os::raw::{c_char, c_void};
 use std::time::Duration;
 
-use crate::hal_registry::{HalGpsCb, HalGpsDriver, HalGpsPosition};
+use crate::hal_registry::{HalGpsCb, HalGpsDriver, HalGpsPosition, HalGpsSky};
 
 // ── ESP error codes ──────────────────────────────────────────────────────────
 
@@ -37,16 +42,54 @@ const RX_CHUNK: usize = 128;
 /// so. A receiver that is powered and at the right rate talks within a second.
 const SILENCE_WARN_TICKS: u32 = 5000;
 
-/// UBX-RXM-PMREQ: put the receiver into backup mode (indefinite).
-/// Sync chars (0xB5, 0x62) + class 0x02, id 0x41 + 8-byte payload + checksum.
-const UBX_RXM_PMREQ_BACKUP: [u8; 16] = [
+/// UBX-RXM-PMREQ: software standby until an edge on the receiver's UART RX.
+///
+/// The 16-byte form, the only one the M10's firmware (ROM SPG 5.10) defines,
+/// with `force`, which the integration manual (§3.6.3.2) says standby needs.
+/// Standby keeps the battery-backed RAM, so a receiver woken within the
+/// ephemeris' four hours starts hot.
+///
+/// The 8-byte form this driver sent before is the M8's, and the M10 does not
+/// take it reliably: on the bench it sometimes ran on, and sometimes went
+/// into a standby that the single byte the driver then sent did not wake it
+/// from. From such a sleep on, the receiver stayed off until the board lost
+/// power or deep-slept. Bench, 2026-10-20, ticket 06.
+const UBX_RXM_PMREQ_STANDBY: [u8; 24] = [
     0xB5, 0x62, // sync chars
     0x02, 0x41, // class, id
-    0x08, 0x00, // payload length = 8
-    0x00, 0x00, 0x00, 0x00, // duration = 0 (indefinite)
-    0x02, 0x00, 0x00, 0x00, // flags: backup
-    0x4D, 0x3B, // checksum
+    0x10, 0x00, // payload length = 16
+    0x00, 0x00, 0x00, 0x00, // version 0, reserved
+    0x00, 0x00, 0x00, 0x00, // duration = 0: until woken
+    0x06, 0x00, 0x00, 0x00, // flags: backup | force
+    0x08, 0x00, 0x00, 0x00, // wakeupSources: uartrx
+    0x61, 0x6B, // checksum
 ];
+
+/// What wakes the receiver. One byte of anything wakes one this driver sent
+/// to standby, talking again 0.3 s later. One the 8-byte form sent there
+/// comes back less readily: on the bench single bytes woke it once in nine
+/// tries, and sixteen zero bytes did on the first to the third. A restart
+/// leaves the receiver powered, so after an update it may still be there.
+/// A receiver already awake ignores them.
+const WAKE_PULSE: [u8; 16] = [0; 16];
+/// How long a woken receiver gets to say something before it is woken again,
+/// and how many times: for the one the 8-byte form left in standby, which
+/// may take several pulses. One that never answers costs 160 bytes on its
+/// RX line.
+const WAKE_RETRY_TICKS: u32 = 3000;
+const WAKE_TRIES: u8 = 10;
+
+/// How long a constellation's GSV report counts: the receiver sends one a
+/// second, so an older one is a constellation it stopped reporting.
+const SKY_STALE_TICKS: u32 = 3000;
+/// Constellation and signal pairs kept: GPS, Galileo, BeiDou and QZSS by
+/// default, GLONASS when it is switched on, with room to spare.
+const SKY_REPORTS: usize = 8;
+/// When the first "no fix" line is due after the receiver starts, and the
+/// longest gap between two. Each gap doubles the one before: a receiver left
+/// indoors says so a few times, not every minute all day.
+const SKY_LOG_FIRST_TICKS: u32 = 30_000;
+const SKY_LOG_MAX_GAP_TICKS: u32 = 600_000;
 
 // ── ESP-IDF FFI ──────────────────────────────────────────────────────────────
 
@@ -65,7 +108,8 @@ extern "C" {
     fn uart_driver_delete(port: i32) -> i32;
     fn uart_read_bytes(port: i32, buf: *mut u8, len: u32, timeout: u32) -> i32;
     fn uart_write_bytes(port: i32, buf: *const u8, len: usize) -> i32;
-    fn vTaskDelay(ticks: u32);
+    fn uart_wait_tx_done(port: i32, ticks: u32) -> i32;
+    fn uart_flush_input(port: i32) -> i32;
     fn xTaskGetTickCount() -> u32;
     fn esp_log_write(level: i32, tag: *const u8, format: *const u8, ...);
 }
@@ -122,13 +166,26 @@ unsafe fn uart_read_bytes(_port: i32, _buf: *mut u8, _len: u32, _timeout: u32) -
     0
 }
 
+/// Everything the driver sent the receiver, for the tests to read.
 #[cfg(not(target_os = "espidf"))]
-unsafe fn uart_write_bytes(_port: i32, _buf: *const u8, _len: usize) -> i32 {
+static UART_SENT: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(not(target_os = "espidf"))]
+unsafe fn uart_write_bytes(_port: i32, buf: *const u8, len: usize) -> i32 {
+    let bytes = std::slice::from_raw_parts(buf, len);
+    UART_SENT.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(bytes);
+    len as i32
+}
+
+#[cfg(not(target_os = "espidf"))]
+unsafe fn uart_wait_tx_done(_port: i32, _ticks: u32) -> i32 {
     0
 }
 
 #[cfg(not(target_os = "espidf"))]
-unsafe fn vTaskDelay(_ticks: u32) {}
+unsafe fn uart_flush_input(_port: i32) -> i32 {
+    0
+}
 
 #[cfg(not(target_os = "espidf"))]
 unsafe fn xTaskGetTickCount() -> u32 {
@@ -197,8 +254,20 @@ struct GpsState {
     rx_started: u32,
     link_reported: bool,
     fix_reported: bool,
+    /// When the next "no fix" line is due, in ticks after `rx_started`.
+    next_sky_log: u32,
     initialized: bool,
     enabled: bool,
+    /// Whether the receiver was last sent to standby rather than woken. True
+    /// until the first wake: an ESP restart leaves the receiver as it was,
+    /// so one sent to standby before it is still there.
+    standby: bool,
+    /// Tries at waking it since it was last heard from; 0 when not waking.
+    wake_tries: u8,
+    /// When the last wake went, and the sentence count then.
+    wake_sent: u32,
+    sentences_at_wake: u32,
+    sky: Sky,
     nmea_buf: [u8; 256],
     nmea_idx: usize,
     /// Bytes off the wire and sentences that passed their checksum, since the
@@ -239,8 +308,14 @@ impl GpsState {
             rx_started: 0,
             link_reported: false,
             fix_reported: false,
+            next_sky_log: SKY_LOG_FIRST_TICKS,
             initialized: false,
             enabled: false,
+            standby: true,
+            wake_tries: 0,
+            wake_sent: 0,
+            sentences_at_wake: 0,
+            sky: Sky::new(),
             nmea_buf: [0u8; 256],
             nmea_idx: 0,
             bytes_seen: 0,
@@ -368,6 +443,122 @@ pub fn nmea_to_timestamp(time_str: &str, date_str: &str) -> u32 {
 
     let ts = days * 86400 + hour as u64 * 3600 + min as u64 * 60 + sec as u64;
     ts as u32
+}
+
+// ── What the receiver hears ──────────────────────────────────────────────────
+
+/// One constellation's last GSV report.
+#[derive(Clone, Copy)]
+struct SkyReport {
+    /// Talker ID and signal ID, `GP1` or `GA7`; `-` for a sentence older than
+    /// NMEA 4.10, which has no signal ID. All zero for a slot not in use.
+    key: [u8; 3],
+    in_view: u8,
+    heard: u8,
+    best_cno: u8,
+    /// When its last sentence came, in ticks.
+    at: u32,
+}
+
+impl SkyReport {
+    const EMPTY: SkyReport = SkyReport { key: [0; 3], in_view: 0, heard: 0, best_cno: 0, at: 0 };
+}
+
+/// The GSV sentences put together. The receiver sends a set a second for each
+/// constellation, four satellites to a sentence, so a constellation's report
+/// is kept only once its set is whole.
+struct Sky {
+    reports: [SkyReport; SKY_REPORTS],
+    /// The set being read, and the number of its sentence due next; 0 when
+    /// none is being read.
+    partial: SkyReport,
+    next_msg: u8,
+}
+
+impl Sky {
+    const fn new() -> Self {
+        Sky { reports: [SkyReport::EMPTY; SKY_REPORTS], partial: SkyReport::EMPTY, next_msg: 0 }
+    }
+
+    /// Take one GSV sentence, split into fields:
+    /// `$xxGSV,numMsg,msgNum,numSV{,svid,elv,az,cno},signalId`.
+    fn feed(&mut self, fields: &[&str], now: u32) {
+        if fields.len() < 4 || fields[0].len() != 6 {
+            return;
+        }
+        let num_msg: u8 = fields[1].parse().unwrap_or(0);
+        let msg_num: u8 = fields[2].parse().unwrap_or(0);
+        let in_view: u8 = fields[3].parse().unwrap_or(0);
+        if msg_num == 0 || msg_num > num_msg {
+            self.next_msg = 0;
+            return;
+        }
+
+        // NMEA 4.10 and later put a signal ID after the groups of four.
+        let rest = &fields[4..];
+        let (sats, signal) = if rest.len() % 4 == 1 {
+            (&rest[..rest.len() - 1], rest[rest.len() - 1])
+        } else {
+            (rest, "")
+        };
+        let talker = fields[0].as_bytes();
+        let key = [talker[1], talker[2], signal.bytes().next().unwrap_or(b'-')];
+
+        if msg_num == 1 {
+            self.partial = SkyReport { key, in_view, heard: 0, best_cno: 0, at: now };
+        } else if msg_num != self.next_msg || key != self.partial.key {
+            // A sentence of the set went missing: the set is lost.
+            self.next_msg = 0;
+            return;
+        }
+
+        for sat in sats.chunks(4) {
+            // C/N0 is empty for a satellite the receiver expects but does not hear.
+            let cno: u8 = sat.get(3).and_then(|c| c.parse().ok()).unwrap_or(0);
+            if cno > 0 {
+                self.partial.heard = self.partial.heard.saturating_add(1);
+                self.partial.best_cno = self.partial.best_cno.max(cno);
+            }
+        }
+
+        if msg_num == num_msg {
+            self.partial.at = now;
+            self.keep(self.partial, now);
+            self.next_msg = 0;
+        } else {
+            self.next_msg = msg_num + 1;
+        }
+    }
+
+    /// Keep a whole report in its constellation's slot, else a free one, else
+    /// the oldest.
+    fn keep(&mut self, report: SkyReport, now: u32) {
+        let slot = self
+            .reports
+            .iter()
+            .position(|r| r.key == report.key)
+            .or_else(|| self.reports.iter().position(|r| r.key[0] == 0))
+            .unwrap_or_else(|| {
+                (0..SKY_REPORTS)
+                    .max_by_key(|&i| now.wrapping_sub(self.reports[i].at))
+                    .unwrap_or(0)
+            });
+        self.reports[slot] = report;
+    }
+
+    /// Every constellation reported in the last few seconds, added up.
+    fn summary(&self, now: u32) -> HalGpsSky {
+        let mut sky = HalGpsSky::default();
+        for r in &self.reports {
+            if r.key[0] == 0 || now.wrapping_sub(r.at) >= SKY_STALE_TICKS {
+                continue;
+            }
+            sky.in_view = sky.in_view.saturating_add(r.in_view);
+            sky.heard = sky.heard.saturating_add(r.heard);
+            sky.best_cno = sky.best_cno.max(r.best_cno);
+        }
+        sky
+    }
 }
 
 // ── NMEA sentence processors ─────────────────────────────────────────────────
@@ -509,6 +700,11 @@ unsafe fn nmea_process_sentence(sentence: &[u8]) -> bool {
         "$GNGGA" | "$GPGGA" => {
             process_gngga(&fields);
         }
+        // Each constellation's under its own talker ID, never GN.
+        id if id.len() == 6 && id.ends_with("GSV") => {
+            let gps = &mut *(&raw mut S_GPS);
+            gps.sky.feed(&fields, xTaskGetTickCount());
+        }
         _ => {}
     }
     true
@@ -550,11 +746,7 @@ unsafe fn nmea_feed_byte(byte: u8) {
 // ── UART reader ──────────────────────────────────────────────────────────────
 
 /// The reader, a job on the kernel worker every `RX_POLL`: feeds what the UART
-/// has buffered to the sentence assembler, and reports once whether the
-/// receiver is talking.
-///
-/// Both outcomes get a line. Before it had either, a receiver that never spoke
-/// looked exactly like one still waiting for a fix.
+/// has buffered to the sentence assembler, then makes `reader_checks`.
 ///
 /// # Safety
 /// Accesses `S_GPS` directly. Runs only as the job `mia_m10q_enable` starts.
@@ -577,41 +769,153 @@ pub unsafe extern "C" fn gps_rx_job(_arg: *mut c_void) {
                 nmea_feed_byte(byte);
             }
         }
+        reader_checks(xTaskGetTickCount());
+    }
+}
 
-        let gps = &mut *(&raw mut S_GPS);
-        let elapsed = xTaskGetTickCount().wrapping_sub(gps.rx_started);
 
-        if !gps.link_reported {
-            if gps.sentences_seen > 0 {
+/// What the reader decides once the UART is drained, `now` in ticks: whether
+/// a receiver just woken needs waking again; once, whether the receiver is
+/// talking; and until the first fix, what it hears.
+///
+/// Both outcomes of the second get a line. Before it had either, a receiver
+/// that never spoke looked exactly like one still waiting for a fix. The
+/// third tells one that needs a better view of the sky from one that hears
+/// nothing: the satellites in use stay at 0 in both until the fix.
+///
+/// # Safety
+/// Mutates `S_GPS`.
+unsafe fn reader_checks(now: u32) {
+    let gps = &mut *(&raw mut S_GPS);
+    let elapsed = now.wrapping_sub(gps.rx_started);
+
+    if gps.wake_tries > 0 {
+        if gps.sentences_seen != gps.sentences_at_wake {
+            if gps.wake_tries > 1 {
                 gps_log!(
                     ESP_LOG_INFO,
-                    "receiver talking on UART%d at %u baud",
-                    gps.cfg.uart_num,
-                    gps.cfg.baud_rate
+                    "receiver woke on try %u at waking it",
+                    gps.wake_tries as u32
                 );
-                gps.link_reported = true;
-            } else if elapsed >= SILENCE_WARN_TICKS {
+            }
+            gps.wake_tries = 0;
+        } else if now.wrapping_sub(gps.wake_sent) >= WAKE_RETRY_TICKS {
+            if gps.wake_tries < WAKE_TRIES {
+                send_wake(gps, now);
+            } else {
                 gps_log!(
                     ESP_LOG_WARN,
-                    "no NMEA on UART%d at %u baud after 5 s (%u bytes received)",
-                    gps.cfg.uart_num,
-                    gps.cfg.baud_rate,
-                    gps.bytes_seen
+                    "receiver silent after %u tries at waking it",
+                    gps.wake_tries as u32
                 );
-                gps.link_reported = true;
+                gps.wake_tries = 0;
             }
         }
+    }
 
-        if !gps.fix_reported && gps.last_position.fix_valid {
+    if !gps.link_reported {
+        if gps.sentences_seen > 0 {
             gps_log!(
                 ESP_LOG_INFO,
-                "fix after %u s with %u satellites",
-                elapsed / 1000,
-                gps.last_position.satellites as u32
+                "receiver talking on UART%d at %u baud",
+                gps.cfg.uart_num,
+                gps.cfg.baud_rate
             );
-            gps.fix_reported = true;
+            gps.link_reported = true;
+        } else if elapsed >= SILENCE_WARN_TICKS {
+            gps_log!(
+                ESP_LOG_WARN,
+                "no NMEA on UART%d at %u baud after 5 s (%u bytes received)",
+                gps.cfg.uart_num,
+                gps.cfg.baud_rate,
+                gps.bytes_seen
+            );
+            gps.link_reported = true;
         }
     }
+
+    if gps.fix_reported || gps.sentences_seen == 0 {
+        return;
+    }
+    let sky = gps.sky.summary(now);
+    if gps.last_position.fix_valid {
+        gps_log!(
+            ESP_LOG_INFO,
+            "fix after %u s with %u satellites, best signal %u dB-Hz",
+            elapsed / 1000,
+            gps.last_position.satellites as u32,
+            sky.best_cno as u32
+        );
+        gps.fix_reported = true;
+    } else if elapsed >= gps.next_sky_log {
+        gps_log!(
+            ESP_LOG_INFO,
+            "no fix after %u s: %u satellites in view, %u heard, best %u dB-Hz",
+            elapsed / 1000,
+            sky.in_view as u32,
+            sky.heard as u32,
+            sky.best_cno as u32
+        );
+        gps.next_sky_log = gps
+            .next_sky_log
+            .saturating_add(gps.next_sky_log.min(SKY_LOG_MAX_GAP_TICKS));
+    }
+}
+
+// ── The receiver's power ─────────────────────────────────────────────────────
+
+/// Send the receiver to standby, unless it is there already: anything sent
+/// to a receiver in standby wakes it, and the command would be lost with it.
+/// What it reported goes stale from here.
+///
+/// # Safety
+/// Mutates `S_GPS`.
+unsafe fn enter_standby(gps: &mut GpsState) -> i32 {
+    if gps.standby {
+        return ESP_OK;
+    }
+    let written = uart_write_bytes(
+        gps.cfg.uart_num,
+        UBX_RXM_PMREQ_STANDBY.as_ptr(),
+        UBX_RXM_PMREQ_STANDBY.len(),
+    );
+    if written < 0 {
+        return ESP_FAIL;
+    }
+    // Out on the wire before the caller sleeps: a UART stopped halfway
+    // through would leave the receiver half a command, and running.
+    uart_wait_tx_done(gps.cfg.uart_num, 100);
+
+    gps.standby = true;
+    gps.wake_tries = 0;
+    gps.last_position.fix_valid = false;
+    gps.last_position.satellites = 0;
+    gps.sky = Sky::new();
+    ESP_OK
+}
+
+/// Send the receiver the edge that wakes it, and watch for it to talk.
+///
+/// # Safety
+/// Mutates `S_GPS`.
+unsafe fn send_wake(gps: &mut GpsState, now: u32) {
+    uart_write_bytes(gps.cfg.uart_num, WAKE_PULSE.as_ptr(), WAKE_PULSE.len());
+    gps.standby = false;
+    gps.wake_tries += 1;
+    gps.wake_sent = now;
+    gps.sentences_at_wake = gps.sentences_seen;
+}
+
+/// Wake the receiver, and time the next fix from now.
+///
+/// # Safety
+/// Mutates `S_GPS`.
+unsafe fn wake_receiver(gps: &mut GpsState, now: u32) {
+    gps.wake_tries = 0;
+    send_wake(gps, now);
+    gps.rx_started = now;
+    gps.fix_reported = false;
+    gps.next_sky_log = SKY_LOG_FIRST_TICKS;
 }
 
 // ── vtable implementations ───────────────────────────────────────────────────
@@ -715,6 +1019,9 @@ unsafe extern "C" fn mia_m10q_init(config: *const c_void) -> i32 {
     gps.nmea_idx = 0;
     gps.rx_job = 0;
     gps.enabled = false;
+    gps.standby = true;
+    gps.wake_tries = 0;
+    gps.sky = Sky::new();
     gps.initialized = true;
 
     ESP_OK
@@ -741,7 +1048,7 @@ unsafe extern "C" fn mia_m10q_deinit() {
     gps.enabled = false;
 }
 
-/// Start the reader.
+/// Wake the receiver and start the reader.
 ///
 /// # Safety
 /// Driver must be initialised.
@@ -755,12 +1062,16 @@ unsafe extern "C" fn mia_m10q_enable() -> i32 {
         return ESP_OK;
     }
 
+    // What came in while nobody read is from before: an old RMC would show
+    // as a fix.
+    uart_flush_input(gps.cfg.uart_num);
     gps.nmea_idx = 0;
     gps.bytes_seen = 0;
     gps.sentences_seen = 0;
-    gps.rx_started = xTaskGetTickCount();
     gps.link_reported = false;
-    gps.fix_reported = false;
+    // In standby, or it may be: switched off, or left there by a restart,
+    // which does not take its power away.
+    wake_receiver(gps, xTaskGetTickCount());
     gps.rx_job = crate::kworker::every(gps_rx_job, std::ptr::null_mut(), RX_POLL);
 
     gps.enabled = true;
@@ -775,7 +1086,8 @@ unsafe fn stop_reader(gps: &mut GpsState) {
     }
 }
 
-/// Stop the reader.
+/// Stop the reader and send the receiver to standby, where it draws next to
+/// nothing and keeps what it knows of the sky.
 ///
 /// # Safety
 /// Driver must be initialised.
@@ -790,8 +1102,10 @@ unsafe extern "C" fn mia_m10q_disable() -> i32 {
     }
 
     stop_reader(gps);
-
     gps.enabled = false;
+    // Off is the reader stopped. A receiver that missed its standby only
+    // costs power.
+    let _ = enter_standby(gps);
     ESP_OK
 }
 
@@ -831,37 +1145,47 @@ unsafe extern "C" fn mia_m10q_register_callback(cb: HalGpsCb, user_data: *mut c_
     ESP_OK
 }
 
-/// Enter or leave the MIA-M10Q hardware low-power backup mode.
+/// The last few seconds' sky. `ESP_OK` exactly when `get_position` is.
 ///
-/// - `enter = true`:  send UBX-RXM-PMREQ (indefinite backup mode).
-/// - `enter = false`: send 0xFF wakeup pulse then delay 500 ms.
+/// # Safety
+/// `sky` must be a writable `HalGpsSky`.
+unsafe extern "C" fn mia_m10q_get_sky(sky: *mut HalGpsSky) -> i32 {
+    if sky.is_null() {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    let gps = &*(&raw const S_GPS);
+    if gps.initialized && gps.enabled {
+        *sky = gps.sky.summary(xTaskGetTickCount());
+        ESP_OK
+    } else {
+        *sky = HalGpsSky::default();
+        ESP_ERR_INVALID_STATE
+    }
+}
+
+/// Send the receiver to standby while the device sleeps, or wake it after.
+///
+/// Waking does not wait for it: the reader watches for it to talk and wakes
+/// it again if it does not. One switched off stays in standby.
 ///
 /// # Safety
 /// Driver must be initialised.
 unsafe extern "C" fn mia_m10q_sleep(enter: bool) -> i32 {
-    let gps = &*(&raw const S_GPS);
+    let gps = &mut *(&raw mut S_GPS);
 
     if !gps.initialized {
         return ESP_ERR_INVALID_STATE;
     }
 
     if enter {
-        let written = uart_write_bytes(
-            gps.cfg.uart_num,
-            UBX_RXM_PMREQ_BACKUP.as_ptr(),
-            UBX_RXM_PMREQ_BACKUP.len(),
-        );
-        if written < 0 {
-            return ESP_FAIL;
-        }
+        enter_standby(gps)
     } else {
-        let wake: u8 = 0xFF;
-        uart_write_bytes(gps.cfg.uart_num, &wake as *const u8, 1);
-        // pdMS_TO_TICKS(500) with configTICK_RATE_HZ=1000 → 500 ticks
-        vTaskDelay(500);
+        if gps.enabled && gps.standby {
+            wake_receiver(gps, xTaskGetTickCount());
+        }
+        ESP_OK
     }
-
-    ESP_OK
 }
 
 // ── HAL vtable ────────────────────────────────────────────────────────────────
@@ -878,6 +1202,7 @@ static GPS_DRIVER: HalGpsDriver = HalGpsDriver {
     register_callback: Some(mia_m10q_register_callback),
     sleep: Some(mia_m10q_sleep),
     name: b"MIA-M10Q\0".as_ptr() as *const c_char,
+    get_sky: Some(mia_m10q_get_sky),
 };
 
 /// Return the MIA-M10Q driver vtable.
@@ -900,6 +1225,12 @@ mod tests {
     /// Reset driver state between tests.
     unsafe fn reset_state() {
         *(&raw mut S_GPS) = GpsState::new();
+        sent();
+    }
+
+    /// What the driver has sent the receiver since this was last asked.
+    fn sent() -> Vec<u8> {
+        std::mem::take(&mut *UART_SENT.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
     // ── nmea_verify_checksum ──────────────────────────────────────────────────
@@ -1494,32 +1825,255 @@ mod tests {
         }
     }
 
-    // ── sleep ─────────────────────────────────────────────────────────────────
+    // ── GSV: what the receiver hears ──────────────────────────────────────────
+
+    /// The interface description's own example: GPS, nine satellites in
+    /// three sentences, every one heard.
+    const GPS_SET: &[u8] = b"$GPGSV,3,1,09,09,,,17,10,,,40,12,,,49,13,,,35,1*6F\r\n\
+$GPGSV,3,2,09,15,,,44,17,,,45,19,,,44,24,,,50,1*64\r\n\
+$GPGSV,3,3,09,25,,,40,1*6E\r\n";
+
+    fn sky_of(lines: &[&str], now: u32) -> Sky {
+        let mut sky = Sky::new();
+        for line in lines {
+            sky.feed(&nmea_split(line), now);
+        }
+        sky
+    }
 
     #[test]
-    fn test_sleep_before_init_returns_invalid_state() {
+    fn gsv_counts_a_constellation_once_its_set_is_whole() {
+        unsafe {
+            start_receiver();
+            feed(GPS_SET);
+            let mut sky = HalGpsSky::default();
+            assert_eq!(mia_m10q_get_sky(&mut sky), ESP_OK);
+            assert_eq!(sky, HalGpsSky { in_view: 9, heard: 9, best_cno: 50 });
+            mia_m10q_deinit();
+        }
+    }
+
+    #[test]
+    fn gsv_adds_constellations_up() {
+        unsafe {
+            start_receiver();
+            feed(GPS_SET);
+            feed(b"$GBGSV,2,1,06,07,,,,10,,,21,19,,,,22,,,,1*7E\r\n");
+            feed(b"$GBGSV,2,2,06,27,,,28,30,,,,1*7C\r\n");
+            feed(b"$GAGSV,1,1,00,2*76\r\n");
+            let mut sky = HalGpsSky::default();
+            assert_eq!(mia_m10q_get_sky(&mut sky), ESP_OK);
+            assert_eq!(sky, HalGpsSky { in_view: 15, heard: 11, best_cno: 50 });
+            mia_m10q_deinit();
+        }
+    }
+
+    /// A satellite with no C/N0 is one the receiver expects to see but does
+    /// not hear: in view, not heard. Indoors that is most of them.
+    #[test]
+    fn gsv_counts_a_satellite_with_no_signal_as_in_view_only() {
+        let sky = sky_of(&["$GBGSV,2,1,06,07,,,,10,,,21,19,,,,22,,,,1", "$GBGSV,2,2,06,27,,,28,30,,,,1"], 0);
+        assert_eq!(sky.summary(0), HalGpsSky { in_view: 6, heard: 2, best_cno: 28 });
+    }
+
+    #[test]
+    fn gsv_drops_a_set_with_a_sentence_missing() {
+        let sky = sky_of(&["$GPGSV,3,1,09,09,,,17,10,,,40,12,,,49,13,,,35,1", "$GPGSV,3,3,09,25,,,40,1"], 0);
+        assert_eq!(sky.summary(0), HalGpsSky::default());
+    }
+
+    #[test]
+    fn gsv_keeps_one_report_per_constellation_and_signal() {
+        let mut sky = sky_of(&["$GPGSV,1,1,03,12,,,42,24,,,47,32,,,37,5"], 0);
+        sky.feed(&nmea_split("$GPGSV,1,1,03,12,,,30,24,,,31,32,,,,5"), 1000);
+        assert_eq!(sky.summary(1000), HalGpsSky { in_view: 3, heard: 2, best_cno: 31 });
+        // The same talker on another signal is reported apart.
+        sky.feed(&nmea_split("$GPGSV,1,1,01,12,,,20,1"), 1000);
+        assert_eq!(sky.summary(1000), HalGpsSky { in_view: 4, heard: 3, best_cno: 31 });
+    }
+
+    /// NMEA before 4.10 has no signal ID after the satellites.
+    #[test]
+    fn gsv_reads_a_sentence_with_no_signal_id() {
+        let sky = sky_of(&["$GPGSV,1,1,02,12,,,42,24,,,"], 0);
+        assert_eq!(sky.summary(0), HalGpsSky { in_view: 2, heard: 1, best_cno: 42 });
+    }
+
+    #[test]
+    fn gsv_forgets_a_constellation_no_longer_reported() {
+        let mut sky = sky_of(&["$GPGSV,1,1,03,12,,,42,24,,,47,32,,,37,5"], 0);
+        sky.feed(&nmea_split("$GAGSV,1,1,01,04,,,33,7"), SKY_STALE_TICKS);
+        assert_eq!(sky.summary(SKY_STALE_TICKS), HalGpsSky { in_view: 1, heard: 1, best_cno: 33 });
+    }
+
+    #[test]
+    fn get_sky_is_an_error_while_nobody_reads_the_receiver() {
+        unsafe {
+            reset_state();
+            let mut sky = HalGpsSky { in_view: 1, heard: 1, best_cno: 1 };
+            assert_eq!(mia_m10q_get_sky(&mut sky), ESP_ERR_INVALID_STATE);
+            assert_eq!(sky, HalGpsSky::default());
+            assert_eq!(mia_m10q_get_sky(std::ptr::null_mut()), ESP_ERR_INVALID_ARG);
+        }
+    }
+
+    // ── standby and waking ────────────────────────────────────────────────────
+
+    #[test]
+    fn the_standby_command_is_the_m10s_sixteen_byte_form() {
+        let frame = &UBX_RXM_PMREQ_STANDBY;
+        assert_eq!(&frame[..4], &[0xB5, 0x62, 0x02, 0x41]);
+        assert_eq!(u16::from_le_bytes([frame[4], frame[5]]) as usize, frame.len() - 8);
+        let field = |at: usize| u32::from_le_bytes(frame[6 + at..10 + at].try_into().unwrap());
+        assert_eq!(field(4), 0, "duration: until woken");
+        assert_eq!(field(8), 0b110, "flags: backup and force");
+        assert_eq!(field(12), 1 << 3, "wakeupSources: uartrx");
+
+        let (mut a, mut b) = (0u8, 0u8);
+        for &x in &frame[2..frame.len() - 2] {
+            a = a.wrapping_add(x);
+            b = b.wrapping_add(a);
+        }
+        assert_eq!([a, b], frame[frame.len() - 2..]);
+    }
+
+    #[test]
+    fn sleep_before_init_is_refused() {
         unsafe {
             reset_state();
             assert_eq!(mia_m10q_sleep(true), ESP_ERR_INVALID_STATE);
             assert_eq!(mia_m10q_sleep(false), ESP_ERR_INVALID_STATE);
+            assert!(sent().is_empty());
+        }
+    }
+
+    /// A restart does not take the receiver's power away, so one sent to
+    /// standby before it is still there: the first enable wakes it.
+    #[test]
+    fn enable_wakes_the_receiver() {
+        unsafe {
+            start_receiver();
+            assert_eq!(sent(), WAKE_PULSE);
+            mia_m10q_deinit();
         }
     }
 
     #[test]
-    fn test_sleep_enter_and_wake_after_init() {
+    fn sleep_sends_the_receiver_to_standby_and_wakes_it_after() {
         unsafe {
-            reset_state();
-            let cfg = GpsMiaM10qConfig {
-                uart_num: 1,
-                pin_tx: 10,
-                pin_rx: 9,
-                baud_rate: 9600,
-            };
-            mia_m10q_init(&cfg as *const GpsMiaM10qConfig as *const c_void);
-            // Stub uart_write_bytes returns 0 (>= 0), so both succeed.
+            start_receiver();
+            sent();
+            assert_eq!(mia_m10q_sleep(true), ESP_OK);
+            assert_eq!(sent(), UBX_RXM_PMREQ_STANDBY);
+            assert_eq!(mia_m10q_sleep(false), ESP_OK);
+            assert_eq!(sent(), WAKE_PULSE);
+            mia_m10q_deinit();
+        }
+    }
+
+    /// Anything sent to a receiver in standby wakes it, the command lost.
+    #[test]
+    fn a_receiver_in_standby_is_sent_nothing_more() {
+        unsafe {
+            start_receiver();
+            assert_eq!(mia_m10q_sleep(true), ESP_OK);
+            sent();
+            assert_eq!(mia_m10q_sleep(true), ESP_OK);
+            assert!(sent().is_empty());
+            mia_m10q_deinit();
+        }
+    }
+
+    #[test]
+    fn switching_off_sends_the_receiver_to_standby_until_switched_on() {
+        unsafe {
+            start_receiver();
+            sent();
+            assert_eq!(mia_m10q_disable(), ESP_OK);
+            assert_eq!(sent(), UBX_RXM_PMREQ_STANDBY);
+
+            // A sleep and a wake while off leave it there.
             assert_eq!(mia_m10q_sleep(true), ESP_OK);
             assert_eq!(mia_m10q_sleep(false), ESP_OK);
+            assert!(sent().is_empty());
+
+            assert_eq!(mia_m10q_enable(), ESP_OK);
+            assert_eq!(sent(), WAKE_PULSE);
+            mia_m10q_deinit();
+        }
+    }
+
+    /// Navigator must not show the fix from before a sleep as current.
+    #[test]
+    fn standby_takes_the_fix_and_the_sky_with_it() {
+        unsafe {
+            start_receiver();
+            feed(b"$GNGGA,092751.000,5321.6802,N,00630.3372,W,1,08,1.03,61.7,M,55.3,M,,*58\r\n");
+            feed(b"$GNRMC,092751.000,A,5321.6802,N,00630.3372,W,0.06,31.66,280511,,,A*58\r\n");
+            feed(GPS_SET);
+            assert_eq!(mia_m10q_sleep(true), ESP_OK);
+            assert_eq!(mia_m10q_sleep(false), ESP_OK);
+
+            let mut pos = empty_position();
+            assert_eq!(mia_m10q_get_position(&mut pos), ESP_OK);
+            assert!(!pos.fix_valid);
+            assert_eq!(pos.satellites, 0);
+            let mut sky = HalGpsSky::default();
+            assert_eq!(mia_m10q_get_sky(&mut sky), ESP_OK);
+            assert_eq!(sky, HalGpsSky::default());
+            mia_m10q_deinit();
+        }
+    }
+
+    #[test]
+    fn a_receiver_that_does_not_answer_a_wake_is_woken_again_then_left() {
+        unsafe {
+            start_receiver();
+            sent();
+            reader_checks(WAKE_RETRY_TICKS - 1);
+            assert!(sent().is_empty());
+            for try_at in 1..WAKE_TRIES as u32 {
+                reader_checks(try_at * WAKE_RETRY_TICKS);
+                assert_eq!(sent(), WAKE_PULSE, "try {}", try_at + 1);
+            }
+            reader_checks(WAKE_TRIES as u32 * WAKE_RETRY_TICKS);
+            reader_checks((WAKE_TRIES as u32 + 1) * WAKE_RETRY_TICKS);
+            assert!(sent().is_empty());
+            mia_m10q_deinit();
+        }
+    }
+
+    #[test]
+    fn a_receiver_that_talks_after_a_wake_is_left_alone() {
+        unsafe {
+            start_receiver();
+            sent();
+            feed(b"$GAGSV,1,1,00,2*76\r\n");
+            reader_checks(WAKE_RETRY_TICKS);
+            reader_checks(2 * WAKE_RETRY_TICKS);
+            assert!(sent().is_empty());
+            mia_m10q_deinit();
+        }
+    }
+
+    /// Indoors there may never be a fix: the line comes at 30 s, then at
+    /// gaps doubling up to ten minutes, not every pass.
+    #[test]
+    fn the_no_fix_line_comes_less_often_the_longer_it_waits() {
+        unsafe {
+            start_receiver();
+            feed(GPS_SET);
+            let mut logged = Vec::new();
+            for second in 0..3600u32 {
+                let due = (*(&raw const S_GPS)).next_sky_log;
+                reader_checks(second * 1000);
+                if (*(&raw const S_GPS)).next_sky_log != due {
+                    logged.push(second);
+                }
+            }
+            assert_eq!(logged, [30, 60, 120, 240, 480, 960, 1560, 2160, 2760, 3360]);
             mia_m10q_deinit();
         }
     }
 }
+

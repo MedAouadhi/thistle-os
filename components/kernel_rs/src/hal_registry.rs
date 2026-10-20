@@ -187,6 +187,14 @@ pub struct HalGpsPosition {
     pub timestamp: u32,
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct HalGpsSky {
+    pub in_view: u8,
+    pub heard: u8,
+    pub best_cno: u8,
+}
+
 pub type HalGpsCb =
     Option<unsafe extern "C" fn(pos: *const HalGpsPosition, user_data: *mut c_void)>;
 
@@ -201,6 +209,7 @@ pub struct HalGpsDriver {
         Option<unsafe extern "C" fn(cb: HalGpsCb, user_data: *mut c_void) -> i32>,
     pub sleep: Option<unsafe extern "C" fn(enter: bool) -> i32>,
     pub name: *const c_char,
+    pub get_sky: Option<unsafe extern "C" fn(sky: *mut HalGpsSky) -> i32>,
 }
 
 unsafe impl Send for HalGpsDriver {}
@@ -1658,6 +1667,7 @@ mod tests {
             register_callback: None,
             sleep: None,
             name: b"test-gps\0".as_ptr() as *const c_char,
+            get_sky: None,
         };
 
         let rc = unsafe { hal_gps_register(&drv as *const HalGpsDriver, std::ptr::null()) };
@@ -1690,6 +1700,7 @@ mod tests {
             register_callback: None,
             sleep: None,
             name: b"test-gps\0".as_ptr() as *const c_char,
+            get_sky: None,
         }
     }
 

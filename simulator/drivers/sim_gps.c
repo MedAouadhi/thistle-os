@@ -52,6 +52,18 @@ static esp_err_t sim_gps_get_position(hal_gps_position_t *pos)
     return ESP_OK;
 }
 
+/* A sky to go with the position: a few more satellites in view than in use,
+ * as a receiver outdoors lists, and none heard without a fix. */
+static esp_err_t sim_gps_get_sky(hal_gps_sky_t *sky)
+{
+    if (!sky) return ESP_ERR_INVALID_ARG;
+
+    sky->in_view  = s_sats + 4;
+    sky->heard    = s_fix ? s_sats + 1 : 0;
+    sky->best_cno = s_fix ? 42 : 0;
+    return ESP_OK;
+}
+
 static esp_err_t sim_gps_register_callback(hal_gps_cb_t cb, void *user_data)
 {
     s_cb      = cb;
@@ -76,6 +88,7 @@ static const hal_gps_driver_t sim_gps_driver = {
     .register_callback = sim_gps_register_callback,
     .sleep             = sim_gps_sleep,
     .name              = "Simulator GPS",
+    .get_sky           = sim_gps_get_sky,
 };
 
 const hal_gps_driver_t *sim_gps_get(void)

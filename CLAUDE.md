@@ -236,6 +236,26 @@ them in `time_manager.rs` (`thistle/time_manager.h`), every ESP-IDF call in
   source and size (`clock slewing by -125 ms, from NTP`). Like every Rust
   module's on the device, these lines carry no tag and no newline.
 
+### GPS
+
+The T-Deck Max's receiver is a u-blox MIA-M10Q on UART2
+(`drv_gps_mia_m10q.rs`), powered by XL9555 P02, which only deep sleep and
+power-off take down. Ticket 06 has the bring-up and the bench results.
+
+- **Standby is UBX-RXM-PMREQ's 16-byte form**, the only one its firmware
+  (ROM SPG 5.10) defines, with `force`. The receiver goes there while GPS is
+  off and while the device sleeps, and keeps what it knows for a quick
+  start. The M8's 8-byte form, sent until 2026-10, sometimes left it in a
+  standby one byte did not wake: GPS stayed off from the first light sleep.
+- **Anything sent to it wakes it**, so a receiver in standby is sent nothing
+  but the wake pulse, sixteen zero bytes, which the reader repeats every 3 s
+  until it talks. A restart leaves the receiver as it was.
+- **What it hears is GSV's**, through `get_sky` (`hal/gps.h`): satellites in
+  view, heard, and the best C/N0, shown in Settings → GPS. Until the fix the
+  log says `no fix after 30 s: 4 satellites in view, 4 heard, best 27
+  dB-Hz`, at doubling gaps. Satellites in use stay at 0 until the fix, so
+  they tell a weak signal from no signal at all only with these.
+
 ### The quick panel
 
 A drag down from the status bar, or the quick key (`HAL_KEY_QUICK`, the

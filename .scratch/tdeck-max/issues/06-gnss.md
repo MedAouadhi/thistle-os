@@ -194,3 +194,75 @@ On the bench, indoors: NMEA at 38400 on the first try, so the 9600 worry above
 did not come up. UTC time was valid. GSV showed one or two satellites at
 9–21 dB-Hz, never enough for a fix. The fix box stays open until someone takes
 the board outside.
+
+### Every sleep switched the receiver off for good (2026-10-20)
+
+Reported as "never a fix, even outside". Two faults, the first enough on its
+own.
+
+**Light sleep left the receiver in a standby nothing woke it from.** Before
+each light sleep (after 2 minutes idle on this board's settings, 5 by
+default, or the power key) the driver sent UBX-RXM-PMREQ in its 8-byte form,
+and woke the receiver after with one 0xFF. The 8-byte form is the M8's: the
+receiver's boot banner says `ROM SPG 5.10`, `MOD=MIA-M10Q`, and the SPG 5.10
+interface description (UBX-21035062) defines only the 16-byte form, with a
+`wakeupSources` field, and the integration manual (§3.6.3.2) says standby
+needs `force`. On the bench, over six runs, the first two from a receiver
+power-cycled through XL9555 P02 so that its state was known:
+
+| Sent | What the receiver did |
+| --- | --- |
+| 8-byte PMREQ | Silent after the 2 sentences in flight, 4 times; ran on, twice |
+| then one 0xFF, the old wake | Stayed silent; so did three more 0xFF, and one 0x00 |
+| then sixteen 0x00 | Woke, 4 times, on the first to the third try |
+| 16-byte PMREQ, backup + force, uartrx | Silent after what was in flight, 12 times of 12 |
+| then one 0xFF, one 0x00 or sixteen 0x00 | Talking 304 to 311 ms later, 12 times of 12 |
+
+So from the first light sleep on, GPS was off until the board lost power or
+deep-slept, which cuts P02; a restart does not. Settings showed "No fix,
+Satellites: 0" throughout, as it does for a receiver that hears nothing.
+
+The driver now sends the 16-byte form, and for a wake sixteen zero bytes,
+which also wake a receiver an older firmware left in the other standby. The
+reader sends them again every 3 s, up to ten times, until the receiver
+talks. Waking no longer blocks the power manager for 500 ms. Switching GPS
+off now sends the receiver to standby too, where it stops drawing tracking
+current and keeps what it knows for a quick start; before, off only stopped
+the reader. Sleeping or waking while off leaves it there. Enable flushes
+the UART first, so a sentence from before standby is not read as current.
+
+Checked on the board with a test build calling the driver's `sleep(true)`,
+`sleep(false)`, `disable` and `enable` as the power manager and Settings do:
+standby, a second `sleep(true)` sending nothing, waking in 306 ms, staying in
+standby through a sleep and wake while off, and waking in 305 ms on enable.
+Not checked: a real light sleep. It takes the board off USB and needs a key
+to wake, and the board was on the bench unattended. The receiver's side is
+the same; what that leaves open is the S3's TX pin during light sleep, which
+would at worst wake the receiver early.
+
+**Nothing showed what the receiver hears.** "Satellites" was GGA's satellites
+in use, 0 until a fix whether the receiver needs a better view or hears
+nothing. The driver now reads every constellation's GSV, and the GPS HAL has
+`get_sky` (appended last, as `is_plugged_in` was): satellites in view, how
+many are heard, and the strongest C/N0. Settings → GPS shows
+`Satellites: 0 used, 4 in view` and `Signal: 4 heard, best 27 dB-Hz`, and
+the log, at 30 s and gaps doubling to 10 minutes until the fix:
+
+    gps: no fix after 30 s: 2 satellites in view, 2 heard, best 14 dB-Hz
+
+then `fix after N s with M satellites, best signal X dB-Hz`. Indoors on the
+bench it hears one to four satellites at 11 to 27 dB-Hz. A fix needs several
+at around 30 or better.
+
+### Still open
+
+- The fix itself: outdoors, GPS on, the device awake (on a power bank, "Stay
+  awake when plugged in"). If the signal row stays below about 30 dB-Hz with
+  a clear sky, try again with mobile data off, to see if the modem is
+  interfering, before suspecting the antenna. LilyGo's factory image in the
+  vendor checkout is the hardware's reference.
+- Assistance (AssistNow): Predictive Orbits is free for M10 once a device is
+  registered on Thingstream, Live Orbits is paid. With no account, time and
+  last-position aiding (UBX-MGA-INI) and saving the receiver's database to
+  the card (UBX-MGA-DBD) would help after deep sleep, which loses everything:
+  P02 powers the whole receiver.
