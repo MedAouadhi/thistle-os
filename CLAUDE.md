@@ -560,6 +560,77 @@ ticks a task off, Backspace removes it, and typing goes back to the field.
   run types one short task, and a case that needs a list writes `todo.md`
   first.
 
+### App Store
+
+`apps/appstore/` browses a catalog, installs apps, drivers and window
+managers from it, and updates the firmware; `appstore_client.rs` does the
+network and the files. LVGL window managers only; thistle-tk has its own
+(`tk_appstore.rs`).
+
+- **The catalog is a static JSON file**, by default upstream's
+  `https://wan0net.github.io/thistle-apps/catalog.json`, which
+  `.github/workflows/apps.yml` publishes; a card's `config/appstore.json`,
+  `{"catalog_url": "..."}`, names another. Refresh keeps the server's JSON
+  whole at `/sdcard/appstore/catalog.json`, which the app reads with the
+  kernel's parser when it opens (`appstore_load_catalog_file`). Entries for
+  another chip are left out.
+- **A catalog and its packages can be on the card**: a `file:///sdcard/...`
+  URL is read from it, no network needed (`card_file()`), and nothing off
+  the card. `tools/make_card_appstore.py` builds `standalone_apps/` into such
+  a folder, `card-appstore/` (git-ignored), to copy onto a card's root.
+- **Notes, Weather, WiFi Scanner and Flashlight come from the App Store**,
+  not the firmware: their packages are `standalone_apps/`, their LVGL
+  versions under `apps/` are built nowhere (`THISTLE_STORE_APPS` in
+  `cmake/thistle_apps.cmake`). Tests that need one in front use To-do; the
+  Arabic dictation case installs the packaged Notes on its card.
+- **An app installs only as a signed TAP package** (`docs/app-package-format.md`):
+  its entry needs `package_url`, `package_sig_url`, `package_sha256`,
+  `package_size_bytes` and `release_sequence`. It goes to
+  `/sdcard/apps/<id>/generations/<N>/`, `<id>/active.json` naming the
+  release. The boot scan (`app_elf_paths`) loads that and each plain
+  `/sdcard/apps/*.app.elf`, so an install opens after a restart; the
+  Installed tab lists the same (`installed_apps.rs`).
+- **Signatures are checked against the key in `kernel_boot.rs`**: upstream's
+  production key in a release build, the dev key in a debug one. Apps, and
+  only apps, may also be signed by the build machine's publisher key:
+  `make_card_appstore.py` makes `tools/local_publisher_{private,public}.key`
+  (both git-ignored) on its first run, and a firmware built afterwards
+  trusts its public half (`build_rust.sh` passes it to cargo as
+  `THISTLE_APP_PUBLISHER_KEY`; `signing_verify_app`). The boot log says
+  `Apps signed by this build's publisher key ... are trusted too`.
+- **A packaged app is a shared object** built by `app_sdk/` (`-shared`, entry
+  `thistle_app_main`), as Espressif's loader takes them; the `-r` link it
+  used before put every section at address 0, and the loader could place
+  none. The boot scan loads it into PSRAM, calls `thistle_app_main` for its
+  `thistle_app_t`, and registers its callbacks, which run on the UI task as
+  a built-in app's; the ELF stays loaded. An ELF entered anywhere else is
+  refused (`enters_at_app_main`). It may link the `thistle_*` ABI and the C
+  library functions in `APP_LIBC` (`syscall_table.rs`). The vendored loader
+  (`components/elf_loader/vendor`) is patched to align each data section:
+  it packed them, which left an app's table of callbacks misaligned.
+- **A packaged app's files are `/sdcard/data/apps/<id>/`** on a device, as
+  in the simulator (`APP_STORAGE_BASE`): under `/spiffs` no app could save,
+  as SPIFFS has no folders and 31 bytes of path.
+- **Everything a packaged app hands the kernel must be static or
+  `thistle_malloc`'d**: the kernel refuses pointers into internal RAM, where
+  the UI task's stack is (`syscall_is_ptr_allowed`). Leaving an app destroys
+  it, so its `on_destroy` deletes its widgets; `lvgl_wm_widget_destroy()`
+  forgets the handles of a deleted widget's children.
+- **Refresh and Install run on the App Store's worker** (`appstore_job.c`),
+  one at a time, on a task with a 16 KB internal stack, never on
+  `lvgl_task`: its 8 KB stack once took a refresh's 100 KB of catalog
+  entries, and the board crashed. An install's deepest point is Ed25519
+  verifying the package's ELF, 7 to 8 KB, inside `install_tap_with()`; with
+  a 4 KB copy buffer on the stack too, 12 KB overflowed. The device is held
+  awake meanwhile; a job outlives the app's screens and says how it went in
+  a toast.
+- **Each list is one `lv_table`**: fourteen installed apps, as rows of
+  widgets, ran LVGL's pool dry.
+- The simulator's card is `/tmp/thistle_sdcard` to the kernel
+  (`card_root()`). `simulator/tests/test_appstore.py` runs the app against a
+  local catalog host; the simulator trusts only the production key, so an
+  install there stops at the signature.
+
 ### LVGL's pool is 64 KB
 
 LVGL allocates every object and every local style property from its own
@@ -634,10 +705,12 @@ The kernel is **100% Rust and hardware-independent**. It never calls ESP-IDF har
 - **Kernel (Rust)** (`components/kernel_rs/`): 100% Rust. 57 modules: manifest parser, permissions, IPC, events, app manager, version, crypto, HAL registry, driver manager, WM, app store, wifi/ble/net managers, OTA, and more. 1231 tests.
 - **Display Server** (`components/kernel/src/display_server.c`): Surface management, compositor, WM vtable interface.
 - **UI** (`components/ui/`): thistle-tk WM (default). LVGL-based WM also available. Both loadable as `.wm.elf`.
-- **Apps**: 20 apps, migrating to `.app.elf` on SPIFFS. Five remain in
-  `components/apps_builtin/`; the other fifteen are their own components under
+- **Apps**: 16 built in, and 4 from the App Store (Notes, Weather, WiFi
+  Scanner, Flashlight: `standalone_apps/`). Five remain in
+  `components/apps_builtin/`; the other eleven are their own components under
   `apps/`, listed once in `cmake/thistle_apps.cmake` for the simulators and
-  found by `EXTRA_COMPONENT_DIRS` for the firmware. The app manager has 32
+  found by `EXTRA_COMPONENT_DIRS` for the firmware, which excludes the four
+  store apps' old LVGL versions still there. The app manager has 32
   slots (`APP_SLOTS_MAX`), the built-in apps taking theirs at boot before any
   installed `.app.elf`; an app past the last is refused, which
   `test_app_matrix.py` shows as one that does not launch.
@@ -709,8 +782,8 @@ launching them under thistle-tk segfaults. App Store and Flashlight exist in
 both toolkits under the same IDs, and the app manager keeps the first
 registration of an ID, so each manager registers only its own:
 `lvgl_apps_register_builtin()` under LVGL, `tk_native_apps_register()` under
-thistle-tk. All twenty apps are reachable by default on every S3 board;
-naming `thistle-tk` trades seventeen of them for its refresh behaviour.
+thistle-tk. All sixteen built-in apps are reachable by default on every S3
+board; naming `thistle-tk` trades fourteen of them for its refresh behaviour.
 
 `simulator/tests/test_app_matrix.py` launches every app on every simulated
 device profile, and the simulator's `--wm NAME` overrides `system.json` for a

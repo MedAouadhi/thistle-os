@@ -8,6 +8,9 @@
 
 #include "esp_err.h"
 #include "esp_http_client.h"
+#ifdef ESP_PLATFORM
+#include "esp_crt_bundle.h"
+#endif
 
 typedef struct {
     esp_http_client_handle_t inner;
@@ -33,6 +36,12 @@ static esp_err_t thistle_http_event_handler(esp_http_client_event_t *event)
 {
     thistle_http_client_t *client = event ? event->user_data : NULL;
     if (!client || !client->data_cb || event->event_id != HTTP_EVENT_ON_DATA) {
+        return ESP_OK;
+    }
+    /* perform() follows a redirect itself, but hands on the redirect's own
+     * body first, which is no part of what was asked for. */
+    int status = esp_http_client_get_status_code(event->client);
+    if (status >= 300 && status < 400) {
         return ESP_OK;
     }
     return client->data_cb((const uint8_t *)event->data,
@@ -61,6 +70,9 @@ void *thistle_http_client_init(const char *url,
         .url = url,
 #ifdef ESP_PLATFORM
         .event_handler = thistle_http_event_handler,
+        /* Without a way to check the server, every https:// request failed
+         * in TLS setup ("No server verification option set"). */
+        .crt_bundle_attach = esp_crt_bundle_attach,
 #endif
         .user_data = client,
         .timeout_ms = timeout_ms,

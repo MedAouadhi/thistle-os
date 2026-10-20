@@ -63,7 +63,7 @@
     <div class="page-header">
       <div class="breadcrumb"><a href="index.html">ThistleOS</a> / Building Apps</div>
       <h1>Building Apps</h1>
-      <p class="lead">Apps are position-independent ELF files that live on the SD card. The kernel loads them at runtime, resolves syscall symbols, and runs them in their own FreeRTOS task.</p>
+      <p class="lead">Apps are position-independent ELF files, shared objects that the App Store installs on the SD card. The kernel loads them at boot, resolves syscall symbols and a few C library functions (<code>memcpy</code>, <code>strlen</code>, <code>snprintf</code> and the like), asks each app's entry point for its callbacks, and runs those on the UI task, as it runs a built-in app's. A buffer an app hands the kernel must be its own static or <code>thistle_malloc</code>'d memory, never a local: the kernel refuses pointers into internal RAM, where the UI task's stack is.</p>
       <a href="https://github.com/wan0net/thistle-os/blob/main/docs/app-development.html" class="edit-link">&#9998; Edit on GitHub</a>
     </div>
 
@@ -138,7 +138,11 @@ on_destroy() &#x2500;&#x2500; user closed app; free LVGL objects, free memory</d
 
     <h3>GPS (requires <code>PERM_GPS</code>)</h3>
     <pre><code><span class="tok-keyword">int</span> <span class="tok-fn">thistle_gps_enable</span>(<span class="tok-keyword">void</span>);
-<span class="tok-keyword">int</span> <span class="tok-fn">thistle_gps_get_lat_lon</span>(<span class="tok-keyword">double</span> *lat, <span class="tok-keyword">double</span> *lon);</code></pre>
+<span class="tok-keyword">int</span> <span class="tok-fn">thistle_gps_get_position</span>(<span class="tok-type">thistle_gps_position_t</span> *pos);</code></pre>
+
+    <h3>WiFi (requires <code>PERM_NETWORK</code>)</h3>
+    <pre><code><span class="tok-keyword">int</span> <span class="tok-fn">thistle_wifi_scan</span>(<span class="tok-type">thistle_wifi_ap_t</span> *out, <span class="tok-keyword">int</span> max);
+<span class="tok-keyword">int</span> <span class="tok-fn">thistle_wifi_connect</span>(<span class="tok-keyword">const char</span> *ssid, <span class="tok-keyword">const char</span> *password);</code></pre>
 
     <h3>Audio (requires <code>PERM_AUDIO</code>)</h3>
     <p>The speaker and the microphone share one format, since the codec runs both from one word clock: signed little-endian PCM, channels interleaved, 44100&nbsp;Hz 16-bit stereo until an app configures another. Buffers must come from <code>thistle_malloc</code>. Each call returns an <code>esp_err_t</code>: <code>ESP_ERR_NOT_SUPPORTED</code> on a device with no speaker or no microphone, <code>ESP_ERR_INVALID_ARG</code> for a buffer outside app memory. <code>play</code> and <code>record</code> block until the audio has gone out or come in. A task that plays and another that records run side by side; two players, or two recorders, take turns. The first <code>record</code> after the codec has been idle waits about 400&nbsp;ms for the microphone to settle, and that audio is dropped rather than returned. The microphone is mono, and in stereo it is in both channels. The amplifier is on only while sound plays, and the codec powers down half a second after the last call.</p>
@@ -150,7 +154,7 @@ on_destroy() &#x2500;&#x2500; user closed app; free LVGL objects, free memory</d
 <span class="tok-keyword">int</span> <span class="tok-fn">thistle_audio_set_mic_gain</span>(<span class="tok-type">uint8_t</span> db);      <span class="tok-comment">// 0-42, 6 dB steps</span></code></pre>
 
     <h3>Storage (requires <code>PERM_STORAGE</code>)</h3>
-    <p>App paths are relative to <code>/spiffs/data/apps/&lt;manifest-id&gt;/</code>. Absolute paths and paths containing <code>.</code> or <code>..</code> are rejected. File handles are private to the app that opened them; shared storage requires a future explicit broker API.</p>
+    <p>App paths are relative to <code>/sdcard/data/apps/&lt;manifest-id&gt;/</code>, on the SD card beside the installed app. Absolute paths and paths containing <code>.</code> or <code>..</code> are rejected. File handles are private to the app that opened them; shared storage requires a future explicit broker API.</p>
     <pre><code><span class="tok-keyword">void</span> *<span class="tok-fn">thistle_fs_open</span> (<span class="tok-keyword">const</span> <span class="tok-keyword">char</span> *relative_path, <span class="tok-keyword">const</span> <span class="tok-keyword">char</span> *mode);
 <span class="tok-keyword">int</span>   <span class="tok-fn">thistle_fs_read</span> (<span class="tok-keyword">void</span> *buf, <span class="tok-type">size_t</span> size, <span class="tok-type">size_t</span> count, <span class="tok-keyword">void</span> *stream);
 <span class="tok-keyword">int</span>   <span class="tok-fn">thistle_fs_write</span>(<span class="tok-keyword">const</span> <span class="tok-keyword">void</span> *buf, <span class="tok-type">size_t</span> size, <span class="tok-type">size_t</span> count, <span class="tok-keyword">void</span> *stream);

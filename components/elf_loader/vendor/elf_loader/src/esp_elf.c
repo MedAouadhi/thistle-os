@@ -163,6 +163,10 @@ uintptr_t elf_find_sym(const char *sym_name)
 
 #if CONFIG_ELF_LOADER_BUS_ADDRESS_MIRROR
 
+/* The room a data section takes in the data block, so the next starts
+ * 8-byte aligned (ThistleOS). */
+#define ELF_DATA_SLOT(_size) ELF_ALIGN((_size), 8)
+
 /**
  * @brief Load ELF section.
  *
@@ -260,10 +264,14 @@ static int esp_elf_load_section(esp_elf_t *elf, const uint8_t *pbuf)
         return -ENOMEM;
     }
 
-    size = elf->sec[ELF_SEC_DATA].size +
-           elf->sec[ELF_SEC_RODATA].size +
-           elf->sec[ELF_SEC_BSS].size +
-           elf->sec[ELF_SEC_DRLRO].size;
+    /* ThistleOS: each section starts 8-byte aligned. Upstream packs them
+     * back to back, so a .rodata of 0x122 bytes left .data.rel.ro, where an
+     * app's table of function pointers is, misaligned, and Xtensa faults on
+     * a misaligned 32-bit load. */
+    size = ELF_DATA_SLOT(elf->sec[ELF_SEC_DATA].size) +
+           ELF_DATA_SLOT(elf->sec[ELF_SEC_RODATA].size) +
+           ELF_DATA_SLOT(elf->sec[ELF_SEC_DRLRO].size) +
+           elf->sec[ELF_SEC_BSS].size;
     if (size) {
         elf->pdata = esp_elf_malloc(size, false);
         if (!elf->pdata) {
@@ -302,7 +310,7 @@ static int esp_elf_load_section(esp_elf_t *elf, const uint8_t *pbuf)
             memcpy(pdata, pbuf + elf->sec[ELF_SEC_DATA].offset,
                    elf->sec[ELF_SEC_DATA].size);
 
-            pdata += elf->sec[ELF_SEC_DATA].size;
+            pdata += ELF_DATA_SLOT(elf->sec[ELF_SEC_DATA].size);
         }
 
         if (elf->sec[ELF_SEC_RODATA].size) {
@@ -311,7 +319,7 @@ static int esp_elf_load_section(esp_elf_t *elf, const uint8_t *pbuf)
             memcpy(pdata, pbuf + elf->sec[ELF_SEC_RODATA].offset,
                    elf->sec[ELF_SEC_RODATA].size);
 
-            pdata += elf->sec[ELF_SEC_RODATA].size;
+            pdata += ELF_DATA_SLOT(elf->sec[ELF_SEC_RODATA].size);
         }
 
         if (elf->sec[ELF_SEC_DRLRO].size) {
@@ -320,7 +328,7 @@ static int esp_elf_load_section(esp_elf_t *elf, const uint8_t *pbuf)
             memcpy(pdata, pbuf + elf->sec[ELF_SEC_DRLRO].offset,
                    elf->sec[ELF_SEC_DRLRO].size);
 
-            pdata += elf->sec[ELF_SEC_DRLRO].size;
+            pdata += ELF_DATA_SLOT(elf->sec[ELF_SEC_DRLRO].size);
         }
 
         if (elf->sec[ELF_SEC_BSS].size) {

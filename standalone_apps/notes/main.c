@@ -66,14 +66,18 @@ static int save_current_note(void)
     const char *text = thistle_ui_get_text(s_editor);
     if (!text || s_current_path[0] == '\0') return -1;
 
-    char temp_path[sizeof(s_current_path) + 8];
+    /* Static, as everything handed to the kernel must be: on a device it
+     * refuses a pointer into internal RAM, where this task's stack is. */
+    static char temp_path[sizeof(s_current_path) + 8];
     snprintf(temp_path, sizeof(temp_path), "%s.tmp", s_current_path);
     void *file = thistle_fs_open(temp_path, "wb");
     if (!file) return -1;
 
     size_t length = strlen(text);
     if (length >= MAX_NOTE_BYTES) length = MAX_NOTE_BYTES - 1;
-    int written = thistle_fs_write(text, 1, length, file);
+    memcpy(s_text, text, length);
+    s_text[length] = '\0';
+    int written = thistle_fs_write(s_text, 1, length, file);
     int close_result = thistle_fs_close(file);
     if (written != (int)length || close_result != 0) {
         thistle_fs_remove(temp_path);
@@ -254,7 +258,18 @@ static int notes_on_create(void)
 static void notes_on_start(void) { thistle_log(TAG, "on_start"); }
 static void notes_on_pause(void) { thistle_log(TAG, "on_pause"); }
 static void notes_on_resume(void) { thistle_log(TAG, "on_resume"); }
-static void notes_on_destroy(void) { thistle_log(TAG, "on_destroy"); }
+
+/* Leaving an app destroys it: its widgets go, and the next open builds them
+ * again. */
+static void notes_on_destroy(void)
+{
+    thistle_log(TAG, "on_destroy");
+    thistle_ui_destroy(s_list_screen);
+    thistle_ui_destroy(s_editor_screen);
+    s_list_screen = s_editor_screen = THISTLE_WIDGET_NONE;
+    for (int i = 0; i < MAX_NOTES; i++) s_note_buttons[i] = THISTLE_WIDGET_NONE;
+    s_note_count = 0;
+}
 
 static const thistle_app_t notes_app = {
     .id = "com.thistle.notes",

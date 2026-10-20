@@ -49,12 +49,12 @@ DEVICES = (
 )
 
 UNGATED_APPS = (
-    "launcher", "settings", "filemgr", "reader", "podcasts", "notes",
-    "appstore", "assistant", "flashlight", "weather", "terminal", "vault",
+    "launcher", "settings", "filemgr", "reader", "podcasts",
+    "appstore", "assistant", "terminal", "vault",
     "phone", "filexfer", "tailscale", "hermes", "todo",
 )
 # lvgl_apps_register_builtin() registers these only on a capable board.
-RADIO_APPS = ("messenger", "wifiscanner")
+RADIO_APPS = ("messenger",)
 GPS_APPS = ("navigator",)
 # All thistle-tk hosts. Its App Store and Flashlight register only under it,
 # so these also catch that registration going missing.

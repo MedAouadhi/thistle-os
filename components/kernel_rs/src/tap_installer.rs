@@ -207,7 +207,10 @@ fn extract_entry(file: &mut File, entry: &ZipEntry, target: &Path, expected_hash
     if let Some(parent) = target.parent() { std::fs::create_dir_all(parent)?; }
     let mut output = OpenOptions::new().write(true).create_new(true).open(target)?;
     let mut remaining = entry.size;
-    let mut buffer = [0u8; 4096];
+    // On the heap: this is inlined into install_tap_with(), which verifies
+    // the ELF's signature from inside its frame, and the 4 KB on the stack
+    // with Ed25519's 7 KB beneath overflowed the App Store's worker.
+    let mut buffer = vec![0u8; 4096];
     let mut crc = Crc32::new();
     let mut hash = Sha256::new();
     while remaining > 0 {
@@ -234,6 +237,22 @@ fn active_sequence(path: &Path) -> Result<Option<u64>, TapError> {
     value.get("release_sequence").and_then(Value::as_u64).map(Some).ok_or(TapError::InvalidManifest)
 }
 
+/// The stages installs that never finished left in `generations`, `.N.stage-M`:
+/// a crash or a power cut part way leaves one, and the stage counter starts
+/// at 0 again with each boot, so the next install of that release tried to
+/// make the same folder and failed. Installs run one at a time, so none of
+/// these is in use.
+fn remove_unfinished_stages(generations: &Path) {
+    let Ok(entries) = std::fs::read_dir(generations) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.') && name.contains(".stage-") {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
 /// Install an already package-signature-verified TAP and atomically activate it.
 pub fn install_tap_with<F>(
     tap_path: &Path, apps_root: &Path, expected_id: &str,
@@ -258,6 +277,7 @@ where F: FnOnce(&Path) -> bool {
         return Err(TapError::Downgrade);
     }
     std::fs::create_dir_all(&generations)?;
+    remove_unfinished_stages(&generations);
     let stage = generations.join(format!(".{expected_sequence}.stage-{}", STAGE_SEQUENCE.fetch_add(1, Ordering::Relaxed)));
     std::fs::create_dir(&stage)?;
     let result = (|| {
@@ -283,6 +303,14 @@ where F: FnOnce(&Path) -> bool {
     })();
     if result.is_err() { let _ = std::fs::remove_dir_all(&stage); }
     result
+}
+
+/// The folder of the release an installed app's `active.json` names, if it
+/// holds the app's ELF: `app_dir/generations/<release_sequence>`.
+pub fn active_generation(app_dir: &Path) -> Option<PathBuf> {
+    let sequence = active_sequence(&app_dir.join("active.json")).ok()??;
+    let generation = app_dir.join("generations").join(sequence.to_string());
+    generation.join("app.app.elf").is_file().then_some(generation)
 }
 
 #[cfg(test)]
@@ -378,6 +406,50 @@ mod tests {
         assert_eq!(std::fs::read(destination.join("app.app.elf")).unwrap(), b"host-elf");
         let active = std::fs::read_to_string(apps.join("com.thistle.notes/active.json")).unwrap();
         assert!(active.contains("\"release_sequence\": 1"));
+        assert_eq!(active_generation(&apps.join("com.thistle.notes")), Some(destination));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn no_active_generation_without_its_elf_or_active_json() {
+        let root = std::env::temp_dir().join(format!("thistle-tap-active-{}", STAGE_SEQUENCE.fetch_add(1, Ordering::Relaxed)));
+        let app = root.join("com.thistle.notes");
+        std::fs::create_dir_all(app.join("generations/1")).unwrap();
+        // A generation unpacked but never activated.
+        assert_eq!(active_generation(&app), None);
+        // Activated, but naming a release that is not there.
+        std::fs::write(app.join("active.json"), "{\"release_sequence\": 2, \"version\": \"1.1.0\"}").unwrap();
+        assert_eq!(active_generation(&app), None);
+        std::fs::write(app.join("generations/2.app.elf"), b"").unwrap();
+        assert_eq!(active_generation(&app), None);
+        std::fs::create_dir_all(app.join("generations/2")).unwrap();
+        std::fs::write(app.join("generations/2/app.app.elf"), b"elf").unwrap();
+        assert_eq!(active_generation(&app), Some(app.join("generations/2")));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_install_cut_short_does_not_stop_the_next() {
+        let root = std::env::temp_dir().join(format!("thistle-tap-cut-{}", STAGE_SEQUENCE.fetch_add(1, Ordering::Relaxed)));
+        std::fs::create_dir(&root).unwrap();
+        let tap = fixture(&root);
+        let apps = root.join("apps");
+        let generations = apps.join("com.thistle.notes/generations");
+        // Stages under every name the next install could pick, as a crash
+        // part way through leaves one, and an unrelated file.
+        let next = STAGE_SEQUENCE.load(Ordering::Relaxed);
+        for n in next..next + 4 {
+            std::fs::create_dir_all(generations.join(format!(".1.stage-{n}"))).unwrap();
+            std::fs::write(generations.join(format!(".1.stage-{n}/app.app.elf")), b"half").unwrap();
+        }
+        std::fs::write(generations.join("notes.txt"), b"keep").unwrap();
+
+        let destination = install_tap_with(&tap, &apps, "com.thistle.notes", "1.0.0", 1, |_| true, |_| true).unwrap();
+        assert_eq!(destination, generations.join("1"));
+        let mut left: Vec<String> = std::fs::read_dir(&generations).unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        left.sort();
+        assert_eq!(left, ["1", "notes.txt"]);
         std::fs::remove_dir_all(root).unwrap();
     }
 

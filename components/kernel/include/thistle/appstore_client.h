@@ -63,6 +63,20 @@ esp_err_t appstore_fetch_catalog(const char *catalog_url,
                                   catalog_entry_t *entries, int max_entries,
                                   int *out_count);
 
+/* Fetch the catalog as appstore_fetch_catalog() does (catalog_url NULL for
+ * the configured one), and keep the server's JSON whole at cache_path, unless
+ * it lists nothing for this chip. Blocks for the whole download: never call
+ * it from lvgl_task. */
+esp_err_t appstore_refresh_catalog(const char *catalog_url, const char *cache_path,
+                                    catalog_entry_t *entries, int max_entries,
+                                    int *out_count);
+
+/* Parse the catalog appstore_refresh_catalog() kept at path into entries[],
+ * as a fetched one is parsed. ESP_ERR_NOT_FOUND when there is none. */
+esp_err_t appstore_load_catalog_file(const char *path,
+                                      catalog_entry_t *entries, int max_entries,
+                                      int *out_count);
+
 /* Download a file from URL to a local path on SD card.
  * Optionally verifies SHA-256 hash if expected_sha256_hex is non-NULL.
  * Shows progress via callback (may be NULL). */
@@ -85,3 +99,22 @@ esp_err_t appstore_install_entry(const catalog_entry_t *entry,
 
 /* Get the configured catalog URL (from /sdcard/config/appstore.json or default) */
 const char *appstore_get_catalog_url(void);
+
+/* An app on the SD card, as the boot scan loads them: a NAME.app.elf in
+ * /sdcard/apps, or a package the App Store installed, /sdcard/apps/<id>/
+ * (installed_apps.rs). */
+typedef struct {
+    char key[64];         /* what appstore_remove_installed() takes */
+    char id[64];
+    char name[64];
+    char version[16];     /* "" when an ELF has no manifest */
+    uint32_t size_bytes;  /* the ELF's */
+    bool is_package;      /* installed by the App Store */
+} installed_app_t;
+
+/* The SD card's apps, by name, at most max_apps of them. */
+esp_err_t appstore_list_installed(installed_app_t *apps, int max_apps, int *out_count);
+
+/* Remove an installed app: a package's folder, or an ELF with its signature
+ * and manifest. It stays in the launcher until the next restart. */
+esp_err_t appstore_remove_installed(const char *key);

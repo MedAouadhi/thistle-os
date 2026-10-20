@@ -9,17 +9,19 @@ Each app is an independent ESP-IDF component today, on a path to becoming a sign
 
 | Directory      | App ID                     | Description                        |
 |----------------|----------------------------|------------------------------------|
-| `notes/`       | com.thistle.notes          | Text note editor with SD persistence |
 | `todo/`        | com.thistle.todo           | Checklist, kept as Markdown on the SD card |
 | `reader/`      | com.thistle.reader         | Document/ebook reader               |
 | `podcasts/`    | com.thistle.podcasts       | PodcastIndex podcast player         |
 | `vault/`       | com.thistle.vault          | Encrypted file vault                |
 | `file_manager/`| com.thistle.filemgr        | SD card file browser                |
-| `wifiscanner/` | com.thistle.wifiscanner    | WiFi network scanner                |
 | `navigator/`   | com.thistle.navigator      | GPS map navigator                   |
-| `flashlight/`  | com.thistle.flashlight     | LED flashlight                      |
-| `weather/`     | com.thistle.weather        | Weather with GPS/IMU integration    |
 | `appstore/`    | com.thistle.appstore       | App Store browser and installer     |
+
+`notes/`, `wifiscanner/`, `flashlight/` and `weather/` are here but built
+nowhere: those apps install from the App Store, as the packages in
+`standalone_apps/` (`THISTLE_STORE_APPS` in `cmake/thistle_apps.cmake`).
+`tools/make_card_appstore.py` builds them into a folder to copy onto an SD
+card.
 
 ## Structure
 

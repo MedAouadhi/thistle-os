@@ -30,7 +30,8 @@ const ESP_ERR_INVALID_CRC: i32 = 0x109;
 const ESP_FAIL: i32 = -1;
 
 const DEFAULT_CATALOG_URL: &str = "https://wan0net.github.io/thistle-apps/catalog.json\0";
-const MAX_CATALOG_JSON: usize = 32 * 1024; // 32 KB
+// A catalog lists every chip's builds: 24 entries came to 19 KB.
+const MAX_CATALOG_JSON: usize = 64 * 1024;
 const DOWNLOAD_BUF_SIZE: usize = 4096;
 const APPSTORE_URL_MAX: usize = 256;
 const MAX_APP_DOWNLOAD: u64 = 8 * 1024 * 1024;
@@ -93,6 +94,7 @@ extern "C" {
 
 extern "C" {
     fn signing_verify_file(path: *const c_char) -> i32;
+    fn signing_verify_app_file(path: *const c_char) -> i32;
 }
 
 // ---------------------------------------------------------------------------
@@ -223,16 +225,110 @@ fn validated_catalog_id(id: &[u8; 64]) -> Result<&str, i32> {
     Ok(value)
 }
 
+/// The SD card's root: the simulator's card is linked at /tmp/thistle_sdcard
+/// (sim_vfs.c). Tests keep the device's paths.
+pub(crate) fn card_root() -> &'static Path {
+    if cfg!(any(target_os = "espidf", test)) {
+        Path::new("/sdcard")
+    } else {
+        Path::new("/tmp/thistle_sdcard")
+    }
+}
+
+/// The file on the card a `file:///sdcard/...` URL names: a catalog, or a
+/// package it lists, copied onto the card (tools/make_card_appstore.py), which
+/// needs no network. Nothing off the card, and no `..`.
+pub(crate) fn card_file(url: &str) -> Option<PathBuf> {
+    let rest = url.strip_prefix("file:///sdcard/")?;
+    let path = Path::new(rest);
+    let plain = path
+        .components()
+        .all(|part| matches!(part, std::path::Component::Normal(_)));
+    (!rest.is_empty() && plain).then(|| card_root().join(path))
+}
+
+/// Read a catalog kept on the card, as a fetch would give it.
+fn read_card_catalog(path: &Path) -> Result<String, i32> {
+    let length = std::fs::metadata(path).map_err(|_| ESP_ERR_NOT_FOUND)?.len();
+    if length > MAX_CATALOG_JSON as u64 {
+        return Err(ESP_ERR_INVALID_SIZE);
+    }
+    let bytes = std::fs::read(path).map_err(|_| ESP_ERR_NOT_FOUND)?;
+    String::from_utf8(bytes).map_err(|_| ESP_FAIL)
+}
+
+/// download_into_staged() for a file on the card: the same limits, the same
+/// hash check, the same progress calls.
+fn copy_into_staged(
+    path: &Path,
+    expected_sha256_hex: Option<&str>,
+    expected_size: Option<u64>,
+    max_size: u64,
+    progress_cb: Option<DownloadProgressCb>,
+    user_data: *mut c_void,
+    staged: &mut StagedFile,
+) -> i32 {
+    use std::io::Read;
+
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(_) => return ESP_ERR_NOT_FOUND,
+    };
+    let length = match file.metadata() {
+        Ok(metadata) => metadata.len(),
+        Err(_) => return ESP_FAIL,
+    };
+    if length == 0 || length > max_size || expected_size.is_some_and(|size| size != length) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    let total = length.min(u32::MAX as u64) as u32;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; DOWNLOAD_BUF_SIZE];
+    let mut copied = 0u64;
+    loop {
+        let count = match file.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => count,
+            Err(_) => return ESP_FAIL,
+        };
+        copied += count as u64;
+        if copied > length {
+            return ESP_ERR_INVALID_SIZE;
+        }
+        hasher.update(&buffer[..count]);
+        if staged.writer().write_all(&buffer[..count]).is_err() {
+            return ESP_FAIL;
+        }
+        if let Some(callback) = progress_cb {
+            unsafe { callback(copied as u32, total, user_data) };
+        }
+    }
+    if copied != length {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    if let Some(expected) = expected_sha256_hex {
+        let computed: String = hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect();
+        if !computed.eq_ignore_ascii_case(expected) {
+            return ESP_ERR_INVALID_CRC;
+        }
+    }
+    if staged.sync_and_close().is_err() {
+        return ESP_FAIL;
+    }
+    ESP_OK
+}
+
 fn install_destination(entry_type: u32, id: &str) -> Result<std::path::PathBuf, i32> {
-    let (root, file_name) = match entry_type {
-        CATALOG_TYPE_FIRMWARE => ("/sdcard/update", "thistle_os.bin".to_string()),
-        CATALOG_TYPE_DRIVER => ("/sdcard/drivers", format!("{id}.drv.elf")),
-        CATALOG_TYPE_WM => ("/sdcard/wm", format!("{id}.wm.elf")),
+    let (folder, file_name) = match entry_type {
+        CATALOG_TYPE_FIRMWARE => ("update", "thistle_os.bin".to_string()),
+        CATALOG_TYPE_DRIVER => ("drivers", format!("{id}.drv.elf")),
+        CATALOG_TYPE_WM => ("wm", format!("{id}.wm.elf")),
         CATALOG_TYPE_APP => return Err(ESP_ERR_NOT_SUPPORTED),
         _ => return Err(ESP_ERR_INVALID_ARG),
     };
 
-    let root = std::path::Path::new(root);
+    let root = card_root().join(folder);
+    let root = root.as_path();
     let destination = root.join(file_name);
     if destination.parent() != Some(root) || !destination.starts_with(root) {
         return Err(ESP_ERR_INVALID_ARG);
@@ -257,7 +353,7 @@ fn load_catalog_url() {
         return;
     }
 
-    let config_path = "/sdcard/config/appstore.json";
+    let config_path = card_root().join("config/appstore.json");
     if let Ok(content) = std::fs::read_to_string(config_path) {
         if let Some(url) = json_str_extract(&content, "catalog_url") {
             if let Ok(mut buf) = CATALOG_URL.lock() {
@@ -586,6 +682,102 @@ unsafe extern "C" fn http_buf_data_handler(
 // Catalog fetch
 // ---------------------------------------------------------------------------
 
+/// Fetch the catalog's JSON from `catalog_url`, or from the configured URL
+/// (appstore_get_catalog_url) when it is NULL or empty. A catalog longer than
+/// MAX_CATALOG_JSON is refused rather than read cut short.
+#[cfg(not(test))]
+unsafe fn fetch_catalog_json(catalog_url: *const c_char) -> Result<String, i32> {
+    let url_ptr = if catalog_url.is_null() || *catalog_url == 0 {
+        appstore_get_catalog_url()
+    } else {
+        catalog_url
+    };
+
+    let url_str = match CStr::from_ptr(url_ptr).to_str() {
+        Ok(s) => s,
+        Err(_) => return Err(ESP_ERR_INVALID_ARG),
+    };
+
+    if url_str.starts_with("file://") {
+        let json = card_file(url_str)
+            .ok_or(ESP_ERR_INVALID_ARG)
+            .and_then(|path| read_card_catalog(&path));
+        match &json {
+            Ok(json) => esp_log_write(
+                ESP_LOG_INFO,
+                TAG.as_ptr(),
+                b"Catalog read from the card: %d bytes, %s\0".as_ptr(),
+                json.len() as c_int,
+                url_ptr,
+            ),
+            Err(error) => esp_log_write(
+                ESP_LOG_ERROR,
+                TAG.as_ptr(),
+                b"Catalog read failed: 0x%x, %s\0".as_ptr(),
+                *error,
+                url_ptr,
+            ),
+        }
+        return json;
+    }
+
+    esp_log_write(
+        ESP_LOG_INFO,
+        TAG.as_ptr(),
+        b"Fetching catalog: %s\0".as_ptr(),
+        url_ptr,
+    );
+
+    let mut resp_buf = Box::new(HttpBuf::new(MAX_CATALOG_JSON + 1));
+
+    let url_cstr = std::ffi::CString::new(url_str).unwrap_or_default();
+    let client = http_client_init(
+        url_cstr.as_ptr(),
+        15000,
+        Some(http_buf_data_handler),
+        &mut *resp_buf as *mut HttpBuf as *mut c_void,
+    );
+    if client.is_null() {
+        return Err(ESP_FAIL);
+    }
+
+    let err = esp_http_client_perform(client);
+    let status = esp_http_client_get_status_code(client);
+    esp_http_client_cleanup(client);
+
+    if err != ESP_OK || status != 200 {
+        esp_log_write(
+            ESP_LOG_ERROR,
+            TAG.as_ptr(),
+            b"Catalog fetch failed: HTTP %d\0".as_ptr(),
+            status,
+        );
+        return Err(ESP_FAIL);
+    }
+    if resp_buf.overflow || resp_buf.data.len() > MAX_CATALOG_JSON {
+        esp_log_write(
+            ESP_LOG_ERROR,
+            TAG.as_ptr(),
+            b"Catalog is over %d bytes\0".as_ptr(),
+            MAX_CATALOG_JSON as c_int,
+        );
+        return Err(ESP_ERR_INVALID_SIZE);
+    }
+
+    let json = match String::from_utf8(std::mem::take(&mut resp_buf.data)) {
+        Ok(s) => s,
+        Err(_) => return Err(ESP_FAIL),
+    };
+
+    esp_log_write(
+        ESP_LOG_INFO,
+        TAG.as_ptr(),
+        b"Catalog fetched: %d bytes\0".as_ptr(),
+        json.len() as i32,
+    );
+    Ok(json)
+}
+
 /// Fetch the app catalog JSON and parse entries into `entries`.
 ///
 /// # Safety
@@ -609,218 +801,12 @@ pub unsafe extern "C" fn appstore_fetch_catalog(
     }
     *out_count = 0;
 
-    let url_ptr = if catalog_url.is_null() || *catalog_url == 0 {
-        appstore_get_catalog_url()
-    } else {
-        catalog_url
+    let json = match fetch_catalog_json(catalog_url) {
+        Ok(json) => json,
+        Err(error) => return error,
     };
-
-    let url_str = match CStr::from_ptr(url_ptr).to_str() {
-        Ok(s) => s,
-        Err(_) => return ESP_ERR_INVALID_ARG,
-    };
-
-    esp_log_write(
-        ESP_LOG_INFO,
-        TAG.as_ptr(),
-        b"Fetching catalog: %s\0".as_ptr(),
-        url_ptr,
-    );
-
-    let mut resp_buf = Box::new(HttpBuf::new(MAX_CATALOG_JSON + 1));
-
-    let url_cstr = std::ffi::CString::new(url_str).unwrap_or_default();
-    let client = http_client_init(
-        url_cstr.as_ptr(),
-        15000,
-        Some(http_buf_data_handler),
-        &mut *resp_buf as *mut HttpBuf as *mut c_void,
-    );
-    if client.is_null() {
-        return ESP_FAIL;
-    }
-
-    let err = esp_http_client_perform(client);
-    let status = esp_http_client_get_status_code(client);
-    esp_http_client_cleanup(client);
-
-    if err != ESP_OK || status != 200 {
-        esp_log_write(
-            ESP_LOG_ERROR,
-            TAG.as_ptr(),
-            b"Catalog fetch failed: HTTP %d\0".as_ptr(),
-            status,
-        );
-        return ESP_FAIL;
-    }
-
-    let json = match std::str::from_utf8(&resp_buf.data) {
-        Ok(s) => s.to_string(),
-        Err(_) => return ESP_FAIL,
-    };
-
-    esp_log_write(
-        ESP_LOG_INFO,
-        TAG.as_ptr(),
-        b"Catalog fetched: %d bytes\0".as_ptr(),
-        json.len() as i32,
-    );
-
-    // Parse individual { ... } objects from the JSON array
-    let mut count = 0i32;
-    let mut cursor = catalog_entries_json(json.as_str());
-
-    while count < max_entries {
-        let obj_start = match cursor.find('{') {
-            Some(i) => i,
-            None => break,
-        };
-        cursor = &cursor[obj_start..];
-
-        let obj_end = match cursor.find('}') {
-            Some(i) => i + 1,
-            None => break,
-        };
-
-        let obj = &cursor[..obj_end];
-
-        if !catalog_object_matches_current_arch(obj) {
-            cursor = &cursor[obj_end..];
-            continue;
-        }
-
-        let entry = &mut *entries.add(count as usize);
-        *entry = CatalogEntry::default();
-
-        if let Some(v) = json_str_extract(obj, "id") {
-            copy_str_to_buf(&v, &mut entry.id);
-        }
-        if let Some(v) = json_str_extract(obj, "name") {
-            copy_str_to_buf(&v, &mut entry.name);
-        }
-        if let Some(v) = json_str_extract(obj, "version") {
-            copy_str_to_buf(&v, &mut entry.version);
-        }
-        if let Some(v) = json_str_extract(obj, "author") {
-            copy_str_to_buf(&v, &mut entry.author);
-        }
-        if let Some(v) = json_str_extract(obj, "description") {
-            copy_str_to_buf(&v, &mut entry.description);
-        }
-        if let Some(v) = json_str_extract(obj, "url") {
-            copy_str_to_buf(&v, &mut entry.url);
-        }
-        if let Some(v) = json_str_extract(obj, "sig_url") {
-            copy_str_to_buf(&v, &mut entry.sig_url);
-        }
-        if let Some(v) = json_str_extract(obj, "sha256") {
-            copy_str_to_buf(&v, &mut entry.sha256_hex);
-        }
-        if let Some(v) = json_str_extract(obj, "permissions") {
-            copy_str_to_buf(&v, &mut entry.permissions);
-        }
-        if let Some(v) = json_str_extract(obj, "min_os_version") {
-            copy_str_to_buf(&v, &mut entry.min_os_version);
-        }
-        if let Some(v) = json_str_extract(obj, "package_url") {
-            copy_str_to_buf(&v, &mut entry.package_url);
-        }
-        if let Some(v) = json_str_extract(obj, "package_sig_url") {
-            copy_str_to_buf(&v, &mut entry.package_sig_url);
-        }
-        if let Some(v) = json_str_extract(obj, "package_sha256") {
-            copy_str_to_buf(&v, &mut entry.package_sha256_hex);
-        }
-        if let Some(v) = json_str_extract(obj, "publisher_key_id") {
-            copy_str_to_buf(&v, &mut entry.publisher_key_id);
-        }
-
-        if let Some(sz) = json_int_extract(obj, "size_bytes") {
-            if sz > 0 && sz <= u32::MAX as i64 {
-                entry.size_bytes = sz as u32;
-            }
-        }
-        if let Some(sz) = json_int_extract(obj, "package_size_bytes") {
-            if sz > 0 && sz <= u32::MAX as i64 { entry.package_size_bytes = sz as u32; }
-        }
-        if let Some(sequence) = json_int_extract(obj, "release_sequence") {
-            if sequence > 0 && sequence <= u32::MAX as i64 { entry.release_sequence = sequence as u32; }
-        }
-
-        if let Some(t) = json_str_extract(obj, "type") {
-            entry.entry_type = match t.as_str() {
-                "firmware" => CATALOG_TYPE_FIRMWARE,
-                "driver" => CATALOG_TYPE_DRIVER,
-                "wm" => CATALOG_TYPE_WM,
-                _ => CATALOG_TYPE_APP,
-            };
-        }
-
-        // Parse compatible_boards JSON array into comma-separated bytes
-        if let Some(boards) = json_array_extract(obj, "compatible_boards") {
-            copy_str_to_buf(&boards, &mut entry.compatible_boards);
-        }
-
-        // Parse detection object: {"bus":"i2c","address":"0x34",...}
-        if let Some(det_bus) = extract_detection_field(obj, "bus") {
-            copy_str_to_buf(&det_bus, &mut entry.detection_bus);
-            entry.detection_address = extract_detection_u16(obj, "address");
-            entry.detection_chip_id_reg = extract_detection_u16(obj, "chip_id_reg");
-            entry.detection_chip_id_value = extract_detection_u16(obj, "chip_id_value");
-        }
-
-        // Rich metadata fields
-        if let Some(v) = json_str_extract(obj, "category") {
-            copy_str_to_buf(&v, &mut entry.category);
-        }
-        if let Some(v) = json_str_extract(obj, "icon_url") {
-            copy_str_to_buf(&v, &mut entry.icon_url);
-        }
-        if let Some(v) = json_str_extract(obj, "changelog") {
-            copy_str_to_buf(&v, &mut entry.changelog);
-        }
-        if let Some(v) = json_str_extract(obj, "updated") {
-            copy_str_to_buf(&v, &mut entry.updated_date);
-        }
-
-        if let Some(f) = json_float_extract(obj, "rating") {
-            // Store as rating × 100, rounded
-            entry.rating_stars = (f * 100.0 + 0.5) as u16;
-        }
-        if let Some(n) = json_int_extract(obj, "rating_count") {
-            if n > 0 {
-                entry.rating_count = n as u32;
-            }
-        }
-        if let Some(n) = json_int_extract(obj, "downloads") {
-            if n > 0 {
-                entry.download_count = n as u32;
-            }
-        }
-
-        // Screenshots array
-        if let Some(screenshots_raw) = json_array_extract(obj, "screenshots") {
-            let mut sc_count = 0u8;
-            for (i, url) in screenshots_raw.split(',').enumerate() {
-                if i >= 3 {
-                    break;
-                }
-                copy_str_to_buf(url.trim(), &mut entry.screenshots[i]);
-                sc_count += 1;
-            }
-            entry.screenshot_count = sc_count;
-        }
-
-        entry.is_signed = entry.sig_url[0] != 0 || entry.package_sig_url[0] != 0;
-
-        // Only count entries that have at minimum an id
-        if entry.id[0] != 0 {
-            count += 1;
-        }
-
-        cursor = &cursor[obj_end..];
-    }
-
+    let entries = std::slice::from_raw_parts_mut(entries, max_entries as usize);
+    let count = parse_catalog_into(&json, entries) as c_int;
     *out_count = count;
 
     esp_log_write(
@@ -831,6 +817,103 @@ pub unsafe extern "C" fn appstore_fetch_catalog(
     );
 
     ESP_OK
+}
+
+/// Fetch the catalog as appstore_fetch_catalog() does, and keep the server's
+/// JSON at `cache_path`, whole, for appstore_load_catalog_file(). A catalog
+/// with nothing for this chip leaves the one kept there as it was.
+///
+/// # Safety
+/// `cache_path` must be a NUL-terminated path; `entries` must point to an
+/// array of at least `max_entries` CatalogEntry; `out_count` must be valid.
+#[no_mangle]
+#[cfg(not(test))]
+pub unsafe extern "C" fn appstore_refresh_catalog(
+    catalog_url: *const c_char,
+    cache_path: *const c_char,
+    entries: *mut CatalogEntry,
+    max_entries: c_int,
+    out_count: *mut c_int,
+) -> i32 {
+    if cache_path.is_null() || entries.is_null() || out_count.is_null() || max_entries <= 0 {
+        return ESP_ERR_INVALID_ARG;
+    }
+    *out_count = 0;
+    let cache = match CStr::from_ptr(cache_path).to_str() {
+        Ok(path) => PathBuf::from(path),
+        Err(_) => return ESP_ERR_INVALID_ARG,
+    };
+
+    let json = match fetch_catalog_json(catalog_url) {
+        Ok(json) => json,
+        Err(error) => return error,
+    };
+    let entries = std::slice::from_raw_parts_mut(entries, max_entries as usize);
+    let count = parse_catalog_into(&json, entries);
+    *out_count = count as c_int;
+
+    if count > 0 && write_file_replacing(&cache, json.as_bytes()).is_err() {
+        esp_log_write(
+            ESP_LOG_WARN,
+            TAG.as_ptr(),
+            b"Could not keep the catalog at %s\0".as_ptr(),
+            cache_path,
+        );
+    }
+    esp_log_write(
+        ESP_LOG_INFO,
+        TAG.as_ptr(),
+        b"Parsed %d catalog entries\0".as_ptr(),
+        count as c_int,
+    );
+    ESP_OK
+}
+
+/// Parse the catalog kept at `path` by appstore_refresh_catalog() into
+/// `entries`, as a fetched one is parsed. ESP_ERR_NOT_FOUND when there is none.
+///
+/// # Safety
+/// `path` must be a NUL-terminated path; `entries` must point to an array of
+/// at least `max_entries` CatalogEntry; `out_count` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn appstore_load_catalog_file(
+    path: *const c_char,
+    entries: *mut CatalogEntry,
+    max_entries: c_int,
+    out_count: *mut c_int,
+) -> i32 {
+    if path.is_null() || entries.is_null() || out_count.is_null() || max_entries <= 0 {
+        return ESP_ERR_INVALID_ARG;
+    }
+    *out_count = 0;
+    let path = match CStr::from_ptr(path).to_str() {
+        Ok(path) => Path::new(path),
+        Err(_) => return ESP_ERR_INVALID_ARG,
+    };
+    let json = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return ESP_ERR_NOT_FOUND,
+        Err(_) => return ESP_FAIL,
+    };
+    if json.len() > MAX_CATALOG_JSON {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    let json = String::from_utf8_lossy(&json);
+    let entries = std::slice::from_raw_parts_mut(entries, max_entries as usize);
+    *out_count = parse_catalog_into(&json, entries) as c_int;
+    ESP_OK
+}
+
+/// Write `bytes` to `path` whole or not at all: a staged file beside it,
+/// renamed into place (atomic_replace), the folder made if missing.
+fn write_file_replacing(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut staged = StagedFile::create_for(path)?;
+    staged.writer().write_all(bytes)?;
+    staged.sync_and_close()?;
+    atomic_replace(&staged, path)
 }
 
 // Test-mode stub: guard clauses only; no HTTP calls.
@@ -1200,6 +1283,16 @@ unsafe fn download_into_staged(
         }
     };
 
+    let url_str = CStr::from_ptr(url).to_str().unwrap_or("");
+    if url_str.starts_with("file://") {
+        return match card_file(url_str) {
+            Some(path) => copy_into_staged(
+                &path, expected_hash, expected_size, max_size, progress_cb, user_data, staged,
+            ),
+            None => ESP_ERR_INVALID_ARG,
+        };
+    }
+
     let client = http_client_init(url, 30000, None, std::ptr::null_mut());
     if client.is_null() {
         return ESP_FAIL;
@@ -1385,7 +1478,8 @@ unsafe fn install_tap_entry(
     if entry.package_size_bytes == 0 || entry.package_size_bytes as u64 > 2 * 1024 * 1024
         || entry.release_sequence == 0 { return ESP_ERR_INVALID_SIZE; }
 
-    let app_dir = Path::new("/sdcard/apps").join(id);
+    let apps_root = card_root().join("apps");
+    let app_dir = apps_root.join(id);
     if std::fs::create_dir_all(&app_dir).is_err() { return ESP_FAIL; }
     let package_destination = app_dir.join(format!("{id}.tap"));
     let mut staged_package = match StagedFile::create_for(&package_destination) {
@@ -1416,15 +1510,15 @@ unsafe fn install_tap_entry(
         Ok(value) => value,
         Err(_) => return ESP_FAIL,
     };
-    if signing_verify_file(staged_path.as_ptr()) != ESP_OK { return ESP_ERR_INVALID_CRC; }
+    if signing_verify_app_file(staged_path.as_ptr()) != ESP_OK { return ESP_ERR_INVALID_CRC; }
 
     match crate::tap_installer::install_tap_with(
-        &staged_package.path, Path::new("/sdcard/apps"), id, version,
+        &staged_package.path, &apps_root, id, version,
         entry.release_sequence,
         |tap| std::ffi::CString::new(tap.to_string_lossy().as_bytes()).ok()
-            .is_some_and(|path| unsafe { signing_verify_file(path.as_ptr()) == ESP_OK }),
+            .is_some_and(|path| unsafe { signing_verify_app_file(path.as_ptr()) == ESP_OK }),
         |elf| std::ffi::CString::new(elf.to_string_lossy().as_bytes()).ok()
-            .is_some_and(|path| unsafe { signing_verify_file(path.as_ptr()) == ESP_OK }),
+            .is_some_and(|path| unsafe { signing_verify_app_file(path.as_ptr()) == ESP_OK }),
     ) {
         Ok(_) => ESP_OK,
         Err(crate::tap_installer::TapError::Limit) => ESP_ERR_INVALID_SIZE,
@@ -1733,6 +1827,155 @@ pub unsafe extern "C" fn appstore_entry_get_changelog(entry: *const CatalogEntry
 // Browsing API — category filter, sort, ratings, download reporting
 // ---------------------------------------------------------------------------
 
+/// Fill `entry` from one catalog object, every other field cleared.
+fn fill_catalog_entry(obj: &str, entry: &mut CatalogEntry) {
+    // Cleared in place: `*entry = CatalogEntry::default()` built 2.4 KB of it
+    // on the stack first, and the App Store reads its kept catalog on
+    // lvgl_task, whose stack is 8 KB.
+    // SAFETY: every field is an integer, an array of them or a bool, for all
+    // of which zero is valid; zero is CATALOG_TYPE_APP, default()'s type too.
+    unsafe { std::ptr::write_bytes(entry as *mut CatalogEntry, 0, 1) };
+
+    if let Some(v) = json_str_extract(obj, "id") {
+        copy_str_to_buf(&v, &mut entry.id);
+    }
+    if let Some(v) = json_str_extract(obj, "name") {
+        copy_str_to_buf(&v, &mut entry.name);
+    }
+    if let Some(v) = json_str_extract(obj, "version") {
+        copy_str_to_buf(&v, &mut entry.version);
+    }
+    if let Some(v) = json_str_extract(obj, "author") {
+        copy_str_to_buf(&v, &mut entry.author);
+    }
+    if let Some(v) = json_str_extract(obj, "description") {
+        copy_str_to_buf(&v, &mut entry.description);
+    }
+    if let Some(v) = json_str_extract(obj, "url") {
+        copy_str_to_buf(&v, &mut entry.url);
+    }
+    if let Some(v) = json_str_extract(obj, "sig_url") {
+        copy_str_to_buf(&v, &mut entry.sig_url);
+    }
+    if let Some(v) = json_str_extract(obj, "sha256") {
+        copy_str_to_buf(&v, &mut entry.sha256_hex);
+    }
+    if let Some(v) = json_str_extract(obj, "permissions") {
+        copy_str_to_buf(&v, &mut entry.permissions);
+    }
+    if let Some(v) = json_str_extract(obj, "min_os_version") {
+        copy_str_to_buf(&v, &mut entry.min_os_version);
+    }
+    if let Some(v) = json_str_extract(obj, "package_url") {
+        copy_str_to_buf(&v, &mut entry.package_url);
+    }
+    if let Some(v) = json_str_extract(obj, "package_sig_url") {
+        copy_str_to_buf(&v, &mut entry.package_sig_url);
+    }
+    if let Some(v) = json_str_extract(obj, "package_sha256") {
+        copy_str_to_buf(&v, &mut entry.package_sha256_hex);
+    }
+    if let Some(v) = json_str_extract(obj, "publisher_key_id") {
+        copy_str_to_buf(&v, &mut entry.publisher_key_id);
+    }
+    if let Some(v) = json_str_extract(obj, "category") {
+        copy_str_to_buf(&v, &mut entry.category);
+    }
+    if let Some(v) = json_str_extract(obj, "icon_url") {
+        copy_str_to_buf(&v, &mut entry.icon_url);
+    }
+    if let Some(v) = json_str_extract(obj, "changelog") {
+        copy_str_to_buf(&v, &mut entry.changelog);
+    }
+    if let Some(v) = json_str_extract(obj, "updated") {
+        copy_str_to_buf(&v, &mut entry.updated_date);
+    }
+
+    if let Some(sz) = json_int_extract(obj, "size_bytes") {
+        if sz > 0 && sz <= u32::MAX as i64 {
+            entry.size_bytes = sz as u32;
+        }
+    }
+    if let Some(sz) = json_int_extract(obj, "package_size_bytes") {
+        if sz > 0 && sz <= u32::MAX as i64 { entry.package_size_bytes = sz as u32; }
+    }
+    if let Some(sequence) = json_int_extract(obj, "release_sequence") {
+        if sequence > 0 && sequence <= u32::MAX as i64 { entry.release_sequence = sequence as u32; }
+    }
+    if let Some(f) = json_float_extract(obj, "rating") {
+        entry.rating_stars = (f * 100.0 + 0.5) as u16;
+    }
+    if let Some(n) = json_int_extract(obj, "rating_count") {
+        if n > 0 {
+            entry.rating_count = n as u32;
+        }
+    }
+    if let Some(n) = json_int_extract(obj, "downloads") {
+        if n > 0 {
+            entry.download_count = n as u32;
+        }
+    }
+    if let Some(t) = json_str_extract(obj, "type") {
+        entry.entry_type = match t.as_str() {
+            "firmware" => CATALOG_TYPE_FIRMWARE,
+            "driver" => CATALOG_TYPE_DRIVER,
+            "wm" => CATALOG_TYPE_WM,
+            _ => CATALOG_TYPE_APP,
+        };
+    }
+    if let Some(boards) = json_array_extract(obj, "compatible_boards") {
+        copy_str_to_buf(&boards, &mut entry.compatible_boards);
+    }
+    if let Some(screenshots_raw) = json_array_extract(obj, "screenshots") {
+        let mut sc_count = 0u8;
+        for (i, url) in screenshots_raw.split(',').enumerate() {
+            if i >= 3 {
+                break;
+            }
+            copy_str_to_buf(url.trim(), &mut entry.screenshots[i]);
+            sc_count += 1;
+        }
+        entry.screenshot_count = sc_count;
+    }
+    if let Some(det_bus) = extract_detection_field(obj, "bus") {
+        copy_str_to_buf(&det_bus, &mut entry.detection_bus);
+        entry.detection_address = extract_detection_u16(obj, "address");
+        entry.detection_chip_id_reg = extract_detection_u16(obj, "chip_id_reg");
+        entry.detection_chip_id_value = extract_detection_u16(obj, "chip_id_value");
+    }
+    entry.is_signed = entry.sig_url[0] != 0 || entry.package_sig_url[0] != 0;
+}
+
+/// Parse a catalog, an array of entries or `{"entries": [...]}`, into
+/// `entries`, leaving out those built for another chip and those with no id.
+/// Returns how many it filled.
+pub fn parse_catalog_into(json: &str, entries: &mut [CatalogEntry]) -> usize {
+    let mut count = 0;
+    let mut cursor = catalog_entries_json(json);
+    while count < entries.len() {
+        let obj_start = match cursor.find('{') {
+            Some(i) => i,
+            None => break,
+        };
+        cursor = &cursor[obj_start..];
+        let obj_end = match cursor.find('}') {
+            Some(i) => i + 1,
+            None => break,
+        };
+        let obj = &cursor[..obj_end];
+        cursor = &cursor[obj_end..];
+
+        if !catalog_object_matches_current_arch(obj) {
+            continue;
+        }
+        fill_catalog_entry(obj, &mut entries[count]);
+        if entries[count].id[0] != 0 {
+            count += 1;
+        }
+    }
+    count
+}
+
 /// Parse a catalog JSON string and fill `entries` with only those entries
 /// matching `category`. Pass "all" or an empty string to return everything.
 ///
@@ -1761,119 +2004,10 @@ pub fn parse_catalog_entries(json: &str, category_filter: &str, entries: &mut Ve
         }
 
         let mut entry = CatalogEntry::default();
-
-        if let Some(v) = json_str_extract(obj, "id") {
-            copy_str_to_buf(&v, &mut entry.id);
-        }
+        fill_catalog_entry(obj, &mut entry);
         if entry.id[0] == 0 {
             continue;
         }
-
-        if let Some(v) = json_str_extract(obj, "name") {
-            copy_str_to_buf(&v, &mut entry.name);
-        }
-        if let Some(v) = json_str_extract(obj, "version") {
-            copy_str_to_buf(&v, &mut entry.version);
-        }
-        if let Some(v) = json_str_extract(obj, "author") {
-            copy_str_to_buf(&v, &mut entry.author);
-        }
-        if let Some(v) = json_str_extract(obj, "description") {
-            copy_str_to_buf(&v, &mut entry.description);
-        }
-        if let Some(v) = json_str_extract(obj, "url") {
-            copy_str_to_buf(&v, &mut entry.url);
-        }
-        if let Some(v) = json_str_extract(obj, "sig_url") {
-            copy_str_to_buf(&v, &mut entry.sig_url);
-        }
-        if let Some(v) = json_str_extract(obj, "sha256") {
-            copy_str_to_buf(&v, &mut entry.sha256_hex);
-        }
-        if let Some(v) = json_str_extract(obj, "permissions") {
-            copy_str_to_buf(&v, &mut entry.permissions);
-        }
-        if let Some(v) = json_str_extract(obj, "min_os_version") {
-            copy_str_to_buf(&v, &mut entry.min_os_version);
-        }
-        if let Some(v) = json_str_extract(obj, "package_url") {
-            copy_str_to_buf(&v, &mut entry.package_url);
-        }
-        if let Some(v) = json_str_extract(obj, "package_sig_url") {
-            copy_str_to_buf(&v, &mut entry.package_sig_url);
-        }
-        if let Some(v) = json_str_extract(obj, "package_sha256") {
-            copy_str_to_buf(&v, &mut entry.package_sha256_hex);
-        }
-        if let Some(v) = json_str_extract(obj, "publisher_key_id") {
-            copy_str_to_buf(&v, &mut entry.publisher_key_id);
-        }
-        if let Some(v) = json_str_extract(obj, "category") {
-            copy_str_to_buf(&v, &mut entry.category);
-        }
-        if let Some(v) = json_str_extract(obj, "icon_url") {
-            copy_str_to_buf(&v, &mut entry.icon_url);
-        }
-        if let Some(v) = json_str_extract(obj, "changelog") {
-            copy_str_to_buf(&v, &mut entry.changelog);
-        }
-        if let Some(v) = json_str_extract(obj, "updated") {
-            copy_str_to_buf(&v, &mut entry.updated_date);
-        }
-
-        if let Some(sz) = json_int_extract(obj, "size_bytes") {
-            if sz > 0 && sz <= u32::MAX as i64 {
-                entry.size_bytes = sz as u32;
-            }
-        }
-        if let Some(sz) = json_int_extract(obj, "package_size_bytes") {
-            if sz > 0 && sz <= u32::MAX as i64 { entry.package_size_bytes = sz as u32; }
-        }
-        if let Some(sequence) = json_int_extract(obj, "release_sequence") {
-            if sequence > 0 && sequence <= u32::MAX as i64 { entry.release_sequence = sequence as u32; }
-        }
-        if let Some(f) = json_float_extract(obj, "rating") {
-            entry.rating_stars = (f * 100.0 + 0.5) as u16;
-        }
-        if let Some(n) = json_int_extract(obj, "rating_count") {
-            if n > 0 {
-                entry.rating_count = n as u32;
-            }
-        }
-        if let Some(n) = json_int_extract(obj, "downloads") {
-            if n > 0 {
-                entry.download_count = n as u32;
-            }
-        }
-        if let Some(t) = json_str_extract(obj, "type") {
-            entry.entry_type = match t.as_str() {
-                "firmware" => CATALOG_TYPE_FIRMWARE,
-                "driver" => CATALOG_TYPE_DRIVER,
-                "wm" => CATALOG_TYPE_WM,
-                _ => CATALOG_TYPE_APP,
-            };
-        }
-        if let Some(boards) = json_array_extract(obj, "compatible_boards") {
-            copy_str_to_buf(&boards, &mut entry.compatible_boards);
-        }
-        if let Some(screenshots_raw) = json_array_extract(obj, "screenshots") {
-            let mut sc_count = 0u8;
-            for (i, url) in screenshots_raw.split(',').enumerate() {
-                if i >= 3 {
-                    break;
-                }
-                copy_str_to_buf(url.trim(), &mut entry.screenshots[i]);
-                sc_count += 1;
-            }
-            entry.screenshot_count = sc_count;
-        }
-        if let Some(det_bus) = extract_detection_field(obj, "bus") {
-            copy_str_to_buf(&det_bus, &mut entry.detection_bus);
-            entry.detection_address = extract_detection_u16(obj, "address");
-            entry.detection_chip_id_reg = extract_detection_u16(obj, "chip_id_reg");
-            entry.detection_chip_id_value = extract_detection_u16(obj, "chip_id_value");
-        }
-        entry.is_signed = entry.sig_url[0] != 0 || entry.package_sig_url[0] != 0;
 
         // Category filter
         if !category_filter.is_empty() && category_filter != "all" {
@@ -2610,6 +2744,112 @@ mod tests {
         assert_eq!(entry.release_sequence, 1);
         assert_eq!(entry.url[0], 0, "raw ELF URL must remain absent");
         assert!(entry.is_signed);
+    }
+
+    #[test]
+    fn filling_an_entry_clears_what_the_object_leaves_out() {
+        let mut entry = CatalogEntry::default();
+        copy_str_to_buf("stale", &mut entry.name);
+        copy_str_to_buf("https://stale.invalid/a.tap", &mut entry.package_url);
+        entry.entry_type = CATALOG_TYPE_DRIVER;
+        entry.release_sequence = 9;
+        entry.is_signed = true;
+        fill_catalog_entry(r#"{"id":"com.thistle.x"}"#, &mut entry);
+
+        let fresh = CatalogEntry::default();
+        assert_eq!(fixed_cstr(&entry.id), Some("com.thistle.x"));
+        assert_eq!(entry.name, fresh.name);
+        assert_eq!(entry.package_url, fresh.package_url);
+        assert_eq!(entry.entry_type, fresh.entry_type);
+        assert_eq!(entry.release_sequence, 0);
+        assert!(!entry.is_signed);
+    }
+
+    #[test]
+    fn catalog_kept_on_the_card_reads_back_whole() {
+        let dir = transaction_test_dir("catalog-cache");
+        let cache = dir.join("appstore/catalog.json");
+        let json = format!(
+            r#"{{"version": 1, "entries": [
+                {{"id":"com.thistle.notes","name":"Notes","version":"1.0.0","type":"app","arch":"host","package_url":"https://example.invalid/notes.tap","package_sig_url":"https://example.invalid/notes.tap.sig","package_sha256":"{}","package_size_bytes":4096,"release_sequence":3}},
+                {{"id":"com.thistle.other-chip","name":"Elsewhere","version":"1.0.0","type":"app","arch":"esp32c6"}},
+                {{"id":"thistle-os","name":"ThistleOS","version":"0.3.0","type":"firmware"}}
+            ]}}"#,
+            "b".repeat(64)
+        );
+        // Kept once, then replaced: FatFs renames over nothing.
+        write_file_replacing(&cache, b"[]").unwrap();
+        write_file_replacing(&cache, json.as_bytes()).unwrap();
+        assert_eq!(std::fs::read_to_string(&cache).unwrap(), json);
+        assert_no_transaction_debris(cache.parent().unwrap());
+
+        let mut entries: Vec<CatalogEntry> = (0..4).map(|_| CatalogEntry::default()).collect();
+        let mut count = 0;
+        let path = std::ffi::CString::new(cache.to_string_lossy().as_bytes()).unwrap();
+        let ret = unsafe { appstore_load_catalog_file(path.as_ptr(), entries.as_mut_ptr(), 4, &mut count) };
+        assert_eq!((ret, count), (ESP_OK, 2));
+        // The wrapper's own "version" is not the first entry's.
+        assert_eq!(fixed_cstr(&entries[0].version), Some("1.0.0"));
+        assert_eq!(fixed_cstr(&entries[0].package_url), Some("https://example.invalid/notes.tap"));
+        assert_eq!(fixed_cstr(&entries[0].package_sha256_hex), Some("b".repeat(64).as_str()));
+        assert_eq!((entries[0].package_size_bytes, entries[0].release_sequence), (4096, 3));
+        assert_eq!(fixed_cstr(&entries[1].id), Some("thistle-os"));
+        assert_eq!(entries[1].entry_type, CATALOG_TYPE_FIRMWARE);
+
+        // No more than the caller has room for.
+        let ret = unsafe { appstore_load_catalog_file(path.as_ptr(), entries.as_mut_ptr(), 1, &mut count) };
+        assert_eq!((ret, count), (ESP_OK, 1));
+
+        let missing = std::ffi::CString::new(dir.join("none.json").to_string_lossy().as_bytes()).unwrap();
+        let ret = unsafe { appstore_load_catalog_file(missing.as_ptr(), entries.as_mut_ptr(), 4, &mut count) };
+        assert_eq!((ret, count), (ESP_ERR_NOT_FOUND, 0));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_file_url_names_a_file_on_the_card_and_nowhere_else() {
+        assert_eq!(
+            card_file("file:///sdcard/appstore/packages/catalog.json"),
+            Some(PathBuf::from("/sdcard/appstore/packages/catalog.json"))
+        );
+        for url in [
+            "file:///sdcard/",
+            "file:///sdcard/../spiffs/config/system.json",
+            "file:///sdcard/appstore/../../etc/passwd",
+            "file:///spiffs/apps/x.tap",
+            "file://sdcard/appstore/catalog.json",
+            "https://example.invalid/catalog.json",
+        ] {
+            assert_eq!(card_file(url), None, "{url}");
+        }
+    }
+
+    #[test]
+    fn a_package_on_the_card_is_copied_only_as_the_catalog_describes_it() {
+        let dir = transaction_test_dir("card-package");
+        let package = dir.join("notes.tap");
+        let bytes: Vec<u8> = (0..10_000u32).map(|i| i as u8).collect();
+        std::fs::write(&package, &bytes).unwrap();
+        let hash: String = Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
+        let size = Some(bytes.len() as u64);
+
+        let copy = |hash: Option<&str>, size: Option<u64>, max: u64| {
+            let destination = dir.join("installed.tap");
+            let mut staged = StagedFile::create_for(&destination).unwrap();
+            let ret = copy_into_staged(&package, hash, size, max, None, std::ptr::null_mut(), &mut staged);
+            let copied = (ret == ESP_OK).then(|| {
+                atomic_replace(&staged, &destination).unwrap();
+                std::fs::read(&destination).unwrap()
+            });
+            (ret, copied)
+        };
+        assert_eq!(copy(Some(&hash), size, 1 << 20), (ESP_OK, Some(bytes.clone())));
+        assert_eq!(copy(Some(&"0".repeat(64)), size, 1 << 20).0, ESP_ERR_INVALID_CRC);
+        assert_eq!(copy(Some(&hash), Some(9_999), 1 << 20).0, ESP_ERR_INVALID_SIZE);
+        assert_eq!(copy(None, None, 4096).0, ESP_ERR_INVALID_SIZE, "over the limit");
+        std::fs::remove_file(&package).unwrap();
+        assert_eq!(copy(None, None, 1 << 20).0, ESP_ERR_NOT_FOUND);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     // -----------------------------------------------------------------------

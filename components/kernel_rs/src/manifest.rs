@@ -241,8 +241,21 @@ impl Manifest {
     }
 
     /// Derive manifest path from ELF path.
-    /// e.g., "messenger.app.elf" → "messenger.manifest.json"
+    /// e.g., "messenger.app.elf" → "messenger.manifest.json", and for an app
+    /// the App Store installed, "ID/generations/N/app.app.elf" → the
+    /// package's "ID/generations/N/package.json" (tap_installer).
     pub fn path_from_elf(elf_path: &str) -> String {
+        let path = Path::new(elf_path);
+        let in_generation = path
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::file_name)
+            .is_some_and(|name| name == "generations");
+        if in_generation && path.file_name().is_some_and(|name| name == "app.app.elf") {
+            if let Some(dir) = path.parent() {
+                return dir.join("package.json").to_string_lossy().into_owned();
+            }
+        }
         if let Some(pos) = elf_path.find(".app.elf") {
             format!("{}.manifest.json", &elf_path[..pos])
         } else if let Some(pos) = elf_path.find(".drv.elf") {
@@ -591,6 +604,12 @@ mod tests {
             Manifest::path_from_elf("/sdcard/drivers/sx1262.drv.elf"),
             "/sdcard/drivers/sx1262.manifest.json"
         );
+        assert_eq!(
+            Manifest::path_from_elf("/sdcard/apps/com.thistle.notes/generations/3/app.app.elf"),
+            "/sdcard/apps/com.thistle.notes/generations/3/package.json"
+        );
+        // Only the package's own ELF, in a generation, reads package.json.
+        assert_eq!(Manifest::path_from_elf("/sdcard/apps/app.app.elf"), "/sdcard/apps/app.manifest.json");
     }
 
     #[test]

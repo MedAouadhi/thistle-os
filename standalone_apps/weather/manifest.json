@@ -1,0 +1,16 @@
+{
+  "type": "app",
+  "id": "com.thistle.weather",
+  "name": "Weather",
+  "version": "1.0.0",
+  "release_sequence": 1,
+  "author": "ThistleOS",
+  "description": "Weather station: GPS altitude and position, and the sensors a board has",
+  "category": "utilities",
+  "min_os": "0.3.0",
+  "arch": "esp32s3",
+  "entry": "weather.app.elf",
+  "permissions": ["gps"],
+  "background": false,
+  "min_memory_kb": 16
+}

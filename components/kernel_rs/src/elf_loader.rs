@@ -2,8 +2,13 @@
 // ThistleOS Kernel — elf_loader module
 //
 // Port of components/kernel/src/elf_loader.c
-// Loads app ELF files into PSRAM using esp_elf, verifies signatures,
-// parses manifests, and starts each app in its own FreeRTOS task.
+// Loads app ELF files into PSRAM using esp_elf, verifies signatures and
+// parses manifests. An app is a shared object built by app_sdk/: its entry
+// point, thistle_app_main, hands back the app's thistle_app_t, whose
+// callbacks the app manager runs on the UI task like a built-in app's. The
+// boot scan only loads and relocates an app; nothing of it runs until it is
+// first opened, so an app that faults cannot stop the device booting. The
+// ELF stays loaded from then on, as the callbacks live in it.
 
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_int, c_void};
@@ -28,8 +33,6 @@ const ESP_FAIL: i32 = -1;
 
 pub(crate) const MAX_LOADED_APPS: usize = 16;
 const ELF_MAX_SIZE_BYTES: usize = 1024 * 1024; // 1 MB
-const ELF_APP_TASK_STACK: u32 = 8192;
-const ELF_APP_TASK_PRIO: u32 = 5;
 
 // MALLOC_CAP_SPIRAM = BIT(10) (esp_heap_caps.h). BIT(9) is MALLOC_CAP_PID7,
 // which no heap has, so every allocation asking for it failed.
@@ -55,20 +58,8 @@ extern "C" {
     fn heap_caps_malloc(size: usize, caps: u32) -> *mut c_void;
     fn free(ptr: *mut c_void);
 
-    // FreeRTOS
-    fn xTaskCreatePinnedToCore(
-        task_fn: unsafe extern "C" fn(*mut c_void),
-        name: *const c_char,
-        stack_depth: u32,
-        param: *mut c_void,
-        priority: u32,
-        task_handle: *mut *mut c_void,
-        core_id: i32,
-    ) -> i32;
-    fn vTaskDelete(task: *mut c_void);
-
     // Signing (Rust)
-    fn signing_verify(data: *const u8, data_len: usize, signature: *const u8) -> i32;
+    fn signing_verify_app(data: *const u8, data_len: usize, signature: *const u8) -> i32;
 
     // Permissions (Rust)
     fn permissions_grant(app_id: *const c_char, perms: u32) -> i32;
@@ -91,9 +82,6 @@ const ESP_LOG_WARN: i32 = 2;
 const ESP_LOG_ERROR: i32 = 1;
 const ESP_LOG_DEBUG: i32 = 4;
 
-// pdPASS = 1 in FreeRTOS
-const PD_PASS: i32 = 1;
-
 static TAG: &[u8] = b"elf_loader\0";
 
 fn manifest_is_compatible_for_arch(manifest: &CManifest, current_arch: &CStr) -> bool {
@@ -111,13 +99,31 @@ const ESP_ELF_T_SIZE: usize = 256;
 // App handle type (opaque pointer exported to C)
 // ---------------------------------------------------------------------------
 
+/// What app_sdk's THISTLE_APP() declares (thistle_app.h), in the ELF.
+#[repr(C)]
+struct ThistleApp {
+    id: *const c_char,
+    name: *const c_char,
+    version: *const c_char,
+    allow_background: bool,
+    on_create: Option<unsafe extern "C" fn() -> i32>,
+    on_start: Option<unsafe extern "C" fn()>,
+    on_pause: Option<unsafe extern "C" fn()>,
+    on_resume: Option<unsafe extern "C" fn()>,
+    on_destroy: Option<unsafe extern "C" fn()>,
+}
+
+/// The entry point app_sdk links every app with.
+const APP_ENTRY_SYMBOL: &[u8] = b"thistle_app_main";
+
 /// Internal ELF app state.
 pub struct ElfAppHandle {
     elf_storage: [u8; ESP_ELF_T_SIZE],
     path: [u8; 128],
-    task: *mut c_void,
+    /// The app's thistle_app_t, inside the loaded ELF: NULL until the app
+    /// is first opened (opened_app).
+    app: *const ThistleApp,
     loaded: bool,
-    running: bool,
     load_addr: usize,
     load_size: usize,
     app_id: [u8; 64],
@@ -134,9 +140,8 @@ impl ElfAppHandle {
         ElfAppHandle {
             elf_storage: [0u8; ESP_ELF_T_SIZE],
             path: [0u8; 128],
-            task: std::ptr::null_mut(),
+            app: std::ptr::null(),
             loaded: false,
-            running: false,
             load_addr: 0,
             load_size: 0,
             app_id: [0u8; 64],
@@ -221,39 +226,55 @@ unsafe extern "C" fn unsigned_app_symbol_resolver(sym_name: *const c_char) -> us
 }
 
 // ---------------------------------------------------------------------------
-// FreeRTOS task entry point
+// The app's entry point
 // ---------------------------------------------------------------------------
 
-unsafe extern "C" fn elf_app_task(arg: *mut c_void) {
-    // arg is a raw pointer into the STATE.apps slot; we cast and use it.
-    let app = &mut *(arg as *mut ElfAppHandle);
-
-    esp_log_write(
-        ESP_LOG_INFO,
-        TAG.as_ptr(),
-        b"Starting ELF app: %s\0".as_ptr(),
-        app.path.as_ptr(),
-    );
-
-    let elf_ptr = app.elf_storage.as_mut_ptr() as *mut c_void;
-    let err = esp_elf_request(elf_ptr, 0, 0, std::ptr::null_mut());
-    if err != 0 {
-        esp_log_write(
-            ESP_LOG_ERROR,
-            TAG.as_ptr(),
-            b"ELF entry point error: ret=%d\0".as_ptr(),
-            err,
-        );
-    } else {
-        esp_log_write(
-            ESP_LOG_INFO,
-            TAG.as_ptr(),
-            b"ELF app exited normally\0".as_ptr(),
-        );
+/// Whether the ELF in `elf` is entered at a global `thistle_app_main`, as
+/// app_sdk links every app. Anything else, an ELF from before or a program
+/// with a main(), would run whole when opening it called its entry point.
+fn enters_at_app_main(elf: &[u8]) -> bool {
+    fn u16_at(b: &[u8], at: usize) -> Option<usize> {
+        Some(u16::from_le_bytes(b.get(at..at + 2)?.try_into().ok()?) as usize)
     }
+    fn u32_at(b: &[u8], at: usize) -> Option<usize> {
+        Some(u32::from_le_bytes(b.get(at..at + 4)?.try_into().ok()?) as usize)
+    }
+    const SHT_DYNSYM: usize = 11;
+    let check = || -> Option<bool> {
+        if elf.get(..5)? != b"\x7fELF\x01" {
+            return Some(false);
+        }
+        let entry = u32_at(elf, 24)?;
+        let (shoff, shentsize, shnum) = (u32_at(elf, 32)?, u16_at(elf, 46)?, u16_at(elf, 48)?);
+        for i in 0..shnum {
+            let sh = shoff + i * shentsize;
+            if u32_at(elf, sh + 4)? != SHT_DYNSYM {
+                continue;
+            }
+            let strtab = shoff + u32_at(elf, sh + 24)? * shentsize;
+            let (str_off, str_size) = (u32_at(elf, strtab + 16)?, u32_at(elf, strtab + 20)?);
+            let names = elf.get(str_off..str_off + str_size)?;
+            let (sym_off, sym_size) = (u32_at(elf, sh + 16)?, u32_at(elf, sh + 20)?);
+            for sym in (sym_off..sym_off + sym_size).step_by(16) {
+                let name = names.get(u32_at(elf, sym)?..)?;
+                let name = &name[..name.iter().position(|&b| b == 0)?];
+                if name == APP_ENTRY_SYMBOL {
+                    return Some(u32_at(elf, sym + 4)? == entry);
+                }
+            }
+        }
+        Some(false)
+    };
+    check().unwrap_or(false)
+}
 
-    app.running = false;
-    vTaskDelete(std::ptr::null_mut());
+/// The app an ELF relocated in `elf_ptr` declares, from its entry point.
+unsafe fn request_app(elf_ptr: *mut c_void) -> Option<&'static ThistleApp> {
+    let mut argv: [*mut c_char; 1] = [std::ptr::null_mut()];
+    if esp_elf_request(elf_ptr, 0, 1, argv.as_mut_ptr()) != 0 {
+        return None;
+    }
+    (argv[0] as *const ThistleApp).as_ref()
 }
 
 // ---------------------------------------------------------------------------
@@ -414,7 +435,7 @@ pub unsafe extern "C" fn elf_app_load(path: *const c_char, handle: *mut *mut Elf
         let sig_path = format!("{}.sig", path_str);
         match std::fs::read(&sig_path) {
             Ok(sig_bytes) if sig_bytes.len() == 64 => {
-                signing_verify(buf as *const u8, size, sig_bytes.as_ptr())
+                signing_verify_app(buf as *const u8, size, sig_bytes.as_ptr())
             }
             Ok(_) => ESP_ERR_INVALID_SIZE,
             Err(_) => ESP_ERR_NOT_FOUND,
@@ -461,6 +482,17 @@ pub unsafe extern "C" fn elf_app_load(path: *const c_char, handle: *mut *mut Elf
         free(buf);
         return sig_ret;
     };
+
+    if !enters_at_app_main(std::slice::from_raw_parts(buf as *const u8, size)) {
+        esp_log_write(
+            ESP_LOG_ERROR,
+            TAG.as_ptr(),
+            b"Not an app_sdk app (no thistle_app_main entry): %s\0".as_ptr(),
+            path,
+        );
+        free(buf);
+        return ESP_ERR_NOT_SUPPORTED;
+    }
 
     let granted_permissions = effective_app_permissions(signed, requested_permissions);
 
@@ -583,9 +615,8 @@ pub unsafe extern "C" fn elf_app_load(path: *const c_char, handle: *mut *mut Elf
     app.app_id[..identity_len].copy_from_slice(&identity_bytes[..identity_len]);
     app.app_id[identity_len] = 0;
     app.granted_permissions = granted_permissions;
+    app.app = std::ptr::null();
     app.loaded = true;
-    app.running = false;
-    app.task = std::ptr::null_mut();
     app.slot = slot_idx;
 
     *handle = app as *mut ElfAppHandle;
@@ -599,59 +630,8 @@ pub unsafe extern "C" fn elf_app_load(path: *const c_char, handle: *mut *mut Elf
     ESP_OK
 }
 
-/// Start a loaded ELF app in its own FreeRTOS task.
-///
-/// # Safety
-/// `handle` must have been obtained from `elf_app_load`.
-#[no_mangle]
-pub unsafe extern "C" fn elf_app_start(handle: *mut ElfAppHandle) -> i32 {
-    if handle.is_null() {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    let app = &mut *handle;
-    if !app.loaded {
-        return ESP_ERR_INVALID_STATE;
-    }
-    if app.running {
-        esp_log_write(
-            ESP_LOG_WARN,
-            TAG.as_ptr(),
-            b"ELF app already running\0".as_ptr(),
-        );
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    let rc = xTaskCreatePinnedToCore(
-        elf_app_task,
-        b"elf_app\0".as_ptr() as *const c_char,
-        ELF_APP_TASK_STACK,
-        handle as *mut c_void,
-        ELF_APP_TASK_PRIO,
-        &mut app.task,
-        -1, // tskNO_AFFINITY
-    );
-
-    if rc != PD_PASS {
-        esp_log_write(
-            ESP_LOG_ERROR,
-            TAG.as_ptr(),
-            b"xTaskCreate failed for ELF app\0".as_ptr(),
-        );
-        return ESP_ERR_NO_MEM;
-    }
-
-    app.running = true;
-    esp_log_write(
-        ESP_LOG_INFO,
-        TAG.as_ptr(),
-        b"ELF app task started: %s\0".as_ptr(),
-        app.path.as_ptr(),
-    );
-    ESP_OK
-}
-
-/// Unload a loaded ELF app, killing its task if running.
+/// Unload a loaded ELF app. Only for one that failed to register: a
+/// registered app's callbacks live in its ELF.
 ///
 /// # Safety
 /// `handle` must have been obtained from `elf_app_load`.
@@ -662,13 +642,6 @@ pub unsafe extern "C" fn elf_app_unload(handle: *mut ElfAppHandle) -> i32 {
     }
 
     let app = &mut *handle;
-
-    // Kill task if running
-    if app.running && !app.task.is_null() {
-        vTaskDelete(app.task);
-        app.task = std::ptr::null_mut();
-        app.running = false;
-    }
 
     // Deinit ELF
     if app.loaded {
@@ -794,6 +767,7 @@ fn ensure_regs(
 struct RegStrings {
     id: [u8; 64],
     name: [u8; 32],
+    version: [u8; 16],
 }
 
 impl RegStrings {
@@ -801,6 +775,7 @@ impl RegStrings {
         RegStrings {
             id: [0u8; 64],
             name: [0u8; 32],
+            version: [0u8; 16],
         }
     }
 }
@@ -836,133 +811,130 @@ fn ensure_reg_strings(
     guard.as_mut().unwrap()
 }
 
-/// Per-slot on_create callbacks. We generate one per slot so the app manager
-/// can invoke it without arguments and we know which ELF handle to start.
-macro_rules! make_on_create {
-    ($fn_name:ident, $slot:expr) => {
-        unsafe extern "C" fn $fn_name() -> i32 {
-            let handle = {
-                match REG_MUTEX.lock() {
-                    Ok(regs) => match regs.as_ref() {
-                        Some(r) => r[$slot].handle,
-                        None => return ESP_ERR_INVALID_STATE,
-                    },
-                    Err(_) => return ESP_FAIL,
-                }
-            };
-            if handle.is_null() {
-                return ESP_ERR_INVALID_STATE;
+/// The app registered in `slot`, asking it for its callbacks the first time
+/// (thistle_app_main). Its id must be its manifest's, which its permissions
+/// were granted to.
+unsafe fn opened_app(slot: usize) -> Option<&'static ThistleApp> {
+    let handle = REG_MUTEX.lock().ok()?.as_ref()?[slot].handle;
+    if handle.is_null() {
+        return None;
+    }
+    let loaded = &mut *handle;
+    if loaded.app.is_null() {
+        let app = request_app(loaded.elf_storage.as_mut_ptr() as *mut c_void);
+        let manifest_id = CStr::from_ptr(loaded.app_id.as_ptr() as *const c_char);
+        match app {
+            Some(app) if !app.id.is_null() && CStr::from_ptr(app.id) == manifest_id => {
+                loaded.app = app;
+                esp_log_write(
+                    ESP_LOG_INFO,
+                    TAG.as_ptr(),
+                    b"Opened ELF app: %s\0".as_ptr(),
+                    app.id,
+                );
             }
-            elf_app_start(handle)
+            _ => {
+                esp_log_write(
+                    ESP_LOG_ERROR,
+                    TAG.as_ptr(),
+                    b"App does not declare itself as its manifest does: %s\0".as_ptr(),
+                    manifest_id.as_ptr(),
+                );
+                return None;
+            }
         }
+    }
+    Some(&*loaded.app)
+}
+
+// The callbacks registered for each slot: each opens the app in it and calls
+// the app's own.
+unsafe extern "C" fn on_create_in<const SLOT: usize>() -> i32 {
+    match opened_app(SLOT) {
+        Some(app) => app.on_create.map_or(ESP_OK, |on_create| on_create()),
+        None => ESP_ERR_INVALID_STATE,
+    }
+}
+
+unsafe extern "C" fn on_start_in<const SLOT: usize>() {
+    if let Some(on_start) = opened_app(SLOT).and_then(|app| app.on_start) {
+        on_start();
+    }
+}
+
+unsafe extern "C" fn on_pause_in<const SLOT: usize>() {
+    if let Some(on_pause) = opened_app(SLOT).and_then(|app| app.on_pause) {
+        on_pause();
+    }
+}
+
+unsafe extern "C" fn on_resume_in<const SLOT: usize>() {
+    if let Some(on_resume) = opened_app(SLOT).and_then(|app| app.on_resume) {
+        on_resume();
+    }
+}
+
+unsafe extern "C" fn on_destroy_in<const SLOT: usize>() {
+    if let Some(on_destroy) = opened_app(SLOT).and_then(|app| app.on_destroy) {
+        on_destroy();
+    }
+}
+
+macro_rules! per_slot {
+    ($callback:ident) => {
+        [
+            $callback::<0>, $callback::<1>, $callback::<2>, $callback::<3>,
+            $callback::<4>, $callback::<5>, $callback::<6>, $callback::<7>,
+            $callback::<8>, $callback::<9>, $callback::<10>, $callback::<11>,
+            $callback::<12>, $callback::<13>, $callback::<14>, $callback::<15>,
+        ]
     };
 }
 
-make_on_create!(on_create_slot_0, 0);
-make_on_create!(on_create_slot_1, 1);
-make_on_create!(on_create_slot_2, 2);
-make_on_create!(on_create_slot_3, 3);
-make_on_create!(on_create_slot_4, 4);
-make_on_create!(on_create_slot_5, 5);
-make_on_create!(on_create_slot_6, 6);
-make_on_create!(on_create_slot_7, 7);
-make_on_create!(on_create_slot_8, 8);
-make_on_create!(on_create_slot_9, 9);
-make_on_create!(on_create_slot_10, 10);
-make_on_create!(on_create_slot_11, 11);
-make_on_create!(on_create_slot_12, 12);
-make_on_create!(on_create_slot_13, 13);
-make_on_create!(on_create_slot_14, 14);
-make_on_create!(on_create_slot_15, 15);
+const ON_CREATE: [unsafe extern "C" fn() -> i32; MAX_LOADED_APPS] = per_slot!(on_create_in);
+const ON_START: [unsafe extern "C" fn(); MAX_LOADED_APPS] = per_slot!(on_start_in);
+const ON_PAUSE: [unsafe extern "C" fn(); MAX_LOADED_APPS] = per_slot!(on_pause_in);
+const ON_RESUME: [unsafe extern "C" fn(); MAX_LOADED_APPS] = per_slot!(on_resume_in);
+const ON_DESTROY: [unsafe extern "C" fn(); MAX_LOADED_APPS] = per_slot!(on_destroy_in);
 
-/// Per-slot on_destroy callbacks — unload the ELF when the app is killed.
-macro_rules! make_on_destroy {
-    ($fn_name:ident, $slot:expr) => {
-        unsafe extern "C" fn $fn_name() {
-            let handle = {
-                match REG_MUTEX.lock() {
-                    Ok(regs) => match regs.as_ref() {
-                        Some(r) => r[$slot].handle,
-                        None => return,
-                    },
-                    Err(_) => return,
-                }
-            };
-            if !handle.is_null() {
-                elf_app_unload(handle);
+/// The app ELFs under `dir`: each `NAME.app.elf`, and each app the App Store
+/// installed, `ID/generations/N/app.app.elf` for the release `ID/active.json`
+/// names. Sorted, so apps register in the same order every boot.
+pub fn app_elf_paths(dir: &std::path::Path) -> std::io::Result<Vec<std::path::PathBuf>> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(dir)?.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.') {
+            continue;
+        }
+        if name.ends_with(".app.elf") && path.is_file() {
+            found.push(path);
+        } else if path.is_dir() {
+            if let Some(generation) = crate::tap_installer::active_generation(&path) {
+                found.push(generation.join("app.app.elf"));
             }
         }
-    };
+    }
+    found.sort();
+    Ok(found)
 }
 
-make_on_destroy!(on_destroy_slot_0, 0);
-make_on_destroy!(on_destroy_slot_1, 1);
-make_on_destroy!(on_destroy_slot_2, 2);
-make_on_destroy!(on_destroy_slot_3, 3);
-make_on_destroy!(on_destroy_slot_4, 4);
-make_on_destroy!(on_destroy_slot_5, 5);
-make_on_destroy!(on_destroy_slot_6, 6);
-make_on_destroy!(on_destroy_slot_7, 7);
-make_on_destroy!(on_destroy_slot_8, 8);
-make_on_destroy!(on_destroy_slot_9, 9);
-make_on_destroy!(on_destroy_slot_10, 10);
-make_on_destroy!(on_destroy_slot_11, 11);
-make_on_destroy!(on_destroy_slot_12, 12);
-make_on_destroy!(on_destroy_slot_13, 13);
-make_on_destroy!(on_destroy_slot_14, 14);
-make_on_destroy!(on_destroy_slot_15, 15);
-
-const ON_CREATE_TABLE: [unsafe extern "C" fn() -> i32; MAX_LOADED_APPS] = [
-    on_create_slot_0,
-    on_create_slot_1,
-    on_create_slot_2,
-    on_create_slot_3,
-    on_create_slot_4,
-    on_create_slot_5,
-    on_create_slot_6,
-    on_create_slot_7,
-    on_create_slot_8,
-    on_create_slot_9,
-    on_create_slot_10,
-    on_create_slot_11,
-    on_create_slot_12,
-    on_create_slot_13,
-    on_create_slot_14,
-    on_create_slot_15,
-];
-
-const ON_DESTROY_TABLE: [unsafe extern "C" fn(); MAX_LOADED_APPS] = [
-    on_destroy_slot_0,
-    on_destroy_slot_1,
-    on_destroy_slot_2,
-    on_destroy_slot_3,
-    on_destroy_slot_4,
-    on_destroy_slot_5,
-    on_destroy_slot_6,
-    on_destroy_slot_7,
-    on_destroy_slot_8,
-    on_destroy_slot_9,
-    on_destroy_slot_10,
-    on_destroy_slot_11,
-    on_destroy_slot_12,
-    on_destroy_slot_13,
-    on_destroy_slot_14,
-    on_destroy_slot_15,
-];
-
-/// Scan `/spiffs/apps/` and `/sdcard/apps/` for `*.app.elf` files, load each
-/// one, and register it with the app manager so it appears in the launcher.
+/// Scan `/spiffs/apps/` and `/sdcard/apps/` for app ELFs (`app_elf_paths`),
+/// load each one, and register it with the app manager so it appears in the
+/// launcher.
 ///
 /// # Safety
 /// May be called from C. Accesses the filesystem and global state.
 #[no_mangle]
 pub unsafe extern "C" fn elf_app_scan_and_register() -> c_int {
-    let dirs: [&str; 2] = ["/spiffs/apps", "/sdcard/apps"];
+    let dirs: [&str; 2] = ["/spiffs/apps\0", "/sdcard/apps\0"];
     let mut registered: i32 = 0;
 
     for dir in &dirs {
-        let read_dir = match std::fs::read_dir(dir) {
-            Ok(d) => d,
+        let elf_paths = match app_elf_paths(std::path::Path::new(dir.trim_end_matches('\0'))) {
+            Ok(found) => found,
             Err(_) => {
                 esp_log_write(
                     ESP_LOG_DEBUG,
@@ -974,15 +946,8 @@ pub unsafe extern "C" fn elf_app_scan_and_register() -> c_int {
             }
         };
 
-        for dir_entry in read_dir.flatten() {
-            let name = dir_entry.file_name();
-            let name_str = name.to_string_lossy();
-
-            if !name_str.ends_with(".app.elf") {
-                continue;
-            }
-
-            let full_path = format!("{}/{}\0", dir, name_str);
+        for elf_path in elf_paths {
+            let full_path = format!("{}\0", elf_path.display());
             let full_path_ptr = full_path.as_ptr() as *const c_char;
 
             esp_log_write(
@@ -1093,11 +1058,15 @@ pub unsafe extern "C" fn elf_app_scan_and_register() -> c_int {
                 let copy_name = name_len.min(s.name.len() - 1);
                 s.name[..copy_name].copy_from_slice(&c_manifest.name[..copy_name]);
                 s.name[copy_name] = 0;
+                let version_len = c_manifest.version.iter().position(|&b| b == 0).unwrap_or(0);
+                let copy_version = version_len.min(s.version.len() - 1);
+                s.version[..copy_version].copy_from_slice(&c_manifest.version[..copy_version]);
+                s.version[copy_version] = 0;
             }
 
             // 5. Build registration entry with static pointers
             //    We must get pointers into the static string storage.
-            let (id_ptr, name_ptr) = {
+            let (id_ptr, name_ptr, version_ptr) = {
                 let mut strings = match REG_STR_MUTEX.lock() {
                     Ok(s) => s,
                     Err(_) => {
@@ -1109,6 +1078,7 @@ pub unsafe extern "C" fn elf_app_scan_and_register() -> c_int {
                 (
                     strs[reg_slot].id.as_ptr() as *const c_char,
                     strs[reg_slot].name.as_ptr() as *const c_char,
+                    strs[reg_slot].version.as_ptr() as *const c_char,
                 )
             };
 
@@ -1122,20 +1092,23 @@ pub unsafe extern "C" fn elf_app_scan_and_register() -> c_int {
                 };
                 let reg = &mut ensure_regs(&mut regs)[reg_slot];
 
+                // The slot's callbacks, which open the app and call its own
+                // on the UI task, as the simulator calls a host build's
+                // (sim_app_loader.c).
                 reg.manifest = CAppManifest {
                     id: id_ptr,
                     name: name_ptr,
-                    version: b"0.0.0\0".as_ptr() as *const c_char,
+                    version: version_ptr,
                     allow_background: c_manifest.background,
                     min_memory_kb: c_manifest.min_memory_kb,
                 };
                 reg.handle = handle;
                 reg.entry = CAppEntry {
-                    on_create: Some(ON_CREATE_TABLE[reg_slot]),
-                    on_start: None,
-                    on_pause: None,
-                    on_resume: None,
-                    on_destroy: Some(ON_DESTROY_TABLE[reg_slot]),
+                    on_create: Some(ON_CREATE[reg_slot]),
+                    on_start: Some(ON_START[reg_slot]),
+                    on_pause: Some(ON_PAUSE[reg_slot]),
+                    on_resume: Some(ON_RESUME[reg_slot]),
+                    on_destroy: Some(ON_DESTROY[reg_slot]),
                     manifest: &reg.manifest as *const CAppManifest,
                 };
                 reg.used = true;
@@ -1178,8 +1151,9 @@ pub unsafe extern "C" fn elf_app_scan_and_register() -> c_int {
             esp_log_write(
                 ESP_LOG_INFO,
                 TAG.as_ptr(),
-                b"Registered ELF app: %s (perms=0x%x)\0".as_ptr(),
+                b"Registered ELF app: %s %s (perms=0x%x)\0".as_ptr(),
                 id_ptr,
+                version_ptr,
                 perms,
             );
             registered += 1;
@@ -1200,6 +1174,79 @@ pub unsafe extern "C" fn elf_app_scan_and_register() -> c_int {
 mod tests {
     use super::*;
     use std::ffi::CString;
+
+    #[test]
+    fn scan_finds_plain_elfs_and_active_store_installs_only() {
+        let apps = std::env::temp_dir().join(format!("thistle-elf-scan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&apps);
+        std::fs::create_dir_all(&apps).unwrap();
+        for file in ["hello.app.elf", "hello.app.elf.sig", "hello.manifest.json", ".hello.app.elf.thistle-tmp-1"] {
+            std::fs::write(apps.join(file), b"x").unwrap();
+        }
+        // Installed and activated.
+        let notes = apps.join("com.thistle.notes");
+        std::fs::create_dir_all(notes.join("generations/2")).unwrap();
+        std::fs::write(notes.join("generations/2/app.app.elf"), b"elf").unwrap();
+        std::fs::write(notes.join("active.json"), "{\"release_sequence\": 2, \"version\": \"1.1.0\"}").unwrap();
+        // Unpacked, never activated.
+        std::fs::create_dir_all(apps.join("com.thistle.half/generations/1")).unwrap();
+        std::fs::write(apps.join("com.thistle.half/generations/1/app.app.elf"), b"elf").unwrap();
+
+        assert_eq!(
+            app_elf_paths(&apps).unwrap(),
+            vec![notes.join("generations/2/app.app.elf"), apps.join("hello.app.elf")]
+        );
+        std::fs::remove_dir_all(&apps).unwrap();
+    }
+
+    /// An ELF32 header and three sections: none, .dynsym, .dynstr, the
+    /// symbols `names` at `values`, entered at `entry`.
+    fn elf_with_symbols(entry: u32, symbols: &[(&str, u32)]) -> Vec<u8> {
+        let mut strings = vec![0u8];
+        let mut syms = vec![0u8; 16];
+        for (name, value) in symbols {
+            let mut sym = [0u8; 16];
+            sym[..4].copy_from_slice(&(strings.len() as u32).to_le_bytes());
+            sym[4..8].copy_from_slice(&value.to_le_bytes());
+            syms.extend_from_slice(&sym);
+            strings.extend_from_slice(name.as_bytes());
+            strings.push(0);
+        }
+        let mut elf = vec![0u8; 52];
+        elf[..5].copy_from_slice(b"\x7fELF\x01");
+        elf[24..28].copy_from_slice(&entry.to_le_bytes());
+        let (sym_off, str_off) = (elf.len(), elf.len() + syms.len());
+        elf.extend_from_slice(&syms);
+        elf.extend_from_slice(&strings);
+        let shoff = elf.len();
+        elf[32..36].copy_from_slice(&(shoff as u32).to_le_bytes());
+        elf[46..48].copy_from_slice(&40u16.to_le_bytes());
+        elf[48..50].copy_from_slice(&3u16.to_le_bytes());
+        let section = |kind: u32, offset: usize, size: usize, link: u32| {
+            let mut sh = [0u8; 40];
+            sh[4..8].copy_from_slice(&kind.to_le_bytes());
+            sh[16..20].copy_from_slice(&(offset as u32).to_le_bytes());
+            sh[20..24].copy_from_slice(&(size as u32).to_le_bytes());
+            sh[24..28].copy_from_slice(&link.to_le_bytes());
+            sh
+        };
+        elf.extend_from_slice(&[0u8; 40]);
+        elf.extend_from_slice(&section(11, sym_off, syms.len(), 2));
+        elf.extend_from_slice(&section(3, str_off, strings.len(), 0));
+        elf
+    }
+
+    #[test]
+    fn only_an_elf_entered_at_thistle_app_main_is_an_app() {
+        let app = elf_with_symbols(0x1acc, &[("thistle_ui_set_text", 0), ("thistle_app_main", 0x1acc)]);
+        assert!(enters_at_app_main(&app));
+        // A program entered at its main().
+        assert!(!enters_at_app_main(&elf_with_symbols(0x200, &[("thistle_app_main", 0x1acc), ("main", 0x200)])));
+        assert!(!enters_at_app_main(&elf_with_symbols(0x200, &[("main", 0x200)])));
+        assert!(!enters_at_app_main(&app[..app.len() - 30]), "cut short");
+        assert!(!enters_at_app_main(b"\x7fELF"));
+        assert!(!enters_at_app_main(&[]));
+    }
 
     #[test]
     fn unsigned_manifest_cannot_escalate_beyond_ipc() {

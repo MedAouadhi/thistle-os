@@ -24,15 +24,26 @@ typedef struct {
     void (*on_destroy)(void);
 } thistle_app_t;
 
-/* Macro to declare an app's entry point */
+/* Macro to declare an app's entry point.
+ *
+ * The simulator dlopen()s a host build and reads _thistle_app_entry. A device
+ * build is linked with thistle_app_main as its ELF entry point; the kernel
+ * calls it once after relocation, with argc 1, and it leaves the app in
+ * argv[0]. The kernel then runs the app's callbacks on the UI task, as it
+ * does a built-in app's. */
 #if defined(THISTLE_HOST_APP)
 #define THISTLE_APP(app_var) \
     __attribute__((used, visibility("default"))) \
     const thistle_app_t *_thistle_app_entry = &(app_var)
 #else
 #define THISTLE_APP(app_var) \
-    __attribute__((section(".thistle_app"), used, visibility("default"))) \
-    const thistle_app_t *_thistle_app_entry = &(app_var)
+    __attribute__((used, visibility("default"))) \
+    int thistle_app_main(int argc, char *argv[]) \
+    { \
+        if (argc < 1 || !argv) return -1; \
+        argv[0] = (char *)&(app_var); \
+        return 0; \
+    }
 #endif
 
 /* === System calls (resolved at load time by ELF loader) === */
@@ -80,13 +91,46 @@ extern int thistle_audio_stop(void);
 extern int thistle_audio_set_volume(uint8_t percent);      /* 0-100 */
 extern int thistle_audio_set_mic_gain(uint8_t db);         /* 0-42, in 6 dB steps */
 
-/* GPS */
+/* GPS (requires the "gps" permission). get_position fills a
+ * thistle_gps_position_t, the HAL's hal_gps_position_t, and returns 0 while
+ * the receiver is being read, fix or not: fix_valid says which. The struct
+ * must be the app's own static or thistle_malloc'd memory, not a local: the
+ * kernel refuses pointers into internal RAM, where the UI task's stack is. */
+typedef struct {
+    double   latitude;
+    double   longitude;
+    float    altitude_m;
+    float    speed_kmh;
+    float    heading_deg;
+    uint8_t  satellites;
+    bool     fix_valid;
+    uint32_t timestamp;     /* UTC, seconds since 1970 */
+} thistle_gps_position_t;
+
 extern int thistle_gps_enable(void);
-extern int thistle_gps_get_lat_lon(double *lat, double *lon);
+extern int thistle_gps_get_position(thistle_gps_position_t *pos);
+
+/* WiFi (requires the "network" permission). scan fills `out` with up to
+ * `max` networks and returns how many, or a negated esp_err_t; it blocks for
+ * the scan, two or three seconds. connect joins a network as Settings does,
+ * password NULL or "" for an open one, blocking until joined or 10 s have
+ * passed; it returns an esp_err_t, 0 when joined. As for GPS, buffers must
+ * be static or thistle_malloc'd. */
+#define THISTLE_WIFI_SSID_MAX 32
+
+typedef struct {
+    char    ssid[THISTLE_WIFI_SSID_MAX + 1];
+    int8_t  rssi;           /* dBm */
+    uint8_t channel;
+    bool    is_open;        /* no password */
+} thistle_wifi_ap_t;
+
+extern int thistle_wifi_scan(thistle_wifi_ap_t *out, int max);
+extern int thistle_wifi_connect(const char *ssid, const char *password);
 
 /* Storage (fopen/fread/fwrite/fclose semantics).
  * Paths must be relative and are resolved beneath the calling app's private
- * /spiffs/data/apps/<manifest-id>/ root. Absolute paths, '.', '..', invalid
+ * /sdcard/data/apps/<manifest-id>/ root, on the SD card beside the app. Absolute paths, '.', '..', invalid
  * modes, and file handles owned by another app are rejected. */
 extern void *thistle_fs_open(const char *path, const char *mode);
 extern int   thistle_fs_read(void *buf, size_t size, size_t count, void *stream);

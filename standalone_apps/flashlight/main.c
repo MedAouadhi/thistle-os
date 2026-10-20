@@ -136,6 +136,10 @@ static void flashlight_on_resume(void)
 static void flashlight_on_destroy(void)
 {
     thistle_log(TAG, "on_destroy");
+    /* Leaving an app destroys it; the next open builds its screen again. */
+    thistle_ui_destroy(s_root);
+    s_root = s_flash_btn = s_sos_btn = s_hint = THISTLE_WIDGET_NONE;
+    s_mode = 0;
 }
 
 static const thistle_app_t flashlight_app = {

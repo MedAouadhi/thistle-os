@@ -21,6 +21,7 @@ pub mod app_manager;
 pub mod appstore_client;
 pub mod audio_volume;
 pub mod tap_installer;
+pub mod installed_apps;
 pub mod ble_manager;
 pub mod battery_curve;
 pub mod ble_scanner;

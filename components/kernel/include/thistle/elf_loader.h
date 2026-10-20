@@ -12,15 +12,13 @@ typedef struct elf_app_handle *elf_app_handle_t;
 
 /* Load an ELF app from the filesystem path (e.g., "/sdcard/apps/hello.app.elf")
  * Returns ESP_OK on success and populates *handle.
- * The ELF is loaded into PSRAM, symbols resolved against the syscall table. */
+ * The ELF is loaded into PSRAM, symbols resolved against the syscall table,
+ * and its entry point, thistle_app_main (app_sdk), asked for the app's
+ * callbacks, which the app manager runs on the UI task. */
 esp_err_t elf_app_load(const char *path, elf_app_handle_t *handle);
 
-/* Start executing a loaded ELF app.
- * Calls the app's entry point in a new FreeRTOS task. */
-esp_err_t elf_app_start(elf_app_handle_t handle);
-
-/* Stop and unload an ELF app.
- * Deletes the FreeRTOS task, frees PSRAM. */
+/* Unload an ELF app, freeing its PSRAM. Not for a registered app, whose
+ * callbacks live in its ELF. */
 esp_err_t elf_app_unload(elf_app_handle_t handle);
 
 /* Get the app manifest from a loaded ELF (NULL if not found) */

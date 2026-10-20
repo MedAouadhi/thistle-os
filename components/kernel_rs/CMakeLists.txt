@@ -37,9 +37,16 @@ endif()
 set(RUST_BUILD_DIR "${CMAKE_CURRENT_SOURCE_DIR}/target/${RUST_TARGET}/release")
 set(RUST_LIB "${RUST_BUILD_DIR}/libthistle_kernel.a")
 
+# The public half of the build machine's app publisher key, if
+# tools/make_card_appstore.py has made one: the kernel trusts apps signed with
+# it (kernel_boot.rs). Read when cargo runs, not when CMake configures, so
+# making the key needs no reconfigure; cargo rebuilds when it changes. The key
+# pair is the machine's own and git ignores both halves.
+set(APP_PUBLISHER_KEY "${CMAKE_CURRENT_SOURCE_DIR}/../../tools/local_publisher_public.key")
+
 # Write a build script that sources the ESP Rust env in isolation
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/build_rust.sh"
-"#!/bin/bash\nexport PATH=\"$ENV{HOME}/.cargo/bin:$PATH\"\nif [ -f \"$ENV{HOME}/export-esp.sh\" ]; then . \"$ENV{HOME}/export-esp.sh\" 2>/dev/null; fi\ncd \"${CMAKE_CURRENT_SOURCE_DIR}\"\nexport RUSTFLAGS=\"${RUST_TARGET_FEATURES}\"\ncargo +esp build --release --target ${RUST_TARGET} --features ${RUST_FEATURES} -Zbuild-std=std,panic_abort\n")
+"#!/bin/bash\nexport PATH=\"$ENV{HOME}/.cargo/bin:$PATH\"\nif [ -f \"$ENV{HOME}/export-esp.sh\" ]; then . \"$ENV{HOME}/export-esp.sh\" 2>/dev/null; fi\ncd \"${CMAKE_CURRENT_SOURCE_DIR}\"\nexport RUSTFLAGS=\"${RUST_TARGET_FEATURES}\"\nif [ -f \"${APP_PUBLISHER_KEY}\" ]; then export THISTLE_APP_PUBLISHER_KEY=$(od -An -v -tx1 \"${APP_PUBLISHER_KEY}\" | tr -d ' \\n'); else unset THISTLE_APP_PUBLISHER_KEY; fi\ncargo +esp build --release --target ${RUST_TARGET} --features ${RUST_FEATURES} -Zbuild-std=std,panic_abort\n")
 
 # Cargo runs on every build and decides for itself what is out of date. It
 # tracks every input, including thistle-tk under crates/, which the glob of

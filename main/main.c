@@ -359,12 +359,8 @@ void app_main(void)
     permissions_grant("com.thistle.podcasts",   PERM_NETWORK | PERM_STORAGE | PERM_AUDIO);
     permissions_grant("com.thistle.messenger",  PERM_RADIO | PERM_IPC);
     permissions_grant("com.thistle.navigator",  PERM_GPS | PERM_STORAGE);
-    permissions_grant("com.thistle.notes",      PERM_STORAGE);
     permissions_grant("com.thistle.appstore",   PERM_STORAGE | PERM_NETWORK);
     permissions_grant("com.thistle.assistant",   PERM_NETWORK | PERM_STORAGE);
-    permissions_grant("com.thistle.wifiscanner", PERM_NETWORK);
-    permissions_grant("com.thistle.flashlight",  PERM_SYSTEM);
-    permissions_grant("com.thistle.weather",     PERM_GPS);
     permissions_grant("com.thistle.terminal",    PERM_ALL);
     permissions_grant("com.thistle.vault",       PERM_STORAGE | PERM_SYSTEM);
 #endif

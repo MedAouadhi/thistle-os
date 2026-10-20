@@ -6,7 +6,7 @@
 // kernel/HAL symbol names to their addresses for ELF dynamic linking.
 
 use std::ffi::{CStr, CString};
-use std::os::raw::{c_char, c_void};
+use std::os::raw::{c_char, c_int, c_long, c_ulong, c_void};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 
@@ -28,8 +28,12 @@ static CURRENT_APP_CONTEXT: Mutex<AppResolverContext> = Mutex::new(AppResolverCo
 
 const MAX_APP_STORAGE_SLOTS: usize = crate::elf_loader::MAX_LOADED_APPS;
 const MAX_OPEN_APP_FILES: usize = 32;
+// On the card, as the simulator's is, beside the installed apps themselves.
+// It was /spiffs/data/apps, where no app could save anything: SPIFFS has no
+// folders and holds 31 bytes of a whole path, of which
+// "/data/apps/com.thistle.notes/" is 29.
 #[cfg(target_os = "espidf")]
-const APP_STORAGE_BASE: &str = "/spiffs/data/apps";
+const APP_STORAGE_BASE: &str = "/sdcard/data/apps";
 #[cfg(not(target_os = "espidf"))]
 const APP_STORAGE_BASE: &str = "/tmp/thistle_sdcard/data/apps";
 const APP_FS_NAME_MAX: usize = 64;
@@ -146,6 +150,8 @@ const APP_VISIBLE_SYMBOLS: &[&str] = &[
     "thistle_ui_theme_surface",
     "thistle_ui_theme_text",
     "thistle_ui_theme_text_secondary",
+    "thistle_wifi_connect",
+    "thistle_wifi_scan",
 ];
 
 /// Set the identity and stable loader slot of the app currently resolving
@@ -682,6 +688,39 @@ unsafe extern "C" fn thistle_gps_enable_impl() -> i32 {
     }
     // Through the GPS manager, so the quick panel shows it on.
     crate::gps_manager::enable_for_app()
+}
+
+/// Scan for WiFi networks into `out`, at most `max`: the number found, or
+/// an esp_err_t negated. Blocks for the scan, two or three seconds.
+#[cfg(not(test))]
+unsafe extern "C" fn thistle_wifi_scan_impl(
+    out: *mut crate::wifi_manager::WifiScanResult,
+    max: i32,
+) -> i32 {
+    if out.is_null() || max <= 0 || !syscall_is_ptr_allowed(out as *const c_void) {
+        return -0x102; // ESP_ERR_INVALID_ARG
+    }
+    let mut count = 0u8;
+    let ret = crate::wifi_manager::wifi_manager_scan(out, max.min(u8::MAX as i32) as u8, &mut count);
+    if ret != ESP_OK {
+        return -ret;
+    }
+    count as i32
+}
+
+/// Join a WiFi network, as Settings does; NULL or "" for an open one.
+/// Blocks until joined or 10 s have passed.
+#[cfg(not(test))]
+unsafe extern "C" fn thistle_wifi_connect_impl(ssid: *const c_char, password: *const c_char) -> i32 {
+    if ssid.is_null()
+        || !syscall_is_ptr_allowed(ssid as *const c_void)
+        || !syscall_is_ptr_allowed(password as *const c_void)
+    {
+        return 0x102; // ESP_ERR_INVALID_ARG
+    }
+    let open = b"\0";
+    let password = if password.is_null() { open.as_ptr() as *const c_char } else { password };
+    crate::wifi_manager::wifi_manager_connect(ssid, password, 0)
 }
 
 unsafe extern "C" fn thistle_power_get_battery_mv_impl() -> u16 {
@@ -2186,6 +2225,17 @@ static SYSCALL_TABLE: &[SyscallEntry] = &[
         "thistle_ui_theme_text_secondary",
         thistle_ui_theme_text_secondary as unsafe extern "C" fn() -> u32
     ),
+    entry!(
+        "thistle_wifi_connect",
+        thistle_wifi_connect_impl as unsafe extern "C" fn(*const c_char, *const c_char) -> i32,
+        PERM_NETWORK
+    ),
+    entry!(
+        "thistle_wifi_scan",
+        thistle_wifi_scan_impl
+            as unsafe extern "C" fn(*mut crate::wifi_manager::WifiScanResult, i32) -> i32,
+        PERM_NETWORK
+    ),
     entry!("vTaskDelay", vTaskDelay as unsafe extern "C" fn(u32)),
     entry!(
         "vTaskDelete",
@@ -2578,6 +2628,64 @@ static SYSCALL_TABLE: &[SyscallEntry] = &[
     ),
 ];
 
+// The C library functions an app may link, as app_sdk builds apps with
+// -nostdlib: memory, string and formatting functions, which reach nothing an
+// app could not touch itself. Signed and unsigned apps alike. Sorted.
+extern "C" {
+    fn memchr(s: *const c_void, c: c_int, n: usize) -> *mut c_void;
+    fn memcmp(a: *const c_void, b: *const c_void, n: usize) -> c_int;
+    fn memcpy(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void;
+    fn memmove(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void;
+    fn memset(s: *mut c_void, c: c_int, n: usize) -> *mut c_void;
+    fn snprintf(buf: *mut c_char, n: usize, format: *const c_char, ...) -> c_int;
+    fn strchr(s: *const c_char, c: c_int) -> *mut c_char;
+    fn strcmp(a: *const c_char, b: *const c_char) -> c_int;
+    fn strcpy(dst: *mut c_char, src: *const c_char) -> *mut c_char;
+    fn strlen(s: *const c_char) -> usize;
+    fn strncat(dst: *mut c_char, src: *const c_char, n: usize) -> *mut c_char;
+    fn strncmp(a: *const c_char, b: *const c_char, n: usize) -> c_int;
+    fn strncpy(dst: *mut c_char, src: *const c_char, n: usize) -> *mut c_char;
+    fn strnlen(s: *const c_char, n: usize) -> usize;
+    fn strrchr(s: *const c_char, c: c_int) -> *mut c_char;
+    fn strstr(haystack: *const c_char, needle: *const c_char) -> *mut c_char;
+    fn strtol(s: *const c_char, end: *mut *mut c_char, base: c_int) -> c_long;
+    fn strtoul(s: *const c_char, end: *mut *mut c_char, base: c_int) -> c_ulong;
+    // A va_list: only its address is taken here.
+    fn vsnprintf(buf: *mut c_char, n: usize, format: *const c_char, args: *mut c_void) -> c_int;
+}
+
+static APP_LIBC: &[SyscallEntry] = &[
+    entry!("memchr", memchr as unsafe extern "C" fn(*const c_void, c_int, usize) -> *mut c_void),
+    entry!("memcmp", memcmp as unsafe extern "C" fn(*const c_void, *const c_void, usize) -> c_int),
+    entry!("memcpy", memcpy as unsafe extern "C" fn(*mut c_void, *const c_void, usize) -> *mut c_void),
+    entry!("memmove", memmove as unsafe extern "C" fn(*mut c_void, *const c_void, usize) -> *mut c_void),
+    entry!("memset", memset as unsafe extern "C" fn(*mut c_void, c_int, usize) -> *mut c_void),
+    entry!("snprintf", snprintf as unsafe extern "C" fn(*mut c_char, usize, *const c_char, ...) -> c_int),
+    entry!("strchr", strchr as unsafe extern "C" fn(*const c_char, c_int) -> *mut c_char),
+    entry!("strcmp", strcmp as unsafe extern "C" fn(*const c_char, *const c_char) -> c_int),
+    entry!("strcpy", strcpy as unsafe extern "C" fn(*mut c_char, *const c_char) -> *mut c_char),
+    entry!("strlen", strlen as unsafe extern "C" fn(*const c_char) -> usize),
+    entry!("strncat", strncat as unsafe extern "C" fn(*mut c_char, *const c_char, usize) -> *mut c_char),
+    entry!("strncmp", strncmp as unsafe extern "C" fn(*const c_char, *const c_char, usize) -> c_int),
+    entry!("strncpy", strncpy as unsafe extern "C" fn(*mut c_char, *const c_char, usize) -> *mut c_char),
+    entry!("strnlen", strnlen as unsafe extern "C" fn(*const c_char, usize) -> usize),
+    entry!("strrchr", strrchr as unsafe extern "C" fn(*const c_char, c_int) -> *mut c_char),
+    entry!("strstr", strstr as unsafe extern "C" fn(*const c_char, *const c_char) -> *mut c_char),
+    entry!("strtol", strtol as unsafe extern "C" fn(*const c_char, *mut *mut c_char, c_int) -> c_long),
+    entry!("strtoul", strtoul as unsafe extern "C" fn(*const c_char, *mut *mut c_char, c_int) -> c_ulong),
+    entry!(
+        "vsnprintf",
+        vsnprintf as unsafe extern "C" fn(*mut c_char, usize, *const c_char, *mut c_void) -> c_int
+    ),
+];
+
+fn app_libc_symbol(name: &str) -> Option<*mut c_void> {
+    APP_LIBC
+        .binary_search_by(|probe| unsafe { CStr::from_ptr(probe.name) }.to_bytes().cmp(name.as_bytes()))
+        .ok()
+        .map(|index| APP_LIBC[index].func_ptr as *mut c_void)
+}
+
 // ---------------------------------------------------------------------------
 // FFI exports
 // ---------------------------------------------------------------------------
@@ -2637,6 +2745,9 @@ unsafe fn resolve_app_symbol(name: *const c_char, allowed: &[&str]) -> *mut c_vo
         Some(Ok(s)) => s,
         _ => return std::ptr::null_mut(),
     };
+    if let Some(function) = app_libc_symbol(name_str) {
+        return function;
+    }
     if allowed.binary_search(&name_str).is_err() {
         return std::ptr::null_mut();
     }
@@ -2793,6 +2904,25 @@ mod tests {
             let c_name = std::ffi::CString::new(name).unwrap();
             assert!(unsafe { syscall_resolve_signed_app(c_name.as_ptr()) }.is_null());
             assert!(unsafe { syscall_resolve_unsigned_app(c_name.as_ptr()) }.is_null());
+        }
+    }
+
+    #[test]
+    fn test_apps_link_string_and_format_functions_and_no_other_libc() {
+        for symbols in [APP_LIBC] {
+            for pair in symbols.windows(2) {
+                let (a, b) = unsafe { (CStr::from_ptr(pair[0].name), CStr::from_ptr(pair[1].name)) };
+                assert!(a < b, "APP_LIBC is not sorted at {a:?}");
+            }
+        }
+        for name in ["snprintf", "strlen", "memcpy", "memset", "strcmp", "vsnprintf"] {
+            let c_name = std::ffi::CString::new(name).unwrap();
+            assert!(!unsafe { syscall_resolve_signed_app(c_name.as_ptr()) }.is_null(), "{name}");
+            assert!(!unsafe { syscall_resolve_unsigned_app(c_name.as_ptr()) }.is_null(), "{name}");
+        }
+        for name in ["malloc", "free", "fopen", "system", "open", "esp_restart", "abort"] {
+            let c_name = std::ffi::CString::new(name).unwrap();
+            assert!(unsafe { syscall_resolve_signed_app(c_name.as_ptr()) }.is_null(), "{name}");
         }
     }
 

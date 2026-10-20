@@ -33,9 +33,10 @@ class Case:
 # status), then the first network. The rows sit at the same height on every
 # screen, so one set of taps serves all three.
 PASSWORD_DIALOG = ("120,69", "120,135", "120,166")
-# WiFi Scanner on a 240 px screen: Scan, the first network, then Connect,
-# which toasts that a secured network needs Settings.
-SCANNER_TOAST = ("162,38", "120,68", "46,218")
+# The App Store on a 240 px screen: the first entry of the catalog the
+# simulator's card keeps, then Install, which toasts that the catalog has no
+# package of it.
+STORE_TOAST = ("100,75", "57,272")
 # The Assistant's setup form, behind the gear at the right of its header.
 # Its URL field once scrolled a one-line URL sideways, off a 240 px panel.
 ASSISTANT_SETUP_240 = ("221,37",)
@@ -48,8 +49,8 @@ CASES = (
          PASSWORD_DIALOG, "attempting connect to"),
     Case("lcd-password-dialog", "tdeck", "com.thistle.settings",
          PASSWORD_DIALOG, "attempting connect to"),
-    Case("eink-max-toast", "tdeck-max", "com.thistle.wifiscanner",
-         SCANNER_TOAST, "toast: Use Settings"),
+    Case("eink-max-toast", "tdeck-max", "com.thistle.appstore",
+         STORE_TOAST, "toast: This catalog has no installable package"),
     Case("eink-max-assistant-setup", "tdeck-max", "com.thistle.assistant",
          ASSISTANT_SETUP_240, "Setup open"),
     Case("lcd-assistant-setup", "tdeck", "com.thistle.assistant",

@@ -18,7 +18,9 @@ WAV into the simulated microphone (THISTLE_SIM_MIC). It checks:
 - a tap of the key sends nothing;
 - a refusal leaves the field as it was, and says why;
 - Arabic is drawn as Arabic in Notes: in glyphs, not boxes, its letters
-  joined, read from the right, and the cursor where it ends.
+  joined, read from the right, and the cursor where it ends. Notes comes
+  from the App Store, so that case installs its host build on its card, as
+  test_tap_notes.py does.
 
 The real Cohere is never asked: the card's URL replaces the built-in one.
 """
@@ -39,6 +41,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 SIM_DIR = Path(__file__).resolve().parent.parent
+REPO = SIM_DIR.parent
 KEY = "TESTKEY-dictation-0123456789"
 MODEL = "cohere-transcribe-arabic-07-2026"
 RATE = 16000
@@ -119,6 +122,32 @@ def make_card(root: Path, name: str, url: str, language: str | None = None) -> P
         settings["thistle_os"]["dictation"] = {"language": language}
     system.write_text(json.dumps(settings, indent=2))
     return card
+
+
+def install_notes(root: Path, card: Path) -> None:
+    """Notes, built for the simulator, packaged, signed with a key of the
+    test's own and installed on `card`, as the App Store would."""
+    sys.path.insert(0, str(REPO / "tools"))
+    import tap_package
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    build = root / "notes-build"
+    for command in (["cmake", "-S", str(REPO / "standalone_apps/notes"), "-B", str(build),
+                     "-DTHISTLE_HOST_APP=ON"],
+                    ["cmake", "--build", str(build), "--parallel"]):
+        subprocess.run(command, check=True, capture_output=True)
+    elf = build / "notes.app.elf"
+    key = Ed25519PrivateKey.generate()
+    signature = root / "notes.app.elf.sig"
+    signature.write_bytes(key.sign(elf.read_bytes()))
+    public = root / "notes.public.key"
+    public.write_bytes(key.public_key().public_bytes_raw())
+    package = root / "com.thistle.notes-host.tap"
+    tap_package.build_package(REPO / "standalone_apps/notes/manifest.json",
+                              REPO / "standalone_apps/notes/metadata.json",
+                              elf, signature, REPO / "LICENSE", package, "host")
+    Path(f"{package}.sig").write_bytes(key.sign(package.read_bytes()))
+    tap_package.install_package(package, card / "apps", public)
 
 
 def run_sim(simulator: Path, card: Path, mic: Path, hold_ms: int,
@@ -289,13 +318,15 @@ def test_arabic_is_drawn_as_arabic(simulator: Path, cohere: FakeCohere, root: Pa
     mic = root / "speech.wav"
     make_wav(mic, 4.0)
     card = make_card(root, "arabic", cohere.url)
+    install_notes(root, card)
     shot_path = root / "arabic.ppm"
     cohere.take()
     joined, apart = "سلام", "\u200c".join("سلام")
     cohere.status, cohere.answer = 200, {"text": f"{joined}\n{apart}"}
     try:
+        # + New, then into the note's text.
         out = run_sim(simulator, card, mic, hold_ms=1500, app="com.thistle.notes",
-                      taps=("190,30",), screenshot=shot_path)
+                      taps=("192,55", "120,160"), screenshot=shot_path)
     finally:
         cohere.answer = {"text": TRANSCRIPT}
     expect_in(f'Focused text: "{joined}\n{apart}"', out)

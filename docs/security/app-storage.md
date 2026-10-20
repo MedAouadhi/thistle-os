@@ -1,8 +1,13 @@
 # App storage isolation
 
 Apps granted `storage` receive a private persistent root at
-`/spiffs/data/apps/<manifest-id>/`. The app ABI accepts relative paths only and
-maps them beneath that root before calling the filesystem. Absolute paths,
+`/sdcard/data/apps/<manifest-id>/`, on the SD card beside the installed apps.
+(It was `/spiffs/data/apps/`, where nothing could be saved: SPIFFS has no
+folders and holds 31 bytes of a whole path.) Private means from other apps,
+through the ABI: the card is FAT, and the File Manager, File Transfer and a
+computer reading the card see these files as any other. The app ABI accepts
+relative paths only and maps them beneath that root before calling the
+filesystem. Absolute paths,
 empty paths, `.` and `..` components, unsupported open modes, invalid manifest
 IDs, and file handles owned by another app fail closed.
 
@@ -21,7 +26,7 @@ card, or another app's namespace.
 1. Change app calls to pass relative paths such as `notes/today.txt`; remove
    `/spiffs/` and `/sdcard/` prefixes.
 2. A trusted system migration may copy existing files once into
-   `/spiffs/data/apps/<manifest-id>/`. Ordinary apps cannot read arbitrary
+   `/sdcard/data/apps/<manifest-id>/`. Ordinary apps cannot read arbitrary
    legacy locations to migrate themselves.
 3. Preserve the manifest ID across upgrades. Changing it intentionally creates
    a new empty storage namespace and requires a trusted migration.

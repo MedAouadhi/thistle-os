@@ -415,6 +415,10 @@ jobs:
         working-directory: simulator
         run: python3 tests/test_todo.py --sim build/thistle_sim
 
+      - name: Run App Store list, refresh, install and remove tests
+        working-directory: simulator
+        run: python3 tests/test_appstore.py --sim build/thistle_sim
+
       - name: Upload launcher framebuffer failures
         if: failure()
         uses: actions/upload-artifact@v4

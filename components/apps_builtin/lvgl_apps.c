@@ -9,7 +9,9 @@
 
 /* The firmware builds every app and sets none of these flags. The simulators
  * set each one from whether the app's sources are present, so an absent app
- * compiles out instead of failing to link. */
+ * compiles out instead of failing to link. Notes, Weather, WiFi Scanner and
+ * Flashlight are not here: they install from the App Store
+ * (cmake/thistle_apps.cmake, THISTLE_STORE_APPS). */
 #ifndef THISTLE_HAVE_LAUNCHER
 #define THISTLE_HAVE_LAUNCHER 1
 #endif
@@ -43,20 +45,8 @@
 #ifndef THISTLE_HAVE_NAVIGATOR
 #define THISTLE_HAVE_NAVIGATOR 1
 #endif
-#ifndef THISTLE_HAVE_NOTES
-#define THISTLE_HAVE_NOTES 1
-#endif
 #ifndef THISTLE_HAVE_APPSTORE
 #define THISTLE_HAVE_APPSTORE 1
-#endif
-#ifndef THISTLE_HAVE_WIFISCANNER
-#define THISTLE_HAVE_WIFISCANNER 1
-#endif
-#ifndef THISTLE_HAVE_FLASHLIGHT
-#define THISTLE_HAVE_FLASHLIGHT 1
-#endif
-#ifndef THISTLE_HAVE_WEATHER
-#define THISTLE_HAVE_WEATHER 1
 #endif
 #ifndef THISTLE_HAVE_VAULT
 #define THISTLE_HAVE_VAULT 1
@@ -104,23 +94,11 @@
 #if THISTLE_HAVE_NAVIGATOR
 #include "navigator/navigator_app.h"
 #endif
-#if THISTLE_HAVE_NOTES
-#include "notes/notes_app.h"
-#endif
 #if THISTLE_HAVE_TODO
 #include "todo/todo_app.h"
 #endif
 #if THISTLE_HAVE_APPSTORE
 #include "appstore/appstore_app.h"
-#endif
-#if THISTLE_HAVE_WIFISCANNER
-#include "wifiscanner/wifiscanner_app.h"
-#endif
-#if THISTLE_HAVE_FLASHLIGHT
-#include "flashlight/flashlight_app.h"
-#endif
-#if THISTLE_HAVE_WEATHER
-#include "weather/weather_app.h"
 #endif
 #if THISTLE_HAVE_VAULT
 #include "vault/vault_app.h"
@@ -191,9 +169,6 @@ esp_err_t lvgl_apps_register_builtin(bool has_radio, bool has_gps)
         REGISTER(navigator_app_register);
     }
 #endif
-#if THISTLE_HAVE_NOTES
-    REGISTER(notes_app_register);
-#endif
 #if THISTLE_HAVE_TODO
     REGISTER(todo_app_register);
 #endif
@@ -202,17 +177,6 @@ esp_err_t lvgl_apps_register_builtin(bool has_radio, bool has_gps)
 #endif
 #if THISTLE_HAVE_ASSISTANT
     REGISTER(assistant_app_register);
-#endif
-#if THISTLE_HAVE_WIFISCANNER
-    if (has_radio) {
-        REGISTER(wifiscanner_app_register);
-    }
-#endif
-#if THISTLE_HAVE_FLASHLIGHT
-    REGISTER(flashlight_app_register);
-#endif
-#if THISTLE_HAVE_WEATHER
-    REGISTER(weather_app_register);
 #endif
 #if THISTLE_HAVE_TERMINAL
     REGISTER(terminal_app_register);

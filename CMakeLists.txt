@@ -11,6 +11,9 @@ set(EXTRA_COMPONENT_DIRS
     "${CMAKE_CURRENT_SOURCE_DIR}/components"
     "${CMAKE_CURRENT_SOURCE_DIR}/apps"
 )
+# The apps the App Store installs are not built in (cmake/thistle_apps.cmake).
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/thistle_apps.cmake")
+set(EXCLUDE_COMPONENTS ${THISTLE_STORE_APPS})
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(thistle_os)

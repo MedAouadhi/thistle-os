@@ -14,18 +14,25 @@ set(THISTLE_OPTIONAL_APPS
     "appstore|APPSTORE|appstore"
     "file_manager|FILEMGR|filemgr"
     "filexfer|FILEXFER|filexfer"
-    "flashlight|FLASHLIGHT|flashlight"
     "hermes|HERMES|hermes"
     "navigator|NAVIGATOR|navigator"
-    "notes|NOTES|notes"
     "phone|PHONE|phone"
     "podcasts|PODCASTS|podcasts"
     "reader|READER|reader"
     "tailscale|TAILSCALE|tailscale"
     "todo|TODO|todo"
     "vault|VAULT|vault"
-    "weather|WEATHER|weather"
-    "wifiscanner|WIFISCANNER|wifiscanner"
+)
+
+# Apps that come from the App Store instead, as the packages in
+# standalone_apps/ (tools/make_card_appstore.py). Their LVGL versions stay
+# under apps/ but are built nowhere: the firmware excludes them from its
+# components, and neither simulator lists them above.
+set(THISTLE_STORE_APPS
+    flashlight
+    notes
+    weather
+    wifiscanner
 )
 
 # Appends each app's sources to THISTLE_SRCS and its component root to

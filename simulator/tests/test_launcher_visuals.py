@@ -62,7 +62,9 @@ CASES = (
     # All apps. What is new is "All caught up" alone: the card is a fresh copy
     # (run_case), the tailnet is off in its system.json, and the simulated
     # mesh never runs (mesh_manager.rs starts MeshCore on the device alone),
-    # so no row counts its contacts. The hashes changed when the rows came.
+    # so no row counts its contacts. The hashes changed when the rows came,
+    # and the T-Deck Max's when Notes, its fifth pin, moved to the App Store
+    # and Files took its place.
     Case(
         "lcd-home",
         "tdeck",
@@ -80,10 +82,10 @@ CASES = (
         None,
         240,
         320,
-        "0bc91973e2783f8dcf60b997805e3501d1620d6ccef1ed12601b19896a0ff0c8",
+        "f524e3dab07d45014ec9f3e8f299b32d408dea27b537bf87c89b8c6cd856cede",
         clock_rows=64,
     ),
-    # The LCD hashes cover all twenty apps. The nine that live under apps/
+    # The LCD hashes cover every built-in app. The nine that live under apps/
     # were absent from the simulator until its CMakeLists stopped looking for
     # them under components/apps_builtin, so both the dock's favourites and
     # this grid changed when they came back. It changed again when App Store
@@ -91,7 +93,8 @@ CASES = (
     # claimed both IDs, and the listing still showed the LVGL manifests. And
     # again when Podcasts joined, after the Reader, and Phone after Podcasts,
     # and File Transfer after Files, Tailscale after File Transfer,
-    # Hermes after Tailscale, and To-do after Notes.
+    # Hermes after Tailscale, and To-do after Notes; and once more when
+    # Notes, Weather, WiFi Scanner and Flashlight moved to the App Store.
     Case(
         "lcd-apps",
         "tdeck",
@@ -99,7 +102,7 @@ CASES = (
         "160,222",
         320,
         240,
-        "b889109d2d676388c8b27d742fb94487af14ee8235d5ee003c2fc676b6d5236d",
+        "ab2a8a9b400ebbff920355945299c673c145d733b96e31e336be534d3f86a078",
     ),
     # What an e-paper board boots by default: the LVGL grid, three columns
     # wide on a 240 px screen. Its first hash had the tile under the tap
@@ -107,7 +110,8 @@ CASES = (
     # It changed again when the 1-bit conversion moved its cut from a third
     # of white to half, which inks more of each letter's antialiased edge,
     # and when Podcasts joined the grid, Phone, File Transfer, Tailscale,
-    # Hermes and To-do.
+    # Hermes and To-do, and when Notes, Weather, WiFi Scanner and Flashlight
+    # moved to the App Store.
     Case(
         "eink-lvgl-apps",
         "tdeck-max",
@@ -115,7 +119,7 @@ CASES = (
         "120,302",
         240,
         320,
-        "3b2322b1e66d147c84c183b4ffe5b77a09a8929055bed18bf93388fa82ed91fd",
+        "fe9059687742eadd252f259398d26727ba84f14cc19d18c5933d19c62f5223b4",
     ),
 )
 
@@ -220,11 +224,11 @@ def run_case(simulator: Path, output_dir: Path, case: Case) -> None:
 # built at all, so run_lvgl_app_case() requires it to launch on the LCD board
 # before it believes the e-paper refusal. That precondition is why an app from
 # apps/ can be listed here: those were compiled out of both simulators until
-# cmake/thistle_apps.cmake, and without the check notes would pass for being
+# cmake/thistle_apps.cmake, and without the check todo would pass for being
 # absent rather than for being refused. The list covers both homes — settings,
-# terminal and assistant from components/apps_builtin, notes from apps/.
+# terminal and assistant from components/apps_builtin, todo from apps/.
 LVGL_ONLY_APPS = ("com.thistle.settings", "com.thistle.terminal",
-                  "com.thistle.assistant", "com.thistle.notes")
+                  "com.thistle.assistant", "com.thistle.todo")
 
 
 def launch_app(simulator: Path, device: str, app_id: str, *extra: str):

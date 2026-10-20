@@ -1,0 +1,16 @@
+{
+  "type": "app",
+  "id": "com.thistle.wifiscanner",
+  "name": "WiFi Scanner",
+  "version": "1.0.0",
+  "release_sequence": 1,
+  "author": "ThistleOS",
+  "description": "List nearby WiFi networks with their signal and channel, and join one",
+  "category": "utilities",
+  "min_os": "0.3.0",
+  "arch": "esp32s3",
+  "entry": "wifiscanner.app.elf",
+  "permissions": ["network"],
+  "background": false,
+  "min_memory_kb": 24
+}

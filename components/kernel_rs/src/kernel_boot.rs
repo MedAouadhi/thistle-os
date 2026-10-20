@@ -237,6 +237,26 @@ pub extern "C" fn kernel_init() -> i32 {
     unsafe {
         crate::signing::signing_init(signing_key.as_ptr());
     }
+    // A key pair made on the build machine, which tools/make_card_appstore.py
+    // signs its packages with; kernel_rs/CMakeLists.txt passes its public
+    // half in. Trusted for apps only.
+    if let Some(key) = option_env!("THISTLE_APP_PUBLISHER_KEY").and_then(crate::signing::parse_key_hex) {
+        if crate::signing::add_app_publisher(&key) == ESP_OK {
+            #[cfg(target_os = "espidf")]
+            unsafe {
+                esp_log_write(
+                    3, /* INFO */
+                    b"signing\0".as_ptr(),
+                    b"Apps signed by this build's publisher key %02x%02x%02x%02x... are trusted too\0"
+                        .as_ptr(),
+                    key[0] as u32,
+                    key[1] as u32,
+                    key[2] as u32,
+                    key[3] as u32,
+                );
+            }
+        }
+    }
 
     // ELF loader (C)
     let ret = unsafe { elf_loader_init() };

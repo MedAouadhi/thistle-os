@@ -26,6 +26,12 @@ managed_components/
 private.key
 *_private.key
 tools/*_private.key
+# The build machine's own app publisher key's public half, which a firmware
+# built here trusts (tools/make_card_appstore.py); no one else's should
+tools/local_publisher_public.key
+
+# What tools/make_card_appstore.py writes to copy onto an SD card
+card-appstore/
 
 # Rust build artifacts
 components/kernel_rs/target/

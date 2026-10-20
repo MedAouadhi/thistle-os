@@ -31,6 +31,11 @@ const ESP_ERR_INVALID_CRC: i32 = 0x109;
 
 static VERIFYING_KEY: Mutex<Option<VerifyingKey>> = Mutex::new(None);
 
+/// A second key trusted for apps only: their ELFs and TAP packages, never the
+/// firmware or a driver. A build gets one from a key pair made on the build
+/// machine (tools/local_publisher_public.key), so its own packages install.
+static APP_PUBLISHER_KEY: Mutex<Option<VerifyingKey>> = Mutex::new(None);
+
 /// 64 hex chars + NUL terminator. Written once during signing_init(),
 /// never modified after. Safe to return a pointer without holding a lock.
 static mut HEX_BUF: [u8; 65] = [0u8; 65];
@@ -81,6 +86,90 @@ pub(crate) fn verify_file_bytes(path: &str, file_bytes: &[u8]) -> i32 {
     }
 
     unsafe { signing_verify(file_bytes.as_ptr(), file_bytes.len(), sig_bytes.as_ptr()) }
+}
+
+/// A 32-byte key written as 64 hex digits, as the build passes the app
+/// publisher's in.
+pub fn parse_key_hex(hex: &str) -> Option<[u8; 32]> {
+    let hex = hex.trim().as_bytes();
+    if hex.len() != 64 {
+        return None;
+    }
+    let mut key = [0u8; 32];
+    for (byte, pair) in key.iter_mut().zip(hex.chunks(2)) {
+        *byte = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
+    }
+    Some(key)
+}
+
+/// Trust `key` for apps as well as the kernel's own key (APP_PUBLISHER_KEY).
+pub fn add_app_publisher(key: &[u8; 32]) -> i32 {
+    let verifying_key = match VerifyingKey::from_bytes(key) {
+        Ok(k) => k,
+        Err(_) => return ESP_ERR_INVALID_ARG,
+    };
+    match APP_PUBLISHER_KEY.lock() {
+        Ok(mut guard) => {
+            *guard = Some(verifying_key);
+            ESP_OK
+        }
+        Err(_) => ESP_ERR_NO_MEM,
+    }
+}
+
+/// Verify an app's ELF or package: by the kernel's key, else by the app
+/// publisher's, if there is one.
+///
+/// # Safety
+/// As signing_verify().
+#[no_mangle]
+pub unsafe extern "C" fn signing_verify_app(
+    data: *const u8,
+    data_len: usize,
+    signature: *const u8,
+) -> i32 {
+    let ret = signing_verify(data, data_len, signature);
+    if ret != ESP_ERR_INVALID_CRC {
+        return ret;
+    }
+    let guard = match APP_PUBLISHER_KEY.lock() {
+        Ok(g) => g,
+        Err(_) => return ret,
+    };
+    let Some(publisher) = guard.as_ref() else { return ret };
+    let sig_bytes: [u8; 64] = match std::slice::from_raw_parts(signature, 64).try_into() {
+        Ok(b) => b,
+        Err(_) => return ESP_ERR_INVALID_SIZE,
+    };
+    match publisher.verify(std::slice::from_raw_parts(data, data_len), &Signature::from_bytes(&sig_bytes)) {
+        Ok(()) => ESP_OK,
+        Err(_) => ESP_ERR_INVALID_CRC,
+    }
+}
+
+/// signing_verify_file() for an app: signing_verify_app() over the file.
+///
+/// # Safety
+/// `path` must be a valid, NUL-terminated C string.
+#[no_mangle]
+pub unsafe extern "C" fn signing_verify_app_file(path: *const c_char) -> i32 {
+    if path.is_null() {
+        return ESP_ERR_INVALID_ARG;
+    }
+    let path_str = match CStr::from_ptr(path).to_str() {
+        Ok(s) => s,
+        Err(_) => return ESP_ERR_INVALID_ARG,
+    };
+    let bytes = match read_file_bounded(path_str, 16 * 1024 * 1024) {
+        Ok(bytes) => bytes,
+        Err(err) => return err,
+    };
+    let sig_bytes = match read_file_bounded(&sig_path_for(path_str), 64) {
+        Ok(bytes) if bytes.len() == 64 => bytes,
+        Ok(_) => return ESP_ERR_INVALID_SIZE,
+        Err(err) => return err,
+    };
+    signing_verify_app(bytes.as_ptr(), bytes.len(), sig_bytes.as_ptr())
 }
 
 /// Stream one already-open object through Ed25519 verification and a consumer.
@@ -278,6 +367,9 @@ mod tests {
     /// Reset global state between tests so they are independent.
     fn reset() {
         if let Ok(mut g) = VERIFYING_KEY.lock() {
+            *g = None;
+        }
+        if let Ok(mut g) = APP_PUBLISHER_KEY.lock() {
             *g = None;
         }
         unsafe {
@@ -723,5 +815,47 @@ mod tests {
     fn test_has_signature_null_path() {
         let result = unsafe { signing_has_signature(std::ptr::null()) };
         assert!(!result, "signing_has_signature(NULL) must return false");
+    }
+
+    #[test]
+    fn the_app_publisher_signs_apps_and_nothing_else() {
+        reset();
+        let kernel = SigningKey::from_bytes(&[0x42u8; 32]);
+        let publisher = SigningKey::from_bytes(&[0x17u8; 32]);
+        let stranger = SigningKey::from_bytes(&[0x99u8; 32]);
+        unsafe { signing_init(kernel.verifying_key().as_bytes().as_ptr()) };
+        let app = b"an app".to_vec();
+        let by = |key: &SigningKey| key.sign(&app).to_bytes();
+        let app_check = |sig: [u8; 64]| unsafe { signing_verify_app(app.as_ptr(), app.len(), sig.as_ptr()) };
+
+        assert_eq!(app_check(by(&kernel)), ESP_OK);
+        assert_eq!(app_check(by(&publisher)), ESP_ERR_INVALID_CRC, "no publisher yet");
+
+        assert_eq!(add_app_publisher(publisher.verifying_key().as_bytes()), ESP_OK);
+        assert_eq!(app_check(by(&kernel)), ESP_OK);
+        assert_eq!(app_check(by(&publisher)), ESP_OK);
+        assert_eq!(app_check(by(&stranger)), ESP_ERR_INVALID_CRC);
+        // Firmware and drivers still take the kernel's key alone.
+        let sig = by(&publisher);
+        assert_eq!(unsafe { signing_verify(app.as_ptr(), app.len(), sig.as_ptr()) }, ESP_ERR_INVALID_CRC);
+
+        let path = temp_payload_path("publisher");
+        std::fs::write(&path, &app).unwrap();
+        std::fs::write(format!("{}.sig", path.display()), sig).unwrap();
+        let c_path = CString::new(path.to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { signing_verify_app_file(c_path.as_ptr()) }, ESP_OK);
+        assert_eq!(unsafe { signing_verify_file(c_path.as_ptr()) }, ESP_ERR_INVALID_CRC);
+        let _ = std::fs::remove_file(format!("{}.sig", path.display()));
+        let _ = std::fs::remove_file(&path);
+        reset();
+    }
+
+    #[test]
+    fn a_publisher_key_is_read_from_64_hex_digits() {
+        assert_eq!(parse_key_hex(&"aB".repeat(32)), Some([0xab; 32]));
+        assert_eq!(parse_key_hex(&format!("{}\n", "01".repeat(32))), Some([1; 32]));
+        assert_eq!(parse_key_hex(&"ab".repeat(31)), None);
+        assert_eq!(parse_key_hex(&"zz".repeat(32)), None);
+        assert_eq!(parse_key_hex(""), None);
     }
 }

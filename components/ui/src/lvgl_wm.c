@@ -109,7 +109,19 @@ void lvgl_wm_widget_destroy(uint32_t widget)
 {
     lv_obj_t *object = h2obj(widget);
     if (!object) return;
-    s_widget_handles[widget] = NULL;
+    /* Its children go with it, and so must their handles: obj2h() reuses
+     * only empty slots, so an app that builds its screen each time it opens
+     * and deletes it each time it closes filled the registry in a dozen
+     * visits. Widgets are deleted only here, so every handle left names a
+     * live object and its parents can be walked. */
+    for (uint32_t handle = 1; handle < LVGL_WIDGET_HANDLE_MAX; handle++) {
+        for (lv_obj_t *o = s_widget_handles[handle]; o; o = lv_obj_get_parent(o)) {
+            if (o == object) {
+                s_widget_handles[handle] = NULL;
+                break;
+            }
+        }
+    }
     lv_obj_delete(object);
 }
 
