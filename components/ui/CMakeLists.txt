@@ -44,3 +44,7 @@ foreach(fn IN ITEMS lv_font_get_glyph_dsc lv_font_get_glyph_width lv_draw_label
                     lv_label_is_char_under_pos)
     target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=${fn}")
 endforeach()
+
+# On e-paper an animation that plays once ends at once: manager.c stands in
+# for lv_anim_start. The simulator's CMakeLists.txt wraps it too.
+target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=lv_anim_start")

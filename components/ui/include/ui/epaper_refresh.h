@@ -50,3 +50,30 @@ void epaper_refresh_request_full(void);
 /* Decide the refresh about to happen: true for full, false for fast. Call it
  * once per panel refresh, just before it — it counts the refresh. */
 bool epaper_refresh_next_is_full(void);
+
+/* How long the screen must go undrawn before the panel refreshes. LVGL draws
+ * every 33 ms, and a change it draws over two of those, such as an app that
+ * builds its page in an lv_async_call, still lands in one refresh. */
+#define EPAPER_REFRESH_SETTLE_US   (60 * 1000)
+
+/* The longest a change waits for the screen to settle, timed from its first
+ * flush: something animating for good is shown anyway. */
+#define EPAPER_REFRESH_MAX_WAIT_US (1000 * 1000)
+
+/* While a finger is on the screen or Enter is held, how long the screen must
+ * go undrawn instead. What LVGL draws then is a button pressed, black on
+ * e-paper, about to be let go; shown at once, every tap, and every drag that
+ * began on an app icon, flashed it black for a whole refresh. This is LVGL's
+ * long press, which is shown. Nor does the cap above apply: a refresh started
+ * mid-drag only kept the frame the list stopped on waiting for it. */
+#define EPAPER_REFRESH_HELD_US     (400 * 1000)
+
+/* How long after a finger or Enter lets go it still counts as held: LVGL
+ * reads the release up to one 33 ms pass later and draws it a pass after. */
+#define EPAPER_REFRESH_LET_GO_US   (100 * 1000)
+
+/* Whether what LVGL has drawn should go to the panel now, given the time,
+ * when the first and the last flush since the last refresh were, and when a
+ * finger or Enter was last held (now, if one is). esp_timer microseconds. */
+bool epaper_refresh_settled(int64_t now_us, int64_t first_flush_us, int64_t last_flush_us,
+                            int64_t last_held_us);

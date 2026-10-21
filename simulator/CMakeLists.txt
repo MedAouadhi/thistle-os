@@ -249,6 +249,10 @@ foreach(fn IN ITEMS lv_font_get_glyph_dsc lv_font_get_glyph_width lv_draw_label
     target_link_options(thistle_sim PRIVATE "LINKER:--wrap=${fn}")
 endforeach()
 
+# On e-paper an animation that plays once ends at once: manager.c stands in
+# for lv_anim_start, as components/ui/CMakeLists.txt has the firmware's do.
+target_link_options(thistle_sim PRIVATE "LINKER:--wrap=lv_anim_start")
+
 # Export symbols so dlopen'd modules can resolve syscall functions
 if(NOT APPLE)
     target_link_options(thistle_sim PRIVATE -rdynamic)

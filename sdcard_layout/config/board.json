@@ -46,7 +46,7 @@
                 "dc": 35,
                 "rst": -1,
                 "busy": 37,
-                "spi_clock_hz": 2000000
+                "spi_clock_hz": 4000000
             }
         },
         {

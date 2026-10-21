@@ -724,7 +724,37 @@ fn normalize_driver_config(driver_id: &str, board_arch: &str, config: &str) -> S
     ) {
         return normalize_tp4065b_power_config(board_arch, config);
     }
+    if driver_id == "com.thistle.drv.epaper-gdeq031t10" {
+        return normalize_gdeq031t10_config(config);
+    }
     config.to_string()
+}
+
+/// The panel's SPI clock in every profile shipped until 2026-10, a bring-up
+/// value no one chose. LilyGo's own firmware drives the panel at 4 MHz
+/// (GxEPD2's default, T-Deck-MAX `examples/factory`), within the UC8253's
+/// 170 ns write cycle, and so do profiles since: a fast refresh sends two
+/// 9.6 KB frames, 80 ms of SPI at the old clock.
+const GDEQ031T10_OLD_SPI_CLOCK_HZ: i64 = 2_000_000;
+const GDEQ031T10_SPI_CLOCK_HZ: i64 = 4_000_000;
+
+/// A board keeps the profile it saved, so one saved with the old clock gets
+/// the new one here. Any other clock was set on purpose and is kept.
+fn normalize_gdeq031t10_config(config: &str) -> String {
+    if json_get_int(config, "spi_clock_hz") != Some(GDEQ031T10_OLD_SPI_CLOCK_HZ) {
+        return config.to_string();
+    }
+    let mut value: serde_json::Value = match serde_json::from_str(config) {
+        Ok(v) => v,
+        Err(_) => return config.to_string(),
+    };
+    match value.as_object_mut() {
+        Some(fields) => {
+            fields.insert("spi_clock_hz".into(), GDEQ031T10_SPI_CLOCK_HZ.into());
+            value.to_string()
+        }
+        None => config.to_string(),
+    }
 }
 
 fn normalize_tp4065b_power_config(board_arch: &str, config: &str) -> String {
@@ -2508,6 +2538,26 @@ mod tests {
     fn test_normalize_tp4065b_power_config_keeps_existing_channel_fields() {
         let config = r#"{ "adc_channel": 3, "pin_charge_status": 10 }"#;
         let normalized = normalize_tp4065b_power_config("esp32s3", config);
+
+        assert_eq!(normalized, config);
+    }
+
+    #[test]
+    fn a_stored_panel_profile_gets_the_vendors_clock() {
+        let config = r#"{"spi_bus": 0, "cs": 34, "spi_clock_hz": 2000000, "rotation": 180}"#;
+        let normalized =
+            normalize_driver_config("com.thistle.drv.epaper-gdeq031t10", "esp32s3", config);
+
+        assert_eq!(json_get_int(&normalized, "spi_clock_hz"), Some(4_000_000));
+        assert_eq!(json_get_int(&normalized, "cs"), Some(34));
+        assert_eq!(json_get_int(&normalized, "rotation"), Some(180));
+    }
+
+    #[test]
+    fn a_panel_clock_set_to_anything_else_is_kept() {
+        let config = r#"{"cs": 34, "spi_clock_hz": 1000000}"#;
+        let normalized =
+            normalize_driver_config("com.thistle.drv.epaper-gdeq031t10", "esp32s3", config);
 
         assert_eq!(normalized, config);
     }

@@ -14,6 +14,7 @@
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "driver/spi_master.h"
 #include "driver/gpio.h"
 #include "driver/ledc.h"
@@ -77,6 +78,9 @@ static struct {
     uint8_t                   *fb;          /* current frame to send via 0x13 */
     uint8_t                   *fb_old;      /* previous frame to send via 0x10 */
     uint8_t                   *spi_buf;     /* EPD_SPI_CHUNK bytes, DMA-capable */
+    /* Held while fb is written or read: the window manager flushes into it
+     * from its task while the panel refreshes from another. */
+    SemaphoreHandle_t          fb_lock;
     bool                       initialised;
     bool                       init_seq_done;     /* PSR sent since last refresh */
     bool                       power_on;
@@ -303,7 +307,8 @@ static esp_err_t gdeq031t10_init(const void *config)
     s_epd.fb      = heap_caps_malloc_prefer(EPD_FB_BYTES, 2, fb_caps_psram, fb_caps_internal);
     s_epd.fb_old  = heap_caps_malloc_prefer(EPD_FB_BYTES, 2, fb_caps_psram, fb_caps_internal);
     s_epd.spi_buf = heap_caps_malloc(EPD_SPI_CHUNK, MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
-    if (!s_epd.fb || !s_epd.fb_old || !s_epd.spi_buf) {
+    if (!s_epd.fb_lock) s_epd.fb_lock = xSemaphoreCreateMutex();
+    if (!s_epd.fb || !s_epd.fb_old || !s_epd.spi_buf || !s_epd.fb_lock) {
         ESP_LOGE(TAG, "FB alloc failed");
         free(s_epd.fb);      s_epd.fb = NULL;
         free(s_epd.fb_old);  s_epd.fb_old = NULL;
@@ -348,7 +353,7 @@ static esp_err_t gdeq031t10_init(const void *config)
     /* SPI device — manual CS so we can frame each command/data segment */
     spi_device_interface_config_t dev_cfg = {
         .clock_source   = SPI_CLK_SRC_DEFAULT,
-        .clock_speed_hz = s_epd.cfg.spi_clock_hz > 0 ? s_epd.cfg.spi_clock_hz : 2000000,
+        .clock_speed_hz = s_epd.cfg.spi_clock_hz > 0 ? s_epd.cfg.spi_clock_hz : 4000000,
         .mode           = 0,
         .spics_io_num   = -1,
         .queue_size     = 1,
@@ -416,27 +421,19 @@ static esp_err_t gdeq031t10_flush(const hal_area_t *area, const uint8_t *color_d
      * Flip rows here so the WM and input stack retain ordinary portrait
      * coordinates without horizontally mirroring text. Which way up the panel
      * is mounted is the PSR's business, not this function's. */
+    xSemaphoreTake(s_epd.fb_lock, portMAX_DELAY);
     epaper_blit_packed_rect_flip_y(s_epd.fb, EPD_WIDTH, EPD_HEIGHT,
                                   x1, y1, x2, y2, color_data);
+    xSemaphoreGive(s_epd.fb_lock);
     return ESP_OK;
 }
 
-static esp_err_t gdeq031t10_refresh(void)
+/* Send the controller the frame to show, and the frame it shows now, which
+ * a fast refresh drives from; a full refresh gets the new one twice, matching
+ * GxEPD2 writeImageForFullRefresh(). The frame sent becomes the one the panel
+ * shows. Called with fb_lock held, as the window manager may be flushing. */
+static esp_err_t epaper_send_frames(bool fast)
 {
-    if (!s_epd.initialised) return ESP_ERR_INVALID_STATE;
-
-    /* Skip refresh entirely if nothing has changed since last commit.
-     * E-paper panels should be static — this preserves both the image and
-     * the panel's lifespan. */
-    if (s_epd.first_refresh_done &&
-        memcmp(s_epd.fb, s_epd.fb_old, EPD_FB_BYTES) == 0) {
-        ESP_LOGD(TAG, "refresh: framebuffer unchanged — skipping");
-        return ESP_OK;
-    }
-
-    bool fast = s_epd.first_refresh_done &&
-                s_epd.refresh_mode != HAL_DISPLAY_REFRESH_FULL;
-
     esp_err_t ret;
 
     /* Re-issue init if we cleared init_seq_done after the last refresh */
@@ -445,9 +442,6 @@ static esp_err_t gdeq031t10_refresh(void)
         if (ret != ESP_OK) return ret;
     }
 
-    /* Full refreshes load the new image into both controller planes, matching
-     * GxEPD2 writeImageForFullRefresh(). Fast differential refreshes use the
-     * actual previous frame in DTM1. */
     ret  = epaper_send_cmd(CMD_DTM1);
     if (ret != ESP_OK) return ret;
     ret = epaper_send_data(fast ? s_epd.fb_old : s_epd.fb, EPD_FB_BYTES);
@@ -457,6 +451,33 @@ static esp_err_t gdeq031t10_refresh(void)
     ret = epaper_send_cmd(CMD_DTM2);
     if (ret != ESP_OK) return ret;
     ret = epaper_send_data(s_epd.fb, EPD_FB_BYTES);
+    if (ret != ESP_OK) return ret;
+
+    memcpy(s_epd.fb_old, s_epd.fb, EPD_FB_BYTES);
+    return ESP_OK;
+}
+
+static esp_err_t gdeq031t10_refresh(void)
+{
+    if (!s_epd.initialised) return ESP_ERR_INVALID_STATE;
+
+    xSemaphoreTake(s_epd.fb_lock, portMAX_DELAY);
+
+    /* Skip refresh entirely if nothing has changed since last commit.
+     * E-paper panels should be static — this preserves both the image and
+     * the panel's lifespan. */
+    if (s_epd.first_refresh_done &&
+        memcmp(s_epd.fb, s_epd.fb_old, EPD_FB_BYTES) == 0) {
+        xSemaphoreGive(s_epd.fb_lock);
+        ESP_LOGD(TAG, "refresh: framebuffer unchanged — skipping");
+        return ESP_OK;
+    }
+
+    bool fast = s_epd.first_refresh_done &&
+                s_epd.refresh_mode != HAL_DISPLAY_REFRESH_FULL;
+
+    esp_err_t ret = epaper_send_frames(fast);
+    xSemaphoreGive(s_epd.fb_lock);
     if (ret != ESP_OK) return ret;
 
     /* Fast/partial mode: cascade + force temperature (matches GxEPD2 _Update_Part) */
@@ -485,8 +506,7 @@ static esp_err_t gdeq031t10_refresh(void)
 
     epaper_power_off();
 
-    /* Save current frame as previous; auto-switch to fast for future updates */
-    memcpy(s_epd.fb_old, s_epd.fb, EPD_FB_BYTES);
+    /* Auto-switch to fast for future updates */
     s_epd.first_refresh_done = true;
     s_epd.init_seq_done      = false;   /* GxEPD2 forces re-init each cycle */
     if (s_epd.refresh_mode == HAL_DISPLAY_REFRESH_FULL && !fast) {

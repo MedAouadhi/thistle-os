@@ -34,16 +34,47 @@ static const char *TAG = "ui_mgr";
 #define STATUSBAR_H     24
 #define LVGL_TASK_PERIOD_MS 10
 
-/* E-paper debounce: wait this many microseconds after the last flush
- * before committing the framebuffer to the physical panel. */
-#define EPAPER_REFRESH_DEBOUNCE_US  (300 * 1000)   /* 300 ms */
-
-/* Timestamp (microseconds) of the most recent flush callback. */
+/* E-paper: the panel refreshes once nothing has been drawn for a moment
+ * (epaper_refresh_settled). Timestamps, in microseconds, of the first and the
+ * most recent flush since the last refresh; 0 when there has been none. */
+static int64_t s_first_flush_time = 0;
 static int64_t s_last_flush_time = 0;
+
+/* The panel refreshes on a task of its own. A fast refresh keeps it waiting on
+ * the panel for 0.6 s (the waveform alone is 430 ms on the GDEQ031T10), and
+ * while lvgl_task did that it read no input: a tap that came and went during
+ * a refresh was never seen. Meanwhile LVGL draws on into the driver's
+ * framebuffer, and what it drew goes to the panel as soon as it is free. */
+#define PANEL_TASK_STACK 3072
+static TaskHandle_t s_panel_task = NULL;
+/* Set by lvgl_task when it hands the panel a refresh, cleared by the panel
+ * task once the panel has finished it. */
+static volatile bool s_panel_busy = false;
 
 /* Whether to run deferred e-paper refresh in the LVGL task.
  * Set during ui_manager_init() based on the WM variant. */
 static bool s_use_deferred_refresh = false;
+
+/* On e-paper an animation's frames are never seen: the panel shows where it
+ * ends, once it has. So there an animation that plays once ends at once, such
+ * as a list scrolling to the item the keyboard focused (200 to 400 ms) or an
+ * edge springing back after a drag. One that repeats, such as a blinking
+ * cursor, is left alone. Linked with --wrap, so LVGL's own calls come here
+ * too (components/ui/CMakeLists.txt, and the simulator's). */
+lv_anim_t *__real_lv_anim_start(const lv_anim_t *a);
+
+lv_anim_t *__wrap_lv_anim_start(const lv_anim_t *a)
+{
+    if (!s_use_deferred_refresh || a == NULL || a->repeat_cnt > 1) {
+        return __real_lv_anim_start(a);
+    }
+    lv_anim_t once = *a;
+    once.duration = 0;
+    once.playback_duration = 0;
+    /* An animation of itself: LVGL points the copy it keeps at the copy. */
+    if (a->var == a) once.var = &once;
+    return __real_lv_anim_start(&once);
+}
 
 /* Runtime display dimensions — set from HAL in ui_manager_init() */
 static uint16_t s_display_w = 240;
@@ -77,6 +108,10 @@ static struct {
  * after a release, so LVGL saw a press nobody made, blacked out the button
  * under it, and dropped the next tap. */
 static bool s_touch_press_unread = false;
+
+/* When a finger last left the screen or Enter was last let go (esp_timer
+ * µs), for the e-paper refresh: LVGL draws the release a pass or two later. */
+static int64_t s_let_go_time = INT64_MIN / 2;
 
 typedef struct {
     uint32_t key;
@@ -204,6 +239,15 @@ static void kbd_queue_push(kbd_event_t ev)
     s_kbd_queue_len++;
 }
 
+/* Let the keypad's key go. Enter's release is timed for the e-paper refresh,
+ * as a finger's is: it is the key that draws a button pressed. */
+static void kbd_release(void)
+{
+    s_kbd_state.state = LV_INDEV_STATE_RELEASED;
+    kbd_queue_push(s_kbd_state);
+    if (s_kbd_state.key == LV_KEY_ENTER) s_let_go_time = esp_timer_get_time();
+}
+
 /* Watch the touch stream for the drags that open and close the quick panel.
  * The touch still reaches LVGL: it went down on the status bar, which does
  * nothing with a drag, or on the open panel. */
@@ -239,6 +283,7 @@ static void ui_input_hal_cb(const hal_input_event_t *event, void *user_data)
             break;
         case HAL_INPUT_EVENT_TOUCH_UP:
             s_touch_state.state = LV_INDEV_STATE_RELEASED;
+            s_let_go_time = esp_timer_get_time();
             note_pull(PULL_TOUCH_UP, s_touch_state.x, s_touch_state.y);
             break;
         case HAL_INPUT_EVENT_KEY_DOWN:
@@ -275,8 +320,7 @@ static void ui_input_hal_cb(const hal_input_event_t *event, void *user_data)
                 /* A key let go after a later one went down was released
                  * below when that one was pressed. */
                 if (lv_key != s_kbd_state.key) break;
-                s_kbd_state.state = LV_INDEV_STATE_RELEASED;
-                kbd_queue_push(s_kbd_state);
+                kbd_release();
                 break;
             }
 
@@ -303,8 +347,7 @@ static void ui_input_hal_cb(const hal_input_event_t *event, void *user_data)
              * the first still held, and the second key is never sent. Typing
              * fast overlaps keys like that, so release the held one first. */
             if (s_kbd_state.state == LV_INDEV_STATE_PRESSED) {
-                s_kbd_state.state = LV_INDEV_STATE_RELEASED;
-                kbd_queue_push(s_kbd_state);
+                kbd_release();
             }
             s_kbd_state.key   = lv_key;
             s_kbd_state.state = LV_INDEV_STATE_PRESSED;
@@ -408,8 +451,10 @@ void ui_flush_cb_epaper(lv_display_t *disp, const lv_area_t *area, uint8_t *px_m
         /* Track dirty region for e-paper batching */
         epaper_refresh_mark_dirty(hal_area.x1, hal_area.y1, hal_area.x2, hal_area.y2);
 
-        /* Record timestamp so the render loop can debounce the panel refresh */
+        /* Record when, so the render loop refreshes the panel once the
+         * screen has settled */
         s_last_flush_time = esp_timer_get_time();
+        if (s_first_flush_time == 0) s_first_flush_time = s_last_flush_time;
     }
 
     lv_display_flush_ready(disp);
@@ -446,14 +491,70 @@ static void lvgl_tick_cb(void *arg)
 }
 
 /* Whether this task may stop for sleep: the sleep screen is up, and the
- * panel is not still waiting to show it. Stopped earlier, the device would
- * sleep showing whatever was there before. */
+ * panel is not still waiting to show it, nor showing it. Stopped earlier, the
+ * device would sleep showing whatever was there before. Only this task starts
+ * a refresh, so none starts while it is stopped, and the panel task need not
+ * stop for sleep itself. */
 static bool ready_to_sleep(void)
 {
     if (!power_ui_sleep_screen_shown()) {
         return false;
     }
-    return !(s_use_deferred_refresh && (epaper_refresh_is_dirty() || s_last_flush_time > 0));
+    return !(s_use_deferred_refresh &&
+             (epaper_refresh_is_dirty() || s_last_flush_time > 0 || s_panel_busy));
+}
+
+static void panel_refresh(const hal_registry_t *reg)
+{
+    esp_err_t err = reg->display->refresh();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "e-paper refresh failed: %s", esp_err_to_name(err));
+    }
+    s_panel_busy = false;
+}
+
+static void panel_task(void *arg)
+{
+    const hal_registry_t *reg = arg;
+    while (1) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        panel_refresh(reg);
+    }
+}
+
+/* Hand what LVGL has drawn to the panel, once the screen has settled and the
+ * panel has finished the refresh before. */
+static void epaper_commit(const hal_registry_t *reg)
+{
+    if (!s_use_deferred_refresh || !reg || !reg->display || !reg->display->refresh ||
+        s_panel_busy || !epaper_refresh_is_dirty() || s_last_flush_time == 0) {
+        return;
+    }
+    int64_t now = esp_timer_get_time();
+    bool held = s_touch_state.state == LV_INDEV_STATE_PRESSED ||
+                (s_kbd_state.state == LV_INDEV_STATE_PRESSED && s_kbd_state.key == LV_KEY_ENTER);
+    if (!epaper_refresh_settled(now, s_first_flush_time, s_last_flush_time,
+                                held ? now : s_let_go_time)) {
+        return;
+    }
+    /* The driver is told on every refresh, so the policy is the only thing
+     * that decides: drivers drop back to fast after a full refresh of their
+     * own accord. */
+    bool full = epaper_refresh_next_is_full();
+    if (reg->display->set_refresh_mode) {
+        reg->display->set_refresh_mode(full ? HAL_DISPLAY_REFRESH_FULL
+                                            : HAL_DISPLAY_REFRESH_FAST);
+    }
+    ESP_LOGI(TAG, "refreshing the e-paper panel (%s)", full ? "full" : "fast");
+    epaper_refresh_clear();
+    s_first_flush_time = 0;
+    s_last_flush_time = 0;
+    s_panel_busy = true;
+    if (s_panel_task) {
+        xTaskNotifyGive(s_panel_task);
+    } else {
+        panel_refresh(reg);   /* no task for it: here, as before */
+    }
 }
 
 /* -------------------------------------------------------------------------
@@ -483,37 +584,7 @@ static void lvgl_task(void *arg)
             xSemaphoreGive(s_lvgl_mutex);
         }
 
-        /* ── Debounced e-paper panel refresh ──
-         * After LVGL flushes stop arriving (UI settled for 300 ms), commit
-         * the in-memory framebuffer to the physical e-paper panel once.
-         * Only runs when the WM requested deferred refresh mode. */
-        if (s_use_deferred_refresh &&
-            reg && reg->display &&
-            reg->display->refresh &&
-            epaper_refresh_is_dirty() &&
-            s_last_flush_time > 0)
-        {
-            int64_t now = esp_timer_get_time();
-            if ((now - s_last_flush_time) >= EPAPER_REFRESH_DEBOUNCE_US) {
-                /* The driver is told on every refresh, so the policy is the
-                 * only thing that decides: drivers drop back to fast after a
-                 * full refresh of their own accord. */
-                bool full = epaper_refresh_next_is_full();
-                if (reg->display->set_refresh_mode) {
-                    reg->display->set_refresh_mode(full ? HAL_DISPLAY_REFRESH_FULL
-                                                        : HAL_DISPLAY_REFRESH_FAST);
-                }
-                ESP_LOGI(TAG, "e-paper debounce elapsed, refreshing panel (%s)",
-                         full ? "full" : "fast");
-                esp_err_t ref_err = reg->display->refresh();
-                if (ref_err != ESP_OK) {
-                    ESP_LOGE(TAG, "e-paper refresh failed: %s",
-                             esp_err_to_name(ref_err));
-                }
-                epaper_refresh_clear();
-                s_last_flush_time = 0;  /* reset until next flush */
-            }
-        }
+        epaper_commit(reg);
 
         vTaskDelay(pdMS_TO_TICKS(LVGL_TASK_PERIOD_MS));
     }
@@ -589,6 +660,12 @@ esp_err_t ui_manager_init(ui_flush_fn_t flush_cb, bool use_deferred_refresh)
     s_touch_indev = lv_indev_create();
     lv_indev_set_type(s_touch_indev, LV_INDEV_TYPE_POINTER);
     lv_indev_set_read_cb(s_touch_indev, ui_touch_read_cb);
+    /* On e-paper a flicked list stops where the finger leaves it. Coasting
+     * on, it kept LVGL drawing frames nobody saw for over a second after a
+     * drag, and only then could the panel show where the list had stopped. */
+    if (use_deferred_refresh) {
+        lv_indev_set_scroll_throw(s_touch_indev, 100);
+    }
 
     /* 4b. Register LVGL keypad input device (hardware keyboard) */
     s_kbd_indev = lv_indev_create();
@@ -726,6 +803,17 @@ esp_err_t ui_manager_init(ui_flush_fn_t flush_cb, bool use_deferred_refresh)
 
 esp_err_t ui_manager_start(void)
 {
+    const hal_registry_t *reg = hal_get_registry();
+    /* Just below lvgl_task, which takes the CPU back whenever it has input
+     * to read or something to draw. Without the task, lvgl_task refreshes
+     * the panel itself, as it always did. */
+    if (s_use_deferred_refresh && reg && reg->display && reg->display->refresh &&
+        xTaskCreate(panel_task, "epaper", PANEL_TASK_STACK, (void *)reg, 4,
+                    &s_panel_task) != pdPASS) {
+        s_panel_task = NULL;
+        ESP_LOGW(TAG, "no task for the e-paper panel; the UI waits for each refresh");
+    }
+
     BaseType_t xret = xTaskCreate(lvgl_task, "lvgl", 8192, NULL, 5, NULL);
     if (xret != pdPASS) {
         ESP_LOGE(TAG, "failed to create LVGL task");

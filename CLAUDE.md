@@ -707,6 +707,32 @@ front; in the simulator a pool run dry shows as a segfault in
 `lv_draw_add_task`, not a hang. A Messenger bubble costs about 0.75 KB even
 with shared styles, which is why a conversation keeps 20 messages.
 
+### The e-paper refresh
+
+LVGL draws into the panel driver's framebuffer, and the panel refreshes once
+nothing has been drawn for 60 ms, or a second after the first change if
+something keeps drawing. While a finger is on the screen or Enter is held it
+waits 400 ms, LVGL's long press, and 100 ms after either lets go: what is
+drawn meanwhile is a button pressed, black, and shown at once every tap
+flashed it (`epaper_refresh_settled()`,
+`simulator/tests/test_epaper_refresh_policy.c`).
+On a T-Deck Max a key press shows in about 0.6 s: the panel's fast waveform
+is 430 ms of it, the two 9.6 KB frames 41 ms of SPI at 4 MHz, power-on 40 ms.
+It took 0.95 s with a fixed 300 ms wait and 2 MHz, and a drag 1.5 s more.
+
+- **The refresh runs on a task of its own** (`epaper` in `manager.c`, 3 KB
+  stack), handed each refresh by `lvgl_task`, which reads input and draws on
+  meanwhile; a tap that came and went during a refresh used to be lost. The
+  GDEQ031T10 driver's `fb_lock` keeps a flush and a refresh off the
+  framebuffer at once; a driver for another e-paper panel needs the same.
+- **On e-paper an animation that plays once ends at once**
+  (`__wrap_lv_anim_start`, by `--wrap` as for Arabic text), and a flicked
+  list stops where the finger lifts (`scroll_throw` 100): their frames were
+  never seen, only waited for. One that repeats, such as a blinking cursor,
+  still runs, and costs a refresh each time it changes the screen.
+- A board that saved its profile with the panel at 2 MHz gets 4 MHz at load
+  (`normalize_driver_config`); any other clock is kept.
+
 ### Rust toolchains
 
 Two toolchains, for two different jobs:

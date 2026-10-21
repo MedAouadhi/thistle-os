@@ -19,6 +19,11 @@ static inline UBaseType_t ulTaskNotifyTake(BaseType_t clear, TickType_t timeout)
     return 0;
 }
 
+static inline BaseType_t xTaskNotifyGive(TaskHandle_t task) {
+    (void)task;
+    return pdPASS;
+}
+
 static inline void vTaskNotifyGiveFromISR(TaskHandle_t task, BaseType_t *wake) {
     (void)task;
     if (wake) *wake = pdFALSE;

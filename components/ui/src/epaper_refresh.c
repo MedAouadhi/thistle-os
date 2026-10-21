@@ -150,3 +150,14 @@ bool epaper_refresh_next_is_full(void)
     s_fast_run = full ? 0 : s_fast_run + 1;
     return full;
 }
+
+bool epaper_refresh_settled(int64_t now_us, int64_t first_flush_us, int64_t last_flush_us,
+                            int64_t last_held_us)
+{
+    int64_t undrawn = now_us - last_flush_us;
+    if (now_us - last_held_us < EPAPER_REFRESH_LET_GO_US) {
+        return undrawn >= EPAPER_REFRESH_HELD_US;
+    }
+    return undrawn >= EPAPER_REFRESH_SETTLE_US ||
+           now_us - first_flush_us >= EPAPER_REFRESH_MAX_WAIT_US;
+}

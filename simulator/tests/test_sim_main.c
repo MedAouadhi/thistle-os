@@ -56,6 +56,12 @@ extern void test_epaper_policy_requested_full_happens_once_under_fast(void);
 extern void test_epaper_policy_requested_full_restarts_the_auto_run(void);
 extern void test_epaper_policy_unknown_value_falls_back_to_fast(void);
 extern void test_epaper_policy_init_forgets_the_policy_and_any_request(void);
+extern void test_epaper_refresh_waits_for_the_screen_to_settle(void);
+extern void test_epaper_refresh_settles_from_the_last_flush(void);
+extern void test_epaper_refresh_shows_a_screen_that_never_settles(void);
+extern void test_epaper_refresh_does_not_show_a_press_about_to_be_let_go(void);
+extern void test_epaper_refresh_waits_for_lvgl_to_draw_a_let_go(void);
+extern void test_epaper_refresh_waits_for_a_dragging_finger(void);
 
 /* test_dictation_core.c */
 extern void test_dictation_wav_header_says_16k_mono_16_bit_pcm(void);
@@ -233,6 +239,12 @@ int main(void)
     RUN_TEST(epaper_policy_requested_full_restarts_the_auto_run);
     RUN_TEST(epaper_policy_unknown_value_falls_back_to_fast);
     RUN_TEST(epaper_policy_init_forgets_the_policy_and_any_request);
+    RUN_TEST(epaper_refresh_waits_for_the_screen_to_settle);
+    RUN_TEST(epaper_refresh_settles_from_the_last_flush);
+    RUN_TEST(epaper_refresh_shows_a_screen_that_never_settles);
+    RUN_TEST(epaper_refresh_does_not_show_a_press_about_to_be_let_go);
+    RUN_TEST(epaper_refresh_waits_for_lvgl_to_draw_a_let_go);
+    RUN_TEST(epaper_refresh_waits_for_a_dragging_finger);
 
     printf("\n[dictation_core]\n");
     RUN_TEST(dictation_wav_header_says_16k_mono_16_bit_pcm);
