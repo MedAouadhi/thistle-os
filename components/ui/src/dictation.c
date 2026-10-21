@@ -11,6 +11,7 @@
  */
 #include "ui/dictation.h"
 #include "ui/dictation_core.h"
+#include "ui/manager.h"
 #include "ui/quick_panel.h"
 #include "ui/toast.h"
 
@@ -334,23 +335,6 @@ static void set_target(lv_obj_t *field)
     if (field) lv_obj_add_event_cb(field, target_deleted, LV_EVENT_DELETE, NULL);
 }
 
-/* The text field the keyboard types into, if one is: the focused object of
- * the keypad's group, which the quick panel and the call screen swap for
- * their own. */
-static lv_obj_t *focused_field(void)
-{
-    for (lv_indev_t *indev = lv_indev_get_next(NULL); indev; indev = lv_indev_get_next(indev)) {
-        if (lv_indev_get_type(indev) != LV_INDEV_TYPE_KEYPAD) continue;
-        lv_group_t *group = lv_indev_get_group(indev);
-        lv_obj_t *focused = group ? lv_group_get_focused(group) : NULL;
-        if (focused && lv_obj_check_type(focused, &lv_textarea_class) &&
-            lv_obj_is_visible(focused)) {
-            return focused;
-        }
-    }
-    return NULL;
-}
-
 static void load_config(dictation_config_t *config)
 {
     dictation_config_init(config, DICTATION_DEFAULT_API_KEY);
@@ -399,7 +383,7 @@ static void start(void)
         say("Still transcribing the last one");
         return;
     }
-    lv_obj_t *field = focused_field();
+    lv_obj_t *field = ui_manager_focused_field();
     if (!field) {
         say("Pick a text field to dictate into");
         return;

@@ -53,13 +53,13 @@ static const char *s_wm_override = NULL;
  * busy refreshing a panel. */
 #define SIM_MAX_TAPS   12
 #define SIM_TAP_GAP_MS 1500u
-/* keycode is HAL_KEY_HOME, HAL_KEY_BACK, HAL_KEY_QUICK or HAL_KEY_MIC for a press of that
- * key in place of a tap, and 0 for a tap at x,y. A drag goes down at x,y and
- * moves to x2,y2 over SIM_DRAG_MS before it lifts. A step is done in place
- * of a tap, at its turn: "wait" (nothing), "dial:NUMBER" or
- * "compose:NUMBER[:NAME]". */
+/* keycode is HAL_KEY_HOME, HAL_KEY_BACK, HAL_KEY_QUICK, HAL_KEY_MIC or '\b' for a press
+ * of that key in place of a tap, and 0 for a tap at x,y. A drag goes down at
+ * x,y and moves to x2,y2 over SIM_DRAG_MS before it lifts. A step is done in
+ * place of a tap, at its turn: "wait" (nothing), "dial:NUMBER",
+ * "compose:NUMBER[:NAME]" or "type:TEXT". */
 /* hold_ms, when not -1, is how long this one is held, in place of
- * s_tap_hold_ms: "mic:MS". */
+ * s_tap_hold_ms: "mic:MS", "backspace:MS". */
 static struct { int x, y, x2, y2; uint16_t keycode; bool drag; const char *step; int hold_ms; } s_taps[SIM_MAX_TAPS];
 static int s_tap_count = 0;
 static int s_tap_hold_ms = 100;
@@ -125,7 +125,7 @@ static bool add_tap(const char *spec)
 {
     if (s_tap_count < SIM_MAX_TAPS &&
         (strcmp(spec, "wait") == 0 || strncmp(spec, "dial:", 5) == 0 ||
-         strncmp(spec, "compose:", 8) == 0)) {
+         strncmp(spec, "compose:", 8) == 0 || strncmp(spec, "type:", 5) == 0)) {
         s_taps[s_tap_count].drag = false;
         s_taps[s_tap_count].keycode = 0;
         s_taps[s_tap_count].step = spec;
@@ -145,6 +145,12 @@ static bool add_tap(const char *spec)
             s_tap_count++;
             return true;
         }
+        if (sscanf(spec, "backspace:%d%c", &hold, &end) == 1 && hold >= 0) {
+            s_taps[s_tap_count].keycode = '\b';
+            s_taps[s_tap_count].hold_ms = hold;
+            s_tap_count++;
+            return true;
+        }
         s_taps[s_tap_count].keycode = strcmp(spec, "home") == 0  ? HAL_KEY_HOME
                                     : strcmp(spec, "back") == 0  ? HAL_KEY_BACK
                                     : strcmp(spec, "quick") == 0 ? HAL_KEY_QUICK
@@ -153,8 +159,9 @@ static bool add_tap(const char *spec)
     if (s_tap_count >= SIM_MAX_TAPS ||
         (s_taps[s_tap_count].keycode == 0 &&
          sscanf(spec, "%d,%d", &s_taps[s_tap_count].x, &s_taps[s_tap_count].y) != 2)) {
-        fprintf(stderr, "Invalid --tap value; expected X,Y, home, back, quick, mic, wait, "
-                        "dial:NUMBER or compose:NUMBER[:NAME] (at most %d taps)\n",
+        fprintf(stderr, "Invalid --tap value; expected X,Y, home, back, quick, mic, "
+                        "backspace:MS, wait, dial:NUMBER, compose:NUMBER[:NAME] or "
+                        "type:TEXT (at most %d taps)\n",
                 SIM_MAX_TAPS);
         return false;
     }
@@ -204,6 +211,24 @@ static bool set_tap_start(const char *spec)
 extern bool sim_cellular_has_registered(void);
 extern bool sim_cellular_has_rung(void);
 
+/* Every key's press and release, before LVGL next reads the keypad. The UI
+ * manager queues 32 key events, so 16 keys at a time. */
+static void type_text(const char *text)
+{
+    for (const char *c = text; *c; c++) {
+        sim_input_inject_key((uint8_t)*c, true);
+        if (!s_type_rollover) {
+            sim_input_inject_key((uint8_t)*c, false);
+        } else if (c > text) {
+            sim_input_inject_key((uint8_t)c[-1], false);
+        }
+    }
+    size_t n = strlen(text);
+    if (s_type_rollover && n > 0) {
+        sim_input_inject_key((uint8_t)text[n - 1], false);
+    }
+}
+
 /* A step taking a tap's turn. */
 static void run_step(const char *step)
 {
@@ -224,6 +249,8 @@ static void run_step(const char *step)
         pthread_mutex_lock(&s_lvgl_mutex);
         app_manager_launch("com.thistle.messenger");
         pthread_mutex_unlock(&s_lvgl_mutex);
+    } else if (strncmp(step, "type:", 5) == 0) {
+        type_text(step + 5);
     }
     fflush(stdout);
 }
@@ -364,10 +391,13 @@ int main(int argc, char **argv)
             printf("  --tap home|back|quick  Press the Home, Back or quick key instead\n");
             printf("  --tap mic[:MS]      Hold the microphone key, to dictate (F4 in a\n");
             printf("                      window), for MS or else --tap-hold\n");
+            printf("  --tap backspace:MS  Hold Backspace for MS\n");
             printf("  --tap wait          Take a tap's turn doing nothing\n");
             printf("  --tap dial:NUMBER   Place a call to NUMBER instead (rs_call_dial)\n");
             printf("  --tap compose:NUMBER[:NAME]\n");
             printf("                      Ask the Messenger for an SMS to NUMBER, and open it\n");
+            printf("  --tap type:TEXT     Type TEXT at the tap's turn, as --type does;\n");
+            printf("                      16 keys at most\n");
             printf("  --tap-start WHEN    When the first tap lands: MS after startup (default\n");
             printf("                      2250), or registered+MS or ring+MS: MS after the\n");
             printf("                      modem first registers, or after the --call rings\n");
@@ -591,18 +621,7 @@ int main(int argc, char **argv)
         if (s_type_text && !typed && taps_due && tap_index >= s_tap_count) {
             uint32_t type_ms = taps_base_ms + (uint32_t)s_tap_count * SIM_TAP_GAP_MS;
             if (now_ms - start_ms > type_ms) {
-                for (const char *c = s_type_text; *c; c++) {
-                    sim_input_inject_key((uint8_t)*c, true);
-                    if (!s_type_rollover) {
-                        sim_input_inject_key((uint8_t)*c, false);
-                    } else if (c > s_type_text) {
-                        sim_input_inject_key((uint8_t)c[-1], false);
-                    }
-                }
-                size_t n = strlen(s_type_text);
-                if (s_type_rollover && n > 0) {
-                    sim_input_inject_key((uint8_t)s_type_text[n - 1], false);
-                }
+                type_text(s_type_text);
                 typed = true;
             }
         }

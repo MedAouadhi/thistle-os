@@ -149,6 +149,12 @@ static bool s_quick_close_pending = false;
 static bool s_quick_toggle_pending = false;
 /* Esc while the call screen is open: offered to it alone, as Back is. */
 static bool s_call_esc_pending = false;
+/* Backspace held this long empties the focused text field. LVGL repeats a
+ * held key from 400 ms, so by then it has deleted a word or two. */
+#define CLEAR_HOLD_US (2000 * 1000)
+/* When the Backspace held now went down (esp_timer µs); 0 once it has
+ * emptied a field. Only while s_kbd_state holds Backspace pressed. */
+static int64_t s_backspace_down_at = 0;
 static void (*s_home_handler)(void) = NULL;
 /* The app in front's back handler, and the root container it belongs to. The
  * app manager destroys an app whenever another comes forward, so deleting the
@@ -191,9 +197,41 @@ static bool go_back(void)
            s_back_handler();
 }
 
+lv_obj_t *ui_manager_focused_field(void)
+{
+    for (lv_indev_t *indev = lv_indev_get_next(NULL); indev; indev = lv_indev_get_next(indev)) {
+        if (lv_indev_get_type(indev) != LV_INDEV_TYPE_KEYPAD) continue;
+        lv_group_t *group = lv_indev_get_group(indev);
+        lv_obj_t *focused = group ? lv_group_get_focused(group) : NULL;
+        if (focused && lv_obj_check_type(focused, &lv_textarea_class) &&
+            lv_obj_is_visible(focused)) {
+            return focused;
+        }
+    }
+    return NULL;
+}
+
+/* Backspace held CLEAR_HOLD_US: empty the focused text field, once a press.
+ * Anything else focused is left alone, as is a field already empty. */
+static void clear_held_field(void)
+{
+    if (s_backspace_down_at == 0 || s_kbd_state.state != LV_INDEV_STATE_PRESSED ||
+        s_kbd_state.key != LV_KEY_BACKSPACE ||
+        esp_timer_get_time() - s_backspace_down_at < CLEAR_HOLD_US) {
+        return;
+    }
+    s_backspace_down_at = 0;
+    lv_obj_t *field = ui_manager_focused_field();
+    if (field && lv_textarea_get_text(field)[0] != '\0') {
+        lv_textarea_set_text(field, "");
+        ESP_LOGI(TAG, "Backspace held: text field cleared");
+    }
+}
+
 static void nav_key_timer_cb(lv_timer_t *timer)
 {
     (void)timer;
+    clear_held_field();
     if (s_quick_close_pending) {
         s_quick_close_pending = false;
         quick_panel_close();
@@ -341,6 +379,14 @@ static void ui_input_hal_cb(const hal_input_event_t *event, void *user_data)
              * switch back to the launcher regardless of focus. */
             if (lv_key == LV_KEY_ESC) {
                 app_manager_launch("com.thistle.launcher");
+            }
+
+            /* Backspace starts the hold that empties the field. A press of
+             * it while it is held is the same hold: SDL repeats a held key. */
+            if (lv_key == LV_KEY_BACKSPACE &&
+                !(s_kbd_state.state == LV_INDEV_STATE_PRESSED &&
+                  s_kbd_state.key == LV_KEY_BACKSPACE)) {
+                s_backspace_down_at = esp_timer_get_time();
             }
 
             /* LVGL tracks one key: a second press while one is held reads as

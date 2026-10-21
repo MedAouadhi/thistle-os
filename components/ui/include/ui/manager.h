@@ -37,6 +37,12 @@ void ui_manager_unlock(void);
 /* Show splash screen overlay — auto-hides after duration_ms milliseconds */
 void ui_manager_show_splash(uint32_t duration_ms);
 
+/* The text field the keyboard types into, if one is: the focused text area of
+ * the keypad's group, which the quick panel and the call screen swap for
+ * their own. NULL when the focus is on anything else, or hidden. Call with
+ * the LVGL lock held. */
+lv_obj_t *ui_manager_focused_field(void);
+
 /* Called with the LVGL lock held after a HAL_KEY_HOME press has brought the
  * launcher forward, so the launcher can close whatever it had open over its
  * home screen. One handler; NULL clears it. */
