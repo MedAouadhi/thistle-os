@@ -209,16 +209,6 @@ static void styles_init(void)
     lv_style_set_text_color(&s->field, clr->text);
     lv_style_set_text_font(&s->field, &s_text_font);
 
-    lv_style_set_text_color(&s->placeholder, clr->text_secondary);
-
-    /* A bar before the next letter. It does not blink on e-paper, where each
-     * blink would be a refresh. */
-    lv_style_set_border_side(&s->cursor, LV_BORDER_SIDE_LEFT);
-    lv_style_set_border_width(&s->cursor, 2);
-    lv_style_set_border_color(&s->cursor, clr->text);
-    lv_style_set_bg_opa(&s->cursor, LV_OPA_TRANSP);
-    lv_style_set_anim_duration(&s->cursor, s_ui.epaper ? 0 : 500);
-
     lv_style_set_bg_color(&s->table, clr->bg);
     lv_style_set_bg_opa(&s->table, LV_OPA_COVER);
     lv_style_set_border_width(&s->table, 0);

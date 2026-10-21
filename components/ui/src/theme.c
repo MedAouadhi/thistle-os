@@ -1,3 +1,4 @@
+#include "hal/board.h"
 #include "hal/sdcard_path.h"
 #include "ui/theme.h"
 #include "ui/statusbar.h"
@@ -33,6 +34,61 @@ static lv_style_t  s_style_btn;
 static lv_style_t  s_style_label;
 static lv_style_t  s_style_panel;
 
+/* Text fields, as the To-do app's: a box, drawn heavier while focused, and a
+ * cursor bar while focused. The focused look outranks an app's own unfocused
+ * border, as a state's style does in LVGL, so every field shows it. */
+static lv_style_t  s_style_field;
+static lv_style_t  s_style_field_focused;
+static lv_style_t  s_style_field_placeholder;
+static lv_style_t  s_style_field_cursor;
+
+static void field_styles_set_colors(void)
+{
+    lv_style_set_bg_color(&s_style_field, s_current_theme.surface);
+    lv_style_set_border_color(&s_style_field, s_current_theme.text_secondary);
+    lv_style_set_radius(&s_style_field, s_current_theme.radius);
+    lv_style_set_text_color(&s_style_field, s_current_theme.text);
+    lv_style_set_border_color(&s_style_field_focused, s_current_theme.primary);
+    lv_style_set_outline_color(&s_style_field_focused, s_current_theme.primary);
+    lv_style_set_text_color(&s_style_field_placeholder, s_current_theme.text_secondary);
+    lv_style_set_border_color(&s_style_field_cursor, s_current_theme.text);
+}
+
+static void field_styles_init(void)
+{
+    lv_style_init(&s_style_field);
+    lv_style_set_bg_opa(&s_style_field, LV_OPA_COVER);
+    lv_style_set_border_width(&s_style_field, 1);
+    lv_style_set_pad_hor(&s_style_field, 4);
+    lv_style_set_pad_ver(&s_style_field, 4);
+
+    /* An outline, not a wider border, so the text does not move. */
+    lv_style_init(&s_style_field_focused);
+    lv_style_set_outline_width(&s_style_field_focused, 1);
+    lv_style_set_outline_pad(&s_style_field_focused, 0);
+
+    lv_style_init(&s_style_field_placeholder);
+
+    /* A bar before the next letter. It does not blink on e-paper, where each
+     * blink would be a refresh. */
+    const hal_registry_t *reg = hal_get_registry();
+    bool epaper = reg && reg->display && reg->display->type == HAL_DISPLAY_TYPE_EPAPER;
+    lv_style_init(&s_style_field_cursor);
+    lv_style_set_border_side(&s_style_field_cursor, LV_BORDER_SIDE_LEFT);
+    lv_style_set_border_width(&s_style_field_cursor, 2);
+    lv_style_set_bg_opa(&s_style_field_cursor, LV_OPA_TRANSP);
+    lv_style_set_anim_duration(&s_style_field_cursor, epaper ? 0 : 500);
+
+    field_styles_set_colors();
+}
+
+void theme_style_text_field(lv_obj_t *ta)
+{
+    lv_obj_add_style(ta, &s_style_field_focused, LV_PART_MAIN | LV_STATE_FOCUSED);
+    lv_obj_add_style(ta, &s_style_field_placeholder, LV_PART_TEXTAREA_PLACEHOLDER);
+    lv_obj_add_style(ta, &s_style_field_cursor, LV_PART_CURSOR | LV_STATE_FOCUSED);
+}
+
 /* -------------------------------------------------------------------------
  * LVGL theme apply callback
  * Called by LVGL for every widget — we pattern-match on widget class.
@@ -41,7 +97,10 @@ static void theme_apply_cb(lv_theme_t *th, lv_obj_t *obj)
 {
     (void)th;
 
-    if (lv_obj_check_type(obj, &lv_button_class)) {
+    if (lv_obj_check_type(obj, &lv_textarea_class)) {
+        lv_obj_add_style(obj, &s_style_field, LV_PART_MAIN);
+        theme_style_text_field(obj);
+    } else if (lv_obj_check_type(obj, &lv_button_class)) {
         lv_obj_add_style(obj, &s_style_btn, LV_PART_MAIN);
     } else if (lv_obj_check_type(obj, &lv_label_class)) {
         lv_obj_add_style(obj, &s_style_label, LV_PART_MAIN);
@@ -136,6 +195,7 @@ esp_err_t theme_init(lv_display_t *disp)
 
     /* Initialize default colors */
     theme_colors_init_defaults();
+    field_styles_init();
 
     /* Reset name to Default */
     strncpy(s_current_theme_name, "Default", sizeof(s_current_theme_name) - 1);
@@ -215,6 +275,8 @@ esp_err_t theme_load(const char *json_path)
 
     lv_style_set_bg_color(&s_style_panel, s_current_theme.bg);
     lv_style_set_border_color(&s_style_panel, s_current_theme.text);
+
+    field_styles_set_colors();
 
     /* Force LVGL to re-render everything with new styles */
     lv_obj_report_style_change(NULL);

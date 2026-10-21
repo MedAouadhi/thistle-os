@@ -516,6 +516,9 @@ esp_err_t terminal_ui_create(lv_obj_t *parent)
     lv_textarea_set_one_line(s_term.output_ta, false);
     lv_textarea_set_cursor_click_pos(s_term.output_ta, false);
     lv_obj_clear_flag(s_term.output_ta, LV_OBJ_FLAG_CLICKABLE);
+    /* A text area joins the keyboard's group as it is made; nothing is typed
+     * into this one, so Tab passes it by. */
+    lv_group_remove_obj(s_term.output_ta);
     lv_obj_set_style_bg_color(s_term.output_ta, clr->bg, LV_PART_MAIN);
     lv_obj_set_style_bg_opa(s_term.output_ta, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_border_width(s_term.output_ta, 0, LV_PART_MAIN);

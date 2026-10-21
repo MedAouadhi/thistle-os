@@ -442,8 +442,7 @@ static void build_contacts(lv_obj_t *page)
     lv_obj_t *ta = lv_textarea_create(page);
     lv_obj_remove_style_all(ta);
     lv_obj_add_style(ta, &st->field, LV_PART_MAIN);
-    lv_obj_add_style(ta, &st->placeholder, LV_PART_TEXTAREA_PLACEHOLDER);
-    lv_obj_add_style(ta, &st->cursor, LV_PART_CURSOR | LV_STATE_FOCUSED);
+    theme_style_text_field(ta);
     lv_textarea_set_one_line(ta, true);
     lv_textarea_set_max_length(ta, QUERY_MAX - 1);
     lv_textarea_set_placeholder_text(ta, "Search");

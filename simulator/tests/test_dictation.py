@@ -337,8 +337,13 @@ def test_arabic_is_drawn_as_arabic(simulator: Path, cohere: FakeCohere, root: Pa
     cx, cy = (int(v) for v in cursor[0].split(": ", 1)[1].split(","))
     shot = read_ppm(shot_path)
     text_area = range(12, shot[0] - 4)
-    first = ink_columns(shot, range(cy - 20, cy), text_area)
-    second = ink_columns(shot, range(cy, cy + 20), text_area)
+    # Not the letters: the field's frame, its sides inked in the empty lines
+    # below the text too, its top a few rows above the first line's letters,
+    # which sit in the dozen rows above the second line; and the cursor, a
+    # bar in the two columns left of cx, from 2 rows above the second line.
+    skip = set(ink_columns(shot, range(cy + 40, cy + 60), text_area)) | {cx - 2, cx - 1}
+    first = [x for x in ink_columns(shot, range(cy - 12, cy), text_area) if x not in skip]
+    second = [x for x in ink_columns(shot, range(cy, cy + 20), text_area) if x not in skip]
     expect(first and second, "nothing drawn on one of the note's two lines")
     first_w, second_w = first[-1] - first[0], second[-1] - second[0]
     expect(first_w * 10 < second_w * 9,

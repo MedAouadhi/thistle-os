@@ -63,8 +63,6 @@ typedef struct {
     lv_style_t large;           /* Montserrat 22 */
     lv_style_t note;            /* wrapped text */
     lv_style_t field;           /* a text field */
-    lv_style_t placeholder;
-    lv_style_t cursor;          /* drawn when focused; still on e-paper */
     lv_style_t table;           /* a list */
     lv_style_t cell;            /* its rows */
     lv_style_t cell_chosen;     /* the selected row, inverted */

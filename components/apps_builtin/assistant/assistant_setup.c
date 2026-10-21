@@ -181,7 +181,6 @@ static lv_obj_t *create_textarea(lv_obj_t *parent, int max_lines,
     lv_obj_set_style_bg_opa(ta, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_border_color(ta, tc->text, LV_PART_MAIN);
     lv_obj_set_style_border_width(ta, 1, LV_PART_MAIN);
-    lv_obj_set_style_border_width(ta, 2, LV_STATE_FOCUSED);
     lv_obj_set_style_radius(ta, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_all(ta, FIELD_PAD, LV_PART_MAIN);
     add_to_group(ta);
