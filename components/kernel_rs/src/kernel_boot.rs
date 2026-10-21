@@ -299,6 +299,10 @@ pub extern "C" fn kernel_init() -> i32 {
     // there is a network and the clock is set (tailnet_manager.rs).
     crate::tailnet_manager::start();
 
+    // AssistNow: orbits fetched once a day and handed to a u-blox receiver
+    // as it starts, if a token has been given (gps_assist.rs).
+    crate::gps_assist::start();
+
     // Publish SYSTEM_BOOT event
     crate::event::event_publish_simple(0); // EVENT_SYSTEM_BOOT = 0
 

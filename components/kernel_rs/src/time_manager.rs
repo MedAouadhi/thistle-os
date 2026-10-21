@@ -185,6 +185,18 @@ fn with<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> {
     guard.as_mut().map(f)
 }
 
+/// What last set or confirmed the clock, and when; None before anything
+/// has, or if what did is not known.
+pub(crate) fn last_sync() -> Option<Sync> {
+    with(|s| s.last).flatten()
+}
+
+/// What of the last correction is still to be slewed in, µs: the clock
+/// plus this is the time its source gave.
+pub(crate) fn slew_left_us() -> i64 {
+    platform::pending_slew_us()
+}
+
 fn now_us() -> i64 {
     match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
         Ok(d) => d.as_micros().min(i64::MAX as u128) as i64,

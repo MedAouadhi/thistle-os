@@ -72,3 +72,6 @@ simulator/sdcard/phone/
 # The To-do app's list, which a run of the simulator writes (apps/todo/)
 simulator/sdcard/todo.md
 simulator/sdcard/todo.md.tmp
+
+# The GPS start reports a run of the simulator writes (gps_report.rs)
+simulator/sdcard/gps/

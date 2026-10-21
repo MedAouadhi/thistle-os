@@ -11,13 +11,28 @@
 // The receiver goes into software standby (UBX-RXM-PMREQ) while GPS is off
 // and while the device sleeps, keeping what it knows of the sky for a quick
 // start, and an edge on its UART RX wakes it. So anything sent to it wakes it.
+//
+// Once the receiver talks after a wake it is sent its signals: GPS,
+// Galileo, GLONASS and BeiDou B1C. A second later goes AssistNow
+// Autonomous, switched on, then the assistance (`assist`): the time, where
+// it last was, and of AssistNow's messages the almanacs and the orbit
+// predictions for today, a few each pass with the receiver asked to
+// acknowledge each (UBX-MGA-ACK). What AssistNow registers a receiver by,
+// its UBX-SEC-UNIQID and UBX-MON-VER replies, is polled when asked for, and
+// so is its report of each satellite, UBX-NAV-SAT (`get_satellites`).
 
 #![allow(non_upper_case_globals)]
 
 use std::os::raw::{c_char, c_void};
 use std::time::Duration;
 
-use crate::hal_registry::{HalGpsCb, HalGpsDriver, HalGpsPosition, HalGpsSky};
+use crate::hal_registry::{
+    HalGpsAssist, HalGpsCb, HalGpsDriver, HalGpsIdentity, HalGpsPosition, HalGpsSat, HalGpsSats,
+    HalGpsSky, HAL_GPS_HAS_ALMANAC, HAL_GPS_HAS_AUTONOMOUS, HAL_GPS_HAS_EPHEMERIS,
+    HAL_GPS_HAS_PREDICTED, HAL_GPS_ORBIT_ALMANAC, HAL_GPS_ORBIT_AUTONOMOUS,
+    HAL_GPS_ORBIT_EPHEMERIS, HAL_GPS_ORBIT_NONE, HAL_GPS_ORBIT_OTHER, HAL_GPS_ORBIT_PREDICTED,
+    HAL_GPS_SATS_MAX,
+};
 
 // ── ESP error codes ──────────────────────────────────────────────────────────
 
@@ -25,6 +40,7 @@ const ESP_OK: i32 = 0;
 const ESP_FAIL: i32 = -1;
 const ESP_ERR_INVALID_ARG: i32 = 0x102;
 const ESP_ERR_INVALID_STATE: i32 = 0x103;
+const ESP_ERR_NOT_FOUND: i32 = 0x105;
 
 // ── Driver constants ─────────────────────────────────────────────────────────
 
@@ -90,6 +106,65 @@ const SKY_REPORTS: usize = 8;
 /// indoors says so a few times, not every minute all day.
 const SKY_LOG_FIRST_TICKS: u32 = 30_000;
 const SKY_LOG_MAX_GAP_TICKS: u32 = 600_000;
+
+/// The longest UBX-MON-VER kept: 40 bytes and 30 a string after them,
+/// with eleven strings. This receiver sends six.
+const UBX_MAX: usize = 400;
+/// The longest UBX frame read off the wire: UBX-NAV-SAT, 8 bytes and 12 a
+/// satellite, for 84 satellites. With four constellations the receiver
+/// lists 40 to 60.
+const UBX_FRAME_MAX: usize = 1024;
+/// The poll for UBX-NAV-SAT.
+const UBX_POLL_NAV_SAT: [u8; 8] = [0xB5, 0x62, 0x01, 0x35, 0x00, 0x00, 0x36, 0xA3];
+/// The polls for what AssistNow registers a receiver by.
+const UBX_POLL_SEC_UNIQID: [u8; 8] = [0xB5, 0x62, 0x27, 0x03, 0x00, 0x00, 0x2A, 0xA5];
+const UBX_POLL_MON_VER: [u8; 8] = [0xB5, 0x62, 0x0A, 0x04, 0x00, 0x00, 0x0E, 0x34];
+/// How long a receiver gets to answer them, and how many times it is asked
+/// between two wakes.
+const IDENTITY_RETRY_TICKS: u32 = 3000;
+const IDENTITY_POLLS: u8 = 3;
+/// UBX-CFG-VALSET's payload for the signals tracked: GPS, Galileo, GLONASS
+/// and BeiDou's B1C, with QZSS and SBAS as they come, in RAM and in the
+/// battery-backed RAM, which standby keeps. GLONASS cannot be had with
+/// BeiDou's B1I, the module's default, and B1C, on GPS's frequency, makes
+/// the four (integration manual §2.1.3); B1C acquires a little less
+/// readily. GLONASS is wanted for its orbit predictions, which this
+/// receiver takes, as it does GPS's.
+const VALSET_SIGNALS: [u8; 29] = [
+    0x00, 0x03, 0x00, 0x00, // version 0, layers RAM and BBR
+    0x25, 0x00, 0x31, 0x10, 0x01, // CFG-SIGNAL-GLO_ENA
+    0x18, 0x00, 0x31, 0x10, 0x01, // CFG-SIGNAL-GLO_L1_ENA
+    0x22, 0x00, 0x31, 0x10, 0x01, // CFG-SIGNAL-BDS_ENA
+    0x0D, 0x00, 0x31, 0x10, 0x00, // CFG-SIGNAL-BDS_B1_ENA
+    0x0F, 0x00, 0x31, 0x10, 0x01, // CFG-SIGNAL-BDS_B1C_ENA
+];
+/// A change of signals restarts the receiver's GNSS: the manual asks for
+/// its acknowledgement and half a second before anything more is sent.
+const SIGNALS_SETTLE_TICKS: u32 = 1000;
+/// UBX-CFG-VALSET's payload for CFG-ANA-USE_ANA = 1, in RAM and BBR:
+/// AssistNow Autonomous, the receiver's own orbit predictions, made from
+/// each ephemeris it decodes and good for three days (integration manual
+/// §3.12.4). They cover Galileo and BeiDou, whose AssistNow predictions this
+/// receiver does not take, but not GLONASS, which would need a flash it does
+/// not have. Kept in BBR, so through standby but not deep sleep. The manual
+/// recommends it alongside AssistNow Offline: the receiver picks the better
+/// prediction for each satellite. Sent apart from the signals, so a receiver
+/// that refused it would still have those.
+const VALSET_AUTONOMOUS: [u8; 9] = [0x00, 0x03, 0x00, 0x00, 0x01, 0x00, 0x23, 0x10, 0x01];
+/// UBX-CFG-VALSET's payload for CFG-NAVSPG-ACKAIDING = 1, in RAM: the
+/// receiver acknowledges each assistance message, UBX-MGA-ACK, and says why
+/// one was refused. Off by default; RAM's settings go with the power.
+const VALSET_ACK_AIDING: [u8; 9] = [0x00, 0x01, 0x00, 0x00, 0x25, 0x00, 0x11, 0x10, 0x01];
+/// The constellations whose orbit predictions (UBX-MGA-ANO) this receiver
+/// takes: GPS and GLONASS, the datasheet's table 5. AssistNow sends
+/// Galileo's and BeiDou's too, for receivers that take them.
+const ANO_GNSS: [u8; 2] = [0, 6];
+/// Bytes of assistance sent a pass, at least one message: about half the
+/// line's 3.8 KB a second, so the receiver's buffer never fills while it
+/// also searches the sky. A day's messages take a few seconds.
+const ASSIST_BUDGET: usize = 200;
+/// How long after the last message the acknowledgements may still come.
+const ACK_WAIT_TICKS: u32 = 2000;
 
 // ── ESP-IDF FFI ──────────────────────────────────────────────────────────────
 
@@ -275,6 +350,25 @@ struct GpsState {
     /// all is an unpowered or unwired receiver.
     bytes_seen: u32,
     sentences_seen: u32,
+    /// Whether the signals and AssistNow Autonomous have been sent since
+    /// the last wake, and when the signals went.
+    signals_sent: bool,
+    signals_at: u32,
+    autonomous_sent: bool,
+    /// The UBX-CFG-VALSETs awaiting their answer (UBX-ACK), oldest first:
+    /// the receiver answers in order.
+    cfg_awaited: Vec<Cfg>,
+    /// Whether `get_satellites` has asked for the next UBX-NAV-SAT.
+    sats_wanted: bool,
+    /// Whether `get_identity` has asked for what the receiver has not yet
+    /// answered, and the polls for it since the last wake.
+    identity_wanted: bool,
+    identity_polls: u8,
+    identity_polled: u32,
+    /// The assistance `assist` was handed, until the receiver talks, and
+    /// then what is being sent of it.
+    aid: Option<Box<Aid>>,
+    sending: Option<Box<Sending>>,
 }
 
 // SAFETY: The driver state is only mutated during single-threaded board-init
@@ -320,11 +414,52 @@ impl GpsState {
             nmea_idx: 0,
             bytes_seen: 0,
             sentences_seen: 0,
+            signals_sent: false,
+            signals_at: 0,
+            autonomous_sent: false,
+            cfg_awaited: Vec::new(),
+            sats_wanted: false,
+            identity_wanted: false,
+            identity_polls: 0,
+            identity_polled: 0,
+            aid: None,
+            sending: None,
         }
     }
 }
 
 static mut S_GPS: GpsState = GpsState::new();
+
+/// The receiver's UBX replies: the frame being read; what it said to the
+/// identity polls, whole frames, 0 long until it answers; and its last
+/// report of its satellites, with the tick it came at. In PSRAM, as only
+/// the reader, `get_identity` and `get_satellites`, all on the kernel
+/// worker, touch them.
+struct Ubx {
+    frame: [u8; UBX_FRAME_MAX],
+    len: usize,
+    unique_id: [u8; 32],
+    unique_id_len: usize,
+    version: [u8; UBX_MAX],
+    version_len: usize,
+    sats: HalGpsSats,
+    sats_at: u32,
+    /// Whether `sats` came since the last wake.
+    sats_fresh: bool,
+}
+
+#[cfg_attr(target_os = "espidf", link_section = ".ext_ram.bss")]
+static mut S_UBX: Ubx = Ubx {
+    frame: [0; UBX_FRAME_MAX],
+    len: 0,
+    unique_id: [0; 32],
+    unique_id_len: 0,
+    version: [0; UBX_MAX],
+    version_len: 0,
+    sats: HalGpsSats::EMPTY,
+    sats_at: 0,
+    sats_fresh: false,
+};
 
 // ── NMEA helpers (pure Rust, no external crates) ─────────────────────────────
 
@@ -743,6 +878,589 @@ unsafe fn nmea_feed_byte(byte: u8) {
     }
 }
 
+/// Take one byte off the wire: NMEA and UBX come mixed, and neither's
+/// framing can start inside the other's text.
+///
+/// # Safety
+/// Mutates `S_GPS` and `S_UBX`. Called only from the reader, or a test.
+unsafe fn feed_byte(byte: u8) {
+    nmea_feed_byte(byte);
+    ubx_feed_byte(byte);
+}
+
+// ── UBX ──────────────────────────────────────────────────────────────────────
+
+/// UBX's Fletcher checksum, over the class, ID, length and payload.
+fn ubx_checksum(bytes: &[u8]) -> [u8; 2] {
+    let (mut a, mut b) = (0u8, 0u8);
+    for &x in bytes {
+        a = a.wrapping_add(x);
+        b = b.wrapping_add(a);
+    }
+    [a, b]
+}
+
+/// Append one UBX frame to `out`.
+fn ubx_push(out: &mut Vec<u8>, class: u8, id: u8, payload: &[u8]) {
+    let start = out.len();
+    out.extend_from_slice(&[0xB5, 0x62, class, id]);
+    out.extend_from_slice(&(payload.len() as u16).to_le_bytes());
+    out.extend_from_slice(payload);
+    let check = ubx_checksum(&out[start + 2..]);
+    out.extend_from_slice(&check);
+}
+
+/// The whole UBX frames in `data`, in order, those with a bad checksum left
+/// out.
+fn ubx_frames(data: &[u8]) -> impl Iterator<Item = &[u8]> {
+    let mut at = 0;
+    std::iter::from_fn(move || {
+        while at + 8 <= data.len() {
+            if data[at] != 0xB5 || data[at + 1] != 0x62 {
+                at += 1;
+                continue;
+            }
+            let end = at + 8 + u16::from_le_bytes([data[at + 4], data[at + 5]]) as usize;
+            if end > data.len() {
+                break;
+            }
+            let frame = &data[at..end];
+            if ubx_checksum(&frame[2..frame.len() - 2]) == frame[frame.len() - 2..] {
+                at = end;
+                return Some(frame);
+            }
+            at += 2;
+        }
+        None
+    })
+}
+
+/// Take one byte toward a UBX frame, and once one is whole and checks, what
+/// it says: an assistance message's acknowledgement, a configuration's, an
+/// identity reply, or the satellites.
+///
+/// # Safety
+/// Mutates `S_UBX`, and `S_GPS` through `take_ack`.
+unsafe fn ubx_feed_byte(byte: u8) {
+    let ubx = &mut *(&raw mut S_UBX);
+    match ubx.len {
+        0 => {
+            if byte == 0xB5 {
+                ubx.frame[0] = byte;
+                ubx.len = 1;
+            }
+            return;
+        }
+        1 => {
+            ubx.len = match byte {
+                0x62 => 2,
+                0xB5 => 1,
+                _ => 0,
+            };
+            ubx.frame[1] = byte;
+            return;
+        }
+        _ => {}
+    }
+    ubx.frame[ubx.len] = byte;
+    ubx.len += 1;
+    if ubx.len < 6 {
+        return;
+    }
+    let total = 8 + u16::from_le_bytes([ubx.frame[4], ubx.frame[5]]) as usize;
+    if total > UBX_FRAME_MAX {
+        // Nothing this driver reads is this long.
+        ubx.len = 0;
+        return;
+    }
+    if ubx.len < total {
+        return;
+    }
+    ubx.len = 0;
+    if ubx_checksum(&ubx.frame[2..total - 2]) != ubx.frame[total - 2..total] {
+        return;
+    }
+    match (ubx.frame[2], ubx.frame[3]) {
+        (0x13, 0x60) if total == 16 => {
+            let mut ack = [0u8; 8];
+            ack.copy_from_slice(&ubx.frame[6..14]);
+            take_ack(&ack);
+        }
+        // UBX-ACK-ACK and -NAK, for a UBX-CFG-VALSET.
+        (0x05, id @ (0x00 | 0x01)) if total == 10 && ubx.frame[6..8] == [0x06, 0x8A] => {
+            take_cfg_answer(id == 0x01);
+        }
+        (0x27, 0x03) if total <= ubx.unique_id.len() => {
+            ubx.unique_id[..total].copy_from_slice(&ubx.frame[..total]);
+            ubx.unique_id_len = total;
+        }
+        (0x0A, 0x04) if total <= ubx.version.len() => {
+            ubx.version[..total].copy_from_slice(&ubx.frame[..total]);
+            ubx.version_len = total;
+        }
+        (0x01, 0x35) if total >= 16 => {
+            let listed = nav_sat(&ubx.frame[6..total - 2], &mut ubx.sats.sats);
+            ubx.sats.count = listed as u16;
+            ubx.sats_at = xTaskGetTickCount();
+            ubx.sats_fresh = true;
+        }
+        _ => {}
+    }
+}
+
+/// UBX-NAV-SAT's payload into `out`: how many satellites it lists, up to
+/// what `out` holds.
+fn nav_sat(payload: &[u8], out: &mut [HalGpsSat]) -> usize {
+    let listed = (payload[5] as usize).min((payload.len() - 8) / 12).min(out.len());
+    for (sat, b) in out.iter_mut().zip(payload[8..].chunks_exact(12)).take(listed) {
+        let flags = u32::from_le_bytes([b[8], b[9], b[10], b[11]]);
+        let elev = b[3] as i8;
+        let azim = i16::from_le_bytes([b[4], b[5]]);
+        let has = |bit: u32, what: u8| if flags & (1 << bit) != 0 { what } else { 0 };
+        *sat = HalGpsSat {
+            gnss: match b[0] {
+                0 => b'G',
+                1 => b'S',
+                2 => b'E',
+                3 => b'C',
+                5 => b'J',
+                6 => b'R',
+                7 => b'I',
+                _ => b'?',
+            },
+            sv: b[1],
+            cno: b[2],
+            elev: if (-90..=90).contains(&elev) { elev } else { -128 },
+            azim: if (0..=360).contains(&azim) { azim } else { -1 },
+            quality: (flags & 0x7) as u8,
+            used: flags & 0x8 != 0,
+            health: ((flags >> 4) & 0x3) as u8,
+            orbit: match (flags >> 8) & 0x7 {
+                0 => HAL_GPS_ORBIT_NONE,
+                1 => HAL_GPS_ORBIT_EPHEMERIS,
+                2 => HAL_GPS_ORBIT_ALMANAC,
+                3 => HAL_GPS_ORBIT_PREDICTED,
+                4 => HAL_GPS_ORBIT_AUTONOMOUS,
+                _ => HAL_GPS_ORBIT_OTHER,
+            },
+            orbits: has(11, HAL_GPS_HAS_EPHEMERIS)
+                | has(12, HAL_GPS_HAS_ALMANAC)
+                | has(13, HAL_GPS_HAS_PREDICTED)
+                | has(14, HAL_GPS_HAS_AUTONOMOUS),
+            reserved: 0,
+        };
+    }
+    listed
+}
+
+// ── Assistance ───────────────────────────────────────────────────────────────
+
+/// What `assist` was handed, kept until the receiver talks.
+struct Aid {
+    utc_us: i64,
+    /// The tick the time was read at: it is brought up to date when sent.
+    utc_tick: u32,
+    utc_acc_ms: u32,
+    /// Latitude and longitude in 1e-7 degrees, altitude and accuracy in cm,
+    /// as UBX-MGA-INI-POS_LLH has them.
+    position: Option<[i32; 3]>,
+    position_acc_cm: u32,
+    /// The service's messages this receiver takes, whole frames.
+    data: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    Time,
+    Position,
+    Almanac,
+    Orbit,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Answer {
+    None,
+    Taken,
+    /// Not used, and UBX-MGA-ACK's infoCode for why.
+    Refused(u8),
+}
+
+/// One assistance message in `Sending::bytes`.
+struct Msg {
+    at: usize,
+    len: usize,
+    kind: Kind,
+    /// Its ID and the first four bytes of its payload, which its
+    /// acknowledgement repeats.
+    key: [u8; 5],
+    answer: Answer,
+}
+
+/// The assistance being sent: every message, and those still to go.
+struct Sending {
+    bytes: Vec<u8>,
+    msgs: Vec<Msg>,
+    queue: Vec<usize>,
+    next: usize,
+    /// Whether the messages that went unanswered have been sent again.
+    retried: bool,
+    last_sent: u32,
+}
+
+/// UBX-MGA-ACK's infoCode for a receiver not ready for the data yet: worth
+/// sending again, unlike the others.
+const ACK_NOT_READY: u8 = 5;
+
+/// Days since 1970-01-01 to (year, month, day). Howard Hinnant's algorithm.
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let year = yoe + era * 400 + if month <= 2 { 1 } else { 0 };
+    (year, month, day)
+}
+
+/// Of the service's messages, those this receiver takes: the almanacs and
+/// anything else but orbit predictions and UBX-MGA-INI, and the orbit
+/// predictions for `today`'s UTC date (years since 2000, month, day) of the
+/// constellations it predicts. The time and position are sent fresh.
+fn kept_messages(data: &[u8], today: Option<(u8, u8, u8)>) -> Vec<u8> {
+    let mut kept = Vec::new();
+    for frame in ubx_frames(data) {
+        if frame[2] != 0x13 {
+            continue;
+        }
+        let payload = &frame[6..frame.len() - 2];
+        let keep = match frame[3] {
+            0x20 => {
+                payload.len() >= 7
+                    && ANO_GNSS.contains(&payload[3])
+                    && today == Some((payload[4], payload[5], payload[6]))
+            }
+            0x40 => false,
+            _ => true,
+        };
+        if keep {
+            kept.extend_from_slice(frame);
+        }
+    }
+    kept
+}
+
+impl Aid {
+    fn new(aid: &HalGpsAssist, data: &[u8], tick: u32) -> Aid {
+        let today = (aid.utc_us > 0).then(|| {
+            let (year, month, day) = civil_from_days(aid.utc_us.div_euclid(86_400_000_000));
+            ((year - 2000).clamp(0, 255) as u8, month as u8, day as u8)
+        });
+        Aid {
+            utc_us: aid.utc_us,
+            utc_tick: tick,
+            utc_acc_ms: aid.utc_acc_ms,
+            position: aid.has_position.then(|| {
+                [
+                    (aid.latitude * 1e7).round() as i32,
+                    (aid.longitude * 1e7).round() as i32,
+                    (aid.altitude_m * 100.0).round() as i32,
+                ]
+            }),
+            position_acc_cm: aid.position_acc_m.saturating_mul(100),
+            data: kept_messages(data, today),
+        }
+    }
+}
+
+/// UBX-MGA-INI-TIME_UTC's payload for `utc_us`, good to `acc_ms`, taken
+/// as of its arrival. The leap seconds are left to the receiver.
+fn ini_time_utc(utc_us: i64, acc_ms: u32) -> [u8; 24] {
+    let secs = utc_us.div_euclid(1_000_000);
+    let (year, month, day) = civil_from_days(secs.div_euclid(86_400));
+    let of_day = secs.rem_euclid(86_400);
+    let mut p = [0u8; 24];
+    p[0] = 0x10; // type: UTC time
+    p[3] = 0x80; // leapSecs: unknown
+    p[4..6].copy_from_slice(&(year as u16).to_le_bytes());
+    p[6] = month as u8;
+    p[7] = day as u8;
+    p[8] = (of_day / 3600) as u8;
+    p[9] = (of_day / 60 % 60) as u8;
+    p[10] = (of_day % 60) as u8;
+    p[12..16].copy_from_slice(&((utc_us.rem_euclid(1_000_000) * 1000) as u32).to_le_bytes());
+    p[16..18].copy_from_slice(&((acc_ms / 1000).min(u16::MAX as u32) as u16).to_le_bytes());
+    p[20..24].copy_from_slice(&((acc_ms % 1000) * 1_000_000).to_le_bytes());
+    p
+}
+
+/// UBX-MGA-INI-POS_LLH's payload.
+fn ini_pos_llh(llh: [i32; 3], acc_cm: u32) -> [u8; 20] {
+    let mut p = [0u8; 20];
+    p[0] = 0x01; // type: position, WGS84 latitude, longitude and altitude
+    p[4..8].copy_from_slice(&llh[0].to_le_bytes());
+    p[8..12].copy_from_slice(&llh[1].to_le_bytes());
+    p[12..16].copy_from_slice(&llh[2].to_le_bytes());
+    p[16..20].copy_from_slice(&acc_cm.to_le_bytes());
+    p
+}
+
+impl Sending {
+    /// Everything `aid` holds, as sent `now`: the time first, as the
+    /// receiver needs it to use the rest, then the position, then the
+    /// service's messages.
+    fn new(aid: &Aid, now: u32) -> Sending {
+        let mut s = Sending {
+            bytes: Vec::with_capacity(aid.data.len() + 60),
+            msgs: Vec::new(),
+            queue: Vec::new(),
+            next: 0,
+            retried: false,
+            last_sent: now,
+        };
+        if aid.utc_us > 0 {
+            let elapsed_us = now.wrapping_sub(aid.utc_tick) as i64 * 1000;
+            s.push(0x40, &ini_time_utc(aid.utc_us + elapsed_us, aid.utc_acc_ms));
+        }
+        if let Some(llh) = aid.position {
+            s.push(0x40, &ini_pos_llh(llh, aid.position_acc_cm));
+        }
+        for frame in ubx_frames(&aid.data) {
+            s.push(frame[3], &frame[6..frame.len() - 2]);
+        }
+        s.queue = (0..s.msgs.len()).collect();
+        s
+    }
+
+    fn push(&mut self, id: u8, payload: &[u8]) {
+        let at = self.bytes.len();
+        ubx_push(&mut self.bytes, 0x13, id, payload);
+        let kind = match (id, payload.first()) {
+            (0x40, Some(0x10)) => Kind::Time,
+            (0x40, Some(0x01)) => Kind::Position,
+            (0x20, _) => Kind::Orbit,
+            (_, Some(0x02)) => Kind::Almanac,
+            _ => Kind::Other,
+        };
+        let mut key = [id, 0, 0, 0, 0];
+        for (k, &b) in key[1..].iter_mut().zip(payload) {
+            *k = b;
+        }
+        self.msgs.push(Msg { at, len: self.bytes.len() - at, kind, key, answer: Answer::None });
+    }
+
+    /// Of `kind`'s messages, how many were taken, and how many there are.
+    fn tally(&self, kind: Kind) -> (u32, u32) {
+        let of_kind = self.msgs.iter().filter(|m| m.kind == kind);
+        let taken = of_kind.clone().filter(|m| m.answer == Answer::Taken).count();
+        (taken as u32, of_kind.count() as u32)
+    }
+
+    /// What became of the time or the position, as the log says it.
+    fn word(&self, kind: Kind) -> &'static [u8] {
+        match self.msgs.iter().find(|m| m.kind == kind).map(|m| m.answer) {
+            None => b"none\0",
+            Some(Answer::Taken) => b"taken\0",
+            Some(Answer::Refused(_)) => b"refused\0",
+            Some(Answer::None) => b"unanswered\0",
+        }
+    }
+}
+
+/// An acknowledgement, UBX-MGA-ACK's payload: matched to the first message
+/// not yet answered that it repeats the start of.
+///
+/// # Safety
+/// Mutates `S_GPS`.
+unsafe fn take_ack(ack: &[u8; 8]) {
+    let gps = &mut *(&raw mut S_GPS);
+    let Some(s) = gps.sending.as_mut() else {
+        return;
+    };
+    let key = [ack[3], ack[4], ack[5], ack[6], ack[7]];
+    if let Some(m) = s.msgs.iter_mut().find(|m| m.answer == Answer::None && m.key == key) {
+        m.answer = if ack[0] == 1 { Answer::Taken } else { Answer::Refused(ack[2]) };
+    }
+}
+
+/// A UBX-CFG-VALSET the reader sent, for its answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Cfg {
+    Signals,
+    Autonomous,
+    AckAiding,
+}
+
+/// Send the receiver a UBX-CFG-VALSET, and await its answer.
+///
+/// # Safety
+/// Mutates `S_GPS`.
+unsafe fn send_valset(gps: &mut GpsState, what: Cfg, payload: &[u8]) {
+    let mut valset = Vec::with_capacity(8 + payload.len());
+    ubx_push(&mut valset, 0x06, 0x8A, payload);
+    send(gps, &valset);
+    gps.cfg_awaited.push(what);
+}
+
+/// The receiver's answer to the oldest UBX-CFG-VALSET awaiting one. Said
+/// once a boot if taken, each time if not.
+///
+/// # Safety
+/// Mutates `S_GPS`.
+unsafe fn take_cfg_answer(taken: bool) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static SIGNALS_SAID: AtomicBool = AtomicBool::new(false);
+    static AUTONOMOUS_SAID: AtomicBool = AtomicBool::new(false);
+    let gps = &mut *(&raw mut S_GPS);
+    if gps.cfg_awaited.is_empty() {
+        return;
+    }
+    match (gps.cfg_awaited.remove(0), taken) {
+        (Cfg::Signals, false) => {
+            gps_log!(ESP_LOG_WARN, "the receiver refused GLONASS with BeiDou B1C (UBX-ACK-NAK)")
+        }
+        (Cfg::Signals, true) if !SIGNALS_SAID.swap(true, Ordering::Relaxed) => {
+            gps_log!(ESP_LOG_INFO, "tracking GPS, Galileo, GLONASS and BeiDou B1C")
+        }
+        (Cfg::Autonomous, false) => {
+            gps_log!(ESP_LOG_WARN, "the receiver refused AssistNow Autonomous (UBX-ACK-NAK)")
+        }
+        (Cfg::Autonomous, true) if !AUTONOMOUS_SAID.swap(true, Ordering::Relaxed) => {
+            gps_log!(ESP_LOG_INFO, "AssistNow Autonomous on: the receiver predicts the orbits it decodes")
+        }
+        _ => {}
+    }
+}
+
+/// Write `bytes` to the receiver.
+///
+/// # Safety
+/// Reads `S_GPS`.
+unsafe fn send(gps: &GpsState, bytes: &[u8]) {
+    uart_write_bytes(gps.cfg.uart_num, bytes.as_ptr(), bytes.len());
+}
+
+/// What the reader sends a receiver that talks: the signals, once a wake,
+/// and a second later, once the GNSS restart they may cause is over,
+/// AssistNow Autonomous, the polls `get_identity` and `get_satellites`
+/// asked for, and the assistance, a few messages a pass. Once the last has
+/// had its time to be acknowledged, those that went unanswered, or found
+/// the receiver not ready, go again, once.
+///
+/// # Safety
+/// Mutates `S_GPS`; reads `S_UBX`.
+unsafe fn assist_checks(gps: &mut GpsState, now: u32) {
+    let talking =
+        !gps.standby && gps.wake_tries == 0 && gps.sentences_seen != gps.sentences_at_wake;
+    if !talking {
+        return;
+    }
+
+    if !gps.signals_sent {
+        send_valset(gps, Cfg::Signals, &VALSET_SIGNALS);
+        gps.signals_sent = true;
+        gps.signals_at = now;
+        return;
+    }
+    if now.wrapping_sub(gps.signals_at) < SIGNALS_SETTLE_TICKS {
+        return;
+    }
+    // An answer not in by now is lost; the next would be taken for it.
+    if gps.cfg_awaited.first() == Some(&Cfg::Signals) {
+        gps.cfg_awaited.remove(0);
+    }
+    if !gps.autonomous_sent {
+        send_valset(gps, Cfg::Autonomous, &VALSET_AUTONOMOUS);
+        gps.autonomous_sent = true;
+    }
+    if std::mem::take(&mut gps.sats_wanted) {
+        send(gps, &UBX_POLL_NAV_SAT);
+    }
+
+    let ubx = &*(&raw const S_UBX);
+    if gps.identity_wanted && (ubx.unique_id_len == 0 || ubx.version_len == 0) {
+        let due = gps.identity_polls == 0
+            || now.wrapping_sub(gps.identity_polled) >= IDENTITY_RETRY_TICKS;
+        if due && gps.identity_polls < IDENTITY_POLLS {
+            send(gps, &UBX_POLL_SEC_UNIQID);
+            send(gps, &UBX_POLL_MON_VER);
+            gps.identity_polls += 1;
+            gps.identity_polled = now;
+        }
+    }
+
+    if gps.sending.is_none() {
+        let Some(aid) = gps.aid.take() else {
+            return;
+        };
+        send_valset(gps, Cfg::AckAiding, &VALSET_ACK_AIDING);
+        gps.sending = Some(Box::new(Sending::new(&aid, now)));
+    }
+    let Some(s) = gps.sending.as_mut() else {
+        return;
+    };
+
+    let mut budget = ASSIST_BUDGET;
+    loop {
+        while let Some(&i) = s.queue.get(s.next) {
+            let (at, len) = (s.msgs[i].at, s.msgs[i].len);
+            if len > budget && budget < ASSIST_BUDGET {
+                return;
+            }
+            uart_write_bytes(gps.cfg.uart_num, s.bytes[at..].as_ptr(), len);
+            budget = budget.saturating_sub(len);
+            s.next += 1;
+            s.last_sent = now;
+        }
+        if now.wrapping_sub(s.last_sent) < ACK_WAIT_TICKS || s.retried {
+            break;
+        }
+        s.retried = true;
+        // With no answer at all, the receiver is not acknowledging: going
+        // again would only say the same.
+        let again: Vec<usize> = (0..s.msgs.len())
+            .filter(|&i| matches!(s.msgs[i].answer, Answer::None | Answer::Refused(ACK_NOT_READY)))
+            .collect();
+        if again.is_empty() || again.len() == s.msgs.len() {
+            break;
+        }
+        s.queue = again;
+        s.next = 0;
+    }
+    if now.wrapping_sub(s.last_sent) < ACK_WAIT_TICKS {
+        return;
+    }
+
+    let (almanacs, almanacs_of) = s.tally(Kind::Almanac);
+    let (orbits, orbits_of) = s.tally(Kind::Orbit);
+    gps_log!(
+        ESP_LOG_INFO,
+        "assistance: time %s, position %s, %u of %u almanacs and %u of %u orbits taken",
+        s.word(Kind::Time).as_ptr(),
+        s.word(Kind::Position).as_ptr(),
+        almanacs,
+        almanacs_of,
+        orbits,
+        orbits_of
+    );
+    if let Some(code) = s.msgs.iter().find_map(|m| match m.answer {
+        Answer::Refused(code) => Some(code),
+        _ => None,
+    }) {
+        gps_log!(
+            ESP_LOG_WARN,
+            "assistance: %u of %u refused, the first for reason %u (UBX-MGA-ACK)",
+            s.msgs.iter().filter(|m| matches!(m.answer, Answer::Refused(_))).count() as u32,
+            s.msgs.len() as u32,
+            code as u32
+        );
+    }
+    gps.sending = None;
+}
+
 // ── UART reader ──────────────────────────────────────────────────────────────
 
 /// The reader, a job on the kernel worker every `RX_POLL`: feeds what the UART
@@ -766,7 +1484,7 @@ pub unsafe extern "C" fn gps_rx_job(_arg: *mut c_void) {
                 break;
             }
             for &byte in &chunk[..len as usize] {
-                nmea_feed_byte(byte);
+                feed_byte(byte);
             }
         }
         reader_checks(xTaskGetTickCount());
@@ -776,7 +1494,8 @@ pub unsafe extern "C" fn gps_rx_job(_arg: *mut c_void) {
 
 /// What the reader decides once the UART is drained, `now` in ticks: whether
 /// a receiver just woken needs waking again; once, whether the receiver is
-/// talking; and until the first fix, what it hears.
+/// talking; until the first fix, what it hears; and what of the assistance
+/// and the identity polls goes next.
 ///
 /// Both outcomes of the second get a line. Before it had either, a receiver
 /// that never spoke looked exactly like one still waiting for a fix. The
@@ -833,6 +1552,8 @@ unsafe fn reader_checks(now: u32) {
             gps.link_reported = true;
         }
     }
+
+    assist_checks(gps, now);
 
     if gps.fix_reported || gps.sentences_seen == 0 {
         return;
@@ -891,6 +1612,13 @@ unsafe fn enter_standby(gps: &mut GpsState) -> i32 {
     gps.last_position.fix_valid = false;
     gps.last_position.satellites = 0;
     gps.sky = Sky::new();
+    // What was not sent yet is for a start that is over; the kernel hands
+    // the next one its own.
+    gps.aid = None;
+    gps.sending = None;
+    gps.cfg_awaited.clear();
+    gps.sats_wanted = false;
+    (*(&raw mut S_UBX)).sats_fresh = false;
     ESP_OK
 }
 
@@ -912,6 +1640,11 @@ unsafe fn send_wake(gps: &mut GpsState, now: u32) {
 /// Mutates `S_GPS`.
 unsafe fn wake_receiver(gps: &mut GpsState, now: u32) {
     gps.wake_tries = 0;
+    gps.signals_sent = false;
+    gps.autonomous_sent = false;
+    gps.cfg_awaited.clear();
+    gps.identity_polls = 0;
+    (*(&raw mut S_UBX)).sats_fresh = false;
     send_wake(gps, now);
     gps.rx_started = now;
     gps.fix_reported = false;
@@ -1022,6 +1755,13 @@ unsafe extern "C" fn mia_m10q_init(config: *const c_void) -> i32 {
     gps.standby = true;
     gps.wake_tries = 0;
     gps.sky = Sky::new();
+    gps.signals_sent = false;
+    gps.autonomous_sent = false;
+    gps.cfg_awaited.clear();
+    gps.sats_wanted = false;
+    gps.identity_wanted = false;
+    gps.aid = None;
+    gps.sending = None;
     gps.initialized = true;
 
     ESP_OK
@@ -1164,6 +1904,89 @@ unsafe extern "C" fn mia_m10q_get_sky(sky: *mut HalGpsSky) -> i32 {
     }
 }
 
+/// Take assistance for the receiver's start: sent once it talks, the time
+/// and position made current then. A newer one replaces what is left of an
+/// older one; a receiver with a fix has no use for any.
+///
+/// # Safety
+/// `aid` must be a readable `HalGpsAssist`, its `data` `data_len` bytes.
+unsafe extern "C" fn mia_m10q_assist(aid: *const HalGpsAssist) -> i32 {
+    if aid.is_null() {
+        return ESP_ERR_INVALID_ARG;
+    }
+    let gps = &mut *(&raw mut S_GPS);
+    if !gps.initialized {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if gps.last_position.fix_valid {
+        return ESP_OK;
+    }
+    let aid = &*aid;
+    let data = if aid.data.is_null() || aid.data_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(aid.data, aid.data_len)
+    };
+    gps.aid = Some(Box::new(Aid::new(aid, data, xTaskGetTickCount())));
+    gps.sending = None;
+    ESP_OK
+}
+
+/// The receiver's UBX-SEC-UNIQID and UBX-MON-VER replies. Until it has
+/// answered, `ESP_ERR_NOT_FOUND`, and the reader polls it for them while it
+/// talks.
+///
+/// # Safety
+/// `id` must be a writable `HalGpsIdentity`.
+unsafe extern "C" fn mia_m10q_get_identity(id: *mut HalGpsIdentity) -> i32 {
+    if id.is_null() {
+        return ESP_ERR_INVALID_ARG;
+    }
+    let gps = &mut *(&raw mut S_GPS);
+    if !gps.initialized {
+        return ESP_ERR_INVALID_STATE;
+    }
+    let ubx = &*(&raw const S_UBX);
+    if ubx.unique_id_len == 0 || ubx.version_len == 0 {
+        gps.identity_wanted = true;
+        return ESP_ERR_NOT_FOUND;
+    }
+    let out = &mut *id;
+    *out = HalGpsIdentity::EMPTY;
+    out.unique_id[..ubx.unique_id_len].copy_from_slice(&ubx.unique_id[..ubx.unique_id_len]);
+    out.unique_id_len = ubx.unique_id_len as u16;
+    out.version[..ubx.version_len].copy_from_slice(&ubx.version[..ubx.version_len]);
+    out.version_len = ubx.version_len as u16;
+    gps.identity_wanted = false;
+    ESP_OK
+}
+
+/// The receiver's last UBX-NAV-SAT, and a poll for the next: until one has
+/// come since the last wake, `ESP_ERR_NOT_FOUND`. `ESP_ERR_INVALID_STATE`
+/// while nobody reads the receiver.
+///
+/// # Safety
+/// `sats` must be a writable `HalGpsSats`. Called on the kernel worker, as
+/// the reader is.
+unsafe extern "C" fn mia_m10q_get_satellites(sats: *mut HalGpsSats) -> i32 {
+    if sats.is_null() {
+        return ESP_ERR_INVALID_ARG;
+    }
+    let gps = &mut *(&raw mut S_GPS);
+    if !gps.initialized || !gps.enabled {
+        return ESP_ERR_INVALID_STATE;
+    }
+    gps.sats_wanted = true;
+    let ubx = &*(&raw const S_UBX);
+    if !ubx.sats_fresh {
+        return ESP_ERR_NOT_FOUND;
+    }
+    let out = &mut *sats;
+    *out = ubx.sats;
+    out.age_ms = xTaskGetTickCount().wrapping_sub(ubx.sats_at);
+    ESP_OK
+}
+
 /// Send the receiver to standby while the device sleeps, or wake it after.
 ///
 /// Waking does not wait for it: the reader watches for it to talk and wakes
@@ -1203,6 +2026,9 @@ static GPS_DRIVER: HalGpsDriver = HalGpsDriver {
     sleep: Some(mia_m10q_sleep),
     name: b"MIA-M10Q\0".as_ptr() as *const c_char,
     get_sky: Some(mia_m10q_get_sky),
+    assist: Some(mia_m10q_assist),
+    get_identity: Some(mia_m10q_get_identity),
+    get_satellites: Some(mia_m10q_get_satellites),
 };
 
 /// Return the MIA-M10Q driver vtable.
@@ -1225,6 +2051,11 @@ mod tests {
     /// Reset driver state between tests.
     unsafe fn reset_state() {
         *(&raw mut S_GPS) = GpsState::new();
+        let ubx = &mut *(&raw mut S_UBX);
+        ubx.len = 0;
+        ubx.unique_id_len = 0;
+        ubx.version_len = 0;
+        ubx.sats_fresh = false;
         sent();
     }
 
@@ -1679,7 +2510,7 @@ mod tests {
 
     unsafe fn feed(bytes: &[u8]) {
         for &b in bytes {
-            nmea_feed_byte(b);
+            feed_byte(b);
         }
     }
 
@@ -2051,7 +2882,10 @@ $GPGSV,3,3,09,25,,,40,1*6E\r\n";
             feed(b"$GAGSV,1,1,00,2*76\r\n");
             reader_checks(WAKE_RETRY_TICKS);
             reader_checks(2 * WAKE_RETRY_TICKS);
-            assert!(sent().is_empty());
+            // Its signals and AssistNow Autonomous, and no more wake pulses.
+            let mut want = signals();
+            want.extend(autonomous());
+            assert_eq!(sent(), want);
             mia_m10q_deinit();
         }
     }
@@ -2073,6 +2907,492 @@ $GPGSV,3,3,09,25,,,40,1*6E\r\n";
             }
             assert_eq!(logged, [30, 60, 120, 240, 480, 960, 1560, 2160, 2760, 3360]);
             mia_m10q_deinit();
+        }
+    }
+
+    // ── UBX ───────────────────────────────────────────────────────────────────
+
+    /// A sentence: the receiver talking.
+    const TALK: &[u8] = b"$GAGSV,1,1,00,2*76\r\n";
+    /// 2026-10-20 12:34:56 UTC.
+    const NOW_S: i64 = 1_792_499_696;
+    const TODAY: (u8, u8, u8) = (26, 10, 20);
+
+    fn frame(id: u8, payload: &[u8]) -> Vec<u8> {
+        let mut f = Vec::new();
+        ubx_push(&mut f, 0x13, id, payload);
+        f
+    }
+
+    /// UBX-MGA-ANO for one satellite and day.
+    fn ano(gnss: u8, sv: u8, (y, m, d): (u8, u8, u8)) -> Vec<u8> {
+        let mut p = [0u8; 76];
+        (p[2], p[3], p[4], p[5], p[6]) = (sv, gnss, y, m, d);
+        frame(0x20, &p)
+    }
+
+    /// UBX-MGA-GPS-ALM for one satellite.
+    fn gps_alm(sv: u8) -> Vec<u8> {
+        let mut p = [0u8; 36];
+        (p[0], p[2]) = (0x02, sv);
+        frame(0x00, &p)
+    }
+
+    /// The receiver's UBX-MGA-ACK for `msg`.
+    fn ack(msg: &[u8], taken: bool, code: u8) -> Vec<u8> {
+        let mut f = Vec::new();
+        ubx_push(&mut f, 0x13, 0x60, &[taken as u8, 0, code, msg[3], msg[6], msg[7], msg[8], msg[9]]);
+        f
+    }
+
+    fn aid(utc_s: i64, data: &[u8]) -> HalGpsAssist {
+        HalGpsAssist {
+            utc_us: utc_s * 1_000_000,
+            utc_acc_ms: 10_500,
+            has_position: true,
+            latitude: 59.3293,
+            longitude: 18.0686,
+            altitude_m: 28.0,
+            position_acc_m: 1000,
+            data: data.as_ptr(),
+            data_len: data.len(),
+        }
+    }
+
+    fn signals() -> Vec<u8> {
+        let mut f = Vec::new();
+        ubx_push(&mut f, 0x06, 0x8A, &VALSET_SIGNALS);
+        f
+    }
+
+    fn autonomous() -> Vec<u8> {
+        let mut f = Vec::new();
+        ubx_push(&mut f, 0x06, 0x8A, &VALSET_AUTONOMOUS);
+        f
+    }
+
+    /// The receiver talking, and sent its signals: what goes after the
+    /// settle is what the test is about.
+    unsafe fn talk_and_settle(at: u32) -> u32 {
+        feed(TALK);
+        reader_checks(at);
+        assert_eq!(sent(), signals(), "the signals first");
+        at + SIGNALS_SETTLE_TICKS
+    }
+
+    /// What the first pass after the settle sends after AssistNow
+    /// Autonomous, which goes first.
+    unsafe fn settled(at: u32) -> Vec<u8> {
+        reader_checks(at);
+        let pass = sent();
+        assert!(pass.starts_with(&autonomous()), "AssistNow Autonomous first");
+        pass[autonomous().len()..].to_vec()
+    }
+
+    /// UBX-NAV-SAT listing `sats`: (gnssId, svId, cno, elev, azim, flags).
+    fn nav_sat_frame(sats: &[(u8, u8, u8, i8, i16, u32)]) -> Vec<u8> {
+        let mut p = vec![0u8; 8];
+        p[4] = 1;
+        p[5] = sats.len() as u8;
+        for &(gnss, sv, cno, elev, azim, flags) in sats {
+            p.extend_from_slice(&[gnss, sv, cno, elev as u8]);
+            p.extend_from_slice(&azim.to_le_bytes());
+            p.extend_from_slice(&[0, 0]);
+            p.extend_from_slice(&flags.to_le_bytes());
+        }
+        let mut f = Vec::new();
+        ubx_push(&mut f, 0x01, 0x35, &p);
+        f
+    }
+
+    /// The frames in what was sent, as (class, id, payload).
+    fn frames_in(bytes: &[u8]) -> Vec<(u8, u8, Vec<u8>)> {
+        ubx_frames(bytes).map(|f| (f[2], f[3], f[6..f.len() - 2].to_vec())).collect()
+    }
+
+    #[test]
+    fn civil_dates() {
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        assert_eq!(civil_from_days(-1), (1969, 12, 31));
+        assert_eq!(civil_from_days(11_016), (2000, 2, 29));
+        assert_eq!(civil_from_days(20_454), (2026, 1, 1));
+        assert_eq!(civil_from_days(NOW_S / 86_400), (2026, 10, 20));
+    }
+
+    #[test]
+    fn the_polls_check() {
+        for poll in [UBX_POLL_SEC_UNIQID, UBX_POLL_MON_VER, UBX_POLL_NAV_SAT] {
+            assert_eq!(ubx_checksum(&poll[2..6]), poll[6..]);
+        }
+        let mut valset = Vec::new();
+        ubx_push(&mut valset, 0x06, 0x8A, &VALSET_ACK_AIDING);
+        assert_eq!(u32::from_le_bytes(valset[10..14].try_into().unwrap()), 0x1011_0025);
+    }
+
+    #[test]
+    fn frames_are_found_among_junk_and_bad_ones_left_out() {
+        let good = gps_alm(3);
+        let mut bad = gps_alm(4);
+        let last = bad.len() - 1;
+        bad[last] ^= 0xFF;
+        let mut data = b"junk\xB5".to_vec();
+        data.extend_from_slice(&bad);
+        data.extend_from_slice(&good);
+        data.extend_from_slice(&good[..10]);
+        let found: Vec<&[u8]> = ubx_frames(&data).collect();
+        assert_eq!(found, [&good[..]]);
+    }
+
+    /// The service sends every constellation's predictions for a week, and
+    /// the time it was asked: the receiver gets today's GPS predictions,
+    /// every almanac, and the time made fresh.
+    #[test]
+    fn kept_are_the_almanacs_and_todays_predictions_it_takes() {
+        let mut data = frame(0x40, &[0x10; 24]); // the service's own time
+        data.extend(gps_alm(1));
+        data.extend(ano(0, 1, (26, 10, 19)));
+        data.extend(ano(0, 1, TODAY));
+        data.extend(ano(2, 5, TODAY)); // Galileo
+        data.extend(ano(6, 3, TODAY)); // GLONASS
+        data.extend(ano(0, 1, (26, 10, 21)));
+        let mut want = gps_alm(1);
+        want.extend(ano(0, 1, TODAY));
+        want.extend(ano(6, 3, TODAY));
+        assert_eq!(kept_messages(&data, Some(TODAY)), want);
+        assert_eq!(kept_messages(&data, None), gps_alm(1), "no date, no predictions");
+    }
+
+    #[test]
+    fn the_time_is_sent_as_ubx_mga_ini_time_utc() {
+        let p = ini_time_utc(NOW_S * 1_000_000 + 789_000, 10_500);
+        assert_eq!(p[0], 0x10);
+        assert_eq!(p[3], 0x80, "leap seconds unknown");
+        assert_eq!(u16::from_le_bytes([p[4], p[5]]), 2026);
+        assert_eq!(&p[6..11], &[10, 20, 12, 34, 56]);
+        assert_eq!(u32::from_le_bytes(p[12..16].try_into().unwrap()), 789_000_000);
+        assert_eq!(u16::from_le_bytes([p[16], p[17]]), 10);
+        assert_eq!(u32::from_le_bytes(p[20..24].try_into().unwrap()), 500_000_000);
+    }
+
+    #[test]
+    fn the_position_is_sent_as_ubx_mga_ini_pos_llh() {
+        let a = Aid::new(&aid(NOW_S, &[]), &[], 0);
+        let p = ini_pos_llh(a.position.unwrap(), a.position_acc_cm);
+        assert_eq!(p[0], 0x01);
+        assert_eq!(i32::from_le_bytes(p[4..8].try_into().unwrap()), 593_293_000);
+        assert_eq!(i32::from_le_bytes(p[8..12].try_into().unwrap()), 180_686_000);
+        assert_eq!(i32::from_le_bytes(p[12..16].try_into().unwrap()), 2800);
+        assert_eq!(u32::from_le_bytes(p[16..20].try_into().unwrap()), 100_000);
+    }
+
+    #[test]
+    fn identity_is_polled_once_the_receiver_talks_and_kept() {
+        unsafe {
+            start_receiver();
+            let mut id = HalGpsIdentity::EMPTY;
+            assert_eq!(mia_m10q_get_identity(&mut id), ESP_ERR_NOT_FOUND);
+            sent();
+            reader_checks(100);
+            assert!(sent().is_empty(), "a receiver not yet talking is sent nothing");
+
+            let at = talk_and_settle(200);
+            let mut polls = UBX_POLL_SEC_UNIQID.to_vec();
+            polls.extend_from_slice(&UBX_POLL_MON_VER);
+            assert_eq!(settled(at), polls);
+            reader_checks(at + 100);
+            assert!(sent().is_empty(), "asked again only after a while");
+
+            let mut uniq = Vec::new();
+            ubx_push(&mut uniq, 0x27, 0x03, &[2, 0, 0, 0, 1, 2, 3, 4, 5, 6]);
+            let mut ver = Vec::new();
+            ubx_push(&mut ver, 0x0A, 0x04, &[b'R'; 220]);
+            feed(&uniq);
+            feed(TALK);
+            feed(&ver);
+            assert_eq!(mia_m10q_get_identity(&mut id), ESP_OK);
+            assert_eq!(&id.unique_id[..id.unique_id_len as usize], &uniq[..]);
+            assert_eq!(&id.version[..id.version_len as usize], &ver[..]);
+            reader_checks(at + IDENTITY_RETRY_TICKS);
+            assert!(sent().is_empty(), "nothing more to ask");
+            mia_m10q_deinit();
+        }
+    }
+
+    #[test]
+    fn identity_is_asked_for_a_few_times_a_wake_then_left() {
+        unsafe {
+            start_receiver();
+            let mut id = HalGpsIdentity::EMPTY;
+            assert_eq!(mia_m10q_get_identity(&mut id), ESP_ERR_NOT_FOUND);
+            sent();
+            let at = talk_and_settle(0);
+            let mut asked = (settled(at).len() == 16) as u32;
+            for pass in 1..10u32 {
+                reader_checks(at + pass * IDENTITY_RETRY_TICKS);
+                asked += (sent().len() == 16) as u32;
+            }
+            assert_eq!(asked, IDENTITY_POLLS as u32);
+            mia_m10q_deinit();
+        }
+    }
+
+    /// Sends what was handed, and from the receiver's acknowledgements
+    /// sends again, once, what went unanswered.
+    #[test]
+    fn assistance_goes_once_the_receiver_talks_a_few_messages_a_pass() {
+        unsafe {
+            start_receiver();
+            let mut data = Vec::new();
+            for sv in 1..=10 {
+                data.extend(gps_alm(sv));
+            }
+            for sv in 1..=10 {
+                data.extend(ano(0, sv, TODAY));
+            }
+            assert_eq!(mia_m10q_assist(&aid(NOW_S, &data)), ESP_OK);
+            sent();
+            reader_checks(100);
+            assert!(sent().is_empty(), "a receiver not yet talking is sent nothing");
+
+            let mut now = talk_and_settle(200);
+            let mut all = settled(now);
+            now += 100;
+            loop {
+                reader_checks(now);
+                let pass = sent();
+                if pass.is_empty() {
+                    break;
+                }
+                assert!(pass.len() <= ASSIST_BUDGET + 17, "{} bytes in a pass", pass.len());
+                all.extend(pass);
+                now += 100;
+            }
+            let frames = frames_in(&all);
+            assert_eq!(frames.len(), 1 + 2 + 20);
+            assert_eq!((frames[0].0, frames[0].1), (0x06, 0x8A), "acknowledgements asked for first");
+            assert_eq!((frames[1].1, frames[1].2[0]), (0x40, 0x10), "then the time");
+            assert_eq!((frames[2].1, frames[2].2[0]), (0x40, 0x01), "then the position");
+            assert!(frames[3..].iter().all(|f| f.0 == 0x13));
+
+            // The receiver takes all but the third almanac and the last
+            // prediction, which it never answers.
+            let mut sent_msgs: Vec<Vec<u8>> = ubx_frames(&all).skip(1).map(|f| f.to_vec()).collect();
+            let lost = sent_msgs.pop().unwrap();
+            for (i, msg) in sent_msgs.iter().enumerate() {
+                if i == 4 {
+                    feed(&ack(msg, false, ACK_NOT_READY));
+                } else {
+                    feed(&ack(msg, true, 0));
+                }
+            }
+            reader_checks(now + ACK_WAIT_TICKS);
+            let again = frames_in(&sent());
+            assert_eq!(again.len(), 2, "the one not ready and the one unanswered, again");
+            assert_eq!(again[1].2, frames_in(&lost)[0].2);
+            reader_checks(now + 2 * ACK_WAIT_TICKS);
+            assert!((*(&raw const S_GPS)).sending.is_none(), "done after the second try");
+            reader_checks(now + 3 * ACK_WAIT_TICKS);
+            assert!(sent().is_empty());
+            mia_m10q_deinit();
+        }
+    }
+
+    #[test]
+    fn a_receiver_with_a_fix_takes_no_assistance() {
+        unsafe {
+            start_receiver();
+            feed(b"$GNRMC,092751.000,A,5321.6802,N,00630.3372,W,0.06,31.66,280511,,,A*58\r\n");
+            assert_eq!(mia_m10q_assist(&aid(NOW_S, &[])), ESP_OK);
+            sent();
+            let at = talk_and_settle(100);
+            assert!(settled(at).is_empty());
+            mia_m10q_deinit();
+        }
+    }
+
+    /// Anything sent wakes a receiver in standby; the next wake brings
+    /// the kernel's next assistance.
+    #[test]
+    fn standby_drops_the_assistance() {
+        unsafe {
+            start_receiver();
+            assert_eq!(mia_m10q_assist(&aid(NOW_S, &gps_alm(1))), ESP_OK);
+            assert_eq!(mia_m10q_sleep(true), ESP_OK);
+            assert_eq!(mia_m10q_sleep(false), ESP_OK);
+            sent();
+            let at = talk_and_settle(100);
+            assert!(settled(at).is_empty());
+            mia_m10q_deinit();
+        }
+    }
+
+    /// GLONASS, and so BeiDou on B1C: CFG-SIGNAL's keys, as the
+    /// interface description numbers them.
+    #[test]
+    fn the_signals_are_gps_galileo_glonass_and_beidou_b1c() {
+        assert_eq!(&VALSET_SIGNALS[..4], &[0, 0x03, 0, 0], "RAM and BBR");
+        let items: Vec<(u32, u8)> = VALSET_SIGNALS[4..]
+            .chunks(5)
+            .map(|c| (u32::from_le_bytes(c[..4].try_into().unwrap()), c[4]))
+            .collect();
+        assert_eq!(
+            items,
+            [(0x1031_0025, 1), (0x1031_0018, 1), (0x1031_0022, 1), (0x1031_000D, 0), (0x1031_000F, 1)]
+        );
+    }
+
+    /// Each wake sends them, before anything else and a second before the
+    /// rest: a change restarts the receiver's GNSS.
+    #[test]
+    fn the_signals_go_first_at_each_wake_and_the_rest_waits() {
+        unsafe {
+            start_receiver();
+            assert_eq!(mia_m10q_assist(&aid(NOW_S, &gps_alm(1))), ESP_OK);
+            sent();
+            let at = talk_and_settle(100);
+            reader_checks(at - 1);
+            assert!(sent().is_empty(), "nothing during the settle");
+            assert!(frames_in(&settled(at)).iter().any(|f| f.0 == 0x13), "then the assistance");
+
+            let mut nak = Vec::new();
+            ubx_push(&mut nak, 0x05, 0x00, &[0x06, 0x8A]);
+            feed(&nak); // after the settle: not the signals', but the next
+            assert_eq!((*(&raw const S_GPS)).cfg_awaited, [Cfg::AckAiding]);
+
+            assert_eq!(mia_m10q_sleep(true), ESP_OK);
+            assert_eq!(mia_m10q_sleep(false), ESP_OK);
+            sent();
+            talk_and_settle(at + 5000);
+            mia_m10q_deinit();
+        }
+    }
+
+    /// CFG-ANA-USE_ANA, as the interface description numbers it, kept
+    /// through standby.
+    #[test]
+    fn assistnow_autonomous_is_cfg_ana_use_ana_in_ram_and_bbr() {
+        assert_eq!(&VALSET_AUTONOMOUS[..4], &[0, 0x03, 0, 0]);
+        assert_eq!(u32::from_le_bytes(VALSET_AUTONOMOUS[4..8].try_into().unwrap()), 0x1023_0001);
+        assert_eq!(VALSET_AUTONOMOUS[8], 1);
+    }
+
+    /// Once a wake, after the settle; each answer is matched to the
+    /// configuration it answers, in order.
+    #[test]
+    fn assistnow_autonomous_goes_once_a_wake_and_its_answer_is_its_own() {
+        unsafe {
+            start_receiver();
+            sent();
+            let mut ack = Vec::new();
+            ubx_push(&mut ack, 0x05, 0x01, &[0x06, 0x8A]);
+            let at = talk_and_settle(100);
+            feed(&ack);
+            assert!((*(&raw const S_GPS)).cfg_awaited.is_empty(), "the signals' answer");
+            assert!(settled(at).is_empty());
+            assert_eq!((*(&raw const S_GPS)).cfg_awaited, [Cfg::Autonomous]);
+            reader_checks(at + 100);
+            assert!(sent().is_empty(), "once a wake");
+            feed(&ack);
+            assert!((*(&raw const S_GPS)).cfg_awaited.is_empty());
+
+            assert_eq!(mia_m10q_sleep(true), ESP_OK);
+            assert_eq!(mia_m10q_sleep(false), ESP_OK);
+            sent();
+            let at = talk_and_settle(at + 5000);
+            assert!(settled(at).is_empty(), "and again after a wake");
+            mia_m10q_deinit();
+        }
+    }
+
+    /// A signals' answer that never came is not taken from the next.
+    #[test]
+    fn a_lost_answer_is_forgotten_at_the_settle() {
+        unsafe {
+            start_receiver();
+            sent();
+            let at = talk_and_settle(100);
+            settled(at);
+            assert_eq!((*(&raw const S_GPS)).cfg_awaited, [Cfg::Autonomous]);
+            mia_m10q_deinit();
+        }
+    }
+
+    #[test]
+    fn nav_sat_says_what_the_receiver_has_of_each_satellite() {
+        // GPS 12: 38 dB-Hz, carrier locked, used, healthy, navigated by an
+        // AssistNow prediction, holding its ephemeris and the prediction.
+        let used = 0x7 | 0x8 | (1 << 4) | (3 << 8) | (1 << 11) | (1 << 13);
+        // Galileo 5: searching, its own prediction and an almanac held.
+        let searching = 0x1 | (4 << 8) | (1 << 12) | (1 << 14);
+        let frame = nav_sat_frame(&[(0, 12, 38, 45, 123, used), (2, 5, 0, -100, 400, searching)]);
+        let mut out = [HalGpsSat::default(); 4];
+        assert_eq!(nav_sat(&frame[6..frame.len() - 2], &mut out), 2);
+        assert_eq!(
+            out[0],
+            HalGpsSat {
+                gnss: b'G',
+                sv: 12,
+                cno: 38,
+                elev: 45,
+                azim: 123,
+                quality: 7,
+                orbit: HAL_GPS_ORBIT_PREDICTED,
+                orbits: HAL_GPS_HAS_EPHEMERIS | HAL_GPS_HAS_PREDICTED,
+                health: 1,
+                used: true,
+                reserved: 0,
+            }
+        );
+        let s = out[1];
+        assert_eq!((s.gnss, s.sv, s.cno, s.elev, s.azim), (b'E', 5, 0, -128, -1), "out of range");
+        assert_eq!((s.quality, s.used, s.orbit), (1, false, HAL_GPS_ORBIT_AUTONOMOUS));
+        assert_eq!(s.orbits, HAL_GPS_HAS_ALMANAC | HAL_GPS_HAS_AUTONOMOUS);
+
+        let mut one = [HalGpsSat::default(); 1];
+        assert_eq!(nav_sat(&frame[6..frame.len() - 2], &mut one), 1, "as many as fit");
+    }
+
+    /// Asked for, polled once the receiver talks, and read off the wire,
+    /// longer than any other frame; gone with a standby.
+    #[test]
+    fn the_satellites_are_polled_when_asked_for() {
+        unsafe {
+            reset_state();
+            let mut sats = HalGpsSats::EMPTY;
+            assert_eq!(mia_m10q_get_satellites(&mut sats), ESP_ERR_INVALID_STATE);
+            start_receiver();
+            assert_eq!(mia_m10q_get_satellites(&mut sats), ESP_ERR_NOT_FOUND);
+            sent();
+            let at = talk_and_settle(100);
+            assert_eq!(settled(at), UBX_POLL_NAV_SAT, "polled once settled");
+            reader_checks(at + 100);
+            assert!(sent().is_empty(), "once an ask");
+
+            let many: Vec<_> = (0..60u8).map(|i| (i % 4, i, 30, 20, 90, 0x4)).collect();
+            let frame = nav_sat_frame(&many);
+            assert!(frame.len() > UBX_MAX);
+            feed(&frame);
+            assert_eq!(mia_m10q_get_satellites(&mut sats), ESP_OK);
+            assert_eq!(sats.count, 60);
+            assert_eq!((sats.sats[59].gnss, sats.sats[59].sv), (b'C', 59));
+            reader_checks(at + 200);
+            assert_eq!(sent(), UBX_POLL_NAV_SAT, "each ask polls the next");
+
+            assert_eq!(mia_m10q_sleep(true), ESP_OK);
+            assert_eq!(mia_m10q_sleep(false), ESP_OK);
+            assert_eq!(mia_m10q_get_satellites(&mut sats), ESP_ERR_NOT_FOUND, "stale after a standby");
+            mia_m10q_deinit();
+        }
+    }
+
+    #[test]
+    fn assistance_before_init_is_refused() {
+        unsafe {
+            reset_state();
+            assert_eq!(mia_m10q_assist(&aid(NOW_S, &[])), ESP_ERR_INVALID_STATE);
+            assert_eq!(mia_m10q_assist(std::ptr::null()), ESP_ERR_INVALID_ARG);
+            let mut id = HalGpsIdentity::EMPTY;
+            assert_eq!(mia_m10q_get_identity(&mut id), ESP_ERR_INVALID_STATE);
         }
     }
 }

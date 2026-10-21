@@ -2,6 +2,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include "esp_err.h"
 
 /* Whether the GPS receiver is being read (gps_manager.rs). It is started at
@@ -17,3 +18,7 @@ bool rs_gps_is_enabled(void);
  * switch (ESP_ERR_NOT_SUPPORTED with no receiver); otherwise whether the
  * choice was saved. */
 esp_err_t rs_gps_set_enabled(bool on);
+
+/* What AssistNow's orbit predictions stand at, as Settings shows it:
+ * "Orbits: until 27 Oct" (gps_assist.rs). */
+void rs_gps_assist_describe(char *buf, size_t len);

@@ -195,6 +195,109 @@ pub struct HalGpsSky {
     pub best_cno: u8,
 }
 
+/// What helps the receiver to its first fix (`hal_gps_assist_t`).
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct HalGpsAssist {
+    /// The time now, µs since 1970; 0 when the clock is not set.
+    pub utc_us: i64,
+    pub utc_acc_ms: u32,
+    pub has_position: bool,
+    pub latitude: f64,
+    pub longitude: f64,
+    pub altitude_m: f32,
+    pub position_acc_m: u32,
+    /// The assistance service's data as it came, or null.
+    pub data: *const u8,
+    pub data_len: usize,
+}
+
+/// What the assistance service registers a receiver by (`hal_gps_identity_t`).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct HalGpsIdentity {
+    pub unique_id: [u8; 32],
+    pub unique_id_len: u16,
+    pub version: [u8; 400],
+    pub version_len: u16,
+}
+
+impl HalGpsIdentity {
+    pub const EMPTY: HalGpsIdentity =
+        HalGpsIdentity { unique_id: [0; 32], unique_id_len: 0, version: [0; 400], version_len: 0 };
+}
+
+/// Where the receiver has a satellite's orbit from (`HAL_GPS_ORBIT_*`).
+pub const HAL_GPS_ORBIT_NONE: u8 = 0;
+pub const HAL_GPS_ORBIT_EPHEMERIS: u8 = 1;
+pub const HAL_GPS_ORBIT_ALMANAC: u8 = 2;
+pub const HAL_GPS_ORBIT_PREDICTED: u8 = 3;
+pub const HAL_GPS_ORBIT_AUTONOMOUS: u8 = 4;
+pub const HAL_GPS_ORBIT_OTHER: u8 = 5;
+/// Which orbits it holds for one (`HAL_GPS_HAS_*`).
+pub const HAL_GPS_HAS_EPHEMERIS: u8 = 0x01;
+pub const HAL_GPS_HAS_ALMANAC: u8 = 0x02;
+pub const HAL_GPS_HAS_PREDICTED: u8 = 0x04;
+pub const HAL_GPS_HAS_AUTONOMOUS: u8 = 0x08;
+
+/// One satellite the receiver knows of (`hal_gps_sat_t`).
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct HalGpsSat {
+    /// RINEX's letter for its constellation: G, E, R, C, J, S, I, or ?.
+    pub gnss: u8,
+    pub sv: u8,
+    pub cno: u8,
+    /// -128 when not known.
+    pub elev: i8,
+    /// -1 when not known.
+    pub azim: i16,
+    pub quality: u8,
+    pub orbit: u8,
+    pub orbits: u8,
+    pub health: u8,
+    pub used: bool,
+    pub reserved: u8,
+}
+
+pub const HAL_GPS_SATS_MAX: usize = 80;
+
+/// The receiver's last report of its satellites (`hal_gps_sats_t`).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct HalGpsSats {
+    pub age_ms: u32,
+    pub count: u16,
+    pub sats: [HalGpsSat; HAL_GPS_SATS_MAX],
+}
+
+impl HalGpsSats {
+    pub const EMPTY: HalGpsSats = HalGpsSats {
+        age_ms: 0,
+        count: 0,
+        sats: [HalGpsSat {
+            gnss: 0,
+            sv: 0,
+            cno: 0,
+            elev: 0,
+            azim: 0,
+            quality: 0,
+            orbit: 0,
+            orbits: 0,
+            health: 0,
+            used: false,
+            reserved: 0,
+        }; HAL_GPS_SATS_MAX],
+    };
+
+    pub fn listed(&self) -> &[HalGpsSat] {
+        &self.sats[..(self.count as usize).min(HAL_GPS_SATS_MAX)]
+    }
+}
+
+const _: () = assert!(core::mem::size_of::<HalGpsSat>() == 12);
+const _: () = assert!(core::mem::size_of::<HalGpsSats>() == 8 + 12 * HAL_GPS_SATS_MAX);
+
 pub type HalGpsCb =
     Option<unsafe extern "C" fn(pos: *const HalGpsPosition, user_data: *mut c_void)>;
 
@@ -210,6 +313,9 @@ pub struct HalGpsDriver {
     pub sleep: Option<unsafe extern "C" fn(enter: bool) -> i32>,
     pub name: *const c_char,
     pub get_sky: Option<unsafe extern "C" fn(sky: *mut HalGpsSky) -> i32>,
+    pub assist: Option<unsafe extern "C" fn(aid: *const HalGpsAssist) -> i32>,
+    pub get_identity: Option<unsafe extern "C" fn(id: *mut HalGpsIdentity) -> i32>,
+    pub get_satellites: Option<unsafe extern "C" fn(sats: *mut HalGpsSats) -> i32>,
 }
 
 unsafe impl Send for HalGpsDriver {}
@@ -1668,6 +1774,9 @@ mod tests {
             sleep: None,
             name: b"test-gps\0".as_ptr() as *const c_char,
             get_sky: None,
+            assist: None,
+            get_identity: None,
+            get_satellites: None,
         };
 
         let rc = unsafe { hal_gps_register(&drv as *const HalGpsDriver, std::ptr::null()) };
@@ -1701,6 +1810,9 @@ mod tests {
             sleep: None,
             name: b"test-gps\0".as_ptr() as *const c_char,
             get_sky: None,
+            assist: None,
+            get_identity: None,
+            get_satellites: None,
         }
     }
 

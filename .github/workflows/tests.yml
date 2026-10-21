@@ -419,6 +419,10 @@ jobs:
         working-directory: simulator
         run: python3 tests/test_appstore.py --sim build/thistle_sim
 
+      - name: Run AssistNow registration, fetch and hand-over tests against a fake service
+        working-directory: simulator
+        run: python3 tests/test_gps_assist.py --sim build/thistle_sim
+
       - name: Upload launcher framebuffer failures
         if: failure()
         uses: actions/upload-artifact@v4

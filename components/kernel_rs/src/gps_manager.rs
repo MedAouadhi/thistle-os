@@ -63,6 +63,9 @@ fn apply(on: bool) -> i32 {
     };
     if ret == ESP_OK {
         ON.store(on, Ordering::Relaxed);
+        if on {
+            crate::gps_assist::receiver_started();
+        }
     }
     ret
 }

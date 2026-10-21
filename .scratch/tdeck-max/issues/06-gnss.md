@@ -261,8 +261,201 @@ at around 30 or better.
   a clear sky, try again with mobile data off, to see if the modem is
   interfering, before suspecting the antenna. LilyGo's factory image in the
   vendor checkout is the hardware's reference.
-- Assistance (AssistNow): Predictive Orbits is free for M10 once a device is
-  registered on Thingstream, Live Orbits is paid. With no account, time and
-  last-position aiding (UBX-MGA-INI) and saving the receiver's database to
-  the card (UBX-MGA-DBD) would help after deep sleep, which loses everything:
-  P02 powers the whole receiver.
+- Saving the receiver's database (UBX-MGA-DBD) before deep sleep, which
+  loses everything since P02 powers the whole receiver, and sending it back
+  after: the ephemeris it holds is better than predicted orbits for 4 hours.
+
+### AssistNow Predictive Orbits (2026-10-20)
+
+u-blox's free assistance, now in `gps_assist.rs` (the kernel) and the
+driver's new `assist` and `get_identity` (`hal/gps.h`). Sources: the
+Thingstream AssistNow user guide, getting-started guide, service
+integration guide, service specifications and host-software guide (read
+through support.thingstream.io's help-centre API, as the pages refuse
+scripted reads), the AssistNow API at assistnowapi.services.u-blox.com, the
+M10 SPG 5.10 interface description (UBX-21035062: MGA-ACK, MGA-ANO,
+MGA-INI-TIME_UTC, MGA-INI-POS_LLH, SEC-UNIQID, MON-VER, CFG-NAVSPG-ACKAIDING)
+and the MIA-M10Q datasheet's table 5.
+
+What the service is:
+
+- Predictive Orbits is free and permanent; Live Orbits is paid. The old
+  AssistNow Offline/Online tokens are no longer issued. Each receiver is
+  registered once (zero-touch provisioning): a POST to
+  `https://api.thingstream.io/ztp/assistnow/credentials` of a device
+  profile's token and the receiver's UBX-SEC-UNIQID and UBX-MON-VER replies
+  as hex, answered with a chipcode, a service URL and the data the profile
+  allows. That last, `allowedData`, is a list in the guide but one string
+  from the service: `"ualm, uporb_1, uporb_3, uporb_7, uporb_14, ulorb_l1,
+  utime, ukion, usvht"` for an evaluation profile, which takes Live Orbits
+  too and cannot be set to leave them out (2026-10-21). The data is then a
+  GET of
+  `GetAssistNowData.ashx?chipcode=...&gnss=gps,gal&data=uporb_7,ualm`.
+- Limits: an evaluation profile, 300 requests a month a device, three
+  devices an account; a commercial one, 2 a day. A 403 says the count is
+  reached; it starts again at 00:00 UTC.
+- The orbits come as UBX-MGA-ANO, one a satellite a day, and the almanacs as
+  UBX-MGA-*-ALM. This receiver has no flash, so the host keeps them and sends
+  only the day's (host-based, as the guide calls it). **The MIA-M10Q takes
+  orbit predictions for GPS and GLONASS only** (datasheet table 5). The
+  almanacs it takes for all.
+
+What the device does:
+
+- With a token (`ASSISTNOW_ZTP_TOKEN` in .env, built into the firmware;
+  `ztp_token` in the card's `config/assistnow.json` wins, and
+  `"enabled": false` there leaves the service and its data alone), it registers the receiver once
+  GPS is on and there is a network and a clock, then fetches 7 days of GPS,
+  Galileo and GLONASS orbits and the almanacs, 50 KB or so, once every 20
+  hours, and at once if what it keeps was for other constellations. It
+  sends no position: Predictive Orbits needs none. Failures wait 15 min,
+  1 h, 4 h, then 12 h; a 401 registers again.
+- `/spiffs/assistnow.json` keeps the chipcode, when the data came and the
+  last fix (written at most every 30 minutes); `/spiffs/assistnow.ubx` the
+  data. A week with no network still starts with orbits.
+- Whenever the receiver starts (boot, GPS switched on, a wake from sleep),
+  unless it had a fix in the last 2 hours, the kernel hands the driver the
+  time, the last fix and the data; and again when new data comes while it
+  has no fix, and when a much better time comes (below). The fix's
+  accuracy is 1 km plus 100 km an hour since it was taken, left out past
+  3000 km. A receiver told better than the truth starts worse than one told
+  nothing (the interface description's warning on both messages).
+- The driver keeps the almanacs and today's GPS and GLONASS orbits, and once
+  the receiver talks sends CFG-NAVSPG-ACKAIDING (RAM), MGA-INI-TIME_UTC,
+  MGA-INI-POS_LLH and those, 200 bytes a pass, about half the line. Each
+  MGA-ACK is matched to its message by its ID and first four payload bytes;
+  what went unanswered, or found the receiver not ready (infoCode 5), goes
+  once more. The log then says `assistance: time taken, position taken, 31
+  of 31 almanacs and 31 of 31 orbits taken`, and `assistance: N of M
+  refused, the first for reason K` with any refusal.
+- Settings → GPS has an Orbits row: `until 26 Oct`, `no AssistNow token`,
+  `registering`, `downloading`, `failed, HTTP 403`.
+- Privacy: the registration sends the receiver's unique ID and versions to
+  Thingstream, and each fetch the chipcode, with the device's address;
+  nothing else, and never a position.
+
+Checked: 26 kernel tests (the frames, today's selection, the pacing, the
+acknowledgements and the second try, the decisions, the time and position
+accuracies, the registration's body and answer, the URL), and
+`simulator/tests/test_gps_assist.py` against a fake Thingstream and
+AssistNow: registration, fetch and hand-over; kept data asking nothing; no
+token asking nothing; a 403 not asked again at once.
+
+On the bench, 2026-10-21, with an evaluation profile's token on the card,
+indoors:
+
+| Step | Log |
+|---|---|
+| Boot, no orbits yet | `handed to the receiver: the time to 15 s, no position, no orbits` |
+| The receiver | `assistance: time taken, position none, 0 of 0 almanacs and 0 of 0 orbits taken` |
+| Registration | `this receiver is registered; orbits come 7 days at a time` |
+| Fetch, GPS and Galileo | `7 days of orbits fetched: 469 messages, 37052 bytes` |
+| Hand-over | `handed to the receiver: the time to 14 s, no position, 37052 bytes of orbits and almanacs` |
+| The receiver | `assistance: time taken, position none, 55 of 55 almanacs and 32 of 32 orbits taken` |
+
+The first registration was refused by the parser, not the service: the
+guide's list was a string. The redacted answer it now logs on such a
+failure is how that showed. Still to see: the fix outdoors with the orbits,
+and a start with a last position.
+
+To set it up: sign up at portal.thingstream.io; Services → ZTP → Device
+Profiles → Create, module OTHER, assistance Predictive Orbits, an
+Evaluation profile while trying it; copy its ZTP token into .env as
+`ASSISTNOW_ZTP_TOKEN=...` and rebuild, or into the card's
+`config/assistnow.json` as `{"ztp_token": "..."}`.
+
+### GLONASS, and the time to a second (2026-10-21)
+
+Outdoors the first fix with the orbits still took minutes. An IMU would not
+have helped: SPG 5.10 has no sensor input (no UBX-ESF class), and dead
+reckoning keeps a fix going rather than finding the first. Two changes
+instead:
+
+- **GLONASS on.** The module comes up with GPS, Galileo and BeiDou B1I,
+  and B1I cannot run with GLONASS (integration manual §2.1.3). The driver
+  sends, once the receiver talks after each wake, a UBX-CFG-VALSET to RAM
+  and BBR: GLO_ENA, GLO_L1_ENA, BDS_ENA and BDS_B1C_ENA on, BDS_B1_ENA
+  off, the four-constellation set the manual names; B1C acquires a little
+  less readily than B1I. A change restarts the GNSS subsystem, so the rest
+  waits 1 s (the manual asks for the acknowledgement and 0.5 s). The log
+  says `tracking GPS, Galileo, GLONASS and BeiDou B1C` once a boot, or
+  `the receiver refused ...` on a UBX-ACK-NAK. AssistNow is asked for
+  `gps,gal,glo` (BeiDou's predictions would be 23 KB a week it does not
+  take), and kept data for other constellations is fetched again.
+- **The time.** It was 10 s plus 0.5 % of the time since the clock's last
+  sync. It is now the clock plus what is still to be slewed in (the time
+  its source gave), good to the source's own accuracy (NTP 0.1 s; GPS, the
+  mobile network and a clock chip 2 s; by hand 60 s), plus 0.5 s for the
+  hand-over, plus 50 ppm of the time awake and 1 % of the time asleep
+  since that sync. The power manager counts the time in light sleep
+  (`power_manager::slept()`); a sync before the last wake, or before this
+  boot, counts all its time as asleep. The boot's hand-over usually comes
+  before NTP; a time at least twice as good, where the first was over 3 s,
+  is handed over again while there is no fix.
+
+On the bench, indoors, after the reflash:
+
+| Step | Log |
+|---|---|
+| Signals | `tracking GPS, Galileo, GLONASS and BeiDou B1C` |
+| Boot hand-over, the kept data | `the time to 12 s, its last fix to 32 km, 37052 bytes` |
+| NTP | `clock slewing by -1418 ms, from NTP` |
+| Fetched again, for GLONASS | `7 days of orbits fetched: 640 messages, 50456 bytes` |
+| Handed over again | `the time to 1 s, its last fix to 32 km, 50456 bytes` |
+| The receiver | `time taken, position taken, 79 of 79 almanacs and 53 of 53 orbits taken` |
+| The sky | `38 satellites in view, 8 heard`, where it was 13 in view |
+
+The 12 s was honest: the clock was 1.4 s out. Still to see: the first fix
+outdoors with all of it.
+
+### AssistNow Autonomous, and a report of each start (2026-10-21)
+
+On the balcony the first fix still took minutes: many satellites heard,
+some used only much later. The likely reasons are the orbits and the
+sleep, and a report on the card is there to tell which:
+
+- **Orbits.** The receiver takes AssistNow's predictions for GPS and
+  GLONASS only (datasheet table 5), so Galileo and BeiDou wait for an
+  ephemeris read off the satellite: 30 s of clean signal for GPS's, longer
+  for the others, and a balcony's signal is weak and reflected. **AssistNow
+  Autonomous** is now on: CFG-ANA-USE_ANA (0x10230001), sent in RAM and
+  BBR after the settle at each wake, in a UBX-CFG-VALSET of its own so a
+  refusal would not take the signals with it. The receiver then extends
+  each ephemeris it decodes into about three days of its own predictions
+  (integration manual §3.12.4) for GPS, Galileo and BeiDou; GLONASS would
+  need a flash this module does not have. The manual recommends it beside
+  AssistNow Offline: the receiver picks the better prediction for each
+  satellite. BBR keeps them through standby, not deep sleep. The log says
+  `AssistNow Autonomous on: the receiver predicts the orbits it decodes`
+  once a boot, or `the receiver refused AssistNow Autonomous` on a NAK.
+  The driver now matches each UBX-ACK to the VALSET it answers, in order.
+- **Sleep.** Nothing holds the device awake while GPS looks for its first
+  fix. After the idle time (120 s on this board) it light-sleeps, the
+  receiver goes to standby, and the search starts again at the next wake.
+  A report ended `by a sleep` shows it.
+
+**The report** (`gps_report.rs`): one file a start on the card,
+`gps/starts/NNNN-YYYYMMDD-HHMMSS.jsonl` (UTC; `NNNN.jsonl` without the
+clock), JSON lines: `start`, `handed` (the time's and the position's
+accuracy, the bytes), `sats` every 5 s from UBX-NAV-SAT, `fix`, and `end`
+with why and a summary per constellation. It ends 30 s after the fix, at
+the receiver's next start (`by a sleep` or `by GPS switched on again`),
+after 30 minutes without a fix, or at 2 MB. No position is written, the
+last 20 are kept, and `"report": false` in the card's config/assistnow.json
+stops it. The satellites come from the driver's new `get_satellites`
+(`hal/gps.h`): each call polls UBX-NAV-SAT, read whole off the wire (up to
+1024 bytes, 84 satellites, where the frame buffer was 400), and returns the
+last one with its age. A satellite's row is `["G12", dB-Hz, elevation,
+azimuth, quality, used, health, orbit it is navigated by, orbits held]`,
+the orbits `eph` (decoded), `alm`, `pred` (AssistNow's), `auto` (its own).
+The log has the summary of the first `sats` and of the `end`.
+
+On the bench, indoors, after the reflash:
+
+| Step | Log |
+|---|---|
+| Autonomous | `AssistNow Autonomous on: the receiver predicts the orbits it decodes` |
+| The report | `reporting this GPS start in gps/starts/0001-20261021-100004.jsonl` |
+| Its first look, at 1 s | `GPS 1 heard, 0 used, orbits: 4 decoded, 11 predicted, 3 autonomous; Galileo 0 heard, 0 used, orbits: 3 decoded, 0 predicted, 3 autonomous; GLONASS 1 heard, 0 used, orbits: 0 decoded, 8 predicted, 0 autonomous; BeiDou 0 heard, 0 used, orbits: 3 decoded, 0 predicted, 3 autonomous` |
+
+Still to see: a balcony start's report.

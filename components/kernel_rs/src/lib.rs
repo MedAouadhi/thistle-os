@@ -65,6 +65,8 @@ pub mod elf_loader;
 pub mod event;
 mod ffi;
 mod gpio_isr_service;
+pub mod gps_assist;
+pub mod gps_report;
 pub mod gps_manager;
 pub mod gps_track;
 pub mod hal_registry;

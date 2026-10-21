@@ -354,6 +354,22 @@ static LAST_ACTIVITY: AtomicU32 = AtomicU32::new(0);
 static REQUEST: AtomicU8 = AtomicU8::new(0);
 static MENU_AVAILABLE: AtomicBool = AtomicBool::new(false);
 static UI_REQUEST: AtomicU8 = AtomicU8::new(UI_NONE);
+/// The µs spent in light sleep since boot, and when the last sleep ended,
+/// in µs since 1970 (0 for none yet). Asleep, the clock runs on the RC
+/// oscillator, far less steady than the crystal it runs on awake.
+static SLEPT: Mutex<(u64, i64)> = Mutex::new((0, 0));
+
+/// The µs spent in light sleep since boot, and when the last sleep ended.
+pub(crate) fn slept() -> (u64, i64) {
+    *SLEPT.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn wall_us() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros().min(i64::MAX as u128) as i64)
+        .unwrap_or(0)
+}
 
 fn start() -> Instant {
     *START.get_or_init(Instant::now)
@@ -674,6 +690,7 @@ impl Runtime {
             return;
         }
 
+        let fell_asleep = wall_us();
         let (active, timer) = match platform::light_sleep(&pins, slice) {
             Ok(woke) => woke,
             Err(ret) => {
@@ -682,6 +699,12 @@ impl Runtime {
                 (0, false)
             }
         };
+        let woke_at = wall_us();
+        {
+            let mut slept = SLEPT.lock().unwrap_or_else(PoisonError::into_inner);
+            slept.0 += woke_at.saturating_sub(fell_asleep).max(0) as u64;
+            slept.1 = woke_at;
+        }
 
         let now = Instant::now();
         let woke_by = |from: &[WakePin], offset: usize| {
@@ -806,6 +829,7 @@ fn drivers_wake() {
         }
         if let Some(sleep) = reg.gps.as_ref().and_then(|g| g.sleep) {
             sleep(false);
+            crate::gps_assist::receiver_started();
         }
         if let Some(display) = reg.display.as_ref() {
             if display.display_type == HalDisplayType::Lcd {

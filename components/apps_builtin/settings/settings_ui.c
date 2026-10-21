@@ -129,6 +129,7 @@ static lv_obj_t   *s_gps_lat_lbl    = NULL;
 static lv_obj_t   *s_gps_lon_lbl    = NULL;
 static lv_obj_t   *s_gps_sat_lbl    = NULL;
 static lv_obj_t   *s_gps_sig_lbl    = NULL;
+static lv_obj_t   *s_gps_orbit_lbl  = NULL;
 
 /* IMU detail live-update timer: one label per axis, accelerometer then gyro */
 #define IMU_AXES 6
@@ -349,6 +350,7 @@ static void back_to_drivers(lv_event_t *e)
         s_gps_lon_lbl    = NULL;
         s_gps_sat_lbl    = NULL;
         s_gps_sig_lbl    = NULL;
+        s_gps_orbit_lbl  = NULL;
     }
     if (s_imu_timer) {
         lv_timer_delete(s_imu_timer);
@@ -2229,6 +2231,11 @@ static void gps_timer_cb(lv_timer_t *timer)
     esp_err_t err = reg->gps->get_position(&pos);
     char buf[48];
 
+    /* Whatever the receiver is doing: the orbits are fetched whether or not
+     * it is being read. */
+    rs_gps_assist_describe(buf, sizeof(buf));
+    lv_label_set_text(s_gps_orbit_lbl, buf);
+
     if (err != ESP_OK) {
         lv_label_set_text(s_gps_status_lbl, rs_gps_is_enabled() ? "Status: Error" : "Status: Off");
         lv_label_set_text(s_gps_lat_lbl,    "Lat: --");
@@ -2308,6 +2315,8 @@ static void open_detail_gps(lv_obj_t *content)
     s_gps_sat_lbl    = create_live_row(content, "Satellites: --");
     create_separator(content);
     s_gps_sig_lbl    = create_live_row(content, "Signal: --");
+    create_separator(content);
+    s_gps_orbit_lbl  = create_live_row(content, "Orbits: --");
     create_separator(content);
 
     /* Enable / Disable button */
@@ -3552,6 +3561,7 @@ void settings_ui_destroy(void)
         s_gps_lon_lbl    = NULL;
         s_gps_sat_lbl    = NULL;
         s_gps_sig_lbl    = NULL;
+        s_gps_orbit_lbl  = NULL;
     }
     if (s_imu_timer) {
         lv_timer_delete(s_imu_timer);

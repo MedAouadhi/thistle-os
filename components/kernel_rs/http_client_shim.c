@@ -90,6 +90,25 @@ static thistle_http_client_t *checked_client(void *opaque)
     return (thistle_http_client_t *)opaque;
 }
 
+int thistle_http_client_set_post(void *opaque,
+                                 const char *content_type,
+                                 const char *body,
+                                 int length)
+{
+    thistle_http_client_t *client = checked_client(opaque);
+    if (!client || !content_type || !body || length < 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    esp_err_t err = esp_http_client_set_method(client->inner, HTTP_METHOD_POST);
+    if (err == ESP_OK) {
+        err = esp_http_client_set_header(client->inner, "Content-Type", content_type);
+    }
+    if (err == ESP_OK) {
+        err = esp_http_client_set_post_field(client->inner, body, length);
+    }
+    return err;
+}
+
 int thistle_http_client_perform(void *opaque)
 {
     thistle_http_client_t *client = checked_client(opaque);

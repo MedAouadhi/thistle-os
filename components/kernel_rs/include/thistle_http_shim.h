@@ -14,6 +14,12 @@ void *thistle_http_client_init(const char *url,
                                int timeout_ms,
                                thistle_http_data_cb_t data_cb,
                                void *user_data);
+/* Make the request a POST of `length` bytes of `content_type` from `body`,
+ * which must outlive perform(). */
+int thistle_http_client_set_post(void *client,
+                                 const char *content_type,
+                                 const char *body,
+                                 int length);
 int thistle_http_client_perform(void *client);
 int thistle_http_client_get_status_code(void *client);
 int thistle_http_client_open(void *client, int write_len);

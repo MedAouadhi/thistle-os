@@ -255,6 +255,45 @@ power-off take down. Ticket 06 has the bring-up and the bench results.
   log says `no fix after 30 s: 4 satellites in view, 4 heard, best 27
   dB-Hz`, at doubling gaps. Satellites in use stay at 0 until the fix, so
   they tell a weak signal from no signal at all only with these.
+- **AssistNow Predictive Orbits**, u-blox's free service, starts it in
+  seconds (`gps_assist.rs`). With a Thingstream device profile's token,
+  `ASSISTNOW_ZTP_TOKEN` in `.env` (firmware only, never the simulator) or
+  `ztp_token` in the card's `config/assistnow.json`, the kernel registers
+  the receiver once (its UBX-SEC-UNIQID and UBX-MON-VER, the driver's
+  `get_identity`), fetches 7 days of orbits and the almanacs every 20 hours
+  while GPS is on, keeps them in `/spiffs/assistnow.{json,ubx}` with the
+  last fix, and hands them, the time and that fix to the driver's `assist`
+  at each start. No position is ever sent. Without a token nothing is asked.
+- **The receiver takes orbit predictions for GPS and GLONASS only**
+  (datasheet table 5), so the driver switches GLONASS on at each wake
+  (UBX-CFG-VALSET, RAM and BBR), which moves BeiDou from B1I to B1C: B1I
+  cannot run with GLONASS. A change of signals restarts its GNSS, so the
+  rest waits a second. It sends today's orbits and the almanacs, 200 bytes
+  a pass, with UBX-MGA-ACK asked for, and logs `assistance: time taken,
+  position taken, 79 of 79 almanacs and 53 of 53 orbits taken`.
+- **AssistNow Autonomous is on** (CFG-ANA-USE_ANA, a VALSET of its own
+  after the settle, RAM and BBR): the receiver predicts, for three days,
+  the orbits it decodes, Galileo's and BeiDou's too, whose AssistNow
+  predictions it does not take. The driver matches each UBX-ACK to its
+  VALSET in order (`cfg_awaited`).
+- **The time handed over is as good as it is, never better**: the clock
+  plus the slew still to come, good to its source's accuracy, 0.5 s, and
+  50 ppm of the time awake and 1 % of the time asleep since the last sync
+  (`power_manager::slept()` counts the sleep). A much better time, NTP's
+  after the boot's hand-over, is handed over again until the fix.
+  Thingstream's `allowedData` is one string, not the guide's list. Free
+  profiles allow 2 requests a day (300 a month on an evaluation one).
+  Ticket 06 has the protocol and the limits;
+  `simulator/tests/test_gps_assist.py` runs it against a fake service.
+- **Each start is reported on the card**, `gps/starts/NNNN-YYYYMMDD-HHMMSS.jsonl`
+  (`gps_report.rs`): what was handed over, every 5 s each satellite the
+  receiver knows of (UBX-NAV-SAT through the driver's `get_satellites`:
+  signal, used, the orbit it is navigated by and those held), the fix,
+  and why it ended: 30 s after the fix, `by a sleep`, after 30 minutes.
+  No position; the last 20 kept; `"report": false` in
+  config/assistnow.json stops it. Read it to see why a start was slow.
+  Nothing holds the device awake while GPS looks for a fix, so a sleep
+  starts the search again.
 
 ### The quick panel
 
