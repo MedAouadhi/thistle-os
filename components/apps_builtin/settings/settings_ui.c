@@ -1858,7 +1858,7 @@ static void update_refresh(lv_timer_t *t)
         ESP_LOGI(TAG, "System update: %s", card);
     }
 
-    char check[96];
+    char check[112];
     update_check_text(&st, check, sizeof(check));
     update_set_text(s_update_check_lbl, check);
 

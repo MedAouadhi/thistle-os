@@ -130,6 +130,29 @@ flash always boots `kernel_a`.
   kernel is kept, so one rolled back never raises it. The boot log says
   `security floor N; this kernel's security version M`, and `security floor
   raised from N to M` at the keep.
+- **The device updates itself from the catalog** (ticket 07). Once a day
+  with a network up, at most once a boot while the clock is unset, a
+  kernel worker job (`update_manager.rs`, `tick`) starts the check on the
+  `update` task: a FreeRTOS task with a 16 KB internal stack, made for one
+  job (a check, a download, a card install) and gone after. It reads the
+  catalog the App Store reads (`appstore_get_catalog_url()`), keeps it at
+  `/sdcard/appstore/catalog.json`, and offers the newest firmware entry
+  newer than the running version for this chip and board
+  (`update_policy::pick_offer`); the App Store's Refresh counts as a check
+  (`catalog_read`). `/spiffs/update.json` records when and what. Download
+  and install fetches the manifest and signature, checks them as a card's
+  (and newer than what runs), then streams the image through the redirects
+  (`appstore_client::HttpStream`) into the other slot. On mobile data it
+  waits (`UPDATE_WAITING`) until the user allows it or WiFi comes; the
+  log says `the download waits: ...`, `update check (...): ...`,
+  `update refused: ...`. Only firmware entries are parsed into JSON
+  values: a whole catalog's tree of small allocations would land in
+  internal RAM. The App Store has no Firmware tab. The simulator checks
+  daily only with `THISTLE_SIM_UPDATE_CHECKS=1` (its card names the real
+  catalog); `THISTLE_SIM_NETWORK=mobile` takes its host network down, so
+  with mobile data on the fake modem is the network; `THISTLE_SIM_CA_BUNDLE`
+  lets a test's server speak HTTPS. `test_system_update.py` runs it against
+  a fake GitHub.
 - **Settings → System update offers Go back** to the version in the other
   kernel slot, with no download, while that slot's record is the version its
   image description says (`esp_ota_get_partition_description`) and its

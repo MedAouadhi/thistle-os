@@ -19,6 +19,13 @@
 //!
 //! **The floor** rises to a kernel's security version when that kernel is
 //! kept, never when it is written, so one rolled back never raises it.
+//!
+//! **Over the air.** The catalog's newest firmware newer than the running
+//! version (a laptop build counting as its tag), for this chip and board, is
+//! offered. The check is due a day after the last, or at once if there was
+//! none or the clock went back; with the clock unset, once a boot; never
+//! within an hour of the last try. A download starts on WiFi; on mobile data
+//! only once the user allows it.
 
 use crate::version::Version;
 use thistle_artifact::{ArtifactManifest, ArtifactType};
@@ -205,21 +212,23 @@ pub(crate) struct FirmwareRelease {
 
 /// The firmware releases a catalog lists, each with what an install needs;
 /// an entry missing any of it is left out.
+///
+/// Only the firmware entries are parsed into JSON values, one at a time: a
+/// whole catalog's tree, of small allocations, would land in internal RAM
+/// (allocations under 4 KB do), where a 64 KB catalog would cost far more
+/// than the device has to spare.
 pub(crate) fn firmware_releases(catalog_json: &str) -> Vec<FirmwareRelease> {
     use serde_json::Value;
-    let Ok(catalog) = serde_json::from_str::<Value>(catalog_json) else {
-        return Vec::new();
-    };
-    let Some(entries) = catalog.get("entries").and_then(Value::as_array) else {
-        return Vec::new();
-    };
     let text = |entry: &Value, key: &str| -> Option<String> {
         entry.get(key).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string)
     };
-    entries
-        .iter()
+    entry_objects(catalog_json)
+        .into_iter()
+        .filter(|object| object.contains("\"firmware\""))
+        .filter_map(|object| serde_json::from_str::<Value>(object).ok())
         .filter(|entry| entry.get("type").and_then(Value::as_str) == Some("firmware"))
         .filter_map(|entry| {
+            let entry = &entry;
             Some(FirmwareRelease {
                 version: text(entry, "version")?,
                 arch: text(entry, "arch")?,
@@ -238,6 +247,48 @@ pub(crate) fn firmware_releases(catalog_json: &str) -> Vec<FirmwareRelease> {
             })
         })
         .collect()
+}
+
+/// The text of each object in the catalog's `entries` array, found without
+/// parsing the catalog: braces and brackets inside strings are skipped.
+fn entry_objects(json: &str) -> Vec<&str> {
+    let Some(key) = json.find("\"entries\"") else { return Vec::new() };
+    let Some(open) = json[key..].find('[').map(|i| key + i) else { return Vec::new() };
+    let bytes = json.as_bytes();
+    let mut objects = Vec::new();
+    let (mut depth, mut start) = (0usize, 0usize);
+    let (mut in_string, mut escaped) = (false, false);
+    for (i, &b) in bytes.iter().enumerate().skip(open + 1) {
+        if in_string {
+            match b {
+                _ if escaped => escaped = false,
+                b'\\' => escaped = true,
+                b'"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'{' | b'[' => {
+                if depth == 0 && b == b'{' {
+                    start = i;
+                }
+                depth += 1;
+            }
+            b'}' | b']' => {
+                if depth == 0 {
+                    break; // the end of the entries array
+                }
+                depth -= 1;
+                if depth == 0 && b == b'}' {
+                    objects.push(&json[start..=i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    objects
 }
 
 /// Which of the catalog's firmware releases to offer: the newest, by
@@ -674,6 +725,18 @@ mod tests {
         assert!(firmware_releases(&no_manifest).is_empty());
         let no_size = CATALOG.replace("\"size_bytes\": 3866624", "\"size_bytes\": 0");
         assert!(firmware_releases(&no_size).is_empty());
+    }
+
+    #[test]
+    fn braces_and_quotes_inside_strings_do_not_split_an_entry() {
+        let catalog = CATALOG.replace(
+            "Over the air updates.",
+            "Fixed {braces} and \\\"quotes\\\" and ]brackets[",
+        );
+        let releases = firmware_releases(&catalog);
+        assert_eq!(releases.len(), 1);
+        assert_eq!(releases[0].notes, "Fixed {braces} and \"quotes\" and ]brackets[\n- Check now");
+        assert_eq!(releases[0].size, 3866624);
     }
 
     #[test]
