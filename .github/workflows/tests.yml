@@ -219,6 +219,9 @@ jobs:
       - name: Test the workflows run on hosted runners and publish nothing of upstream's
         run: python3 tools/test_ci_workflows.py
 
+      - name: Test the docs and the apps' metadata link to the fork, not upstream
+        run: python3 tools/test_upstream_links.py
+
       - name: Test the firmware's version and the release steps
         run: |
           python3 tools/test_firmware_version.py

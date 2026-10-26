@@ -173,8 +173,8 @@ Example:
   "summary": "Fast, local notes for colour and e-paper devices.",
   "description": "Create and edit portable plain-text notes stored locally.",
   "license": "BSD-3-Clause",
-  "homepage": "https://github.com/wan0net/thistle-os",
-  "source": "https://github.com/wan0net/thistle-os/tree/main/apps/notes",
+  "homepage": "https://github.com/MedAouadhi/thistle-os",
+  "source": "https://github.com/MedAouadhi/thistle-os/tree/main/apps/notes",
   "releases": [
     {
       "version": "1.2.0",

@@ -77,7 +77,7 @@ mod tests {
     use super::*;
 
     const GITHUB: &str =
-        "https://github.com/wan0net/thistle-apps/releases/download/notes-1.2.0/notes.tap";
+        "https://github.com/MedAouadhi/thistle-os/releases/download/notes-v1.2.0/notes.tap";
     const ASSETS: &str =
         "https://release-assets.githubusercontent.com/github-production-release-asset/1/2?sig=x";
 
