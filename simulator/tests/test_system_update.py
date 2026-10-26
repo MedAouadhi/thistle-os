@@ -26,7 +26,8 @@ The fake GitHub is two servers: one serves the catalog and answers a release
 asset's URL with a 302, as GitHub does, to the second, which serves the
 bytes. The catalog server can speak HTTPS, with a certificate of the test's
 own that the simulator trusts through THISTLE_SIM_CA_BUNDLE. The daily check
-runs in the simulator only with THISTLE_SIM_UPDATE_CHECKS=1, and
+runs in the simulator only with THISTLE_SIM_UPDATE_CHECKS=1, after
+THISTLE_SIM_UPDATE_SETTLE_S of settling (two minutes on a device), and
 THISTLE_SIM_NETWORK=mobile takes its host network down, so that with mobile
 data on the fake modem's link is the network.
 
@@ -61,6 +62,8 @@ from cryptography.hazmat.primitives.serialization import (Encoding, NoEncryption
 from cryptography.x509.oid import NameOID
 
 SDCARD = Path(__file__).resolve().parent.parent / "sdcard"
+# A kernel slot's size (partitions.csv).
+KERNEL_SLOT = 0x480000
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
 from sign import canonical_manifest  # noqa: E402
 
@@ -117,10 +120,13 @@ class Device:
     def put_release(self, version: str = "0.6.0", security_version: int = 600,
                     arch: str = "host", boards: tuple = ("tdeck", "tdeck-max"),
                     key: Optional[Ed25519PrivateKey] = None,
-                    on_card: Optional[Callable[[bytes], bytes]] = None) -> None:
+                    on_card: Optional[Callable[[bytes], bytes]] = None,
+                    size: int = 0) -> None:
         """Copy a release to update/; `on_card` changes the image after it
-        is signed for, as a corrupted or swapped copy would."""
+        is signed for, as a corrupted or swapped copy would. `size` pads the
+        image, signed for as it is."""
         image = kernel_image(version)
+        image += b"\xff" * max(0, size - len(image))
         manifest = canonical_manifest(
             artifact_type="firmware", artifact_id="thistle-os", version=version,
             security_version=security_version, arch=arch, compatible_boards=list(boards),
@@ -473,7 +479,8 @@ def a_file_with_one_byte_changed_is_refused(device: Device) -> None:
 
 # --- over the air -----------------------------------------------------------
 
-DAILY = {"THISTLE_SIM_UPDATE_CHECKS": "1"}
+# The daily check, at once: a boot settles for two minutes before it.
+DAILY = {"THISTLE_SIM_UPDATE_CHECKS": "1", "THISTLE_SIM_UPDATE_SETTLE_S": "0"}
 
 
 def online(case: Callable[[Device, "GitHub"], None], tls: bool = False):
@@ -524,6 +531,14 @@ def the_daily_check_offers_a_newer_release(device: Device, github: GitHub) -> No
     log = device.settings(env=DAILY)
     refuse(log, "update check (the daily check)")
     expect(log, "System update: Available: ThistleOS 0.6.0")
+
+
+def the_daily_check_waits_for_the_boot_to_settle(device: Device, github: GitHub) -> None:
+    device.put_online_release(github)
+    log = device.settings(env={**DAILY, "THISTLE_SIM_UPDATE_SETTLE_S": "60"})
+    refuse(log, "update check (the daily check)")
+    log = device.settings(env={**DAILY, "THISTLE_SIM_UPDATE_SETTLE_S": "3"})
+    expect(log, "update check (the daily check): 0.6.0 is offered; running ")
 
 
 def the_daily_check_offers_nothing_older_or_for_another_board(device: Device,
@@ -699,6 +714,25 @@ def go_back_disappears_once_an_install_starts_erasing_the_other_slot(device: Dev
     refuse(device.settings(), "Go back")
 
 
+def go_back_stays_when_the_other_slot_cannot_be_written(device: Device) -> None:
+    device.put_release(security_version=500)
+    device.run("--install-update")
+    log = device.run(keep_s=1, timeout_ms=3000)
+    expect(log, "kept the kernel in kernel_b")
+    previous = device.nvs()["kernel_a_ver"]
+
+    # Signed for, but larger than a kernel slot: the slot refuses it before
+    # anything is erased, and the previous version is still there.
+    device.put_release(version="0.7.0", security_version=500, size=KERNEL_SLOT + 1)
+    log = device.settings(INSTALL_BELOW_GO_BACK)
+    expect(log, f"System update: Go back to {previous}",
+           "card update refused: kernel_a cannot be written")
+    refuse(log, "no longer offered")
+    if device.nvs().get("kernel_a_ver") != previous:
+        raise AssertionError("kernel_a's record was cleared though nothing was erased")
+    expect(device.settings(), f"System update: Go back to {previous}")
+
+
 CASES = (
     settings_shows_the_running_version_and_the_release_on_the_card,
     a_release_installs_from_settings_and_restart_now_boots_it,
@@ -712,6 +746,7 @@ CASES = (
     a_file_of_another_size_is_refused,
     a_file_with_one_byte_changed_is_refused,
     online(the_daily_check_offers_a_newer_release),
+    online(the_daily_check_waits_for_the_boot_to_settle),
     online(the_daily_check_offers_nothing_older_or_for_another_board),
     online(a_release_downloads_through_the_redirect_and_installs),
     online(a_download_of_another_size_is_refused),
@@ -724,6 +759,7 @@ CASES = (
     go_back_boots_the_other_slot_and_the_profile_follows_it,
     going_back_is_not_offered_below_the_floor,
     go_back_disappears_once_an_install_starts_erasing_the_other_slot,
+    go_back_stays_when_the_other_slot_cannot_be_written,
 )
 
 

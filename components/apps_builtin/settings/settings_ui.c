@@ -18,6 +18,7 @@
 #include "esp_err.h"
 #include "esp_system.h"
 #include "esp_heap_caps.h"
+#include "esp_attr.h"
 
 #include "thistle/wifi_manager.h"
 #include "thistle/net_manager.h"
@@ -1863,7 +1864,8 @@ static void update_refresh(lv_timer_t *t)
     update_set_text(s_update_check_lbl, check);
 
     char offer_version[40] = "";
-    static char notes[320];
+    /* Only this task reads it: PSRAM. */
+    static EXT_RAM_BSS_ATTR char notes[320];
     notes[0] = '\0';
     bool offered = rs_update_offer(offer_version, sizeof(offer_version), notes, sizeof(notes));
     char offer[64];
@@ -2075,6 +2077,8 @@ static void open_update_screen(void)
     create_note(content, "To install a release from the card, copy its image, "
                          "manifest and signature to the card's update folder.");
 
+    /* The card may have changed since the page was last open. */
+    rs_update_rescan();
     update_refresh(NULL);
     s_update_timer = lv_timer_create(update_refresh, 500, NULL);
 }

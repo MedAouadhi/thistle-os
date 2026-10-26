@@ -317,6 +317,10 @@ pub(crate) const CHECK_EVERY_S: i64 = 24 * 3600;
 /// be tried.
 pub(crate) const RETRY_MS: u64 = 3600 * 1000;
 
+/// How long a boot settles before the daily check: the boot's own work
+/// (drivers, the network, the tailnet, GPS) has its RAM first.
+pub(crate) const SETTLE_MS: u64 = 120_000;
+
 /// What decides whether the daily check is due.
 #[derive(Clone, Debug)]
 pub(crate) struct CheckInputs {
@@ -330,14 +334,21 @@ pub(crate) struct CheckInputs {
     pub last_check_s: Option<i64>,
     /// How long ago this boot's last check was tried, if one was.
     pub attempted_ms_ago: Option<u64>,
+    /// The running kernel is kept, or was never new.
+    pub kept: bool,
+    /// How long this boot has run.
+    pub up_ms: u64,
+    /// How long it settles first: SETTLE_MS, shorter only in tests.
+    pub settle_ms: u64,
 }
 
-/// The daily check is due: with a network, nothing under way, and no check
-/// tried this boot in the last hour; then, with the clock set, a day after
+/// The daily check is due: once the boot has settled and its kernel is
+/// kept, with a network, nothing under way, and no check tried this boot in
+/// the last hour; then, with the clock set, a day after
 /// the last check (or at once, if there was none or the clock has gone back
 /// since); with the clock unset, once a boot.
 pub(crate) fn check_due(i: &CheckInputs) -> bool {
-    if !i.network || i.busy {
+    if !i.kept || i.up_ms < i.settle_ms || !i.network || i.busy {
         return false;
     }
     if i.attempted_ms_ago.is_some_and(|ago| ago < RETRY_MS) {
@@ -832,7 +843,24 @@ mod tests {
             now_s: Some(NOW),
             last_check_s: Some(NOW - 25 * HOUR),
             attempted_ms_ago: None,
+            kept: true,
+            up_ms: SETTLE_MS,
+            settle_ms: SETTLE_MS,
         }
+    }
+
+    #[test]
+    fn no_check_until_the_boot_has_settled() {
+        assert!(!check_due(&CheckInputs { up_ms: 0, ..due() }));
+        assert!(!check_due(&CheckInputs { up_ms: SETTLE_MS - 1, ..due() }));
+        assert!(check_due(&CheckInputs { up_ms: SETTLE_MS, ..due() }));
+        // A test may shorten the settle; a device never does.
+        assert!(check_due(&CheckInputs { up_ms: 0, settle_ms: 0, ..due() }));
+    }
+
+    #[test]
+    fn no_check_until_a_new_kernel_is_kept() {
+        assert!(!check_due(&CheckInputs { kept: false, up_ms: 3_600_000, ..due() }));
     }
 
     #[test]

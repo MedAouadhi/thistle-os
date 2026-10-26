@@ -21,7 +21,8 @@
 //! the simulator keeps the same in `nvs`, a file beside its kernel slots.
 //!
 //! An install runs on a FreeRTOS task of its own with a 16 KB internal
-//! stack, gone when it is done, and holds the device awake meanwhile.
+//! stack, a check on one with 8 KB, each gone when it is done
+//! (kernel_task), and holds the device awake meanwhile.
 //! The C API is `thistle/update.h`.
 
 use std::ffi::{CStr, CString};
@@ -49,9 +50,12 @@ const ESP_ERR_INVALID_CRC: i32 = 0x109;
 
 /// A manifest is eleven short lines; Recovery bounds it the same.
 const MAX_MANIFEST: u64 = 4096;
-/// The install's task: an Ed25519 verify is 7 to 8 KB deep, as the App
+/// An install's task: an Ed25519 verify is 7 to 8 KB deep, as the App
 /// Store worker found. Internal RAM, as it writes flash.
-const STACK_SIZE: usize = 16 * 1024;
+const INSTALL_STACK: usize = 16 * 1024;
+/// A check's task: an HTTPS fetch and the catalog's parse, as gps_assist's
+/// fetch on 8 KB. The catalog is on the heap.
+const CHECK_STACK: usize = 8 * 1024;
 /// Copied a chunk at a time: at most 4 KB stays in internal RAM.
 const CHUNK: usize = 4096;
 
@@ -83,21 +87,54 @@ const ESP_LOG_INFO: i32 = 3;
 // The state, as Settings reads it
 // ---------------------------------------------------------------------------
 
-/// update_state_t
-pub const STATE_IDLE: u32 = 0;
-pub const STATE_CHECKING: u32 = 1;
-pub const STATE_UP_TO_DATE: u32 = 2;
-pub const STATE_AVAILABLE: u32 = 3;
-pub const STATE_DOWNLOADING: u32 = 4;
-pub const STATE_WRITING: u32 = 5;
-pub const STATE_READY: u32 = 6;
-pub const STATE_FAILED: u32 = 7;
-/// A download asked for waits: for a network, or on mobile data for the
-/// user to allow it.
-pub const STATE_WAITING: u32 = 8;
+/// What the update manager is doing, as Settings shows it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum State {
+    Idle,
+    Checking,
+    UpToDate,
+    Available,
+    Downloading,
+    /// Checking a release and writing it.
+    Writing,
+    /// Written: runs after the next restart.
+    Ready,
+    /// Refused or failed; the reason says why.
+    Failed,
+    /// A download asked for waits: for a network, or on mobile data for the
+    /// user to allow it.
+    Waiting,
+}
+
+impl State {
+    /// update_state_t's value.
+    fn to_c(self) -> u32 {
+        match self {
+            State::Idle => 0,
+            State::Checking => 1,
+            State::UpToDate => 2,
+            State::Available => 3,
+            State::Downloading => 4,
+            State::Writing => 5,
+            State::Ready => 6,
+            State::Failed => 7,
+            State::Waiting => 8,
+        }
+    }
+}
+
+/// What Settings reads of the card and the other kernel slot, kept so its
+/// twice-a-second refresh reads neither: the card's release and whether
+/// going back is offered. Read again after an install's job, when a card
+/// is mounted, and when Settings opens its page.
+#[derive(Clone, Debug, Default)]
+struct Local {
+    card: Option<CardRelease>,
+    go_back: Option<(&'static str, String)>,
+}
 
 struct Status {
-    state: u32,
+    state: State,
     done: u32,
     total: u32,
     /// The version being installed, or installed and waiting for a restart.
@@ -120,10 +157,13 @@ struct Status {
     app_releases: Vec<AppRelease>,
     /// Of those, the ones offered to the installed apps: one an app at most.
     app_offers: Vec<AppRelease>,
+    /// The card and the other slot as last read; None until read, or once
+    /// they may have changed.
+    local: Option<Local>,
 }
 
 static STATUS: Mutex<Status> = Mutex::new(Status {
-    state: STATE_IDLE,
+    state: State::Idle,
     done: 0,
     total: 0,
     version: String::new(),
@@ -136,6 +176,7 @@ static STATUS: Mutex<Status> = Mutex::new(Status {
     attempted_ms: None,
     app_releases: Vec::new(),
     app_offers: Vec::new(),
+    local: None,
 });
 
 /// An install is under way; only one at a time.
@@ -478,7 +519,7 @@ fn install_card_release() -> Result<String, Failure> {
     let size = file.metadata().map(|m| m.len()).unwrap_or(0);
     policy::check_size(&manifest, size).map_err(Failure::Refused)?;
 
-    write_into_slot(&manifest, size, STATE_WRITING, &mut |buffer| match file.read(buffer) {
+    write_into_slot(&manifest, size, State::Writing, &mut |buffer| match file.read(buffer) {
         Ok(0) | Err(_) => Err(error("the image could not be read to its end", ESP_ERR_INVALID_SIZE)),
         Ok(count) => Ok(count),
     })
@@ -491,7 +532,7 @@ fn install_card_release() -> Result<String, Failure> {
 fn write_into_slot(
     manifest: &ArtifactManifest,
     size: u64,
-    state: u32,
+    state: State,
     read: &mut dyn FnMut(&mut [u8]) -> Result<usize, Failure>,
 ) -> Result<String, Failure> {
     let running = crate::ota::running_slot()
@@ -514,14 +555,21 @@ fn write_into_slot(
         s.total = size as u32;
     });
 
+    // Beginning erases the slot. One that cannot begin is left as it was,
+    // and going back to it is still offered.
+    let mut writer = crate::ota::SlotWriter::begin(target, size as usize)
+        .map_err(|err| error(&format!("{target} cannot be written"), err))?;
     // From here the other slot's previous kernel is gone, and going back
     // to it is no longer offered, whether or not this install finishes.
     if platform::record(target, &Record { version: String::new(), security_version: 0 }) != ESP_OK
     {
         log(ESP_LOG_WARN, &format!("could not clear {target}'s record in NVS"));
     }
-    let mut writer = crate::ota::SlotWriter::begin(target, size as usize)
-        .map_err(|err| error(&format!("{target} cannot be written"), err))?;
+    with(|s| {
+        if let Some(local) = s.local.as_mut() {
+            local.go_back = None;
+        }
+    });
     let mut hasher = Sha256::new();
     // On the heap: the task's internal stack holds no buffer.
     let mut buffer = vec![0u8; CHUNK];
@@ -552,7 +600,7 @@ fn write_into_slot(
         writer.abort();
         return Err(Failure::Refused(refusal));
     }
-    with(|s| s.state = STATE_WRITING);
+    with(|s| s.state = State::Writing);
     if let Err(err) = writer.finish() {
         log(
             ESP_LOG_ERROR,
@@ -582,7 +630,7 @@ fn run_card_install() -> i32 {
     let code = match &result {
         Ok(version) => {
             with(|s| {
-                s.state = STATE_READY;
+                s.state = State::Ready;
                 s.version = version.clone();
                 s.reason.clear();
             });
@@ -592,12 +640,13 @@ fn run_card_install() -> i32 {
             let reason = failure.reason();
             log(ESP_LOG_WARN, &format!("card update refused: {reason}"));
             with(|s| {
-                s.state = STATE_FAILED;
+                s.state = State::Failed;
                 s.reason = reason;
             });
             failure.code()
         }
     };
+    with(|s| s.local = None);
     BUSY.store(false, Ordering::Release);
     code
 }
@@ -608,7 +657,7 @@ fn begin() -> bool {
         return false;
     }
     with(|s| {
-        s.state = STATE_WRITING;
+        s.state = State::Writing;
         s.done = 0;
         s.total = 0;
         s.version.clear();
@@ -628,23 +677,25 @@ pub(crate) fn install_from_card_blocking() -> i32 {
 
 /// What the update task is made for. It does one, then is gone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(usize)]
 enum Job {
     /// Install the card's release.
-    Card = 1,
+    Card,
     /// Read the catalog: the daily check.
-    DailyCheck = 2,
+    DailyCheck,
     /// Read the catalog: Settings' Check now.
-    CheckNow = 3,
+    CheckNow,
     /// Download the release on offer and install it.
-    Download = 4,
+    Download,
 }
 
 impl Job {
-    fn from_arg(arg: usize) -> Option<Job> {
-        [Job::Card, Job::DailyCheck, Job::CheckNow, Job::Download]
-            .into_iter()
-            .find(|job| *job as usize == arg)
+    /// Its task's stack: an install verifies a signature, a check only
+    /// fetches and parses.
+    fn stack(self) -> usize {
+        match self {
+            Job::Card | Job::Download => INSTALL_STACK,
+            Job::DailyCheck | Job::CheckNow => CHECK_STACK,
+        }
     }
 }
 
@@ -659,60 +710,25 @@ fn run_job(job: Job) {
         Job::CheckNow => run_check("Check now"),
         Job::Download => run_download(),
     }
-}
-
-#[cfg(target_os = "espidf")]
-fn start_task(job: Job) -> bool {
-    extern "C" {
-        fn xTaskCreatePinnedToCore(
-            task_fn: unsafe extern "C" fn(*mut c_void),
-            name: *const c_char,
-            stack_depth: u32,
-            param: *mut c_void,
-            priority: u32,
-            task_handle: *mut *mut c_void,
-            core_id: i32,
-        ) -> i32;
-        fn vTaskDelete(task: *mut c_void);
-    }
-    const PD_PASS: i32 = 1;
-    const PRIORITY: u32 = 5;
-    const NO_AFFINITY: i32 = 0x7fff_ffff;
-
-    unsafe extern "C" fn entry(arg: *mut c_void) {
-        if let Some(job) = Job::from_arg(arg as usize) {
-            run_job(job);
-        }
-        unsafe { vTaskDelete(std::ptr::null_mut()) };
-    }
-
-    // The stack is internal RAM (xTaskCreatePinnedToCore's), as a task that
-    // writes flash needs; it exists only while the job runs.
-    unsafe {
-        xTaskCreatePinnedToCore(
-            entry,
-            b"update\0".as_ptr() as *const c_char,
-            STACK_SIZE as u32,
-            job as usize as *mut c_void,
-            PRIORITY,
-            std::ptr::null_mut(),
-            NO_AFFINITY,
-        ) == PD_PASS
+    if let Some(unused) = crate::kernel_task::stack_unused() {
+        log(
+            ESP_LOG_INFO,
+            &format!("update task ({job:?}): {unused} of {} bytes of stack never used", job.stack()),
+        );
     }
 }
 
-#[cfg(not(target_os = "espidf"))]
+/// Run `job` on the update task: internal RAM, as a task that writes flash
+/// needs, and only while the job runs.
 fn start_task(job: Job) -> bool {
-    std::thread::Builder::new()
-        .name("update".to_string())
-        .stack_size(STACK_SIZE)
-        .spawn(move || run_job(job))
-        .is_ok()
+    crate::kernel_task::spawn(c"update", job.stack(), crate::kernel_task::PRIORITY_DEFAULT, move || {
+        run_job(job)
+    })
 }
 
 /// Start `job` on the update task, `state` shown meanwhile, unless a job is
 /// under way.
-fn start_job(job: Job, state: u32) -> i32 {
+fn start_job(job: Job, state: State) -> i32 {
     if BUSY.swap(true, Ordering::AcqRel) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -883,8 +899,8 @@ pub(crate) fn catalog_read(json: &str, by: &str) {
         if now > 0 {
             s.checked_s = now;
         }
-        if matches!(s.state, STATE_IDLE | STATE_CHECKING | STATE_UP_TO_DATE | STATE_AVAILABLE | STATE_FAILED) {
-            s.state = if offer.is_some() { STATE_AVAILABLE } else { STATE_UP_TO_DATE };
+        if matches!(s.state, State::Idle | State::Checking | State::UpToDate | State::Available | State::Failed) {
+            s.state = if offer.is_some() { State::Available } else { State::UpToDate };
             s.reason.clear();
         }
         s.offer = offer;
@@ -913,8 +929,8 @@ fn run_check(by: &'static str) {
             with(|s| {
                 s.found = "the catalog could not be read".into();
                 s.shown_s = now;
-                if s.state == STATE_CHECKING {
-                    s.state = if s.offer.is_some() { STATE_AVAILABLE } else { STATE_IDLE };
+                if s.state == State::Checking {
+                    s.state = if s.offer.is_some() { State::Available } else { State::Idle };
                 }
             });
             save_record();
@@ -930,9 +946,9 @@ fn reread_kept_catalog() {
     let (offer, _) = judge_catalog(&json);
     judge_apps(&json);
     with(|s| {
-        if s.offer.is_none() && s.state == STATE_IDLE {
+        if s.offer.is_none() && s.state == State::Idle {
             if offer.is_some() {
-                s.state = STATE_AVAILABLE;
+                s.state = State::Available;
             }
             s.offer = offer;
         }
@@ -944,7 +960,7 @@ fn reread_kept_catalog() {
 // ---------------------------------------------------------------------------
 
 /// The largest kernel a download may be: a kernel slot.
-const MAX_FIRMWARE: u64 = 0x480000;
+const MAX_FIRMWARE: u64 = crate::kernel_slot::SLOT_SIZE as u64;
 
 fn fetch_failure(what: &str, err: FetchError) -> Failure {
     let said = format!("{what}: {}", err.reason());
@@ -986,7 +1002,7 @@ fn download_offer() -> Result<String, Failure> {
         HttpStream::open(&release.url, MAX_FIRMWARE).map_err(|e| fetch_failure("the image", e))?;
     policy::check_size(&manifest, stream.length()).map_err(Failure::Refused)?;
     let size = stream.length();
-    write_into_slot(&manifest, size, STATE_DOWNLOADING, &mut |buffer| {
+    write_into_slot(&manifest, size, State::Downloading, &mut |buffer| {
         stream.read(buffer).map_err(|e| fetch_failure("the image", e))
     })
 }
@@ -996,7 +1012,7 @@ fn run_download() {
     let _awake = crate::power_manager::HoldGuard::new(b"an update is downloading\0");
     match download_offer() {
         Ok(version) => with(|s| {
-            s.state = STATE_READY;
+            s.state = State::Ready;
             s.version = version;
             s.reason.clear();
         }),
@@ -1008,11 +1024,12 @@ fn run_download() {
             };
             log(ESP_LOG_WARN, &format!("update {verb}: {reason}"));
             with(|s| {
-                s.state = STATE_FAILED;
+                s.state = State::Failed;
                 s.reason = reason;
             });
         }
     }
+    with(|s| s.local = None);
     BUSY.store(false, Ordering::Release);
 }
 
@@ -1026,15 +1043,15 @@ fn download_or_wait(consent: bool) -> i32 {
             s.total = 0;
             s.reason.clear();
         });
-        return start_job(Job::Download, STATE_DOWNLOADING);
+        return start_job(Job::Download, State::Downloading);
     }
     let reason = match gate {
         Gate::WaitForConsent => "on mobile data: waiting for WiFi, or for you to allow mobile data",
         _ => "waiting for a network",
     };
     let changed = with(|s| {
-        let changed = s.state != STATE_WAITING || s.reason != reason;
-        s.state = STATE_WAITING;
+        let changed = s.state != State::Waiting || s.reason != reason;
+        s.state = State::Waiting;
         s.consent = consent;
         s.reason = reason.into();
         changed
@@ -1054,31 +1071,67 @@ unsafe extern "C" fn tick(_arg: *mut c_void) {
         return;
     }
     let (state, consent) = with(|s| (s.state, s.consent));
-    if state == STATE_WAITING {
+    if state == State::Waiting {
         download_or_wait(consent);
         return;
     }
+    if !daily_checks() {
+        return;
+    }
+    // Read before the lock: net_manager takes its own.
+    let network = network() != Network::None;
+    let (now, kept, up_ms) = (now_s(), crate::ota::running_kernel_kept(), up_ms());
     let inputs = with(|s| policy::CheckInputs {
-        network: network() != Network::None,
-        busy: s.state == STATE_READY,
-        now_s: now_s(),
+        network,
+        busy: s.state == State::Ready,
+        now_s: now,
         last_check_s: (s.checked_s > 0).then_some(s.checked_s),
         attempted_ms_ago: s.attempted_ms.map(|at| now_ms().saturating_sub(at)),
+        kept,
+        up_ms,
+        settle_ms: settle_ms(),
     });
-    if daily_checks() && policy::check_due(&inputs) {
+    if policy::check_due(&inputs) {
         with(|s| s.attempted_ms = Some(now_ms()));
-        start_job(Job::DailyCheck, STATE_CHECKING);
+        start_job(Job::DailyCheck, State::Checking);
     }
 }
 
 /// Start the daily check: a kernel worker job notices when it is due.
 pub(crate) fn start_checks() {
+    for event in [crate::event::EventType::SdMounted, crate::event::EventType::SdUnmounted] {
+        crate::event::event_subscribe(event as u32, on_card_event, std::ptr::null_mut());
+    }
     load_record();
     reread_kept_catalog();
     if !daily_checks() {
         log(ESP_LOG_INFO, "update checks: only Check now (THISTLE_SIM_UPDATE_CHECKS is not 1)");
     }
     crate::kworker::every(tick, std::ptr::null_mut(), Duration::from_secs(2));
+}
+
+/// How long this boot has run: the running kernel's time, or the update
+/// manager's where no kernel slot was found.
+fn up_ms() -> u64 {
+    if crate::ota::running_slot().is_some() {
+        crate::ota::running_for().as_millis() as u64
+    } else {
+        now_ms()
+    }
+}
+
+/// How long a boot settles before its first check: update_policy's, or in
+/// the simulator THISTLE_SIM_UPDATE_SETTLE_S, which tests shorten.
+fn settle_ms() -> u64 {
+    #[cfg(not(target_os = "espidf"))]
+    if let Some(s) = std::env::var("THISTLE_SIM_UPDATE_SETTLE_S")
+        .ok()
+        .and_then(|s| s.trim().parse::<f64>().ok())
+        .filter(|s| s.is_finite() && *s >= 0.0)
+    {
+        return (s * 1000.0) as u64;
+    }
+    policy::SETTLE_MS
 }
 
 /// A device checks every day. The simulator only when a test asks, with
@@ -1101,9 +1154,14 @@ fn daily_checks() -> bool {
 /// erasing that slot, which clears its record, nor while one waits for its
 /// restart: the slot is then the new kernel's.
 pub(crate) fn go_back_target() -> Option<(&'static str, String)> {
-    if with(|s| s.state) == STATE_READY {
+    if with(|s| s.state) == State::Ready {
         return None;
     }
+    read_go_back()
+}
+
+/// Whether going back is offered, as NVS and the other slot say now.
+fn read_go_back() -> Option<(&'static str, String)> {
     let other = crate::kernel_slot::other_kernel_slot(crate::ota::running_slot()?)?;
     let record = slot_record(other);
     let image = crate::ota::slot_image_version(other);
@@ -1113,6 +1171,32 @@ pub(crate) fn go_back_target() -> Option<(&'static str, String)> {
         security_version: r.security_version,
     });
     policy::go_back(record, image.as_deref(), floor).map(|version| (other, version))
+}
+
+/// The card and the other slot, as last read; read now if they may have
+/// changed, unless an install is under way, which reads both (Settings
+/// shows the last read meanwhile; going back is gone once the erase
+/// starts).
+fn local() -> Local {
+    if let Some(local) = with(|s| s.local.clone()) {
+        return local;
+    }
+    if BUSY.load(Ordering::Acquire) {
+        return Local::default();
+    }
+    let local = Local { card: card_release(), go_back: read_go_back() };
+    with(|s| s.local = Some(local.clone()));
+    local
+}
+
+/// Read the card and the other slot again at the next look: a card was
+/// mounted, or Settings opened its page.
+fn local_changed() {
+    with(|s| s.local = None);
+}
+
+extern "C" fn on_card_event(_event: *const crate::event::CEvent, _arg: *mut c_void) {
+    local_changed();
 }
 
 /// Select the other kernel slot as it is and restart into it.
@@ -1147,19 +1231,18 @@ pub struct CUpdateStatus {
     pub state: u32,
     pub done: u32,
     pub total: u32,
-    pub version: [c_char; 40],
-    pub reason: [c_char; 128],
+    pub version: [u8; 40],
+    pub reason: [u8; 128],
 }
 
-fn copy_c(text: &str, out: &mut [c_char]) {
-    let mut n = text.len().min(out.len() - 1);
-    while !text.is_char_boundary(n) {
-        n -= 1;
+/// `text` into `len` bytes at `out`, cut at a character and NUL-ended.
+///
+/// # Safety
+/// `out` must be NULL or point to `len` bytes.
+unsafe fn copy_out(text: &str, out: *mut c_char, len: usize) {
+    if !out.is_null() && len > 0 {
+        crate::sms_manager::copy_c(std::slice::from_raw_parts_mut(out as *mut u8, len), text);
     }
-    for (dst, src) in out.iter_mut().zip(text.as_bytes()[..n].iter()) {
-        *dst = *src as c_char;
-    }
-    out[n] = 0;
 }
 
 /// # Safety
@@ -1168,11 +1251,11 @@ fn copy_c(text: &str, out: &mut [c_char]) {
 pub unsafe extern "C" fn rs_update_get_status(out: *mut CUpdateStatus) {
     let Some(out) = out.as_mut() else { return };
     with(|s| {
-        out.state = s.state;
+        out.state = s.state.to_c();
         out.done = s.done;
         out.total = s.total;
-        copy_c(&s.version, &mut out.version);
-        copy_c(&s.reason, &mut out.reason);
+        crate::sms_manager::copy_c(&mut out.version, &s.version);
+        crate::sms_manager::copy_c(&mut out.reason, &s.reason);
     });
 }
 
@@ -1189,12 +1272,15 @@ pub extern "C" fn rs_update_running_version() -> *const c_char {
 /// `version` must be NULL or point to `len` bytes.
 #[no_mangle]
 pub unsafe extern "C" fn rs_update_card_release(version: *mut c_char, len: usize) -> bool {
-    let Some(release) = card_release() else { return false };
-    if !version.is_null() && len > 0 {
-        let out = std::slice::from_raw_parts_mut(version, len);
-        copy_c(release.version.as_deref().unwrap_or(""), out);
-    }
+    let Some(release) = local().card else { return false };
+    copy_out(release.version.as_deref().unwrap_or(""), version, len);
     true
+}
+
+/// Settings opened its page: read the card and the other slot again.
+#[no_mangle]
+pub extern "C" fn rs_update_rescan() {
+    local_changed();
 }
 
 /// Start installing the card's release on a task of its own. Its progress
@@ -1210,7 +1296,7 @@ pub extern "C" fn rs_update_install_from_card() -> i32 {
     }
     log(ESP_LOG_ERROR, "could not start a task to install the update");
     with(|s| {
-        s.state = STATE_FAILED;
+        s.state = State::Failed;
         s.reason = "no memory to start the install".into();
     });
     BUSY.store(false, Ordering::Release);
@@ -1230,12 +1316,8 @@ pub unsafe extern "C" fn rs_update_offer(
     notes_len: usize,
 ) -> bool {
     let Some(offer) = with(|s| s.offer.clone()) else { return false };
-    if !version.is_null() && version_len > 0 {
-        copy_c(&offer.version, std::slice::from_raw_parts_mut(version, version_len));
-    }
-    if !notes.is_null() && notes_len > 0 {
-        copy_c(&offer.notes, std::slice::from_raw_parts_mut(notes, notes_len));
-    }
+    copy_out(&offer.version, version, version_len);
+    copy_out(&offer.notes, notes, notes_len);
     true
 }
 
@@ -1260,9 +1342,7 @@ pub unsafe extern "C" fn rs_update_app_offer(id: *const c_char, version: *mut c_
     else {
         return false;
     };
-    if !version.is_null() && len > 0 {
-        copy_c(&offered, std::slice::from_raw_parts_mut(version, len));
-    }
+    copy_out(&offered, version, len);
     true
 }
 
@@ -1281,9 +1361,7 @@ pub unsafe extern "C" fn rs_update_last_check(when_s: *mut i64, found: *mut c_ch
     if let Some(when_s) = when_s.as_mut() {
         *when_s = shown;
     }
-    if !found.is_null() && len > 0 {
-        copy_c(&text, std::slice::from_raw_parts_mut(found, len));
-    }
+    copy_out(&text, found, len);
     true
 }
 
@@ -1291,10 +1369,10 @@ pub unsafe extern "C" fn rs_update_last_check(when_s: *mut i64, found: *mut c_ch
 /// check or an install is under way.
 #[no_mangle]
 pub extern "C" fn rs_update_check_now() -> i32 {
-    if with(|s| s.state == STATE_READY) {
+    if with(|s| s.state == State::Ready) {
         return ESP_ERR_INVALID_STATE;
     }
-    start_job(Job::CheckNow, STATE_CHECKING)
+    start_job(Job::CheckNow, State::Checking)
 }
 
 /// Download and install the release on offer. On mobile data it waits
@@ -1306,7 +1384,7 @@ pub extern "C" fn rs_update_install(mobile_data_allowed: bool) -> i32 {
     if !offered {
         return ESP_ERR_NOT_FOUND;
     }
-    if BUSY.load(Ordering::Acquire) || state == STATE_READY {
+    if BUSY.load(Ordering::Acquire) || state == State::Ready {
         return ESP_ERR_INVALID_STATE;
     }
     if mobile_data_allowed {
@@ -1318,13 +1396,13 @@ pub extern "C" fn rs_update_install(mobile_data_allowed: bool) -> i32 {
 /// Whether a download waits for the user to allow mobile data.
 #[no_mangle]
 pub extern "C" fn rs_update_needs_consent() -> bool {
-    with(|s| s.state == STATE_WAITING && !s.consent) && network() == Network::Mobile
+    with(|s| s.state == State::Waiting && !s.consent) && network() == Network::Mobile
 }
 
 /// Restart into the kernel just installed. Nothing happens unless one is.
 #[no_mangle]
 pub extern "C" fn rs_update_restart() {
-    if with(|s| s.state) == STATE_READY {
+    if with(|s| s.state) == State::Ready {
         log(ESP_LOG_INFO, "restarting into the new kernel");
         crate::ota::restart();
     }
@@ -1337,10 +1415,11 @@ pub extern "C" fn rs_update_restart() {
 /// `version` must be NULL or point to `len` bytes.
 #[no_mangle]
 pub unsafe extern "C" fn rs_update_go_back_version(version: *mut c_char, len: usize) -> bool {
-    let Some((_, target)) = go_back_target() else { return false };
-    if !version.is_null() && len > 0 {
-        copy_c(&target, std::slice::from_raw_parts_mut(version, len));
+    if with(|s| s.state) == State::Ready {
+        return false;
     }
+    let Some((_, target)) = local().go_back else { return false };
+    copy_out(&target, version, len);
     true
 }
 
@@ -1446,7 +1525,16 @@ mod tests {
     #[test]
     fn the_status_reads_out_as_c_strings() {
         let mut out = [1 as c_char; 8];
-        copy_c("0.6.0-rc.1", &mut out);
+        unsafe { copy_out("0.6.0-rc.1", out.as_mut_ptr(), out.len()) };
         assert_eq!(unsafe { CStr::from_ptr(out.as_ptr()) }.to_str().unwrap(), "0.6.0-r");
+    }
+
+    #[test]
+    fn the_states_are_update_state_ts() {
+        // thistle/update.h: UPDATE_IDLE = 0 ... UPDATE_WAITING = 8.
+        let states = [State::Idle, State::Checking, State::UpToDate, State::Available,
+                      State::Downloading, State::Writing, State::Ready, State::Failed,
+                      State::Waiting];
+        assert_eq!(states.map(State::to_c), [0, 1, 2, 3, 4, 5, 6, 7, 8]);
     }
 }

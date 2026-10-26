@@ -57,8 +57,15 @@ void rs_update_get_status(update_status_t *out);
 const char *rs_update_running_version(void);
 
 /* Whether the card holds a release in update/; the version its manifest
- * names into `version` ("" if the manifest does not read). */
+ * names into `version` ("" if the manifest does not read). Read when first
+ * asked and kept: read again after an install, when a card is mounted, or
+ * after rs_update_rescan(). */
 bool rs_update_card_release(char *version, size_t len);
+
+/* Read the card and the other kernel slot again at the next
+ * rs_update_card_release() or rs_update_go_back_version(): Settings calls
+ * it when it opens its System update page. */
+void rs_update_rescan(void);
 
 /* Install the card's release on a task of its own; follow it with
  * rs_update_get_status(). ESP_ERR_INVALID_STATE while one is under way. */
@@ -100,7 +107,8 @@ void rs_update_restart(void);
 /* Whether Settings offers to go back to the version in the other kernel
  * slot, with no download: only while that slot's NVS record is the version
  * its image describes and its security version is at or above the floor,
- * and no install is under way or waiting for its restart. The version into
+ * and no install is under way or waiting for its restart; kept as
+ * rs_update_card_release() is. The version into
  * `version`. */
 bool rs_update_go_back_version(char *version, size_t len);
 
