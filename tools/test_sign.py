@@ -104,6 +104,20 @@ class ArtifactManifestTests(unittest.TestCase):
         self.assertIn(b"arch=esp32s2\n", manifest)
         self.assertIn(b"compatible_boards=\n", manifest)
 
+    def test_a_firmware_manifest_names_the_kernel_not_a_partition(self):
+        manifest = sign.canonical_manifest(
+            artifact_type="firmware",
+            artifact_id="thistle-os",
+            version="0.6.0-rc.1",
+            security_version=500,
+            arch="esp32s3",
+            compatible_boards=["tdeck-max"],
+            url="https://downloads.example/thistle-os.bin",
+            payload=b"firmware bytes",
+        )
+        self.assertIn(b"destination=kernel\n", manifest)
+        self.assertIn(b"version=0.6.0-rc.1\n", manifest)
+
     def test_non_firmware_manifest_still_requires_a_board_profile(self):
         with self.assertRaisesRegex(ValueError, "compatible board"):
             sign.canonical_manifest(

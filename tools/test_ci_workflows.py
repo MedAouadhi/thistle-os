@@ -92,6 +92,132 @@ class FirmwareJobTests(unittest.TestCase):
         self.assertNotIn("secrets.THISTLE_SIGNING_KEY", text)
 
 
+def step_named(steps, name):
+    matches = [s for s in steps if s.get("name") == name]
+    if len(matches) != 1:
+        raise AssertionError(f"expected one step named {name!r}, found {len(matches)}")
+    return matches[0]
+
+
+class FirmwareReleaseTests(unittest.TestCase):
+    """release-firmware.yml: a tag vX.Y.Z builds that commit, signs it with
+    the release key, publishes a release from a draft, attests it, and calls
+    Pages (spec, "The release workflows")."""
+
+    def setUp(self):
+        self.path = WORKFLOWS / "release-firmware.yml"
+        self.text = self.path.read_text()
+        self.workflow = load(self.path)
+        self.jobs = self.workflow["jobs"]
+        self.build = self.jobs["build"]
+        self.release = self.jobs["release"]
+        self.release_steps = self.release["steps"]
+        self.release_names = [s.get("name") for s in self.release_steps]
+
+    def test_runs_on_firmware_tags_only(self):
+        self.assertEqual(self.workflow[True], {"push": {"tags": ["v*"]}})
+
+    def test_reads_nothing_and_writes_nothing_by_default(self):
+        self.assertEqual(self.workflow["permissions"], {})
+
+    def test_builds_the_tagged_commit_with_its_tags_and_no_env(self):
+        self.assertEqual(self.build["container"]["image"], "espressif/idf:v5.5")
+        steps = self.build["steps"]
+        checkout = steps[0]
+        self.assertTrue(checkout["uses"].startswith("actions/checkout@"))
+        # git describe needs the tags; a shallow clone has none.
+        self.assertEqual(checkout["with"]["fetch-depth"], 0)
+        self.assertNotIn("ref", checkout["with"])
+        names = [s.get("name") for s in steps]
+        self.assertLess(names.index("No .env in the workspace"), names.index("Build firmware"))
+        build = step_named(steps, "Build firmware")
+        self.assertIn('idf.py set-target "$CHIP"', build["run"])
+
+    def test_builds_the_s3_from_a_list(self):
+        self.assertEqual(self.build["strategy"]["matrix"]["chip"], ["esp32s3"])
+        self.assertIn("        chip:\n          - esp32s3\n", self.text)
+
+    def test_the_firmware_reports_the_tag_as_its_version(self):
+        check = step_named(self.build["steps"], "The firmware's version is the tag")
+        self.assertIn("tools/firmware_version.sh", check["run"])
+        self.assertIn("project_description.json", check["run"])
+        self.assertIn("exit 1", check["run"])
+
+    def test_checks_the_size_and_merges_a_full_flash_image(self):
+        runs = "\n".join(s.get("run", "") for s in self.build["steps"])
+        self.assertIn("tools/check_partition_sizes.py", runs)
+        self.assertIn("merge_bin", runs)
+        self.assertIn("@flash_args", runs)
+
+    def test_the_build_job_has_no_secrets(self):
+        self.assertNotIn("environment", self.build)
+        self.assertNotIn("secrets.", yaml.safe_dump(self.build))
+
+    def test_only_the_signing_step_receives_the_key(self):
+        # The key is the only secret named, once; the token is github.token.
+        self.assertEqual(self.text.count("secrets."), 1)
+        self.assertEqual(self.text.count("secrets.RELEASE_SIGNING_KEY"), 1)
+        sign = step_named(self.release_steps, "Sign the artifact manifest")
+        self.assertEqual(sign["env"]["RELEASE_SIGNING_KEY"], "${{ secrets.RELEASE_SIGNING_KEY }}")
+        self.assertIn("tools/release_firmware.py sign", sign["run"])
+        self.assertEqual(self.release["environment"], "release")
+
+    def test_the_manifest_is_checked_against_the_committed_key(self):
+        verify = step_named(self.release_steps, "Check the signature against the committed key")
+        self.assertIn("tools/sign.py verify", verify["run"])
+        self.assertIn("--pubkey tools/production_public.key", verify["run"])
+        self.assertLess(self.release_names.index("Sign the artifact manifest"),
+                        self.release_names.index("Check the signature against the committed key"))
+
+    def test_a_draft_gets_every_asset_then_attestations_then_is_published(self):
+        order = ["Stage the release", "Sign the artifact manifest",
+                 "Check the signature against the committed key", "Write SHA256SUMS",
+                 "Create the draft release", "Attest provenance", "Publish the release"]
+        positions = [self.release_names.index(name) for name in order]
+        self.assertEqual(positions, sorted(positions))
+
+        create = step_named(self.release_steps, "Create the draft release")["run"]
+        self.assertIn("gh release create", create)
+        self.assertIn("--draft", create)
+        self.assertIn("--verify-tag", create)
+        self.assertIn("--notes-file", create)
+        self.assertIn("dist/*", create)
+
+        attest = step_named(self.release_steps, "Attest provenance")
+        self.assertTrue(attest["uses"].startswith("actions/attest@"))
+        self.assertEqual(attest["with"]["subject-path"], "dist/*")
+
+        publish = step_named(self.release_steps, "Publish the release")["run"]
+        self.assertIn("gh release edit", publish)
+        self.assertIn("--draft=false", publish)
+        self.assertNotIn("upload", publish)
+
+    def test_a_suffixed_tag_is_a_prerelease(self):
+        create = step_named(self.release_steps, "Create the draft release")["run"]
+        self.assertIn("--prerelease", create)
+        tag = step_named(self.release_steps, "Read the tag")["run"]
+        self.assertIn("tools/release_firmware.py tag", tag)
+
+    def test_the_release_job_may_write_releases_and_attest(self):
+        self.assertEqual(self.release["permissions"], {
+            "contents": "write", "id-token": "write", "attestations": "write"})
+        self.assertEqual(self.release["needs"], "build")
+
+    def test_then_calls_pages(self):
+        pages = self.jobs["pages"]
+        self.assertEqual(pages["uses"], "./.github/workflows/pages.yml")
+        self.assertEqual(pages["needs"], "release")
+        self.assertEqual(pages["permissions"], {
+            "contents": "read", "pages": "write", "id-token": "write"})
+        self.assertIn("workflow_call", load(WORKFLOWS / "pages.yml")[True])
+
+    def test_no_workflow_but_this_one_names_the_release_key(self):
+        for path in sorted(WORKFLOWS.glob("*.yml")):
+            if path != self.path:
+                with self.subTest(workflow=path.name):
+                    self.assertNotIn("RELEASE_SIGNING_KEY", path.read_text())
+
+
 class PagesTests(unittest.TestCase):
     def test_deploys_on_a_push_to_main_only(self):
         pages = load(WORKFLOWS / "pages.yml")

@@ -1,0 +1,235 @@
+name: Release Firmware
+
+# A tag vX.Y.Z releases the firmware built from that commit (ADR-0011; spec
+# .scratch/ota/spec.md, "The release workflows"). A tag with a suffix,
+# vX.Y.Z-rc.1, publishes a prerelease, which no device is offered.
+#
+#   build    builds each chip's firmware with no .env and no secret, checks
+#            that it reports the tag as its version and fits a kernel slot,
+#            and merges a full flash image.
+#   release  in the `release` environment, which admits release tags alone:
+#            stages the assets and the catalog entry, signs the artifact
+#            manifest (the only step given the key), checks the signature
+#            against tools/production_public.key, creates a draft release,
+#            attaches every asset, attests their provenance and publishes it.
+#            Immutable releases are on, so once published nothing changes.
+#   pages    rebuilds Pages. A release made with the workflow's own token
+#            starts no other workflow, so Pages is called here.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions: {}
+
+concurrency:
+  group: release-firmware-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_BUILD_JOBS: 4
+  CMAKE_BUILD_PARALLEL_LEVEL: 4
+
+jobs:
+  build:
+    name: Build Firmware (${{ matrix.chip }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    container:
+      image: espressif/idf:v5.5
+    strategy:
+      fail-fast: true
+      matrix:
+        # The chips a release carries, one a line.
+        chip:
+          - esp32s3
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+          # git describe gives the firmware its version, and needs the tags.
+          fetch-depth: 0
+
+      # .env holds the user's keys and addresses; a release is public.
+      - name: No .env in the workspace
+        shell: bash
+        run: |
+          if [ -e .env ]; then
+            echo "::error::.env exists in the workspace; a release is built without one"
+            exit 1
+          fi
+
+      - name: Cache Rust ESP toolchain
+        uses: actions/cache@v6
+        with:
+          path: |
+            /root/.cargo
+            /root/.rustup
+            /root/export-esp.sh
+          key: rust-esp-toolchain-v5-espup016
+
+      - name: Install Rust ESP toolchain
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          if [ ! -f "$HOME/.cargo/bin/cargo" ]; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+              sh -s -- -y --profile minimal --default-toolchain 1.85.0
+          fi
+          . "$HOME/.cargo/env"
+          rustup toolchain install 1.85.0 --profile minimal
+          # Pinned to 0.16.0: 0.17.x aborts with "Unsuported file extension:
+          # 'part'". CLAUDE.md pins the same.
+          if [ "$(espup --version 2>/dev/null | awk '{print $2}')" != "0.16.0" ]; then
+            cargo +1.85.0 install espup --version 0.16.0 --locked --force
+          fi
+          if [ ! -f "$HOME/export-esp.sh" ] || ! rustup run esp rustc --version >/dev/null 2>&1; then
+            espup install
+          fi
+
+      # No cache of the build itself: a release is built from clean.
+
+      - name: Build firmware
+        shell: bash
+        env:
+          CHIP: ${{ matrix.chip }}
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          . "$IDF_PATH/export.sh"
+          export PATH="$HOME/.cargo/bin:$PATH"
+          idf.py set-target "$CHIP"
+          idf.py build
+
+      - name: The firmware's version is the tag
+        shell: bash
+        run: |
+          expected="${GITHUB_REF_NAME#v}"
+          described=$(sh tools/firmware_version.sh)
+          built=$(python3 -c 'import json; print(json.load(open("build/project_description.json"))["project_version"])')
+          echo "tag $GITHUB_REF_NAME, described $described, built $built"
+          if [ "$described" != "$expected" ] || [ "$built" != "$expected" ]; then
+            echo "::error::the firmware's version is not the tag's ($expected)"
+            exit 1
+          fi
+
+      - name: Check firmware size
+        shell: bash
+        run: |
+          python3 tools/check_partition_sizes.py \
+            --partition-table partitions.csv \
+            --firmware build/thistle_os.bin
+
+      # Bootloader, partition table, the initial boot choice and the kernel,
+      # at their offsets: what sets up a new device by USB.
+      - name: Merge a full flash image
+        shell: bash
+        env:
+          CHIP: ${{ matrix.chip }}
+        run: |
+          . "$IDF_PATH/export.sh"
+          cd build
+          python -m esptool --chip "$CHIP" merge_bin -o thistle_os-full.bin @flash_args
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v7
+        with:
+          name: thistle-os-firmware-${{ matrix.chip }}
+          path: |
+            build/thistle_os.bin
+            build/thistle_os-full.bin
+          if-no-files-found: error
+
+  release:
+    name: Sign and Publish
+    needs: build
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install the signing tools' dependencies
+        run: python3 -m pip install -r tools/requirements.txt
+
+      - name: Download the firmware
+        uses: actions/download-artifact@v8
+        with:
+          pattern: thistle-os-firmware-*
+          path: firmware
+
+      - name: Read the tag
+        id: tag
+        run: python3 tools/release_firmware.py tag "$TAG"
+
+      - name: Stage the release
+        run: |
+          for dir in firmware/thistle-os-firmware-*; do
+            chip="${dir##*/thistle-os-firmware-}"
+            python3 tools/release_firmware.py stage \
+              --tag "$TAG" --repo "$GITHUB_REPOSITORY" --arch "$chip" \
+              --image "$dir/thistle_os.bin" --full-image "$dir/thistle_os-full.bin" \
+              --boards sdcard_layout/config/boards --changelog CHANGELOG.md \
+              --updated "$(date -u +%F)" --dist dist --notes notes.md
+          done
+
+      - name: Sign the artifact manifest
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          for dir in firmware/thistle-os-firmware-*; do
+            chip="${dir##*/thistle-os-firmware-}"
+            python3 tools/release_firmware.py sign \
+              --tag "$TAG" --repo "$GITHUB_REPOSITORY" --arch "$chip" \
+              --boards sdcard_layout/config/boards \
+              --version-rs components/kernel_rs/src/version.rs --dist dist
+          done
+
+      - name: Check the signature against the committed key
+        run: |
+          for manifest in dist/*.bin.manifest; do
+            python3 tools/sign.py verify "$manifest" --pubkey tools/production_public.key
+          done
+
+      - name: Write SHA256SUMS
+        run: |
+          python3 tools/release_firmware.py sums --dist dist
+          cat dist/SHA256SUMS
+
+      - name: Create the draft release
+        env:
+          PRERELEASE: ${{ steps.tag.outputs.prerelease }}
+        run: |
+          prerelease=
+          if [ "$PRERELEASE" = true ]; then prerelease=--prerelease; fi
+          gh release create "$TAG" dist/* --draft --verify-tag \
+            --title "ThistleOS $TAG" --notes-file notes.md $prerelease
+
+      - name: Attest provenance
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/*
+
+      - name: Publish the release
+        run: gh release edit "$TAG" --draft=false
+
+  pages:
+    name: Rebuild Pages
+    needs: release
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    uses: ./.github/workflows/pages.yml
