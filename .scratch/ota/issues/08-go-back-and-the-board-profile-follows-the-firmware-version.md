@@ -26,7 +26,7 @@ boots that slot, and its kernel brings back its own board profile. Spec:
       backup; a custom board id keeps its profile; Go back boots the other
       slot and the profile follows it; Go back disappears once a new install
       starts erasing the other slot.
-- [ ] On the T-Deck Max, a laptop build with a changed embedded profile
+- [x] On the T-Deck Max, a laptop build with a changed embedded profile
       reaches the board on its first boot, with the old profile kept beside
       it, and system.json, WiFi and the mesh identity untouched.
 - [ ] On the T-Deck Max, after an update, Go back returns to the previous
@@ -100,3 +100,8 @@ Go back to the previous version; tap it and check `running kernel_a,
 version ..., new` and the profile rewritten back. A release with a higher
 security version raises the floor at its keep, after which Go back is not
 offered, as intended.
+
+**Hardware, 2026-10-26 (by the user):** the first boot of `0.5.2-201-g8addbb4`
+logged `board profile tdeck-max rewritten from 0.5.2-201-g8addbb4's built-in
+copy (it was an unnamed version's); the previous one is board.json.bak`;
+WiFi, system.json and the mesh identity were untouched.
