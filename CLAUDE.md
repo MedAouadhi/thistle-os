@@ -662,10 +662,13 @@ managers from it, and updates the firmware; `appstore_client.rs` does the
 network and the files. LVGL window managers only; thistle-tk has its own
 (`tk_appstore.rs`).
 
-- **The catalog is a static JSON file**, by default upstream's
-  `https://wan0net.github.io/thistle-apps/catalog.json`, which upstream's
-  own workflow publishes (this repository no longer has it); a card's
-  `config/appstore.json`,
+- **The catalog is a static JSON file**, by default the fork's
+  `https://medaouadhi.github.io/thistle-os/store/catalog.json`, which
+  `pages.yml` builds from the repository's GitHub releases on every deploy
+  (`tools/build_catalog.py --releases`): the newest firmware by version and
+  the newest release of each app, each release's own
+  `*.catalog-entry.json` asset, drafts and prereleases left out. It holds
+  nothing of its own. A card's `config/appstore.json`,
   `{"catalog_url": "..."}`, names another. Refresh keeps the server's JSON
   whole at `/sdcard/appstore/catalog.json`, which the app reads with the
   kernel's parser when it opens (`appstore_load_catalog_file`). Entries for
@@ -679,6 +682,15 @@ network and the files. LVGL window managers only; thistle-tk has its own
   versions under `apps/` are built nowhere (`THISTLE_STORE_APPS` in
   `cmake/thistle_apps.cmake`). Tests that need one in front use To-do; the
   Arabic dictation case installs the packaged Notes on its card.
+- **An app is released by pushing a tag** `<app>-vX.Y.Z` (`notes-v1.0.1`),
+  for those four alone (`.github/workflows/release-app.yml`,
+  `tools/release_app.py`). The tag is refused unless its version is the
+  app's `manifest.json` version and its `min_os` is no newer than the
+  newest firmware release, prereleases included. The release sequence is
+  computed, major x 10^6 + minor x 10^3 + patch, and written into the
+  package; the notes are `metadata.json`'s changes for that version, which
+  must be its newest release. Raise both files' `version` and add the
+  release to `metadata.json` before tagging.
 - **An app installs only as a signed TAP package** (`docs/app-package-format.md`):
   its entry needs `package_url`, `package_sig_url`, `package_sha256`,
   `package_size_bytes` and `release_sequence`. It goes to

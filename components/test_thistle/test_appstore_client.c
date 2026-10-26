@@ -17,12 +17,11 @@
  * Tests
  * -------------------------------------------------------------------------- */
 
-TEST_CASE("test_appstore_get_catalog_url_default: default URL contains 'thistle-apps'", "[appstore]")
+TEST_CASE("test_appstore_get_catalog_url_default: default URL is the fork's Pages catalog", "[appstore]")
 {
     const char *url = appstore_get_catalog_url();
     TEST_ASSERT_NOT_NULL(url);
-    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(url, "thistle-apps"),
-                                 "Default catalog URL does not contain 'thistle-apps'");
+    TEST_ASSERT_EQUAL_STRING("https://medaouadhi.github.io/thistle-os/store/catalog.json", url);
 }
 
 TEST_CASE("test_appstore_get_catalog_url_nonempty: default URL is a non-empty string", "[appstore]")
