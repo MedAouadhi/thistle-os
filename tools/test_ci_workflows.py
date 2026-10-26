@@ -211,23 +211,117 @@ class FirmwareReleaseTests(unittest.TestCase):
             "contents": "read", "pages": "write", "id-token": "write"})
         self.assertIn("workflow_call", load(WORKFLOWS / "pages.yml")[True])
 
-    def test_no_workflow_but_this_one_names_the_release_key(self):
+    def test_no_workflow_but_the_release_workflows_names_the_release_key(self):
+        releases = {"release-firmware.yml", "release-app.yml"}
         for path in sorted(WORKFLOWS.glob("*.yml")):
-            if path != self.path:
+            if path.name not in releases:
                 with self.subTest(workflow=path.name):
                     self.assertNotIn("RELEASE_SIGNING_KEY", path.read_text())
 
 
+class AppReleaseTests(unittest.TestCase):
+    """release-app.yml: a tag <app>-vX.Y.Z checks the tag, builds that App
+    Store app for the S3, signs its ELF and TAP with the release key, and
+    publishes a release from a draft as the firmware's release does."""
+
+    def setUp(self):
+        self.path = WORKFLOWS / "release-app.yml"
+        self.text = self.path.read_text()
+        self.workflow = load(self.path)
+        self.jobs = self.workflow["jobs"]
+        self.release = self.jobs["release"]
+        self.release_steps = self.release["steps"]
+        self.release_names = [s.get("name") for s in self.release_steps]
+
+    def test_runs_on_app_tags_only(self):
+        self.assertEqual(self.workflow[True], {"push": {"tags": ["*-v*"]}})
+
+    def test_reads_nothing_and_writes_nothing_by_default(self):
+        self.assertEqual(self.workflow["permissions"], {})
+
+    def test_the_tag_is_checked_against_the_releases_before_anything_is_built(self):
+        check = self.jobs["check"]
+        self.assertEqual(check["permissions"], {"contents": "read"})
+        runs = "\n".join(s.get("run", "") for s in check["steps"])
+        self.assertIn('gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases"', runs)
+        self.assertIn("tools/release_app.py check", runs)
+        self.assertEqual(self.jobs["build"]["needs"], "check")
+
+    def test_builds_the_app_for_the_s3_in_espidfs_container_with_no_env(self):
+        build = self.jobs["build"]
+        self.assertEqual(build["container"]["image"], "espressif/idf:v5.5")
+        self.assertNotIn("environment", build)
+        self.assertNotIn("secrets.", yaml.safe_dump(build))
+        names = [s.get("name") for s in build["steps"]]
+        self.assertLess(names.index("No .env in the workspace"), names.index("Build the app"))
+        run = step_named(build["steps"], "Build the app")["run"]
+        self.assertIn("standalone_apps/$APP", run)
+        self.assertIn("toolchain-esp32s3.cmake", run)
+
+    def test_only_the_signing_step_receives_the_key(self):
+        self.assertEqual(self.text.count("secrets."), 1)
+        self.assertEqual(self.text.count("secrets.RELEASE_SIGNING_KEY"), 1)
+        sign = step_named(self.release_steps, "Sign the package")
+        self.assertEqual(sign["env"]["RELEASE_SIGNING_KEY"], "${{ secrets.RELEASE_SIGNING_KEY }}")
+        self.assertIn("tools/release_app.py sign", sign["run"])
+        self.assertEqual(self.release["environment"], "release")
+
+    def test_the_package_is_checked_against_the_committed_key(self):
+        verify = step_named(self.release_steps, "Check the signatures against the committed key")
+        self.assertIn("tools/tap_package.py verify", verify["run"])
+        self.assertIn("--pubkey tools/production_public.key", verify["run"])
+
+    def test_a_draft_gets_every_asset_then_attestations_then_is_published(self):
+        order = ["Stage the release", "Sign the package",
+                 "Check the signatures against the committed key", "Write the catalog entry",
+                 "Write SHA256SUMS", "Create the draft release", "Attest provenance",
+                 "Publish the release"]
+        positions = [self.release_names.index(name) for name in order]
+        self.assertEqual(positions, sorted(positions))
+        create = step_named(self.release_steps, "Create the draft release")["run"]
+        for flag in ("gh release create", "--draft", "--verify-tag", "--notes-file",
+                     "dist/*", "--prerelease"):
+            self.assertIn(flag, create)
+        attest = step_named(self.release_steps, "Attest provenance")
+        self.assertEqual(attest["with"]["subject-path"], "dist/*")
+        publish = step_named(self.release_steps, "Publish the release")["run"]
+        self.assertIn("--draft=false", publish)
+
+    def test_the_release_job_may_write_releases_and_attest(self):
+        self.assertEqual(self.release["permissions"], {
+            "contents": "write", "id-token": "write", "attestations": "write"})
+
+    def test_then_calls_pages(self):
+        pages = self.jobs["pages"]
+        self.assertEqual(pages["uses"], "./.github/workflows/pages.yml")
+        self.assertEqual(pages["needs"], "release")
+
+
 class PagesTests(unittest.TestCase):
+    def setUp(self):
+        self.pages = load(WORKFLOWS / "pages.yml")
+        self.text = (WORKFLOWS / "pages.yml").read_text()
+
     def test_deploys_on_a_push_to_main_only(self):
-        pages = load(WORKFLOWS / "pages.yml")
-        self.assertEqual(pages[True]["push"]["branches"], ["main"])
-        self.assertEqual(pages["jobs"]["deploy"]["if"], "github.event_name == 'push'")
+        self.assertEqual(self.pages[True]["push"]["branches"], ["main"])
+        self.assertEqual(self.pages["jobs"]["deploy"]["if"], "github.event_name == 'push'")
 
     def test_names_the_forks_own_pages(self):
-        text = (WORKFLOWS / "pages.yml").read_text()
-        self.assertNotIn("wan0net", text)
-        self.assertIn("github.repository_owner", text)
+        self.assertNotIn("wan0net", self.text)
+        self.assertIn("github.repository_owner", self.text)
+
+    def test_every_deploy_serves_the_catalog_built_from_the_releases(self):
+        steps = self.pages["jobs"]["build"]["steps"]
+        store = step_named(steps, "Build the store catalog from the releases")
+        self.assertIn('gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases"', store["run"])
+        self.assertIn("tools/build_catalog.py --releases", store["run"])
+        self.assertIn("--output _site/store/catalog.json", store["run"])
+        self.assertEqual(store["env"]["GH_TOKEN"], "${{ github.token }}")
+        names = [s.get("name") for s in steps]
+        self.assertLess(names.index("Build the store catalog from the releases"),
+                        names.index("Upload Pages artifact"))
+        # The catalog holds nothing of its own: no fixture is copied in.
+        self.assertNotIn("appstore/catalog.json", self.text)
 
 
 if __name__ == "__main__":

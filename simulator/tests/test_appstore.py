@@ -224,6 +224,80 @@ def card_catalog_kept(card: Path, host: Host) -> None:
     (card / "appstore/catalog.json").write_bytes(catalog(CARD_PACKAGES))
 
 
+REPOSITORY = Path(__file__).resolve().parents[2]
+RELEASE_TAG = "notes-v1.0.1"
+GITHUB = "https://github.com/MedAouadhi/thistle-os"
+
+
+def released_app(card: Path, host: Host) -> None:
+    """Notes released as release-app.yml releases it, tools/release_app.py's
+    steps with a throwaway key, for the simulator's chip; the catalog as
+    Pages builds it from the releases (build_catalog.py's
+    catalog_from_releases), served at store/catalog.json; and the release's
+    assets behind 302s to a second host, as GitHub answers them. The entry
+    names github.com, which the case swaps for the local host."""
+    sys.path.insert(0, str(REPOSITORY / "tools"))
+    import build_catalog  # noqa: PLC0415
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey  # noqa: PLC0415
+
+    work = card.parent / "release"
+    app = work / "notes"
+    shutil.copytree(REPOSITORY / "standalone_apps/notes", app)
+    manifest = json.loads((app / "manifest.json").read_text())
+    (app / "manifest.json").write_text(json.dumps(dict(manifest, version="1.0.1", arch="host")))
+    metadata = json.loads((app / "metadata.json").read_text())
+    metadata["releases"].insert(0, {"version": "1.0.1", "release_sequence": 1,
+                                    "released": "2026-10-26", "changes": ["Released by tag"]})
+    (app / "metadata.json").write_text(json.dumps(metadata))
+    (work / "notes.app.elf").write_bytes(bytes(4096))
+    key = Ed25519PrivateKey.generate()
+    (work / "public.key").write_bytes(key.public_key().public_bytes_raw())
+    env = dict(os.environ, RELEASE_SIGNING_KEY=key.private_bytes_raw().hex())
+    tool = [sys.executable, str(REPOSITORY / "tools/release_app.py")]
+    for step in (
+        ["stage", "--tag", RELEASE_TAG, "--app-dir", str(app), "--staged", str(work / "staged"),
+         "--notes", str(work / "notes.md")],
+        ["sign", "--tag", RELEASE_TAG, "--staged", str(work / "staged"),
+         "--elf", str(work / "notes.app.elf"), "--license", str(REPOSITORY / "LICENSE"),
+         "--dist", str(work / "dist")],
+        ["entry", "--tag", RELEASE_TAG, "--repo", "MedAouadhi/thistle-os",
+         "--staged", str(work / "staged"), "--dist", str(work / "dist"),
+         "--notes", str(work / "notes.md"), "--updated", "2026-10-26",
+         "--pubkey", str(work / "public.key")],
+    ):
+        subprocess.run(tool + step, check=True, capture_output=True, env=env)
+
+    dist = work / "dist"
+    entry_asset = next(dist.glob("*.catalog-entry.json"))
+    entry = json.loads(entry_asset.read_text().replace(GITHUB, host.base))
+    listing = [{"tag_name": RELEASE_TAG, "draft": False, "prerelease": False,
+                "assets": [{"name": entry_asset.name,
+                            "browser_download_url": f"{host.base}/releases/download/"
+                                                    f"{RELEASE_TAG}/{entry_asset.name}"}]}]
+    host.catalog = json.dumps(build_catalog.catalog_from_releases(
+        listing, lambda asset: entry, "2026-10-26"), indent=2).encode()
+    (card / "config/appstore.json").write_text(
+        json.dumps({"catalog_url": f"{host.base}/store/catalog.json"}))
+
+    host.assets = Host()
+    files = {f"/assets/{path.name}": path.read_bytes() for path in dist.iterdir()}
+    host.assets.answer = lambda path: (files[path], 200) if path in files else (b"", 404)
+    for path in dist.iterdir():
+        host.redirects[f"/releases/download/{RELEASE_TAG}/{path.name}"] = \
+            f"{host.assets.base}/assets/{path.name}"
+    answer = host.answer
+    host.answer = lambda path: ((host.catalog, 200) if path == "/store/catalog.json"
+                                else answer(path))
+
+
+def released_app_fetched(card: Path, host: Host) -> Optional[str]:
+    names = sorted(p.name for p in (card.parent / "release/dist").glob("*.tap*"))
+    wanted = [f"/assets/{name}" for name in names]
+    if sorted(host.assets.requests) != wanted:
+        return f"the assets host was asked for {host.assets.requests}, not {wanted}"
+    return nothing_installed(card, host)
+
+
 @dataclass(frozen=True)
 class Case:
     name: str
@@ -354,6 +428,20 @@ CASES = (
                    "toast: Notes: corrupted, or its signature is invalid"),
          absent=("no installable package", "No network connection"),
          check=nothing_installed_nor_asked, timeout_ms=6500),
+    # Ticket 05's path: an app released by tag, listed from the catalog
+    # Pages builds from the releases, and its package fetched through
+    # GitHub's redirect. The simulator does not trust the throwaway key the
+    # release was signed with, so the install stops at the signature.
+    Case("a-released-app-is-listed-from-pages-and-fetched-through-the-redirect",
+         ("--tap", REFRESH, "--tap", FIRST_ROW, "--tap", INSTALL), setup=released_app,
+         expected=("Fetching catalog: ", "Parsed 1 catalog entries", "toast: Catalog updated",
+                   "(appstore_job) done: ESP_ERR_INVALID_CRC",
+                   "toast: Notes: corrupted, or its signature is invalid"),
+         absent=("Download refused", "no installable package"),
+         fetched=("/store/catalog.json",
+                  f"/releases/download/{RELEASE_TAG}/com.thistle.notes-1.0.1-host.tap",
+                  f"/releases/download/{RELEASE_TAG}/com.thistle.notes-1.0.1-host.tap.sig"),
+         check=released_app_fetched, timeout_ms=9000),
 )
 
 

@@ -79,7 +79,7 @@ const ALIGN_SPACE_BETWEEN: i32 = 3;
 const EVENT_CLICK: i32 = 0;
 const STATUS_BAR_HEIGHT: i32 = 24;
 const ITEMS_PER_PAGE: usize = 5;
-const CATALOG_URL: &str = "https://wan0net.github.io/thistle-apps/catalog.json";
+const CATALOG_URL: &str = "https://medaouadhi.github.io/thistle-os/store/catalog.json";
 
 // ---------------------------------------------------------------------------
 // Category tab definitions

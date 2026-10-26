@@ -29,7 +29,7 @@ const ESP_ERR_NOT_SUPPORTED: i32 = 0x106;
 const ESP_ERR_INVALID_CRC: i32 = 0x109;
 const ESP_FAIL: i32 = -1;
 
-const DEFAULT_CATALOG_URL: &str = "https://wan0net.github.io/thistle-apps/catalog.json\0";
+const DEFAULT_CATALOG_URL: &str = "https://medaouadhi.github.io/thistle-os/store/catalog.json\0";
 // A catalog lists every chip's builds: 24 entries came to 19 KB.
 const MAX_CATALOG_JSON: usize = 64 * 1024;
 const DOWNLOAD_BUF_SIZE: usize = 4096;
@@ -2928,23 +2928,19 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // test_get_catalog_url_contains_thistle_apps
-    // Mirrors test_appstore_client.c: URL must contain "thistle-apps".
+    // With no config/appstore.json on the card, the App Store reads the
+    // catalog Pages builds from the fork's releases (spec, "The catalog").
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_get_catalog_url_contains_thistle_apps() {
+    fn the_default_catalog_is_the_forks_pages_catalog() {
         let ptr = appstore_get_catalog_url();
         assert!(
             !ptr.is_null(),
             "appstore_get_catalog_url() must not return NULL"
         );
         let url = unsafe { CStr::from_ptr(ptr).to_str().unwrap() };
-        assert!(
-            url.contains("thistle-apps"),
-            "catalog URL must contain \"thistle-apps\", got: {}",
-            url
-        );
+        assert_eq!(url, "https://medaouadhi.github.io/thistle-os/store/catalog.json");
     }
 
     // -----------------------------------------------------------------------

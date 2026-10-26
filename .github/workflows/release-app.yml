@@ -1,0 +1,192 @@
+name: Release App
+
+# A tag <app>-vX.Y.Z releases one of the App Store's apps, built from that
+# commit (ADR-0011; spec .scratch/ota/spec.md, "The release workflows").
+# <app> is a folder among standalone_apps/notes, weather, wifiscanner and
+# flashlight. A tag with a suffix, notes-v1.0.1-rc.1, publishes a
+# prerelease, which the catalog leaves out.
+#
+#   check    refuses the tag unless its version is the package manifest's
+#            and the app's min_os is no newer than the newest firmware
+#            release, prereleases included (tools/release_app.py check).
+#   build    builds the app's ELF for the S3 with no .env and no secret.
+#   release  in the `release` environment, which admits release tags alone:
+#            writes the package's documents with the release sequence its
+#            version gives, signs the ELF, builds and signs the TAP (the only
+#            step given the key), checks both signatures against
+#            tools/production_public.key, writes the catalog entry, creates a
+#            draft release, attaches every asset, attests their provenance
+#            and publishes it. Immutable releases are on.
+#   pages    rebuilds Pages, whose catalog is built from the releases. A
+#            release made with the workflow's own token starts no other
+#            workflow, so Pages is called here.
+
+on:
+  push:
+    tags:
+      - '*-v*'
+
+permissions: {}
+
+concurrency:
+  group: release-app-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Check the Tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      app: ${{ steps.check.outputs.app }}
+      version: ${{ steps.check.outputs.version }}
+      prerelease: ${{ steps.check.outputs.prerelease }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install the release tools' dependencies
+        run: python3 -m pip install -r tools/requirements.txt
+
+      # Drafts are listed only to a token that may write; this one may not,
+      # and the check leaves them out anyway.
+      - name: List the releases
+        run: gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases" > releases.json
+
+      - name: Check the tag against the app and the firmware releases
+        id: check
+        run: |
+          app="${GITHUB_REF_NAME%-v*}"
+          python3 tools/release_app.py check --tag "$GITHUB_REF_NAME" \
+            --app-dir "standalone_apps/$app" --releases releases.json
+
+  build:
+    name: Build the App (esp32s3)
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    container:
+      image: espressif/idf:v5.5
+    env:
+      APP: ${{ needs.check.outputs.app }}
+    steps:
+      - uses: actions/checkout@v6
+
+      # .env holds the user's keys and addresses; a release is public.
+      - name: No .env in the workspace
+        shell: bash
+        run: |
+          if [ -e .env ]; then
+            echo "::error::.env exists in the workspace; a release is built without one"
+            exit 1
+          fi
+
+      - name: Build the app
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          cmake -S "standalone_apps/$APP" -B build/app \
+            -DCMAKE_TOOLCHAIN_FILE="$IDF_PATH/tools/cmake/toolchain-esp32s3.cmake"
+          cmake --build build/app --parallel
+          entry=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["entry"])' \
+            "standalone_apps/$APP/manifest.json")
+          mkdir -p out
+          cp "build/app/$entry" out/app.app.elf
+
+      - name: Upload the ELF
+        uses: actions/upload-artifact@v7
+        with:
+          name: app-elf
+          path: out/app.app.elf
+          if-no-files-found: error
+
+  release:
+    name: Sign and Publish
+    needs: [check, build]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.ref_name }}
+      APP: ${{ needs.check.outputs.app }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install the signing tools' dependencies
+        run: python3 -m pip install -r tools/requirements.txt
+
+      - name: Download the ELF
+        uses: actions/download-artifact@v8
+        with:
+          name: app-elf
+          path: app
+
+      - name: Stage the release
+        run: |
+          python3 tools/release_app.py stage --tag "$TAG" \
+            --app-dir "standalone_apps/$APP" --staged staged --notes notes.md
+
+      - name: Sign the package
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          python3 tools/release_app.py sign --tag "$TAG" --staged staged \
+            --elf app/app.app.elf --license LICENSE --dist dist
+
+      - name: Check the signatures against the committed key
+        run: |
+          for package in dist/*.tap; do
+            python3 tools/tap_package.py verify "$package" --pubkey tools/production_public.key
+          done
+
+      - name: Write the catalog entry
+        run: |
+          python3 tools/release_app.py entry --tag "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --staged staged --dist dist --notes notes.md --updated "$(date -u +%F)" \
+            --pubkey tools/production_public.key
+
+      - name: Write SHA256SUMS
+        run: |
+          python3 tools/release_firmware.py sums --dist dist
+          cat dist/SHA256SUMS
+
+      - name: Create the draft release
+        env:
+          PRERELEASE: ${{ needs.check.outputs.prerelease }}
+        run: |
+          prerelease=
+          if [ "$PRERELEASE" = true ]; then prerelease=--prerelease; fi
+          gh release create "$TAG" dist/* --draft --verify-tag \
+            --title "$TAG" --notes-file notes.md $prerelease
+
+      - name: Attest provenance
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/*
+
+      - name: Publish the release
+        run: gh release edit "$TAG" --draft=false
+
+  pages:
+    name: Rebuild Pages
+    needs: release
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    uses: ./.github/workflows/pages.yml

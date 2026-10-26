@@ -150,7 +150,7 @@ Device                          GitHub Pages (or any HTTPS host)
 
 Every download is verified with SHA-256 hash integrity and cryptographic signature. Invalid signatures are rejected — the file is deleted. Unsigned apps run in restricted mode (limited permissions).
 
-**No server infrastructure needed.** The reference catalog is a static JSON file on GitHub Pages: https://wan0net.github.io/thistle-apps/catalog.json
+**No server infrastructure needed.** The catalog is a static JSON file on GitHub Pages, built from the repository's GitHub releases: https://medaouadhi.github.io/thistle-os/store/catalog.json
 
 Anyone can host their own catalog by pointing `appstore.json` at a different URL.
 
