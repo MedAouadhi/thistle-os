@@ -41,10 +41,12 @@ int sim_http_client_fetch_headers(sim_http_client_handle_t client);
 int sim_http_client_read(sim_http_client_handle_t client, char *buf, int len);
 esp_err_t sim_http_client_close(sim_http_client_handle_t client);
 esp_err_t sim_http_client_set_url(sim_http_client_handle_t client, const char *url);
-/* After fetch_headers() answered a redirect that was not followed (the
- * client was made with disable_auto_redirect), points the client at its
- * Location, as ESP-IDF's does. */
+/* After fetch_headers() or perform() answered a redirect that was not
+ * followed (the client was made with disable_auto_redirect), points the
+ * client at its Location, as ESP-IDF's does. */
 esp_err_t sim_http_client_set_redirection(sim_http_client_handle_t client);
+/* The URL the client is pointed at, as ESP-IDF's esp_http_client_get_url(). */
+esp_err_t sim_http_client_get_url(sim_http_client_handle_t client, char *url, int len);
 void sim_http_client_cleanup(sim_http_client_handle_t client);
 /* method is "GET", "POST", "PUT" or "DELETE". */
 esp_err_t sim_http_client_set_method(sim_http_client_handle_t client, const char *method);

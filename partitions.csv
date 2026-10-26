@@ -1,14 +1,15 @@
 # Name,    Type, SubType, Offset,   Size,     Flags
-# 16MB flash layout for ThistleOS
-# factory: ThistleOS firmware for initial flash (idf.py flash)
-# ota_0: Recovery OS (Rust, WiFi/captive portal/HTTPS bundle installer)
-# ota_1: OTA update target
-# storage: SPIFFS for app data, drivers, apps
+# 16MB flash layout for ThistleOS (ADR-0010)
+# kernel_a, kernel_b: the two kernel slots. idf.py flash writes kernel_a; an
+#   update is written into the other kernel slot, named by its label.
+# recovery: reserved for Recovery OS; nothing writes it yet.
+# nvs, otadata, phy_init, storage (SPIFFS) and coredump are where they were
+#   before the kernel slots, so a USB flash to this table keeps them.
 nvs,       data, nvs,     0x9000,   0x6000,
 otadata,   data, ota,     0xf000,   0x2000,
 phy_init,  data, phy,     0x11000,  0x1000,
-factory,   app,  factory, 0x20000,  0x480000,
-ota_0,     app,  ota_0,   0x4A0000, 0x280000,
-ota_1,     app,  ota_1,   0x720000, 0x480000,
+kernel_a,  app,  ota_0,   0x20000,  0x480000,
+kernel_b,  app,  ota_1,   0x4A0000, 0x480000,
+recovery,  app,  ota_2,   0x920000, 0x280000,
 storage,   data, spiffs,  0xBA0000, 0x450000,
 coredump,  data, coredump,0xFF0000, 0x10000,

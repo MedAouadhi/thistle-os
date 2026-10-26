@@ -77,14 +77,14 @@
                           &#x2502;
                           &#x25BC;
 &#x250c;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2510;
-&#x2502;  <span class="d-green">Recovery OS</span> (ota_0)                            &#x2502;
-&#x2502;  Trusted base.  Verifies ota_1 before booting.  &#x2502;
+&#x2502;  <span class="d-green">Recovery OS</span> (ota_2)                            &#x2502;
+&#x2502;  Trusted base.  Verifies a kernel before boot.  &#x2502;
 &#x2502;  SHA-256 + (optional) secure boot signature.    &#x2502;
 &#x2514;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2518;
                           &#x2502;
                           &#x25BC;
 &#x250c;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2510;
-&#x2502;  <span class="d-blue">ThistleOS firmware</span> (ota_1)                     &#x2502;
+&#x2502;  <span class="d-blue">ThistleOS firmware</span> (kernel_a/b)                &#x2502;
 &#x2502;  Kernel verifies SHA-256 of each .app.elf and   &#x2502;
 &#x2502;  .drv.elf before loading.  Signature check for  &#x2502;
 &#x2502;  permission grants.                              &#x2502;
@@ -161,7 +161,7 @@ thistle-register-key --port /dev/ttyACM0 --key dev_key.bin</code></pre>
 
     <ol>
       <li><strong>SHA-256</strong> — verified immediately after download, before writing to the SD card. A corrupt download is detected and discarded.</li>
-      <li><strong>Signature</strong> — verified before flashing to <code>ota_1</code>. A firmware image without a valid signature from the ThistleOS signing key is rejected outright.</li>
+      <li><strong>Signature</strong> — verified while the image is written into the other kernel slot (<code>kernel_a</code> or <code>kernel_b</code>), which is selected only if it verifies. A firmware image without a valid signature from the ThistleOS signing key is rejected outright.</li>
     </ol>
 
     <p>After a new firmware image boots successfully, it must call <code>ota_mark_valid()</code> within 30 seconds. If it does not, the ESP-IDF bootloader automatically rolls back to the previous partition on the next reset.</p>

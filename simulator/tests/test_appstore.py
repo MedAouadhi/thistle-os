@@ -86,11 +86,24 @@ class Host:
     def __init__(self, catalog_status: int = 200) -> None:
         self.catalog_status = catalog_status
         self.requests: list[str] = []
+        # Paths answered with a 302 to the URL given, as GitHub answers a
+        # release asset's URL.
+        self.redirects: dict[str, str] = {}
+        # A second host, the one GitHub's redirects point at.
+        self.assets: Optional[Host] = None
         host = self
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:  # noqa: N802
                 host.requests.append(self.path)
+                if self.path in host.redirects:
+                    body = b"moved"
+                    self.send_response(302)
+                    self.send_header("Location", host.redirects[self.path])
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
                 body, status = host.answer(self.path)
                 self.send_response(status)
                 self.send_header("Content-Length", str(len(body)))
@@ -115,6 +128,8 @@ class Host:
         return b"", 404
 
     def close(self) -> None:
+        if self.assets:
+            self.assets.close()
         self.server.shutdown()
         self.server.server_close()
 
@@ -145,6 +160,48 @@ def installed_package(card: Path, host: Host) -> None:
 def kept_catalog(card: Path, host: Host) -> None:
     """The catalog as an earlier Refresh kept it."""
     (card / "appstore/catalog.json").write_bytes(host.catalog)
+
+
+def assets_elsewhere(card: Path, host: Host) -> None:
+    """The package and its signature answered with 302s to a second host,
+    as GitHub answers a release asset's URL, and the catalog too."""
+    host.assets = Host()
+    for path in ("/catalog.json", "/notes.tap", "/notes.tap.sig"):
+        host.redirects[path] = f"{host.assets.base}/assets{path}"
+    host.assets.answer = lambda path: host.answer(path.removeprefix("/assets"))
+
+
+def assets_elsewhere_kept(card: Path, host: Host) -> None:
+    assets_elsewhere(card, host)
+    kept_catalog(card, host)
+
+
+def redirects(count: int) -> Callable[[Path, Host], None]:
+    """The package answered with count 302s, each to the next hop on the
+    same host, a relative Location, before the package itself."""
+    def setup(card: Path, host: Host) -> None:
+        kept_catalog(card, host)
+        hops = ["/notes.tap"] + [f"/hop{i}" for i in range(1, count)]
+        for here, there in zip(hops, hops[1:] + ["/notes.tap.real"]):
+            host.redirects[here] = there
+        answer = host.answer
+        host.answer = lambda path: answer("/notes.tap" if path == "/notes.tap.real" else path)
+    return setup
+
+
+def assets_fetched(card: Path, host: Host) -> Optional[str]:
+    if not host.assets:
+        return "no assets host"
+    wanted = ["/assets/notes.tap", "/assets/notes.tap.sig"]
+    if host.assets.requests != wanted:
+        return f"the assets host was asked for {host.assets.requests}, not {wanted}"
+    return nothing_installed(card, host)
+
+
+def catalog_fetched_from_assets(card: Path, host: Host) -> Optional[str]:
+    if not host.assets or host.assets.requests != ["/assets/catalog.json"]:
+        return f"the assets host was asked for {host.assets and host.assets.requests}"
+    return catalog_kept_whole(card, host)
 
 
 CARD_PACKAGES = "file:///sdcard/appstore/packages"
@@ -258,6 +315,32 @@ CASES = (
                    "toast: Notes: corrupted, or its signature is invalid"),
          absent=("no installable package",),
          fetched=("/notes.tap", "/notes.tap.sig"), check=nothing_installed, timeout_ms=6500),
+    Case("refresh-follows-the-catalogs-redirect",
+         ("--tap", REFRESH), setup=assets_elsewhere,
+         expected=("Fetching catalog: ", "Parsed 2 catalog entries", "(appstore_job) done: ESP_OK",
+                   "toast: Catalog updated"),
+         fetched=("/catalog.json",), check=catalog_fetched_from_assets),
+    # As a GitHub Release asset: the package and its signature are 302s to
+    # another host, and the install reaches the signature check.
+    Case("a-package-behind-redirects-reaches-the-signature-check",
+         ("--tap", FIRST_ROW, "--tap", INSTALL), setup=assets_elsewhere_kept,
+         expected=("Loaded 2 entries from local cache", "(appstore_job) done: ESP_ERR_INVALID_CRC",
+                   "toast: Notes: corrupted, or its signature is invalid"),
+         absent=("Download refused",),
+         fetched=("/notes.tap", "/notes.tap.sig"), check=assets_fetched, timeout_ms=6500),
+    Case("five-redirects-are-followed",
+         ("--tap", FIRST_ROW, "--tap", INSTALL), setup=redirects(5),
+         expected=("(appstore_job) done: ESP_ERR_INVALID_CRC",),
+         absent=("Download refused",),
+         fetched=("/notes.tap", "/hop1", "/hop2", "/hop3", "/hop4", "/notes.tap.real",
+                  "/notes.tap.sig"),
+         check=nothing_installed, timeout_ms=6500),
+    Case("a-sixth-redirect-is-refused",
+         ("--tap", FIRST_ROW, "--tap", INSTALL), setup=redirects(6),
+         expected=("Download refused: more than 5 redirects",
+                   "(appstore_job) done: ESP_FAIL", "toast: Notes: download failed"),
+         fetched=("/notes.tap", "/hop1", "/hop2", "/hop3", "/hop4", "/hop5"),
+         check=nothing_installed, timeout_ms=6500),
     Case("a-catalog-on-the-card-needs-no-server",
          ("--tap", REFRESH), setup=card_catalog,
          expected=("Catalog read from the card: ", "Parsed 2 catalog entries",
@@ -291,7 +374,7 @@ def run_case(simulator: Path, case: Case, keep: Optional[Path]) -> None:
         with tempfile.TemporaryDirectory(prefix="thistle-appstore-") as tmp:
             card = Path(tmp) / "card"
             shutil.copytree(SDCARD, card)
-            shutil.rmtree(card / "apps")
+            shutil.rmtree(card / "apps", ignore_errors=True)
             (card / "apps").mkdir()
             (card / "appstore").mkdir(exist_ok=True)
             (card / "appstore/catalog.json").unlink(missing_ok=True)

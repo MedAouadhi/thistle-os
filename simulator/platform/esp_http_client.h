@@ -153,6 +153,10 @@ static inline esp_err_t esp_http_client_set_redirection(esp_http_client_handle_t
     return sim_http_client_set_redirection(c);
 }
 
+static inline esp_err_t esp_http_client_get_url(esp_http_client_handle_t c, char *url, const int len) {
+    return sim_http_client_get_url(c, url, len);
+}
+
 static inline esp_err_t esp_http_client_flush_response(esp_http_client_handle_t c, int *len) {
     char buf[512];
     int total = 0, n;

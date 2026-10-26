@@ -157,6 +157,9 @@ void *sim_http_client_get_user_data(sim_http_client_handle_t client)
     return client ? client->user_data : NULL;
 }
 
+static size_t header_callback(char *data, size_t size, size_t nmemb, void *userp);
+static void resolve_location(struct sim_http_client *client);
+
 /* A transfer of the request as set up so far, the body going to
  * write_callback. */
 static CURL *new_easy(struct sim_http_client *client)
@@ -186,6 +189,10 @@ esp_err_t sim_http_client_perform(sim_http_client_handle_t client)
     CURL *curl = new_easy(client);
     if (!curl) return ESP_FAIL;
     curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS,    (long)client->timeout_ms);
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_callback);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA,     client);
+    free(client->location_raw);
+    client->location_raw = NULL;
 
     /* An empty "Expect:" stops curl holding a large body back for a
      * 100-continue that esp_http_client never waits for either. */
@@ -222,6 +229,7 @@ esp_err_t sim_http_client_perform(sim_http_client_handle_t client)
     curl_off_t cl = -1;
     curl_easy_getinfo(curl, CURLINFO_CONTENT_LENGTH_DOWNLOAD_T, &cl);
     client->content_length = (cl > 0) ? (int)cl : (int)client->response_len;
+    resolve_location(client);
 
     curl_easy_cleanup(curl);
 
@@ -364,7 +372,13 @@ int sim_http_client_fetch_headers(sim_http_client_handle_t client)
     curl_easy_getinfo(client->easy, CURLINFO_CONTENT_LENGTH_DOWNLOAD_T, &cl);
     /* As ESP-IDF: 0 when the server did not say. */
     client->content_length = cl > 0 ? (int)cl : 0;
-    /* Where a redirect not followed points, made whole if relative. */
+    resolve_location(client);
+    return client->content_length;
+}
+
+/* Where a redirect not followed points, made whole if relative. */
+static void resolve_location(struct sim_http_client *client)
+{
     free(client->location);
     client->location = NULL;
     if (client->location_raw) {
@@ -378,13 +392,19 @@ int sim_http_client_fetch_headers(sim_http_client_handle_t client)
         curl_free(whole);
         curl_url_cleanup(u);
     }
-    return client->content_length;
 }
 
 esp_err_t sim_http_client_set_redirection(sim_http_client_handle_t client)
 {
     if (!client || !client->location) return ESP_ERR_INVALID_ARG;
     return sim_http_client_set_url(client, client->location);
+}
+
+esp_err_t sim_http_client_get_url(sim_http_client_handle_t client, char *url, int len)
+{
+    if (!client || !url || len <= 0 || !client->url) return ESP_ERR_INVALID_ARG;
+    snprintf(url, (size_t)len, "%s", client->url);
+    return ESP_OK;
 }
 
 int sim_http_client_read(sim_http_client_handle_t client, char *buf, int len)

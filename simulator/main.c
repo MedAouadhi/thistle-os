@@ -36,6 +36,7 @@ void sim_lvgl_unlock(void) { pthread_mutex_unlock(&s_lvgl_mutex); }
 #include "sim_scenario.h"
 #include "sim_app_loader.h"
 #include "lvgl_apps.h"
+#include "thistle/ota.h"
 
 static bool s_headless = false;
 static int  s_timeout_ms = 0;
@@ -263,6 +264,8 @@ bool sim_is_headless(void) { return s_headless; }
  * side borders of its buttons. Only the horizontal is checked, because a list
  * that scrolls is meant to run off the bottom. */
 static bool s_report_offscreen = false;
+/* --install-update: install the card's kernel update once booted (ota.rs). */
+static bool s_install_update = false;
 
 static const char *first_label_text(lv_obj_t *obj)
 {
@@ -375,6 +378,8 @@ int main(int argc, char **argv)
             s_call_preview = argv[++i];
         } else if (strcmp(argv[i], "--log-flushes") == 0) {
             sim_display_set_log_flushes(true);
+        } else if (strcmp(argv[i], "--install-update") == 0) {
+            s_install_update = true;
         } else if (strcmp(argv[i], "--report-offscreen") == 0) {
             s_report_offscreen = true;
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
@@ -428,6 +433,8 @@ int main(int argc, char **argv)
             printf("  --log-flushes       Print every area flushed to the display\n");
             printf("  --report-offscreen  On exit, list every visible LVGL object that\n");
             printf("                      reaches past the left or right screen edge\n");
+            printf("  --install-update    Once booted, write the card's update/thistle_os.bin\n");
+            printf("                      into the other kernel slot and restart (exit)\n");
             printf("  --launch-app ID     Launch a registered app instead of the launcher\n");
             printf("  --wm NAME           Window manager, overriding system.json:\n");
             printf("                      thistle-tk, lvgl-epaper-wm or lvgl-lcd-wm\n");
@@ -535,6 +542,16 @@ int main(int argc, char **argv)
     printf("ThistleOS Simulator ready. Close window to exit.\n");
     sim_assert_check_line("ThistleOS Simulator ready");
     fflush(stdout);
+
+    /* As the firmware does, keep a new kernel after its first minute
+     * (THISTLE_SIM_KEEP_S); a run that ends sooner leaves it to be rolled
+     * back. The simulator starts no power manager, so nothing waits on it. */
+    ota_keep_new_kernel(NULL);
+    if (s_install_update) {
+        esp_err_t update_err = ota_apply_from_sd(NULL, NULL);   /* exits once written */
+        printf("Update not installed: 0x%x\n", (unsigned)update_err);
+        fflush(stdout);
+    }
 
     /* Main loop — drive LVGL tick + timer handler + SDL event pump */
     uint32_t last_tick = 0;

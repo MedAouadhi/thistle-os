@@ -85,6 +85,42 @@ wipes `system.json` (WiFi credentials, settings) and the mesh identity.
 Rewriting only `board.json`, for instance by a build that calls
 `board_detect_and_write()` once, keeps them.
 
+### Two kernel slots
+
+The flash holds two 4.5 MB kernel slots, `kernel_a` (ota_0) and `kernel_b`
+(ota_1), and a 2.5 MB `recovery` slot (ota_2) that nothing writes yet
+(`partitions.csv`, ADR-0010). NVS, otadata, SPIFFS and the core dump are
+where they were before, so the one USB flash that moves a board to this
+table keeps WiFi, the mesh identity, `board.json` and `system.json`. There is
+no `factory`: `idf.py flash` writes `kernel_a` and resets otadata, so a USB
+flash always boots `kernel_a`.
+
+- **An update is written into the other kernel slot, named by its label**
+  (`kernel_slot.rs`, `ota.rs`; every ESP-IDF call in
+  `components/kernel/src/kernel_slot_platform.c`). Never
+  `esp_ota_get_next_update_partition()`: from `kernel_b` it is `recovery`.
+  The card update, `/sdcard/update/thistle_os.bin` and its `.sig`, goes
+  there, and the slot is selected only once the signature verifies and
+  ESP-IDF has validated the image.
+- **A new kernel is kept after 60 s of running**
+  (`ota_keep_new_kernel()`); until then a reset rolls it back to the other
+  slot (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`). On that first boot the
+  power manager starts only once it is kept, as deep sleep is a reset; on
+  every other boot nothing waits. The boot log says `running kernel_b,
+  version ..., new: kept after 60 s` and then `kept the kernel in kernel_b`.
+- **CI measures the kernel against a kernel slot**
+  (`tools/check_partition_sizes.py`). ESP-IDF's warning that the kernel is
+  larger than the smallest app partition, the reserved one, is expected, as
+  is its warning that `recovery` is also the name of a data subtype.
+- The simulator's slots are files in `THISTLE_SIM_SLOTS` (or
+  `/tmp/thistle_slots`): `kernel_a.bin`, `kernel_b.bin`, and `otadata`, the
+  bootloader's choice and the version each slot's image describes, which is
+  the version a run reports. A run that ends before the keep leaves the next
+  on the other slot. `THISTLE_SIM_KEEP_S` shortens the keep,
+  `THISTLE_SIM_PUBLISHER_KEY` names a public key it trusts for firmware, and
+  `--install-update` installs the card's update once booted, exiting where a
+  device restarts. `simulator/tests/test_kernel_slots.py`.
+
 ### Internal RAM runs out first; keep stacks there and buffers out
 
 An S3 has about 340 KB of internal RAM, shared with any code placed in IRAM,
@@ -676,6 +712,14 @@ network and the files. LVGL window managers only; thistle-tk has its own
   the UI task's stack is (`syscall_is_ptr_allowed`). Leaving an app destroys
   it, so its `on_destroy` deletes its widgets; `lvgl_wm_widget_destroy()`
   forgets the handles of a deleted widget's children.
+- **Every download follows redirects**, as a GitHub Release asset's URL
+  answers with a 302 to another host: the catalog, a package and its
+  signature, a firmware. At most five, never from HTTPS to HTTP
+  (`redirect_policy.rs`, host-tested); the log says `Download refused:
+  more than 5 redirects, to ...` when not. The kernel follows them itself
+  (`thistle_http_client_init_download`, `thistle_http_client_redirect` in
+  `http_client_shim.c`): ESP-IDF's own following has no scheme rule. What
+  is installed is trusted for its signature and hash, never its host.
 - **Refresh and Install run on the App Store's worker** (`appstore_job.c`),
   one at a time, on a task with a 16 KB internal stack, never on
   `lvgl_task`: its 8 KB stack once took a refresh's 100 KB of catalog
@@ -757,15 +801,15 @@ Do **not** source `~/export-esp.sh` in the shell you run `idf.py` from — it ov
 ## Architecture (three-tier immutable trust chain)
 
 ```
-Recovery (Rust, ota_0, 1MB) — immutable, root of trust
-  ↓ Ed25519 verify
-Kernel (100% Rust, ota_1, 4.5MB) — immutable, hardware-independent
+Recovery (Rust, `recovery` slot, 2.5MB) — reserved, not yet flashed (ADR-0010)
+Kernel (100% Rust, `kernel_a` / `kernel_b`, 4.5MB each) — hardware-independent
+  ↑ Ed25519 verify, then written into the other kernel slot
   ├── Display Server (surfaces, compositor, input routing)
   ├── Kernel modules (57 modules: app manager, IPC, events, permissions, signing, manifest, crypto, HAL registry, drivers, WM, app store, ...)
   ├── Syscall table (~80 syscalls exported to loaded ELFs)
   └── HAL registry (bus handles, driver vtables)
          ↓ loads from
-SPIFFS (10.5MB) + SD card — updateable
+SPIFFS (4.3MB) + SD card — updateable
   ├── config/boards/ (per-board board.json: hardware pins, buses, driver list)
   ├── config/system.json (user prefs, WM selection, WiFi)
   ├── drivers/*.drv.elf (hardware drivers)
