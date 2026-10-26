@@ -156,7 +156,7 @@ Anyone can host their own catalog by pointing `appstore.json` at a different URL
 
 ## Supported Devices
 
-See the full [Supported Devices](https://wan0net.github.io/esp32-os/docs/devices.html) page for component-level hardware details and driver tables.
+See the full [Supported Devices](https://medaouadhi.github.io/thistle-os/docs/devices.html) page for component-level hardware details and driver tables.
 
 | Device | Chip | Display | Status |
 |--------|------|---------|--------|
@@ -189,7 +189,7 @@ Multi-arch: ESP32 (Xtensa), ESP32-S2/S3 (Xtensa LX7), ESP32-C3/C6 (RISC-V). One 
 | Connectivity | WiFi 4 + BLE 5.0 (on-chip) | — |
 
 ### Adding your own board
-See the [Board Support](https://wan0net.github.io/esp32-os/docs/board-support.html) docs. Create a `board.json` with pin assignments and a driver list — the kernel reads it at boot. No recompilation needed for new boards.
+See the [Supported Devices](https://medaouadhi.github.io/thistle-os/docs/devices.html) docs and `sdcard_layout/config/boards/`. Create a `board.json` with pin assignments and a driver list — the kernel reads it at boot. No recompilation needed for new boards.
 
 ## Built-in Apps
 
@@ -275,7 +275,7 @@ The WM is selected in Settings or during first-boot setup. Downloaded from the a
 
 **thistle-tk** is the default window manager for e-paper displays. It is a pure Rust widget toolkit built on **embedded-graphics** with zero C dependencies.
 
-- **Repo:** https://github.com/wan0net/thistle-tk
+- **Source:** [`crates/thistle-tk/`](crates/thistle-tk/) in this repository
 - Works on both 1-bit e-paper (`BinaryColor`) and RGB565 LCD (`Rgb565`)
 - Apps use semantic widgets (`Container`, `Label`, `Button`, `TextInput`) and theme colors
 - Layout engine with flexbox-like positioning
@@ -380,7 +380,7 @@ espflash flash target/xtensa-esp32s3-espidf/release/thistleos-recovery
 
 **Option B — Build the full firmware directly:**
 ```bash
-git clone https://github.com/wan0net/thistle-os.git
+git clone https://github.com/MedAouadhi/thistle-os.git
 cd thistle-os
 
 . ~/esp/esp-idf/export.sh
@@ -484,6 +484,8 @@ All dependencies are permissively licensed. See [THIRD_PARTY_LICENSES.md](THIRD_
 ## License
 
 BSD 3-Clause License. See [LICENSE](LICENSE).
+
+This repository is a fork of ThistleOS by wan0net (https://github.com/wan0net/thistle-os), whose history it keeps.
 
 ---
 

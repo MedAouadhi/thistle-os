@@ -17,7 +17,7 @@
       <a href="/thistle-os/docs/apps.html">Apps</a>
       <a href="/thistle-os/docs/kernel-modules.html">Modules</a>
       <a href="/thistle-os/simulator/">Simulator</a>
-      <a href="https://github.com/wan0net/thistle-os">GitHub</a>
+      <a href="https://github.com/MedAouadhi/thistle-os">GitHub</a>
     </div>
   </div>
 </nav>
@@ -65,7 +65,7 @@
       <div class="breadcrumb"><a href="index.html">ThistleOS</a> / Recovery OS</div>
       <h1>Recovery OS</h1>
       <p class="lead">A minimal Rust firmware in <code>ota_0</code> that starts a WiFi hotspot, serves a captive portal, downloads the selected board profile plus matching drivers and firmware from the catalog, verifies hashes and Ed25519 signatures, flashes <code>ota_1</code>, and reboots into ThistleOS without a programmer.</p>
-      <a href="https://github.com/wan0net/thistle-os/blob/main/docs/recovery.html" class="edit-link">&#9998; Edit on GitHub</a>
+      <a href="https://github.com/MedAouadhi/thistle-os/blob/main/docs/recovery.html" class="edit-link">&#9998; Edit on GitHub</a>
     </div>
 
     <h2>Purpose and design</h2>
@@ -76,7 +76,7 @@
       <li><strong>Rust + esp-rs</strong> — smaller binary than equivalent C code, and memory safety means fewer panic-class bugs in the one piece of code that must always work.</li>
       <li><strong>Catalog-led board selection</strong> — Recovery detects the chip variant (ESP32/S3/C3/etc.) and lets the selected board profile drive firmware, driver, and window-manager selection. Generic I2C/SPI/UART probing is deliberately kept out of the minimal recovery path.</li>
       <li><strong>Multi-arch chip detection</strong> — a single Recovery binary identifies whether it is running on Xtensa or RISC-V and selects the correct firmware architecture from the catalog.</li>
-      <li><strong>Downloadable board list</strong> — after WiFi connects, the web UI fetches the latest board catalog from <code>https://wan0net.github.io/thistle-os/catalog.json</code> and keeps the built-in list as the offline fallback.</li>
+      <li><strong>Downloadable board list</strong> — after WiFi connects, the web UI fetches the latest board catalog from <code>https://wan0net.github.io/thistle-os/catalog.json</code> (upstream's: Recovery's URLs and keys stay as they are until it is brought up on this fork) and keeps the built-in list as the offline fallback.</li>
       <li><strong>Full bundle download</strong> — Recovery downloads the firmware binary, matching drivers, board config, and the appropriate window manager in one provisioning flow. Catalog SHA-256 hashes and Ed25519 signatures are checked before executable files are installed or firmware is flashed.</li>
       <li><strong>No LVGL</strong> — the recovery UI is a captive portal web page served over WiFi, viewable on any phone or laptop. The e-paper display shows status messages via raw framebuffer writes.</li>
       <li><strong>No SD card required</strong> — if the SD card is missing or corrupt, recovery can still download firmware over WiFi.</li>
@@ -202,7 +202,7 @@ espflash flash --partition-table partitions.csv \
 
     <div class="page-footer">
       <span>ThistleOS v0.1.0 &mdash; BSD 3-Clause</span>
-      <a href="https://github.com/wan0net/thistle-os">GitHub</a>
+      <a href="https://github.com/MedAouadhi/thistle-os">GitHub</a>
     </div>
   </main>
 </div>

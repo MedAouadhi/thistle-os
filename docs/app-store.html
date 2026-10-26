@@ -17,7 +17,7 @@
       <a href="/thistle-os/docs/apps.html">Apps</a>
       <a href="/thistle-os/docs/kernel-modules.html">Modules</a>
       <a href="/thistle-os/simulator/">Simulator</a>
-      <a href="https://github.com/wan0net/thistle-os">GitHub</a>
+      <a href="https://github.com/MedAouadhi/thistle-os">GitHub</a>
     </div>
   </div>
 </nav>
@@ -65,7 +65,7 @@
       <div class="breadcrumb"><a href="index.html">ThistleOS</a> / App Store</div>
       <h1>App Store &amp; Catalog</h1>
       <p class="lead">The ThistleOS app store is decentralized — anyone can host a catalog. The device fetches JSON over HTTPS, filters entries by chip architecture and detected hardware components, verifies SHA-256 checksums and Ed25519 signatures, then downloads and installs entries onto the SD card.</p>
-      <a href="https://github.com/wan0net/thistle-os/blob/main/docs/app-store.html" class="edit-link">&#9998; Edit on GitHub</a>
+      <a href="https://github.com/MedAouadhi/thistle-os/blob/main/docs/app-store.html" class="edit-link">&#9998; Edit on GitHub</a>
     </div>
 
     <div class="callout info">
@@ -79,7 +79,7 @@
     <pre><code>{
   <span class="tok-string">"catalog_version"</span>: 2,
   <span class="tok-string">"name"</span>: <span class="tok-string">"ThistleOS Official"</span>,
-  <span class="tok-string">"url"</span>: <span class="tok-string">"https://wan0net.github.io/thistle-apps/catalog.json"</span>,
+  <span class="tok-string">"url"</span>: <span class="tok-string">"https://medaouadhi.github.io/thistle-os/store/catalog.json"</span>,
   <span class="tok-string">"updated"</span>: <span class="tok-string">"2026-03-22"</span>,
   <span class="tok-string">"entries"</span>: [
     {
@@ -206,41 +206,19 @@
       <li>Commit and push — devices will find the new entry on their next catalog refresh</li>
     </ol>
 
-    <h2>Firmware updates via the app store</h2>
-    <p>Firmware updates work exactly like app downloads, but with <code>"type": "firmware"</code> and a <code>.bin</code> extension. The update flow:</p>
+    <h2>Firmware updates</h2>
+    <p>The App Store installs no firmware. The kernel reads the firmware entries of the same catalog once a day, and Settings → System update offers a newer release, checks its signed artifact manifest and writes it into the other kernel slot. See <a href="release-flashing.html">Release Flashing</a>.</p>
 
-    <ol class="steps">
-      <li>User opens App Store → sees "ThistleOS vX.Y.Z available"</li>
-      <li>User taps "Update" — firmware binary downloaded and verified</li>
-      <li>Binary written to <code>/sdcard/update/thistle_os.bin</code></li>
-      <li>The kernel verifies the binary, writes it into its other kernel slot, selects it and restarts</li>
-      <li>Device boots into new firmware, which is kept after a minute of running; a reset before then rolls it back</li>
-    </ol>
-
-    <p>If the firmware entry's <code>sig_url</code> is present and the signature does not verify, the download is rejected before the file is written to the SD card.</p>
-
-    <div class="callout danger">
-      <div class="callout-title">Firmware signing is mandatory</div>
-      Unsigned firmware entries are rejected outright — the device will not install them regardless of the user's choice. Always sign firmware updates with your development key.
-    </div>
-
-    <h2>Adding the official catalog</h2>
-    <p>The official ThistleOS catalog is pre-configured in <code>/sdcard/config/system.json</code>:</p>
+    <h2>The default catalog</h2>
+    <p>The catalog is <code>https://medaouadhi.github.io/thistle-os/store/catalog.json</code>, which the Pages workflow builds from the repository's GitHub releases on every deploy: the newest firmware release and the newest release of each app, drafts and prereleases left out. A release is made by pushing a tag (<code>v0.6.0</code>, <code>notes-v1.0.1</code>); nothing in the catalog is kept by hand. A card's <code>/sdcard/config/appstore.json</code> names another:</p>
 
     <pre><code>{
-  <span class="tok-string">"app_store"</span>: {
-    <span class="tok-string">"catalogs"</span>: [
-      <span class="tok-string">"https://wan0net.github.io/thistle-apps/catalog.json"</span>
-    ],
-    <span class="tok-string">"refresh_interval_hours"</span>: 12
-  }
+  <span class="tok-string">"catalog_url"</span>: <span class="tok-string">"https://medaouadhi.github.io/thistle-os/store/catalog.json"</span>
 }</code></pre>
-
-    <p>To add a third-party catalog, append its URL to the <code>catalogs</code> array. The device merges entries from all catalogs. If two catalogs provide the same <code>id</code>, the entry with the higher version wins.</p>
 
     <div class="page-footer">
       <span>ThistleOS v0.1.0 &mdash; BSD 3-Clause</span>
-      <a href="https://github.com/wan0net/thistle-os">GitHub</a>
+      <a href="https://github.com/MedAouadhi/thistle-os">GitHub</a>
     </div>
   </main>
 </div>

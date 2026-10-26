@@ -4,7 +4,7 @@ A `no_std` Rust widget toolkit for embedded displays, built on [embedded-graphic
 
 One widget tree. Any display. E-paper or LCD — same code.
 
-> **Alpha** — under active development as part of [ThistleOS](https://github.com/wan0net/thistle-os).
+> **Alpha** — under active development as part of [ThistleOS](https://github.com/MedAouadhi/thistle-os).
 
 ## What it does
 
@@ -94,4 +94,4 @@ BSD 3-Clause. See [LICENSE](LICENSE).
 
 ---
 
-*Part of the [ThistleOS](https://github.com/wan0net/thistle-os) project — a portable OS for ESP32 devices.*
+*Part of the [ThistleOS](https://github.com/MedAouadhi/thistle-os) project — a portable OS for ESP32 devices.*
