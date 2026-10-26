@@ -49,7 +49,7 @@ TX/RX are crossed relative to the SoC pin that drives them.
 - **Simulator**: SDL2 desktop build. `cd simulator/build && cmake .. && make -j8 && ./thistle_sim`
 - **Rust kernel**: `cargo +esp check` in `components/kernel_rs/`. Tests: `cargo test --target <host-triple> -- --test-threads=1` (1878 tests)
 - **Recovery OS**: `cd recovery && cargo +esp build --release`
-- **CI**: GitHub Actions — firmware build (espressif/idf:v5.5), Semgrep SAST, Trivy security scan
+- **CI**: GitHub Actions on GitHub's hosted runners, every push to main and every pull request. `ci.yml`: the firmware for each chip in its list (the S3 alone) in `espressif/idf:v5.5`, failing if a `.env` is in the workspace, its partition size check, Recovery, cargo-audit, Semgrep SAST, Trivy. `tests.yml`: the host tests (Rust kernel, Python tools, simulator). `pages.yml`: the docs and the WASM simulator to the repository's own Pages. `tools/test_ci_workflows.py` keeps them off self-hosted runners and upstream's deploy targets.
 
 ### Sharing one USB-Serial-JTAG board between sessions
 
@@ -84,6 +84,42 @@ changed profile changes nothing on a board that already holds one: tickets 03,
 wipes `system.json` (WiFi credentials, settings) and the mesh identity.
 Rewriting only `board.json`, for instance by a build that calls
 `board_detect_and_write()` once, keeps them.
+
+### Two kernel slots
+
+The flash holds two 4.5 MB kernel slots, `kernel_a` (ota_0) and `kernel_b`
+(ota_1), and a 2.5 MB `recovery` slot (ota_2) that nothing writes yet
+(`partitions.csv`, ADR-0010). NVS, otadata, SPIFFS and the core dump are
+where they were before, so the one USB flash that moves a board to this
+table keeps WiFi, the mesh identity, `board.json` and `system.json`. There is
+no `factory`: `idf.py flash` writes `kernel_a` and resets otadata, so a USB
+flash always boots `kernel_a`.
+
+- **An update is written into the other kernel slot, named by its label**
+  (`kernel_slot.rs`, `ota.rs`; every ESP-IDF call in
+  `components/kernel/src/kernel_slot_platform.c`). Never
+  `esp_ota_get_next_update_partition()`: from `kernel_b` it is `recovery`.
+  The card update, `/sdcard/update/thistle_os.bin` and its `.sig`, goes
+  there, and the slot is selected only once the signature verifies and
+  ESP-IDF has validated the image.
+- **A new kernel is kept after 60 s of running**
+  (`ota_keep_new_kernel()`); until then a reset rolls it back to the other
+  slot (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`). On that first boot the
+  power manager starts only once it is kept, as deep sleep is a reset; on
+  every other boot nothing waits. The boot log says `running kernel_b,
+  version ..., new: kept after 60 s` and then `kept the kernel in kernel_b`.
+- **CI measures the kernel against a kernel slot**
+  (`tools/check_partition_sizes.py`). ESP-IDF's warning that the kernel is
+  larger than the smallest app partition, the reserved one, is expected, as
+  is its warning that `recovery` is also the name of a data subtype.
+- The simulator's slots are files in `THISTLE_SIM_SLOTS` (or
+  `/tmp/thistle_slots`): `kernel_a.bin`, `kernel_b.bin`, and `otadata`, the
+  bootloader's choice and the version each slot's image describes, which is
+  the version a run reports. A run that ends before the keep leaves the next
+  on the other slot. `THISTLE_SIM_KEEP_S` shortens the keep,
+  `THISTLE_SIM_PUBLISHER_KEY` names a public key it trusts for firmware, and
+  `--install-update` installs the card's update once booted, exiting where a
+  device restarts. `simulator/tests/test_kernel_slots.py`.
 
 ### Internal RAM runs out first; keep stacks there and buffers out
 
@@ -627,8 +663,9 @@ network and the files. LVGL window managers only; thistle-tk has its own
 (`tk_appstore.rs`).
 
 - **The catalog is a static JSON file**, by default upstream's
-  `https://wan0net.github.io/thistle-apps/catalog.json`, which
-  `.github/workflows/apps.yml` publishes; a card's `config/appstore.json`,
+  `https://wan0net.github.io/thistle-apps/catalog.json`, which upstream's
+  own workflow publishes (this repository no longer has it); a card's
+  `config/appstore.json`,
   `{"catalog_url": "..."}`, names another. Refresh keeps the server's JSON
   whole at `/sdcard/appstore/catalog.json`, which the app reads with the
   kernel's parser when it opens (`appstore_load_catalog_file`). Entries for
@@ -755,7 +792,7 @@ cargo install espup --version 0.16.0 --locked --force
 espup install
 ```
 
-**Pin espup to 0.16.0.** 0.17.x aborts with `Unsuported file extension: 'part'`, and CI pins the same version (`.github/workflows/build.yml`) — keep the two in step.
+**Pin espup to 0.16.0.** 0.17.x aborts with `Unsuported file extension: 'part'`, and CI pins the same version (`.github/workflows/ci.yml`) — keep the two in step.
 
 The `esp` toolchain must be recent enough for the dependency tree: `cargo +esp check` fails at manifest-parse time with `feature 'edition2024' is required` on anything older than Xtensa Rust 1.85. espup 0.16.0 currently installs 1.97.0.0. If you see that error, your `esp` toolchain is stale — reinstall with the commands above rather than editing dependency versions.
 
@@ -764,15 +801,15 @@ Do **not** source `~/export-esp.sh` in the shell you run `idf.py` from — it ov
 ## Architecture (three-tier immutable trust chain)
 
 ```
-Recovery (Rust, ota_0, 1MB) — immutable, root of trust
-  ↓ Ed25519 verify
-Kernel (100% Rust, ota_1, 4.5MB) — immutable, hardware-independent
+Recovery (Rust, `recovery` slot, 2.5MB) — reserved, not yet flashed (ADR-0010)
+Kernel (100% Rust, `kernel_a` / `kernel_b`, 4.5MB each) — hardware-independent
+  ↑ Ed25519 verify, then written into the other kernel slot
   ├── Display Server (surfaces, compositor, input routing)
   ├── Kernel modules (57 modules: app manager, IPC, events, permissions, signing, manifest, crypto, HAL registry, drivers, WM, app store, ...)
   ├── Syscall table (~80 syscalls exported to loaded ELFs)
   └── HAL registry (bus handles, driver vtables)
          ↓ loads from
-SPIFFS (10.5MB) + SD card — updateable
+SPIFFS (4.3MB) + SD card — updateable
   ├── config/boards/ (per-board board.json: hardware pins, buses, driver list)
   ├── config/system.json (user prefs, WM selection, WiFi)
   ├── drivers/*.drv.elf (hardware drivers)

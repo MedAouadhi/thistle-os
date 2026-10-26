@@ -190,9 +190,14 @@ pub(crate) fn verify_exact_reader_with(
     let verifying_key = key_guard.as_ref().ok_or(ESP_ERR_INVALID_STATE)?;
     let sig_bytes: [u8; 64] = signature.try_into().map_err(|_| ESP_ERR_INVALID_SIZE)?;
     let signature = Signature::from_bytes(&sig_bytes);
-    let mut verifier = verifying_key
-        .verify_stream(&signature)
-        .map_err(|_| ESP_ERR_INVALID_CRC)?;
+    let mut verifiers = Vec::with_capacity(2);
+    verifiers.extend(verifying_key.verify_stream(&signature).ok());
+    if let Some(test_key) = sim_test_key() {
+        verifiers.extend(test_key.verify_stream(&signature).ok());
+    }
+    if verifiers.is_empty() {
+        return Err(ESP_ERR_INVALID_CRC);
+    }
 
     let mut buffer = [0u8; 4096];
     let mut consumed = 0usize;
@@ -204,7 +209,9 @@ pub(crate) fn verify_exact_reader_with(
         if count == 0 {
             return Err(ESP_ERR_INVALID_SIZE);
         }
-        verifier.update(&buffer[..count]);
+        for verifier in verifiers.iter_mut() {
+            verifier.update(&buffer[..count]);
+        }
         consume(&buffer[..count])?;
         consumed += count;
     }
@@ -214,9 +221,30 @@ pub(crate) fn verify_exact_reader_with(
         return Err(ESP_ERR_INVALID_SIZE);
     }
 
-    verifier
-        .finalize_and_verify()
-        .map_err(|_| ESP_ERR_INVALID_CRC)
+    if verifiers.into_iter().any(|v| v.finalize_and_verify().is_ok()) {
+        Ok(())
+    } else {
+        Err(ESP_ERR_INVALID_CRC)
+    }
+}
+
+/// A key the simulator trusts beside the kernel's, so its tests can sign
+/// firmware: the file `THISTLE_SIM_PUBLISHER_KEY` names, holding the public
+/// key as 32 bytes or 64 hex digits. Never on a device.
+#[cfg(not(target_os = "espidf"))]
+fn sim_test_key() -> Option<VerifyingKey> {
+    let path = std::env::var_os("THISTLE_SIM_PUBLISHER_KEY")?;
+    let bytes = fs::read(path).ok()?;
+    let key: [u8; 32] = match bytes.len() {
+        32 => bytes.try_into().ok()?,
+        _ => parse_key_hex(std::str::from_utf8(&bytes).ok()?)?,
+    };
+    VerifyingKey::from_bytes(&key).ok()
+}
+
+#[cfg(target_os = "espidf")]
+fn sim_test_key() -> Option<VerifyingKey> {
+    None
 }
 
 // ---------------------------------------------------------------------------

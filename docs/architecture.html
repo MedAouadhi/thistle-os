@@ -203,7 +203,7 @@
     <p><code>wifi_manager</code> wraps ESP-IDF's WiFi station mode: scan, connect, disconnect, RSSI, IP, and NTP time sync. <code>ble_manager</code> is planned for a future release. Both are exposed to apps through the syscall table under the <code>PERM_NETWORK</code> permission.</p>
 
     <h3>OTA</h3>
-    <p>Wraps ESP-IDF's <code>esp_https_ota</code>. The kernel can update itself from an SD card file (<code>/sdcard/update/thistle_os.bin</code>) or from an HTTP URL. The OTA module writes to the inactive partition (<code>ota_1</code>) and reboots. If the new firmware fails to call <code>ota_mark_valid()</code> within 30 seconds, the bootloader rolls back.</p>
+    <p>The kernel updates itself from an SD card file (<code>/sdcard/update/thistle_os.bin</code> and its <code>.sig</code>) into the other of its two kernel slots, <code>kernel_a</code> and <code>kernel_b</code>, named by label (never ESP-IDF's next update partition, which from <code>kernel_b</code> is the reserved Recovery slot). It selects the slot once the signature verifies and the image is valid, and restarts. A new kernel is kept after 60 seconds of running; a reset before that rolls it back to the other slot, and the power manager starts only once it is kept (ADR-0010).</p>
 
     <h2>Memory layout</h2>
     <div class="table-wrap">
@@ -212,8 +212,8 @@
         <tbody>
           <tr><td>Internal DRAM</td><td>~320 KB</td><td>FreeRTOS stacks, kernel BSS, ISR handlers, time-critical code</td></tr>
           <tr><td>PSRAM (SPIRAM)</td><td>8 MB</td><td>LVGL frame buffers, loaded app ELFs, app heap allocations</td></tr>
-          <tr><td>Flash — <code>ota_0</code></td><td>2.5 MB</td><td>Recovery OS (Rust)</td></tr>
-          <tr><td>Flash — <code>ota_1</code></td><td>4.5 MB</td><td>Main ThistleOS firmware</td></tr>
+          <tr><td>Flash — <code>kernel_a</code>, <code>kernel_b</code></td><td>4.5 MB each</td><td>The two kernel slots: the running kernel, and the previous or next one</td></tr>
+          <tr><td>Flash — <code>recovery</code></td><td>2.5 MB</td><td>Reserved for Recovery OS (Rust); not yet flashed</td></tr>
           <tr><td>Flash — <code>nvs</code></td><td>24 KB</td><td>WiFi credentials, app settings (ESP-IDF NVS)</td></tr>
           <tr><td>SD card</td><td>unlimited</td><td>Apps (.app.elf), drivers (.drv.elf), themes, user data</td></tr>
         </tbody>
@@ -228,9 +228,9 @@
      &#x25BC;
 [Bootloader (flash)] &#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500; checks OTA state
      &#x2502;
-     &#x251c;&#x2500; ota_1 valid? &#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500; YES &#x2500;&#x25BA; [ThistleOS main firmware]
+     &#x251c;&#x2500; kernel slot? &#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500; YES &#x2500;&#x25BA; [ThistleOS main firmware]
      &#x2502;                                              &#x2502;
-     &#x2514;&#x2500; ota_1 missing / invalid &#x2500;&#x25BA; [Recovery OS]   &#x25BC;
+     &#x2514;&#x2500; new kernel not kept     &#x2500;&#x25BA; [other slot]    &#x25BC;
                                              kernel_init()
                                               &#x2502;
                                               &#x251c;&#x2500; kworker_start()  (the kernel worker)

@@ -1,6 +1,8 @@
 # Recovery-first installation and packaging
 
-Status: proposed
+Status: proposed. The partition table described here was not adopted: the
+table in `partitions.csv` is two kernel slots, `kernel_a` and `kernel_b`, and
+a reserved `recovery` slot, with no `factory` (ADR-0010).
 
 This document defines the installation experience in which Recovery OS is the
 only image a user initially flashes. Recovery then obtains network access,

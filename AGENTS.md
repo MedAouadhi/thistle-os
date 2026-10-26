@@ -13,15 +13,15 @@ ThistleOS is a portable ESP32 family operating system with an immutable kernel, 
 ## Architecture (three-tier immutable trust chain)
 
 ```
-Recovery (Rust, ota_0, 1MB) — immutable, root of trust
-  ↓ Ed25519 verify
-Kernel (100% Rust, ota_1, 4.5MB) — immutable, hardware-independent
+Recovery (Rust, `recovery` slot, 2.5MB) — reserved, not yet flashed (ADR-0010)
+Kernel (100% Rust, `kernel_a` / `kernel_b`, 4.5MB each) — hardware-independent
+  ↑ Ed25519 verify, then written into the other kernel slot
   ├── Display Server (surfaces, compositor, input routing)
   ├── Kernel modules (57 modules: app manager, IPC, events, permissions, signing, manifest, crypto, HAL registry, drivers, WM, app store, ...)
   ├── Syscall table (~80 syscalls exported to loaded ELFs)
   └── HAL registry (bus handles, driver vtables)
          ↓ loads from
-SPIFFS (10.5MB) + SD card — updateable
+SPIFFS (4.3MB) + SD card — updateable
   ├── config/boards/ (per-board board.json: hardware pins, buses, driver list)
   ├── config/system.json (user prefs, WM selection, WiFi)
   ├── drivers/*.drv.elf (hardware drivers)

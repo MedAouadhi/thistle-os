@@ -11,6 +11,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <libgen.h>
+#include <limits.h>
 
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
@@ -25,7 +26,7 @@ void sim_vfs_init(void)
 
     const char *override_path = getenv("THISTLE_SIM_SDCARD");
     if (override_path && override_path[0]) {
-        char override_resolved[512];
+        char override_resolved[PATH_MAX];
         if (!realpath(override_path, override_resolved)) {
             fprintf(stderr, "[sim_vfs] ERROR: THISTLE_SIM_SDCARD does not exist: %s\n",
                     override_path);
@@ -58,8 +59,8 @@ void sim_vfs_init(void)
     /* Try: exe_dir/../sdcard (exe is in simulator/build/, sdcard is simulator/sdcard/) */
     snprintf(s_sdcard_path, sizeof(s_sdcard_path), "%s/../sdcard", exe_dir);
 
-    /* Resolve to absolute path */
-    char resolved[512];
+    /* Resolve to absolute path; realpath() writes up to PATH_MAX. */
+    char resolved[PATH_MAX];
     if (realpath(s_sdcard_path, resolved)) {
         strncpy(s_sdcard_path, resolved, sizeof(s_sdcard_path) - 1);
     } else {

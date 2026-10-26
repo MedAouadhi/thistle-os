@@ -67,8 +67,8 @@ ThistleOS separates the **kernel** from the **hardware**. The kernel runs across
 
 ThistleOS uses a three-tier immutable trust chain:
 
-1. **Recovery OS** (Rust, ota_0) — immutable root of trust. Verifies the kernel's Ed25519 signature before booting it.
-2. **Kernel** (100% Rust, ota_1) — immutable. Contains the display server, app/driver lifecycle, IPC, permissions, signing, crypto, and HAL. The kernel is hardware-independent: it never calls ESP-IDF hardware APIs directly. All hardware interaction goes through HAL driver vtables. Reads `board.json` from SPIFFS to initialize hardware buses and load drivers.
+1. **Recovery OS** (Rust, the reserved `recovery` slot) — the planned root of trust; its slot is reserved and not yet flashed (ADR-0010).
+2. **Kernel** (100% Rust, two kernel slots `kernel_a` and `kernel_b`) — immutable. An update is verified and written into the other kernel slot; a new kernel that has not run for a minute is rolled back at the next reset. Contains the display server, app/driver lifecycle, IPC, permissions, signing, crypto, and HAL. The kernel is hardware-independent: it never calls ESP-IDF hardware APIs directly. All hardware interaction goes through HAL driver vtables. Reads `board.json` from SPIFFS to initialize hardware buses and load drivers.
 3. **Everything else** (SPIFFS + SD card) — updateable. Apps, drivers, window managers, and themes are all loaded at runtime. Update any component by replacing its file — no firmware reflash needed.
 
 The kernel never talks to hardware directly. It talks through **HAL vtables** — C structs of function pointers. Drivers are loaded from SPIFFS/SD as `.drv.elf` files and register themselves with the HAL at boot.
@@ -290,12 +290,12 @@ Signing and verification at every level — from boot to apps:
 │  eFuse (optional, production only)          │
 │  Burns Recovery public key hash — permanent │
 ├────────────────────────────────────────────┤
-│  Recovery OS (ota_0) — IMMUTABLE            │
+│  Recovery OS (recovery slot) — RESERVED     │
 │  Holds Ed25519 public key                   │
 │  Verifies ThistleOS firmware signature      │
 │  before allowing it to boot                 │
 ├─────────────────────────────────────────────┤
-│  ThistleOS (ota_1) — SIGNED                │
+│  ThistleOS (kernel_a / kernel_b) — SIGNED   │
 │  Verifies app + driver ELF signatures       │
 │  before loading into PSRAM                  │
 ├─────────────────────────────────────────────┤
@@ -333,10 +333,10 @@ The kernel contains a platform-independent crypto layer (`components/kernel_rs/s
 
 ## Recovery OS
 
-A minimal Rust firmware for ota_0 that provides unbreakable recovery and hardware self-provisioning:
+A minimal Rust firmware for the reserved `recovery` slot that provides recovery and hardware self-provisioning. The slot is reserved in the partition table but not yet flashed on any board; until Recovery is brought up, the kernel updates itself into its other kernel slot (ADR-0010). Planned flow:
 
 1. Detects chip type (ESP32/S3/C3/etc.)
-2. Checks ota_1 → boots if valid
+2. Checks a kernel slot → boots if valid
 3. Checks SD card → flashes firmware if found
 4. Enables power rails → scans I2C bus (0x08–0x77), probes SPI/UART devices
 5. Matches detected components to catalog — downloads matching drivers + firmware + WM
