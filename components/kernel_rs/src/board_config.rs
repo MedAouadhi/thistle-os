@@ -896,10 +896,31 @@ fn with_power_section_from(stored: &str, embedded: &str) -> Option<String> {
 
 const WRITER_KEY: &str = "written_by";
 
+/// What decides whether a stored profile is rewritten: its board and the
+/// version that wrote it. Read at every boot, so read without the whole
+/// tree: serde skips the rest of the text, and the two strings are borrowed
+/// from it unless escaped.
+#[derive(serde::Deserialize)]
+struct ProfileHead<'a> {
+    #[serde(borrow, default)]
+    written_by: Option<std::borrow::Cow<'a, str>>,
+    #[serde(borrow, default)]
+    board: Option<BoardHead<'a>>,
+}
+
+#[derive(serde::Deserialize)]
+struct BoardHead<'a> {
+    #[serde(borrow, default)]
+    board_id: Option<std::borrow::Cow<'a, str>>,
+}
+
+fn profile_head(profile: &str) -> Option<ProfileHead<'_>> {
+    serde_json::from_str(profile).ok()
+}
+
 /// The firmware version that wrote a stored profile, if it says.
 fn profile_writer(profile: &str) -> Option<String> {
-    let root: serde_json::Value = serde_json::from_str(profile).ok()?;
-    root.get(WRITER_KEY)?.as_str().map(str::to_string)
+    Some(profile_head(profile)?.written_by?.into_owned())
 }
 
 /// `profile` saying that firmware `version` wrote it, as its first key; a
@@ -948,12 +969,10 @@ pub(crate) fn follow_firmware_version(
     if stored.len() > MAX_CONFIG_SIZE {
         return Followed::Kept;
     }
-    let Ok(root) = serde_json::from_str::<serde_json::Value>(&stored) else {
-        return Followed::Kept;
-    };
-    let Some(board) = root["board"]["board_id"].as_str() else { return Followed::Kept };
-    let writer = root.get(WRITER_KEY).and_then(|w| w.as_str());
-    let built_in = embedded(board);
+    let Some(head) = profile_head(&stored) else { return Followed::Kept };
+    let Some(board) = head.board.and_then(|b| b.board_id) else { return Followed::Kept };
+    let writer = head.written_by.as_deref();
+    let built_in = embedded(&board);
     if crate::update_policy::board_profile(writer, running, built_in.is_some())
         == crate::update_policy::Profile::Keep
     {
@@ -964,8 +983,15 @@ pub(crate) fn follow_firmware_version(
     if fresh.len() > MAX_CONFIG_SIZE {
         return Followed::Kept;
     }
-    // Equal as JSON, as tools/validate_board_catalog.py compares them.
-    let same = serde_json::from_str::<serde_json::Value>(&built_in).is_ok_and(|b| b == root);
+    // Equal as JSON, as tools/validate_board_catalog.py compares them. Only
+    // here, deciding a rewrite, are both read whole.
+    let same = match (
+        serde_json::from_str::<serde_json::Value>(&built_in),
+        serde_json::from_str::<serde_json::Value>(&stored),
+    ) {
+        (Ok(built_in), Ok(stored)) => built_in == stored,
+        _ => false,
+    };
     if writer.is_none() && same {
         return match fs::write(path, &fresh) {
             Ok(()) => Followed::Stamped { board: board.to_string() },
