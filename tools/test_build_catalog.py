@@ -3,11 +3,14 @@
 
 import hashlib
 import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-from build_catalog import merge_catalog_entries, scan_artifacts
+from build_catalog import (catalog_from_releases, load_releases,
+                           merge_catalog_entries, scan_artifacts)
 from tap_package import build_package
 
 
@@ -145,6 +148,106 @@ class BuildCatalogTests(unittest.TestCase):
         self.assertNotIn("com.thistle.legacy", by_id)
         self.assertEqual(by_id["com.thistle.keyboard"]["url"],
                          "https://example.test/keyboard.drv.elf")
+
+
+TESTDATA = Path(__file__).resolve().parent / "testdata"
+
+
+class CatalogFromReleasesTests(unittest.TestCase):
+    """The catalog Pages serves at store/catalog.json, derived from a
+    recorded Releases API listing (two pages, as `gh api --paginate --slurp`
+    writes them) and each release's catalog-entry asset."""
+
+    def setUp(self):
+        self.listing = load_releases(TESTDATA / "releases_api_listing.json")
+        self.assets = json.loads((TESTDATA / "releases_api_catalog_entries.json").read_text())
+        self.fetched = []
+
+    def fetch(self, asset):
+        self.fetched.append(asset["name"])
+        return self.assets[asset["browser_download_url"]]
+
+    def build(self, listing=None):
+        return catalog_from_releases(self.listing if listing is None else listing,
+                                     self.fetch, generated="2026-12-21")
+
+    def entries(self, kind):
+        return [entry for entry in self.build()["entries"] if entry["type"] == kind]
+
+    def test_the_catalog_has_the_shape_the_device_parses(self):
+        catalog = self.build()
+        self.assertEqual(catalog["version"], 1)
+        self.assertEqual(catalog["generated"], "2026-12-21")
+        self.assertIsInstance(catalog["entries"], list)
+
+    def test_the_newest_firmware_by_version_not_by_date(self):
+        # v0.9.1 was published after v0.10.0; v0.11.0-rc.1 is a prerelease
+        # and v0.12.0 a draft.
+        self.assertEqual([e["version"] for e in self.entries("firmware")], ["0.10.0"])
+
+    def test_the_newest_release_of_each_app(self):
+        apps = {e["id"]: e["version"] for e in self.entries("app")}
+        # 1.0.10 is newer than 1.0.9, though 1.0.9 was published later; the
+        # 1.1.0 release candidate is a prerelease.
+        self.assertEqual(apps, {"com.thistle.notes": "1.0.10", "com.thistle.weather": "1.0.1"})
+
+    def test_drafts_and_prereleases_are_never_read(self):
+        self.build()
+        for name in self.fetched:
+            with self.subTest(asset=name):
+                self.assertNotIn("v0.12.0", name)
+                self.assertNotIn("rc.1", name)
+
+    def test_a_release_without_a_catalog_entry_is_passed_over(self):
+        # v0.99.0 is upstream's kind of release, with no entry among its assets.
+        self.assertNotIn("0.99.0", [e["version"] for e in self.entries("firmware")])
+
+    def test_firmware_entries_are_flat(self):
+        firmware = self.entries("firmware")[0]
+        self.assertEqual(set(firmware), {
+            "type", "id", "version", "arch", "compatible_boards", "url", "manifest_url",
+            "manifest_sig_url", "sha256", "size_bytes", "changelog", "updated"})
+        for value in firmware.values():
+            self.assertNotIsInstance(value, dict)
+
+    def test_an_entry_that_disagrees_with_its_tag_is_refused(self):
+        url = next(u for u in self.assets if "/v0.10.0/" in u)
+        self.assets[url] = dict(self.assets[url], version="0.10.1")
+        with self.assertRaisesRegex(ValueError, "v0.10.0"):
+            self.build()
+
+    def test_a_firmware_entry_that_is_not_flat_is_refused(self):
+        url = next(u for u in self.assets if "/v0.10.0/" in u)
+        self.assets[url] = dict(self.assets[url], extra={"nested": True})
+        with self.assertRaisesRegex(ValueError, "flat"):
+            self.build()
+
+    def test_no_releases_make_an_empty_catalog(self):
+        self.assertEqual(self.build([])["entries"], [])
+
+    def test_the_command_line_writes_store_catalog(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            # Entries fetched from file:// URLs stand in for GitHub's.
+            listing = json.loads((TESTDATA / "releases_api_listing.json").read_text())
+            for page in listing:
+                for release in page:
+                    for asset in release["assets"]:
+                        entry = self.assets.get(asset["browser_download_url"])
+                        if entry is not None:
+                            path = Path(tmp) / f"{release['tag_name']}-{asset['name']}"
+                            path.write_text(json.dumps(entry))
+                            asset["browser_download_url"] = path.as_uri()
+            listing_path = Path(tmp) / "releases.json"
+            listing_path.write_text(json.dumps(listing))
+            output = Path(tmp) / "_site" / "store" / "catalog.json"
+            result = subprocess.run(
+                [sys.executable, str(Path(__file__).resolve().parent / "build_catalog.py"),
+                 "--releases", str(listing_path), "--output", str(output)],
+                capture_output=True, text=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            catalog = json.loads(output.read_text())
+            self.assertEqual(sorted((e["type"], e["version"]) for e in catalog["entries"]),
+                             [("app", "1.0.1"), ("app", "1.0.10"), ("firmware", "0.10.0")])
 
 
 if __name__ == "__main__":

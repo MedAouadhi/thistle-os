@@ -66,6 +66,23 @@ def parse_tag(tag):
     return Release(tag=tag, version=tag[1:], prerelease=match.group(2) is not None)
 
 
+VERSION = re.compile(rf"^({_NUMBER})\.({_NUMBER})\.({_NUMBER})(?:-({_IDENTIFIER}(?:\.{_IDENTIFIER})*))?$")
+
+
+def version_key(version):
+    """A sort key that orders versions as semver does, and as the kernel's
+    version.rs: `0.6.0-rc.1` < `0.6.0-rc.2` < `0.6.0` < `0.10.0`."""
+    match = VERSION.match(version)
+    if not match:
+        raise ValueError(f"{version!r} is not a version (X.Y.Z or X.Y.Z-suffix)")
+    numbers = tuple(int(match.group(i)) for i in (1, 2, 3))
+    if match.group(4) is None:
+        return numbers + (1, ())
+    identifiers = tuple((0, int(part), "") if part.isdigit() else (1, 0, part)
+                        for part in match.group(4).split("."))
+    return numbers + (0, identifiers)
+
+
 def changelog_notes(changelog, tag):
     """The body of CHANGELOG.md's `## <tag>` or `## <tag> - <date>` section,
     up to the next `## ` heading."""
