@@ -4,7 +4,6 @@
  */
 #include "appstore/appstore_job.h"
 
-#include "thistle/ota.h"
 #include "thistle/power_manager.h"
 #include "ui/toast.h"
 
@@ -30,8 +29,6 @@ static const char *TAG = "appstore_job";
 #define TASK_STACK     16384
 #define TASK_PRIORITY  4
 #define POLL_MS        250
-/* Time for the screen to say so before the flash is written. */
-#define APPLY_PAUSE_MS 1500
 
 typedef struct {
     appstore_job_kind_t kind;
@@ -39,7 +36,6 @@ typedef struct {
     catalog_entry_t *entries;   /* REFRESH: CATALOG_MAX_ENTRIES of them */
     int count;
     esp_err_t err;
-    atomic_bool applying;       /* UPDATE_OS: downloaded, now being written */
     atomic_bool done;
 } job_t;
 
@@ -47,7 +43,6 @@ static struct {
     job_t *job;
     lv_timer_t *timer;
     uint32_t hold;
-    bool applying_said;
     appstore_job_done_cb_t done_cb;
 } s;
 
@@ -80,15 +75,6 @@ static void job_run(job_t *job)
         break;
     case APPSTORE_JOB_INSTALL:
         job->err = appstore_install_entry(&job->entry, NULL, NULL);
-        break;
-    case APPSTORE_JOB_UPDATE_OS:
-        /* To /sdcard/update/thistle_os.bin, then into the other OTA slot. */
-        job->err = appstore_install_entry(&job->entry, NULL, NULL);
-        if (job->err == ESP_OK) {
-            atomic_store(&job->applying, true);
-            vTaskDelay(pdMS_TO_TICKS(APPLY_PAUSE_MS));
-            job->err = ota_apply_from_sd(NULL, NULL);  /* restarts once written */
-        }
         break;
     }
 }
@@ -136,17 +122,6 @@ static void say_result(const job_t *job)
             return;
         }
         break;
-    case APPSTORE_JOB_UPDATE_OS:
-        if (job->err == ESP_OK) {
-            /* A device restarts before this; the simulator does not. */
-            toast_show("Update written. Restart to run it.", TOAST_SUCCESS, 4000);
-            return;
-        }
-        if (atomic_load(&job->applying)) {
-            toast_warn("The update could not be applied");
-            return;
-        }
-        break;
     }
 
     switch (job->err) {
@@ -172,10 +147,6 @@ static void say_result(const job_t *job)
 static void poll_cb(lv_timer_t *timer)
 {
     job_t *job = s.job;
-    if (job && atomic_load(&job->applying) && !s.applying_said) {
-        s.applying_said = true;
-        toast_show("Applying the update; the device will restart", TOAST_INFO, 60000);
-    }
     if (job && !atomic_load(&job->done)) return;
 
     /* Ended: let another start, even from the callback below. */
@@ -218,7 +189,6 @@ bool appstore_job_start(appstore_job_kind_t kind, const catalog_entry_t *entry)
     }
     job->kind = kind;
     if (entry) job->entry = *entry;
-    atomic_init(&job->applying, false);
     atomic_init(&job->done, false);
 
     s.hold = power_manager_hold(kind == APPSTORE_JOB_REFRESH ? "fetching the app catalog"
@@ -238,7 +208,6 @@ bool appstore_job_start(appstore_job_kind_t kind, const catalog_entry_t *entry)
 #endif
     /* The task cannot end unheard: poll_cb runs on this task, lvgl_task. */
     s.job = job;
-    s.applying_said = false;
     s.timer = lv_timer_create(poll_cb, POLL_MS, NULL);
     return true;
 }

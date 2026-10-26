@@ -2,10 +2,12 @@
  * SPDX-License-Identifier: BSD-3-Clause
  * ThistleOS — App Store UI
  *
- * Three tabs:
+ * Two tabs:
  *   Catalog   — apps, drivers and window managers in the catalog
- *   Firmware  — firmware updates in the catalog
  *   Installed — the SD card's apps, as the boot scan loads them
+ *
+ * The catalog's firmware is Settings → System update's (update_manager.rs),
+ * which keeps the same copy of the catalog.
  *
  * The catalog shown is the one the server last sent, kept whole on the SD
  * card (APPSTORE_CATALOG_PATH) and read by the kernel's parser. Refresh fetches
@@ -25,7 +27,6 @@
 #include "ui/toast.h"
 #include "thistle/appstore_client.h"
 #include "thistle/net_manager.h"
-#include "thistle/ota.h"
 
 #include "lvgl.h"
 #include "esp_log.h"
@@ -51,7 +52,7 @@ static int s_app_h = 296;
 #define BTN_ROW_H        28
 #define ITEM_PAD_LEFT     8
 #define ITEM_PAD_RIGHT    6
-#define TAB_W            74   /* fits "Firmware" in Montserrat 14 and the padding */
+#define TAB_W            74   /* fits "Installed" in Montserrat 14 and the padding */
 #define TAB_GAP           2
 #define ACTION_GAP        8
 #define SCROLLBAR_ROOM    4
@@ -69,7 +70,6 @@ _Static_assert(MAX_CATALOG_APPS <= ROWS_MAX && INSTALLED_MAX <= ROWS_MAX, "a pag
 
 typedef enum {
     TAB_CATALOG,
-    TAB_FIRMWARE,
     TAB_INSTALLED,
     TAB_COUNT,
 } appstore_tab_t;
@@ -427,30 +427,6 @@ static void build_catalog_list(void)
     set_status(TAB_CATALOG, status);
 }
 
-/* Firmware: the catalog's firmware updates. */
-static void build_firmware_list(void)
-{
-    page_t *page = &s_store.pages[TAB_FIRMWARE];
-    if (!page->table) return;
-
-    s_store.filling = true;
-    page->row_count = 0;
-    char head[96], cell[CELL_MAX];
-    for (int i = 0; i < s_store.entry_count; i++) {
-        const catalog_entry_t *e = &s_store.entries[i];
-        if (e->type != CATALOG_TYPE_FIRMWARE) continue;
-        snprintf(head, sizeof head, "%s  v%s", e->name, e->version);
-        row_text(head, e->description, cell, sizeof cell);
-        page_add_row(page, i, cell);
-    }
-    page_finish(page, "No firmware updates in the catalog.\nRefresh from the server to check.");
-
-    char status[64];
-    snprintf(status, sizeof status, "Running v%s (%s)", ota_get_current_version(),
-             ota_get_running_partition());
-    set_status(TAB_FIRMWARE, status);
-}
-
 /* Installed: the SD card's apps. */
 static void build_installed_list(void)
 {
@@ -620,7 +596,6 @@ static bool start_job(appstore_job_kind_t kind, const catalog_entry_t *entry, co
     }
     if (!appstore_job_start(kind, entry)) return false;
     set_status(TAB_CATALOG, status);
-    set_status(TAB_FIRMWARE, status);
     return true;
 }
 
@@ -633,9 +608,7 @@ static void install_btn_cb(lv_event_t *e)
 
     char status[80];
     snprintf(status, sizeof status, "Installing %s...", entry->name);
-    appstore_job_kind_t kind = entry->type == CATALOG_TYPE_FIRMWARE ? APPSTORE_JOB_UPDATE_OS
-                                                                    : APPSTORE_JOB_INSTALL;
-    if (start_job(kind, entry, status)) {
+    if (start_job(APPSTORE_JOB_INSTALL, entry, status)) {
         toast_show("Downloading...", TOAST_INFO, 3000);
         close_detail();
     }
@@ -654,7 +627,6 @@ static void refresh_local_cb(lv_event_t *e)
     (void)e;
     esp_err_t err = load_catalog_local();
     build_catalog_list();
-    build_firmware_list();
 
     if (err == ESP_ERR_NOT_FOUND) {
         set_status(TAB_CATALOG, "catalog.json not found on SD");
@@ -712,7 +684,6 @@ static void job_done_cb(const appstore_job_result_t *result)
             s_store.entry_count = count;
         }
         build_catalog_list();
-        build_firmware_list();
 
         char status[64];
         if (result->err != ESP_OK) {
@@ -726,13 +697,11 @@ static void job_done_cb(const appstore_job_result_t *result)
             snprintf(status, sizeof status, "Fetched %d entries from server", result->count);
         }
         set_status(TAB_CATALOG, status);
-        set_status(TAB_FIRMWARE, status);
         return;
     }
 
     scan_installed_apps();
     build_catalog_list();
-    build_firmware_list();
     build_installed_list();
 }
 
@@ -749,7 +718,6 @@ static void show_detail(int idx)
     s_store.selected_idx = idx;
 
     const char *type =
-        entry->type == CATALOG_TYPE_FIRMWARE ? "Firmware Update" :
         entry->type == CATALOG_TYPE_DRIVER   ? "Driver" :
         entry->type == CATALOG_TYPE_WM       ? "Window Manager" : "App";
     char size[24];
@@ -768,8 +736,7 @@ static void show_detail(int idx)
     detail_rule(content);
 
     lv_obj_t *row = detail_buttons(content);
-    const char *install = entry->type == CATALOG_TYPE_FIRMWARE ? "Update OS" : "Install";
-    lv_obj_t *btn = make_button(row, &s_styles.button, &s_styles.button_pressed, install, 100, 26,
+    lv_obj_t *btn = make_button(row, &s_styles.button, &s_styles.button_pressed, "Install", 100, 26,
                                 install_btn_cb, NULL);
     lv_obj_align(btn, LV_ALIGN_LEFT_MID, 0, 0);
     if (entry->type == CATALOG_TYPE_APP && installed_index(entry->id) >= 0) {
@@ -922,28 +889,28 @@ esp_err_t appstore_ui_create(lv_obj_t *parent)
     lv_obj_set_pos(s_store.root, 0, 0);
 
     /* ---------------------------------------------------------------
-     * Shared title bar with three tab buttons
+     * Shared title bar with two tab buttons
      * --------------------------------------------------------------- */
     lv_obj_t *title_bar = make_box(s_store.root, &s_styles.title_bar);
     lv_obj_set_pos(title_bar, 0, 0);
     lv_obj_set_size(title_bar, s_app_w, TITLE_BAR_H);
 
-    /* Three tab buttons on the right, as wide as the bar allows. Three 80 px
+    /* The tab buttons on the right, as wide as the bar allows. Three 80 px
      * tabs were wider than a 240 px bar and pushed "Catalog" off its left
      * edge. The title goes in whatever the tabs leave, and only if all of it
      * fits: where it did not, it was drawn half under the first tab. */
     int bar_w = s_app_w - ITEM_PAD_LEFT - ITEM_PAD_RIGHT;
-    int tab_w = LV_MIN(TAB_W, (bar_w - 2 * TAB_GAP) / 3);
+    int tab_w = LV_MIN(TAB_W, (bar_w - (TAB_COUNT - 1) * TAB_GAP) / TAB_COUNT);
 
     const char *title = "App Store";
     lv_obj_t *title_lbl = make_inheriting_label(title_bar, title);
     lv_obj_align(title_lbl, LV_ALIGN_LEFT_MID, 0, 0);
-    int title_room = bar_w - 3 * tab_w - 3 * TAB_GAP;
+    int title_room = bar_w - TAB_COUNT * tab_w - TAB_COUNT * TAB_GAP;
     if (lv_text_get_width(title, strlen(title), &lv_font_montserrat_14, 0) > title_room) {
         lv_obj_add_flag(title_lbl, LV_OBJ_FLAG_HIDDEN);
     }
 
-    static const char *const tab_names[TAB_COUNT] = { "Catalog", "Firmware", "Installed" };
+    static const char *const tab_names[TAB_COUNT] = { "Catalog", "Installed" };
     for (int i = 0; i < TAB_COUNT; i++) {
         lv_obj_t *btn = make_button(title_bar, &s_styles.tab, &s_styles.button_pressed, tab_names[i],
                                     tab_w, 22, tab_cb, (void *)(intptr_t)i);
@@ -953,7 +920,6 @@ esp_err_t appstore_ui_create(lv_obj_t *parent)
     }
 
     make_page(TAB_CATALOG, "Loading...", "Reload Cache", refresh_local_cb, "Refresh", refresh_server_cb);
-    make_page(TAB_FIRMWARE, "Firmware updates", "Refresh from Server", refresh_server_cb, NULL, NULL);
     make_page(TAB_INSTALLED, "Installed apps", NULL, NULL, NULL, NULL);
 
     /* ---------------------------------------------------------------
@@ -962,7 +928,6 @@ esp_err_t appstore_ui_create(lv_obj_t *parent)
     esp_err_t err = load_catalog_local();
     scan_installed_apps();
     build_catalog_list();
-    build_firmware_list();
     show_tab(TAB_CATALOG);
 
     if (appstore_job_busy()) {

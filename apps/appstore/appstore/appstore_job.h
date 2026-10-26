@@ -22,13 +22,13 @@
 typedef enum {
     APPSTORE_JOB_REFRESH,    /* fetch the catalog and keep it on the card */
     APPSTORE_JOB_INSTALL,    /* download and install an app, driver or WM */
-    APPSTORE_JOB_UPDATE_OS,  /* download firmware, apply it and restart */
 } appstore_job_kind_t;
+/* Firmware is Settings → System update's, the kernel's update_manager. */
 
 typedef struct {
     appstore_job_kind_t kind;
     esp_err_t err;
-    const catalog_entry_t *entry;    /* INSTALL, UPDATE_OS: the one asked for */
+    const catalog_entry_t *entry;    /* INSTALL: the one asked for */
     const catalog_entry_t *entries;  /* REFRESH: what came, count of them */
     int count;
 } appstore_job_result_t;
