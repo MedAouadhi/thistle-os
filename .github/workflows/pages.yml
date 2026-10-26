@@ -20,9 +20,9 @@ permissions:
   id-token: write
 
 env:
-  CARGO_BUILD_JOBS: 2
-  CMAKE_BUILD_PARALLEL_LEVEL: 2
-  THISTLE_CI_JOBS: 2
+  CARGO_BUILD_JOBS: 4
+  CMAKE_BUILD_PARALLEL_LEVEL: 4
+  THISTLE_CI_JOBS: 4
 
 concurrency:
   group: pages
@@ -31,7 +31,7 @@ concurrency:
 jobs:
   build:
     name: Build Docs + WASM Simulator
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork && '["ubuntu-latest"]' || '["self-hosted","linux","x64","wan0-ci","thistle-os"]') }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
@@ -78,17 +78,7 @@ jobs:
           fi
           export PATH="$HOME/.cargo/bin:$PATH"
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          # A self-hosted runner may already have a usable target even when a
-          # previously restored rustup cache has stale component metadata.
-          # Probe the compiler first so rustup does not collide with files that
-          # are already installed.
-          if ! printf '#![no_std]\n' | rustc \
-            --crate-name thistle_wasm_target_probe \
-            --crate-type lib \
-            --target wasm32-unknown-emscripten \
-            --out-dir "$RUNNER_TEMP" -; then
-            rustup target add wasm32-unknown-emscripten
-          fi
+          rustup target add wasm32-unknown-emscripten
 
       - name: Build Rust kernel for WASM
         working-directory: components/kernel_rs
@@ -135,7 +125,7 @@ jobs:
           cp sdcard_layout/config/boards/*.json _site/config/boards/
           python3 tools/build_board_catalog.py \
             sdcard_layout/config/boards \
-            --base-url "https://wan0net.github.io/thistle-os/config/boards" \
+            --base-url "https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/config/boards" \
             --output _site/catalog.json
 
       - name: Upload Pages artifact
@@ -145,7 +135,7 @@ jobs:
     name: Deploy to GitHub Pages
     if: github.event_name == 'push'
     needs: build
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork && '["ubuntu-latest"]' || '["self-hosted","linux","x64","wan0-ci","thistle-os"]') }}
+    runs-on: ubuntu-latest
     environment:
       name: github-pages
     steps:

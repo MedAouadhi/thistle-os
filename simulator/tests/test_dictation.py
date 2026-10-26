@@ -17,6 +17,8 @@ WAV into the simulated microphone (THISTLE_SIM_MIC). It checks:
 - with no text field focused, nothing records and nothing is sent;
 - a tap of the key sends nothing;
 - a refusal leaves the field as it was, and says why;
+- built with no key, as a release is, and none on the card, it refuses
+  before recording and names the key and the file that would give it;
 - Arabic is drawn as Arabic in Notes: in glyphs, not boxes, its letters
   joined, read from the right, and the cursor where it ends. Notes comes
   from the App Store, so that case installs its host build on its card, as
@@ -312,6 +314,24 @@ def test_a_refusal_changes_nothing(simulator: Path, cohere: FakeCohere, root: Pa
     expect(len(cohere.take()) == 1, "the recording was not sent once")
 
 
+def built_in_key(simulator: Path) -> bool:
+    header = simulator.parent / "dictation" / "dictation_key_default.h"
+    return header.exists() and "DICTATION_DEFAULT_API_KEY" in header.read_text()
+
+
+def test_says_it_has_no_key(simulator: Path, cohere: FakeCohere, root: Path) -> None:
+    mic = root / "speech.wav"
+    make_wav(mic, 4.0)
+    card = make_card(root, "no-key", cohere.url)
+    (card / "config" / "dictation.json").write_text(json.dumps({"url": cohere.url}))
+    cohere.take()
+    out = run_sim(simulator, card, mic, hold_ms=1500)
+    expect_in("Dictation needs a Cohere API key: config/dictation.json", out)
+    expect("[sim_audio] recording" not in out, "the microphone was opened")
+    expect_in('Focused text: ""', out)
+    expect(not cohere.take(), "a request was sent")
+
+
 def test_arabic_is_drawn_as_arabic(simulator: Path, cohere: FakeCohere, root: Path) -> None:
     """A word, and the same letters kept apart by zero-width non-joiners, in a
     new note: the first drawn joined, so narrower; both from the right."""
@@ -376,6 +396,11 @@ def main() -> int:
             ("a_refusal_changes_nothing", lambda: test_a_refusal_changes_nothing(simulator, cohere, root)),
             ("arabic_is_drawn_as_arabic", lambda: test_arabic_is_drawn_as_arabic(simulator, cohere, root)),
         ]
+        # Only where the build has no key of its own from .env, as CI's.
+        if built_in_key(simulator):
+            print("SKIP says_it_has_no_key: this build has a key from .env")
+        else:
+            cases.append(("says_it_has_no_key", lambda: test_says_it_has_no_key(simulator, cohere, root)))
         for name, case in cases:
             try:
                 case()

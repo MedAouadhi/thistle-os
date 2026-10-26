@@ -49,7 +49,7 @@ TX/RX are crossed relative to the SoC pin that drives them.
 - **Simulator**: SDL2 desktop build. `cd simulator/build && cmake .. && make -j8 && ./thistle_sim`
 - **Rust kernel**: `cargo +esp check` in `components/kernel_rs/`. Tests: `cargo test --target <host-triple> -- --test-threads=1` (1878 tests)
 - **Recovery OS**: `cd recovery && cargo +esp build --release`
-- **CI**: GitHub Actions — firmware build (espressif/idf:v5.5), Semgrep SAST, Trivy security scan
+- **CI**: GitHub Actions on GitHub's hosted runners, every push to main and every pull request. `ci.yml`: the firmware for each chip in its list (the S3 alone) in `espressif/idf:v5.5`, failing if a `.env` is in the workspace, its partition size check, Recovery, cargo-audit, Semgrep SAST, Trivy. `tests.yml`: the host tests (Rust kernel, Python tools, simulator). `pages.yml`: the docs and the WASM simulator to the repository's own Pages. `tools/test_ci_workflows.py` keeps them off self-hosted runners and upstream's deploy targets.
 
 ### Sharing one USB-Serial-JTAG board between sessions
 
@@ -663,8 +663,9 @@ network and the files. LVGL window managers only; thistle-tk has its own
 (`tk_appstore.rs`).
 
 - **The catalog is a static JSON file**, by default upstream's
-  `https://wan0net.github.io/thistle-apps/catalog.json`, which
-  `.github/workflows/apps.yml` publishes; a card's `config/appstore.json`,
+  `https://wan0net.github.io/thistle-apps/catalog.json`, which upstream's
+  own workflow publishes (this repository no longer has it); a card's
+  `config/appstore.json`,
   `{"catalog_url": "..."}`, names another. Refresh keeps the server's JSON
   whole at `/sdcard/appstore/catalog.json`, which the app reads with the
   kernel's parser when it opens (`appstore_load_catalog_file`). Entries for
@@ -783,7 +784,7 @@ cargo install espup --version 0.16.0 --locked --force
 espup install
 ```
 
-**Pin espup to 0.16.0.** 0.17.x aborts with `Unsuported file extension: 'part'`, and CI pins the same version (`.github/workflows/build.yml`) — keep the two in step.
+**Pin espup to 0.16.0.** 0.17.x aborts with `Unsuported file extension: 'part'`, and CI pins the same version (`.github/workflows/ci.yml`) — keep the two in step.
 
 The `esp` toolchain must be recent enough for the dependency tree: `cargo +esp check` fails at manifest-parse time with `feature 'edition2024' is required` on anything older than Xtensa Rust 1.85. espup 0.16.0 currently installs 1.97.0.0. If you see that error, your `esp` toolchain is stale — reinstall with the commands above rather than editing dependency versions.
 

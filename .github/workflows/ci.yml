@@ -1,45 +1,59 @@
-name: ThistleOS CI
+name: CI
+
+# Every push to main and every pull request, on GitHub's hosted runners: the
+# firmware, built with no .env as a release is, and its size against the
+# partition table; Recovery; the dependency audit and the scans. The host
+# tests are tests.yml's.
 
 on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
 
 permissions:
   contents: read
   security-events: write
 
 env:
-  CARGO_BUILD_JOBS: 2
-  CMAKE_BUILD_PARALLEL_LEVEL: 2
-  THISTLE_CI_JOBS: 2
+  CARGO_BUILD_JOBS: 4
+  CMAKE_BUILD_PARALLEL_LEVEL: 4
+  THISTLE_CI_JOBS: 4
 
 jobs:
-  firmware-build:
-    name: Build Firmware (${{ matrix.arch }})
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork && '["ubuntu-latest"]' || '["self-hosted","linux","x64","wan0-ci","thistle-os"]') }}
+  firmware:
+    name: Build Firmware (${{ matrix.chip }})
+    runs-on: ubuntu-latest
     container:
       image: espressif/idf:v5.5
     strategy:
       fail-fast: false
       matrix:
-        arch: [esp32, esp32s2, esp32s3, esp32c3, esp32c6]
+        # The chips the firmware is built for, one a line.
+        chip:
+          - esp32s3
     steps:
       - uses: actions/checkout@v6
         with:
           submodules: recursive
 
+      # .env holds the user's keys and addresses. What this job builds is
+      # what a release publishes, so it must never see one.
+      - name: No .env in the workspace
+        shell: bash
+        run: |
+          if [ -e .env ]; then
+            echo "::error::.env exists in the workspace; CI builds firmware without one"
+            exit 1
+          fi
+
       - name: Cache Rust ESP toolchain
         uses: actions/cache@v6
-        id: rust-cache
         with:
           path: |
             /root/.cargo
             /root/.rustup
-          key: rust-esp-toolchain-v4-rust185-espup016
-          # Don't restore from older prefixes — older caches have espup 0.17.0
-          # contents that break the build. Only match the fully-qualified key.
+            /root/export-esp.sh
+          key: rust-esp-toolchain-v5-espup016
 
       - name: Install Rust ESP toolchain
         shell: bash
@@ -52,37 +66,36 @@ jobs:
           fi
           . "$HOME/.cargo/env"
           rustup toolchain install 1.85.0 --profile minimal
-          # Pin espup to 0.16.0 — 0.17.0 (released 2026-04-17) has a regression
-          # that aborts with "Unsuported file extension: 'part'" during install.
-          if ! command -v espup &> /dev/null || [ "$(espup --version 2>/dev/null | awk '{print $2}')" != "0.16.0" ]; then
+          # Pinned to 0.16.0: 0.17.x aborts with "Unsuported file extension:
+          # 'part'". CLAUDE.md pins the same.
+          if [ "$(espup --version 2>/dev/null | awk '{print $2}')" != "0.16.0" ]; then
             cargo +1.85.0 install espup --version 0.16.0 --locked --force
           fi
-          if ! command -v ldproxy &>/dev/null; then
+          if [ ! -f "$HOME/export-esp.sh" ] || ! rustup run esp rustc --version >/dev/null 2>&1; then
             espup install
           fi
-          # NOTE: Do NOT source export-esp.sh here — it overrides ESP-IDF's
-          # GCC with an incompatible version. The kernel_rs CMakeLists.txt
-          # adds cargo to PATH when invoking the Rust build.
+          # Not sourced here: export-esp.sh overrides ESP-IDF's GCC.
+          # components/kernel_rs/CMakeLists.txt sources it for cargo alone.
 
-      - name: Cache ESP-IDF + Rust builds
+      - name: Cache managed components and the Rust build
         uses: actions/cache@v6
         with:
           path: |
-            build
             managed_components
             components/kernel_rs/target
-          key: espidf-v5.5-rust-${{ matrix.arch }}-${{ hashFiles('components/**/*.c', 'components/**/*.h', 'components/kernel_rs/src/**', 'main/**', 'sdkconfig.defaults*', 'partitions.csv') }}
+          key: espidf-v5.5-rust-${{ matrix.chip }}-${{ hashFiles('components/kernel_rs/Cargo.lock', 'components/kernel_rs/src/**', 'components/*/idf_component.yml', 'main/idf_component.yml') }}
           restore-keys: |
-            espidf-v5.5-rust-${{ matrix.arch }}-
+            espidf-v5.5-rust-${{ matrix.chip }}-
 
       - name: Build firmware
         shell: bash
         env:
-          TARGET_ARCH: ${{ matrix.arch }}
+          CHIP: ${{ matrix.chip }}
         run: |
-          . $IDF_PATH/export.sh
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          . "$IDF_PATH/export.sh"
           export PATH="$HOME/.cargo/bin:$PATH"
-          idf.py set-target "$TARGET_ARCH"
+          idf.py set-target "$CHIP"
           idf.py build
 
       - name: Check firmware size against a kernel slot
@@ -93,131 +106,24 @@ jobs:
             --partition-table partitions.csv \
             --firmware build/thistle_os.bin
 
-      - name: Sign firmware
-        if: env.THISTLE_SIGNING_KEY != ''
-        env:
-          THISTLE_SIGNING_KEY: ${{ secrets.THISTLE_SIGNING_KEY }}
-          TARGET_ARCH: ${{ matrix.arch }}
-        shell: bash
-        run: |
-          apt-get update
-          apt-get install -y python3-venv
-          python3 -m venv /tmp/thistle-signing-venv
-          /tmp/thistle-signing-venv/bin/pip install -r tools/requirements.txt
-          /tmp/thistle-signing-venv/bin/python -c "
-          import json, os, pathlib, re
-          from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-          from tools.sign import canonical_manifest
-          key_hex = os.environ['THISTLE_SIGNING_KEY']
-          sk = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(key_hex))
-          data = open('build/thistle_os.bin', 'rb').read()
-          sig = sk.sign(data)
-          open('build/thistle_os.bin.sig', 'wb').write(sig)
-          open('build/thistle_os.bin.pub', 'wb').write(sk.public_key().public_bytes_raw())
-          source = pathlib.Path('components/kernel_rs/src/version.rs').read_text()
-          version = re.search(r'VERSION_STRING: &str = \"([^\"]+)\"', source).group(1)
-          security_version = int(re.search(r'SECURITY_VERSION: u32 = ([0-9]+)', source).group(1))
-          target_arch = os.environ['TARGET_ARCH']
-          boards = sorted(
-              json.loads(path.read_text())['board']['board_id']
-              for path in pathlib.Path('sdcard_layout/config/boards').glob('*.json')
-              if json.loads(path.read_text()).get('board', {}).get('arch') == target_arch
-          )
-          manifest = canonical_manifest(
-              artifact_type='firmware', artifact_id='thistle-os', version=version,
-              security_version=security_version, arch=target_arch,
-              compatible_boards=boards,
-              url=f'https://github.com/{os.environ[\"GITHUB_REPOSITORY\"]}/releases/download/v{version}/thistle_os-{target_arch}-v{version}.bin',
-              payload=data,
-          )
-          open('build/thistle_os.bin.manifest', 'wb').write(manifest)
-          open('build/thistle_os.bin.manifest.sig', 'wb').write(sk.sign(manifest))
-          board_output = pathlib.Path('build/signed-board-profiles')
-          board_output.mkdir(exist_ok=True)
-          for path in pathlib.Path('sdcard_layout/config/boards').glob('*.json'):
-              profile = json.loads(path.read_text())
-              metadata = profile['board']
-              if metadata['arch'] != target_arch:
-                  continue
-              board_id = metadata['board_id']
-              profile_version = metadata.get('version', '1.0.0')
-              if profile_version.count('.') == 1:
-                  profile_version += '.0'
-              output = board_output / f'board-{board_id}.json'
-              payload = path.read_bytes()
-              output.write_bytes(payload)
-              board_manifest = canonical_manifest(
-                  artifact_type='board', artifact_id=board_id,
-                  version=profile_version, security_version=1,
-                  arch=metadata['arch'], compatible_boards=[board_id],
-                  url=f'https://github.com/{os.environ[\"GITHUB_REPOSITORY\"]}/releases/download/v{version}/{output.name}',
-                  payload=payload,
-              )
-              pathlib.Path(f'{output}.manifest').write_bytes(board_manifest)
-              pathlib.Path(f'{output}.manifest.sig').write_bytes(sk.sign(board_manifest))
-          print(f'Signed: {len(data)} bytes, sig: {sig.hex()[:32]}...')
-          "
-
-      - name: Upload firmware artifact
+      - name: Upload firmware
         uses: actions/upload-artifact@v7
         with:
-          name: thistle-os-firmware-${{ matrix.arch }}
+          name: thistle-os-firmware-${{ matrix.chip }}
           path: |
             build/thistle_os.bin
-            build/thistle_os.bin.sig
-            build/thistle_os.bin.manifest
-            build/thistle_os.bin.manifest.sig
-            build/thistle_os.bin.pub
-            build/signed-board-profiles/
+            build/bootloader/bootloader.bin
+            build/partition_table/partition-table.bin
+            build/flasher_args.json
 
-  rust-tests:
-    name: Rust Kernel Tests
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork && '["ubuntu-latest"]' || '["self-hosted","linux","x64","wan0-ci","thistle-os"]') }}
+  rust-audit:
+    name: Rust Dependency Audit
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-        with:
-          submodules: recursive
-
-      - name: Install native build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config
-
-      - name: Cache Rust toolchain
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.cargo/bin
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            ~/.rustup
-          key: rust-stable-${{ runner.os }}-${{ hashFiles('components/kernel_rs/Cargo.lock') }}
-          restore-keys: rust-stable-${{ runner.os }}-
-
-      - name: Cache Cargo build artifacts
-        uses: actions/cache@v6
-        with:
-          path: components/kernel_rs/target
-          key: rust-test-target-${{ runner.os }}-${{ hashFiles('components/kernel_rs/Cargo.lock') }}
-          restore-keys: rust-test-target-${{ runner.os }}-
-
-      - name: Install Rust
-        run: |
-          if [ ! -f "$HOME/.cargo/bin/cargo" ]; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          fi
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-
-      - name: Run Rust kernel tests
-        working-directory: components/kernel_rs
-        run: cargo test --target x86_64-unknown-linux-gnu -- --test-threads=1
 
       - name: Install cargo-audit
-        run: |
-          if [ ! -f "$HOME/.cargo/bin/cargo-audit" ]; then
-            cargo install cargo-audit
-          fi
+        run: cargo install cargo-audit --locked
 
       - name: Run cargo-audit (Rust dependency CVE check)
         working-directory: components/kernel_rs
@@ -225,7 +131,7 @@ jobs:
 
   semgrep:
     name: Semgrep SAST
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork && '["ubuntu-latest"]' || '["self-hosted","linux","x64","wan0-ci","thistle-os"]') }}
+    runs-on: ubuntu-latest
     container:
       image: semgrep/semgrep
     steps:
@@ -297,7 +203,7 @@ jobs:
 
   trivy:
     name: Trivy Security Scan
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork && '["ubuntu-latest"]' || '["self-hosted","linux","x64","wan0-ci","thistle-os"]') }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
@@ -339,7 +245,7 @@ jobs:
 
   recovery-build:
     name: Build Recovery OS (Rust/esp)
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork && '["ubuntu-latest"]' || '["self-hosted","linux","x64","wan0-ci","thistle-os"]') }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:

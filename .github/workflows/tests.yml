@@ -4,20 +4,19 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
 
 permissions:
   contents: read
 
 env:
-  CARGO_BUILD_JOBS: 2
-  CMAKE_BUILD_PARALLEL_LEVEL: 2
-  THISTLE_CI_JOBS: 2
+  CARGO_BUILD_JOBS: 4
+  CMAKE_BUILD_PARALLEL_LEVEL: 4
+  THISTLE_CI_JOBS: 4
 
 jobs:
   board-catalog-validation:
     name: Board Catalog Validation
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork && '["ubuntu-latest"]' || '["self-hosted","linux","x64","wan0-ci","thistle-os"]') }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
@@ -27,7 +26,7 @@ jobs:
         run: |
           python3 tools/build_board_catalog.py \
             sdcard_layout/config/boards \
-            --base-url "https://wan0net.github.io/thistle-os/config/boards" \
+            --base-url "https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/config/boards" \
             --output /tmp/thistle-board-catalog.json
 
       - name: Validate board configs and catalog
@@ -38,7 +37,7 @@ jobs:
 
   unit-tests:
     name: Unit Tests (Host)
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork && '["ubuntu-latest"]' || '["self-hosted","linux","x64","wan0-ci","thistle-os"]') }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
@@ -197,24 +196,27 @@ jobs:
       - name: Test the To-do app's list and checklist file under sanitizers
         run: apps/todo/tests/run_tests.sh
 
-      - name: Test secure signing-key generation
-        run: |
-          python3 -m pip install -r tools/requirements.txt
-          python3 tools/test_sign.py
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
 
-      - name: Test standalone package publication
+      - name: Install Python tools' dependencies
+        run: python3 -m pip install -r tools/requirements.txt
+
+      - name: Test secure signing-key generation
+        run: python3 tools/test_sign.py
+
+      - name: Test the catalog builder, the chip list and the WASM build
         run: |
           python3 tools/test_build_catalog.py
-          python3 tools/test_package_workflow.py
           python3 tools/test_target_matrix.py
           python3 tools/test_wasm_migration.py
-          python3 tools/test_validate_package_matrix.py
+
+      - name: Test the workflows run on hosted runners and publish nothing of upstream's
+        run: python3 tools/test_ci_workflows.py
 
       - name: Test board profile validation
         run: python3 tools/test_validate_board_catalog.py
-
-      - name: Test release input and provenance validation
-        run: python3 tools/test_validate_release.py
 
       - name: Test transactional recovery bundle activation
         run: |
@@ -255,7 +257,7 @@ jobs:
 
   simulator-boot:
     name: Simulator Boot Test
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork && '["ubuntu-latest"]' || '["self-hosted","linux","x64","wan0-ci","thistle-os"]') }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
@@ -305,7 +307,7 @@ jobs:
 
   simulator-integration:
     name: Simulator Integration Tests
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork && '["ubuntu-latest"]' || '["self-hosted","linux","x64","wan0-ci","thistle-os"]') }}
+    runs-on: ubuntu-latest
     needs: simulator-boot  # Only run if basic boot passes
     steps:
       - uses: actions/checkout@v6
@@ -346,6 +348,13 @@ jobs:
         run: |
           mkdir -p build && cd build
           cmake .. && make -j"$THISTLE_CI_JOBS"
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install Python tools' dependencies
+        run: python3 -m pip install -r tools/requirements.txt
 
       - name: Run integration tests
         working-directory: simulator
@@ -407,6 +416,10 @@ jobs:
         working-directory: simulator
         run: python3 tests/test_tailscale.py --sim build/thistle_sim
 
+      - name: Run Dictation tests against a fake Cohere
+        working-directory: simulator
+        run: python3 tests/test_dictation.py --sim build/thistle_sim
+
       - name: Run Hermes Bridge Session tests against a fake bridge
         working-directory: simulator
         run: python3 tests/test_hermes.py --sim build/thistle_sim
@@ -433,7 +446,7 @@ jobs:
 
   rust-kernel-tests:
     name: Rust Kernel Tests
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork && '["ubuntu-latest"]' || '["self-hosted","linux","x64","wan0-ci","thistle-os"]') }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
@@ -467,7 +480,7 @@ jobs:
 
   manifest-memory-safety:
     name: Manifest Loader (Valgrind)
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork && '["ubuntu-latest"]' || '["self-hosted","linux","x64","wan0-ci","thistle-os"]') }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
