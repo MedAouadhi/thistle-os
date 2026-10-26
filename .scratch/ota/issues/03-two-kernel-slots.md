@@ -17,7 +17,7 @@ hardware. Spec: `../spec.md`, "The partition table", "The update manager"
 
 **Status:** done in code; hardware pass pending
 
-- [ ] On the T-Deck Max, one USB flash moves the board to the new table;
+- [x] On the T-Deck Max, one USB flash moves the board to the new table;
       WiFi, the mesh identity, `board.json` and `system.json` survive, and it
       boots the first kernel slot.
 - [ ] A card update from either kernel slot writes the other one, never the
@@ -74,3 +74,12 @@ minute rolling back and none after it; and the boot log's order of
 `kept the kernel in kernel_b after 60 s; starting the power manager` before
 the power manager's own line. Note that on a pending boot the power manager
 starts on the kernel worker rather than the main task.
+
+**Hardware, 2026-10-26 (USB migration, by the user):** a laptop build of
+`ota` at 8addbb4 (`0.5.2-201-g8addbb4`, ESP-IDF v5.5.1) flashed over USB.
+The bootloader listed the new table, said `No factory image, trying OTA 0`
+and loaded `kernel_a` (`running kernel_a, version 0.5.2-201-g8addbb4`).
+WiFi rejoined by itself, NTP set the clock, settings and the mesh identity
+were unchanged, Settings → System update opened. No keep on this boot, as
+expected for a USB flash. Boot log: `ThistleOS ready; internal RAM 135 KB
+free, largest block 60 KB`.
