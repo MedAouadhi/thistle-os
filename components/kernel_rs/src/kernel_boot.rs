@@ -268,6 +268,11 @@ pub extern "C" fn kernel_init() -> i32 {
         return ret;
     }
 
+    // The simulator's kernel slot, and so its version, is known only now; a
+    // device's board profile followed its version in board_config_init.
+    #[cfg(all(not(target_os = "espidf"), feature = "sim-bus", not(test)))]
+    crate::board_config::sim_follow_firmware_version();
+
     // WiFi (C, non-fatal)
     let ret = unsafe { wifi_manager_init() };
     if ret == ESP_OK {

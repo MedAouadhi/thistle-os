@@ -120,12 +120,25 @@ pub struct Slots {
     pub boot: &'static str,
     pub image: Image,
     versions: [Option<String>; 2],
+    /// Erased by an install that began writing it and has not finished.
+    erased: [bool; 2],
+}
+
+/// What a kernel slot holds, as its image description would say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Contents<'a> {
+    /// Never written by an install: in the simulator, the build's kernel.
+    Unwritten,
+    /// An image of this version.
+    Written(&'a str),
+    /// Erased, or half written: no image to describe.
+    Erased,
 }
 
 impl Default for Slots {
     /// As `idf.py flash` leaves a board: the first kernel slot, kept.
     fn default() -> Self {
-        Slots { boot: KERNEL_A, image: Image::Valid, versions: [None, None] }
+        Slots { boot: KERNEL_A, image: Image::Valid, versions: [None, None], erased: [false; 2] }
     }
 }
 
@@ -140,6 +153,11 @@ impl Slots {
             let value = value.trim();
             match key.trim() {
                 "boot" => boot = index(value),
+                "erased" => {
+                    if let Some(i) = index(value) {
+                        slots.erased[i] = true;
+                    }
+                }
                 "image" => {
                     image = match value {
                         "new" => Some(Image::New),
@@ -177,6 +195,11 @@ impl Slots {
                 text.push_str(&format!("{slot}={version}\n"));
             }
         }
+        for (slot, erased) in SLOTS.iter().zip(&self.erased) {
+            if *erased {
+                text.push_str(&format!("erased={slot}\n"));
+            }
+        }
         text
     }
 
@@ -202,8 +225,33 @@ impl Slots {
     pub fn install(&mut self, slot: &'static str, version: Option<String>) {
         let Some(i) = index(slot) else { return };
         self.versions[i] = version;
+        self.erased[i] = false;
         self.boot = SLOTS[i];
         self.image = Image::New;
+    }
+
+    /// An install has begun writing `slot`: what it held is gone.
+    pub fn erase(&mut self, slot: &str) {
+        let Some(i) = index(slot) else { return };
+        self.versions[i] = None;
+        self.erased[i] = true;
+    }
+
+    /// Going back: `slot`, as it is, boots next, new, to be kept or rolled
+    /// back as an install is.
+    pub fn select(&mut self, slot: &str) {
+        let Some(i) = index(slot) else { return };
+        self.boot = SLOTS[i];
+        self.image = Image::New;
+    }
+
+    /// What `slot` holds.
+    pub fn contents(&self, slot: &str) -> Contents<'_> {
+        match index(slot) {
+            None => Contents::Erased,
+            Some(i) if self.erased[i] => Contents::Erased,
+            Some(i) => self.versions[i].as_deref().map_or(Contents::Unwritten, Contents::Written),
+        }
     }
 
     /// The running kernel is kept: a reset boots it again.
@@ -357,6 +405,37 @@ mod tests {
         // A run that ended before the keep: the next one rolls back.
         let mut next_run = read_back;
         assert_eq!(next_run.reset().rolled_back_from, Some("kernel_b"));
+    }
+
+    #[test]
+    fn an_erased_slot_describes_no_image_until_it_is_written() {
+        let mut slots = Slots::default();
+        slots.install("kernel_b", Some("0.6.0".into()));
+        slots.reset();
+        slots.keep();
+        assert_eq!(slots.contents("kernel_a"), Contents::Unwritten);
+        assert_eq!(slots.contents("kernel_b"), Contents::Written("0.6.0"));
+        slots.erase("kernel_a");
+        assert_eq!(slots.contents("kernel_a"), Contents::Erased);
+        // The erase survives being written down; the boot choice is as it was.
+        let mut read_back = Slots::parse(&slots.to_text());
+        assert_eq!(read_back, slots);
+        assert_eq!(read_back.reset().slot, "kernel_b");
+        read_back.install("kernel_a", Some("0.7.0".into()));
+        assert_eq!(read_back.contents("kernel_a"), Contents::Written("0.7.0"));
+    }
+
+    #[test]
+    fn going_back_selects_the_other_slot_as_it_is_and_boots_it_pending() {
+        let mut slots = Slots::default();
+        slots.install("kernel_b", Some("0.6.0".into()));
+        slots.reset();
+        slots.keep();
+        slots.select("kernel_a");
+        assert_eq!(slots.reset(), Boot { slot: "kernel_a", pending: true, rolled_back_from: None });
+        assert_eq!(slots.contents("kernel_b"), Contents::Written("0.6.0"));
+        // A run that ends before the keep returns to the version it left.
+        assert_eq!(slots.reset().slot, "kernel_b");
     }
 
     #[test]

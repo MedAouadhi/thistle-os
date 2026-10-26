@@ -87,6 +87,18 @@ bool rs_update_needs_consent(void);
 /* Restart into the kernel just installed (UPDATE_READY); else nothing. */
 void rs_update_restart(void);
 
+/* Whether Settings offers to go back to the version in the other kernel
+ * slot, with no download: only while that slot's NVS record is the version
+ * its image describes and its security version is at or above the floor,
+ * and no install is under way or waiting for its restart. The version into
+ * `version`. */
+bool rs_update_go_back_version(char *version, size_t len);
+
+/* Go back: select the other kernel slot as it is and restart into it; its
+ * kernel brings back its own board profile. Returns only when going back is
+ * not offered (ESP_ERR_NOT_FOUND) or the slot cannot be selected. */
+esp_err_t rs_update_go_back(void);
+
 #ifdef __cplusplus
 }
 #endif

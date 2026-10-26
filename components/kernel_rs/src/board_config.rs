@@ -669,6 +669,18 @@ fn load_config(config_path: &str) -> i32 {
         }
     }
 
+    // A profile another firmware version wrote is rewritten from this one's
+    // built-in copy, the previous one kept as board.json.bak.
+    #[cfg(target_os = "espidf")]
+    {
+        follow_and_log(Path::new(config_path), crate::version::running());
+        if let Ok(fresh) = fs::read_to_string(config_path) {
+            if fresh.len() <= MAX_CONFIG_SIZE {
+                json = fresh;
+            }
+        }
+    }
+
     // A board that saved its profile before profiles had a power section
     // never sleeps until it gets one; it gets only that.
     #[cfg(target_os = "espidf")]
@@ -871,7 +883,144 @@ fn with_power_section_from(stored: &str, embedded: &str) -> Option<String> {
     power_section(&updated).map(|_| updated)
 }
 
-#[cfg(target_os = "espidf")]
+// ── The profile follows the firmware version ─────────────────────────
+//
+// A board writes its profile once and reads it from then on, so a firmware
+// that changed a profile never reached a board that had one (ADR-0010). The
+// stored profile now says which firmware wrote it, `"written_by"`, added when
+// the file is written: the embedded copies and the catalog files stay equal,
+// as tools/validate_board_catalog.py requires. At boot, a profile another
+// version wrote is rewritten from this firmware's embedded copy, if it has
+// one for the board id; the previous profile is kept beside it, the one
+// backup. update_policy::board_profile decides.
+
+const WRITER_KEY: &str = "written_by";
+
+/// The firmware version that wrote a stored profile, if it says.
+fn profile_writer(profile: &str) -> Option<String> {
+    let root: serde_json::Value = serde_json::from_str(profile).ok()?;
+    root.get(WRITER_KEY)?.as_str().map(str::to_string)
+}
+
+/// `profile` saying that firmware `version` wrote it, as its first key; a
+/// stamp put there before is replaced. Nothing else in the text changes.
+fn stamped_profile(profile: &str, version: &str) -> Option<String> {
+    let open = profile.find('{')?;
+    let stamp = format!("\n    \"{WRITER_KEY}\": ");
+    let mut rest = &profile[open + 1..];
+    if let Some(after) = rest.strip_prefix(stamp.as_str()) {
+        let end = after.find("\",")?;
+        rest = &after[end + 2..];
+    }
+    let stamped = format!(
+        "{}{stamp}{},{rest}",
+        &profile[..=open],
+        serde_json::to_string(version).ok()?
+    );
+    (profile_writer(&stamped).as_deref() == Some(version)).then_some(stamped)
+}
+
+/// What became of the stored profile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Followed {
+    /// Used as it is.
+    Kept,
+    /// The built-in copy, just written for a detected board: stamped only.
+    Stamped { board: String },
+    /// Rewritten from the built-in copy; the old one is `<path>.bak`.
+    Rewritten { board: String, writer: Option<String> },
+}
+
+fn backup_path(path: &Path) -> std::path::PathBuf {
+    let mut backup = path.as_os_str().to_owned();
+    backup.push(".bak");
+    backup.into()
+}
+
+/// Rewrite the profile at `path` from the built-in copy (`embedded`, by
+/// board id) if a version other than `running` wrote it.
+pub(crate) fn follow_firmware_version(
+    path: &Path,
+    running: &str,
+    embedded: &dyn Fn(&str) -> Option<String>,
+) -> Followed {
+    let Ok(stored) = fs::read_to_string(path) else { return Followed::Kept };
+    if stored.len() > MAX_CONFIG_SIZE {
+        return Followed::Kept;
+    }
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(&stored) else {
+        return Followed::Kept;
+    };
+    let Some(board) = root["board"]["board_id"].as_str() else { return Followed::Kept };
+    let writer = root.get(WRITER_KEY).and_then(|w| w.as_str());
+    let built_in = embedded(board);
+    if crate::update_policy::board_profile(writer, running, built_in.is_some())
+        == crate::update_policy::Profile::Keep
+    {
+        return Followed::Kept;
+    }
+    let Some(built_in) = built_in else { return Followed::Kept };
+    let Some(fresh) = stamped_profile(&built_in, running) else { return Followed::Kept };
+    if fresh.len() > MAX_CONFIG_SIZE {
+        return Followed::Kept;
+    }
+    // Equal as JSON, as tools/validate_board_catalog.py compares them.
+    let same = serde_json::from_str::<serde_json::Value>(&built_in).is_ok_and(|b| b == root);
+    if writer.is_none() && same {
+        return match fs::write(path, &fresh) {
+            Ok(()) => Followed::Stamped { board: board.to_string() },
+            Err(_) => Followed::Kept,
+        };
+    }
+    // Never rewrite what could not be kept.
+    if fs::write(backup_path(path), &stored).is_err() || fs::write(path, &fresh).is_err() {
+        // A half-written profile is put back from the backup.
+        let _ = fs::write(path, &stored);
+        return Followed::Kept;
+    }
+    Followed::Rewritten { board: board.to_string(), writer: writer.map(str::to_string) }
+}
+
+/// Follow the running firmware's version and say so in the log.
+#[cfg(not(test))]
+pub(crate) fn follow_and_log(path: &Path, running: &str) {
+    let message = match follow_firmware_version(path, running, &embedded_profile) {
+        Followed::Kept => return,
+        Followed::Stamped { board } => {
+            format!("board profile {board} written by {running}")
+        }
+        Followed::Rewritten { board, writer } => format!(
+            "board profile {board} rewritten from {running}'s built-in copy (it was {}'s); \
+             the previous one is board.json.bak",
+            writer.as_deref().unwrap_or("an unnamed version")
+        ),
+    };
+    extern "C" {
+        fn esp_log_write(level: i32, tag: *const u8, format: *const u8, ...);
+    }
+    let message = CString::new(message).unwrap_or_default();
+    unsafe {
+        esp_log_write(3, b"board_config\0".as_ptr(), b"%s\0".as_ptr(), message.as_ptr());
+    }
+}
+
+/// The simulator reads no profile to configure its board, but keeps one
+/// under `THISTLE_SIM_SPIFFS` that follows the version of the kernel slot it
+/// booted, as a device's does. Called once that version is known, after
+/// ota_init.
+#[cfg(all(not(target_os = "espidf"), feature = "sim-bus", not(test)))]
+pub(crate) fn sim_follow_firmware_version() {
+    let spiffs = std::env::var_os("THISTLE_SIM_SPIFFS")
+        .filter(|d| !d.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/thistle_spiffs"));
+    let running = unsafe { CStr::from_ptr(crate::ota::ota_get_current_version()) }
+        .to_string_lossy()
+        .into_owned();
+    follow_and_log(&spiffs.join("config/board.json"), &running);
+}
+
+#[cfg(not(test))]
 fn embedded_profile(board_id: &str) -> Option<String> {
     extern "C" {
         // components/kernel/src/board_fingerprint.c
@@ -2896,6 +3045,129 @@ mod tests {
         let shipped = include_str!("../../../sdcard_layout/config/boards/tdeck-max.json");
         let power = power_section(shipped).expect("tdeck-max.json declares power");
         assert_eq!(power["key"]["gpio"], 0);
+    }
+
+    // ── The profile follows the firmware version ────────────────────────
+
+    const MAX: &str = include_str!("../../../sdcard_layout/config/boards/tdeck-max.json");
+
+    fn profile_dir(case: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("thistle-board-{case}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn built_in(id: &str) -> Option<String> {
+        (id == "tdeck-max").then(|| MAX.to_string())
+    }
+
+    #[test]
+    fn a_stamped_profile_says_who_wrote_it_and_is_otherwise_the_built_in_one() {
+        let stamped = stamped_profile(MAX, "0.6.0").unwrap();
+        assert_eq!(profile_writer(&stamped).as_deref(), Some("0.6.0"));
+        assert_eq!(profile_writer(MAX), None);
+        // Everything the boot reads is where it was.
+        let parsed: serde_json::Value = serde_json::from_str(&stamped).unwrap();
+        let mut original: serde_json::Value = serde_json::from_str(MAX).unwrap();
+        original["written_by"] = "0.6.0".into();
+        assert_eq!(parsed, original);
+        assert_eq!(extract_object(&stamped, "board"), extract_object(MAX, "board"));
+        // Stamping again replaces the stamp.
+        let again = stamped_profile(&stamped, "0.7.0").unwrap();
+        assert_eq!(profile_writer(&again).as_deref(), Some("0.7.0"));
+        assert_eq!(again.matches("written_by").count(), 1);
+    }
+
+    #[test]
+    fn a_profile_another_version_wrote_is_rewritten_and_the_old_one_kept() {
+        let dir = profile_dir("rewrite");
+        let path = dir.join("board.json");
+        let old = stamped_profile(STORED_WITHOUT_POWER, "0.5.2").unwrap();
+        fs::write(&path, &old).unwrap();
+
+        let followed = follow_firmware_version(&path, "0.6.0", &built_in);
+
+        assert_eq!(
+            followed,
+            Followed::Rewritten { board: "tdeck-max".into(), writer: Some("0.5.2".into()) }
+        );
+        let now = fs::read_to_string(&path).unwrap();
+        assert_eq!(now, stamped_profile(MAX, "0.6.0").unwrap());
+        assert_eq!(fs::read_to_string(dir.join("board.json.bak")).unwrap(), old);
+    }
+
+    #[test]
+    fn only_the_last_profile_is_kept_as_the_backup() {
+        let dir = profile_dir("one-backup");
+        let path = dir.join("board.json");
+        fs::write(&path, stamped_profile(MAX, "0.5.0").unwrap()).unwrap();
+        follow_firmware_version(&path, "0.5.2", &built_in);
+        follow_firmware_version(&path, "0.6.0", &built_in);
+        let backup = fs::read_to_string(dir.join("board.json.bak")).unwrap();
+        assert_eq!(profile_writer(&backup).as_deref(), Some("0.5.2"));
+        let names: Vec<_> = fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(names.len(), 2, "{names:?}");
+    }
+
+    #[test]
+    fn a_profile_the_running_version_wrote_is_left_alone() {
+        let dir = profile_dir("same");
+        let path = dir.join("board.json");
+        let edited = stamped_profile(STORED_WITHOUT_POWER, "0.6.0").unwrap();
+        fs::write(&path, &edited).unwrap();
+        assert_eq!(follow_firmware_version(&path, "0.6.0", &built_in), Followed::Kept);
+        assert_eq!(fs::read_to_string(&path).unwrap(), edited);
+        assert!(!dir.join("board.json.bak").exists());
+    }
+
+    #[test]
+    fn a_board_with_no_built_in_profile_keeps_its_own() {
+        let dir = profile_dir("custom");
+        let path = dir.join("board.json");
+        let custom = MAX.replace("\"tdeck-max\"", "\"my-board\"");
+        fs::write(&path, &custom).unwrap();
+        assert_eq!(follow_firmware_version(&path, "0.6.0", &built_in), Followed::Kept);
+        assert_eq!(fs::read_to_string(&path).unwrap(), custom);
+        assert!(!dir.join("board.json.bak").exists());
+    }
+
+    #[test]
+    fn a_profile_just_written_from_the_built_in_one_is_only_stamped() {
+        // board_fallback.c wrote the detected board's profile: it is the
+        // built-in copy, with nothing to back up.
+        let dir = profile_dir("detected");
+        let path = dir.join("board.json");
+        fs::write(&path, MAX).unwrap();
+        assert_eq!(
+            follow_firmware_version(&path, "0.6.0", &built_in),
+            Followed::Stamped { board: "tdeck-max".into() }
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), stamped_profile(MAX, "0.6.0").unwrap());
+        assert!(!dir.join("board.json.bak").exists());
+        // The embedded copy equals the catalog file as JSON, not as text.
+        fs::write(&path, MAX).unwrap();
+        let compact = |id: &str| {
+            built_in(id).map(|p| {
+                serde_json::to_string(&serde_json::from_str::<serde_json::Value>(&p).unwrap())
+                    .unwrap()
+            })
+        };
+        assert_eq!(
+            follow_firmware_version(&path, "0.6.0", &compact),
+            Followed::Stamped { board: "tdeck-max".into() }
+        );
+    }
+
+    #[test]
+    fn a_profile_that_does_not_read_is_left_alone() {
+        let dir = profile_dir("unreadable");
+        let path = dir.join("board.json");
+        assert_eq!(follow_firmware_version(&path, "0.6.0", &built_in), Followed::Kept);
+        fs::write(&path, "{ not json").unwrap();
+        assert_eq!(follow_firmware_version(&path, "0.6.0", &built_in), Followed::Kept);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "{ not json");
     }
 }
 

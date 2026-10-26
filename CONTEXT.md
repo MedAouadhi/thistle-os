@@ -21,6 +21,10 @@ The human-readable label for a board, distinct from its board id. Boards frequen
 A board profile duplicated as a string literal inside the kernel, written to storage when hardware detection identifies a board with no profile present. The only configuration a freshly flashed board ever sees.
 _Avoid_: fallback JSON, builtin board
 
+**Writer version**:
+The firmware version that wrote a stored board profile, kept in it as `written_by`. A kernel of another version rewrites the profile from its embedded fallback profile, so the profile follows the firmware.
+_Avoid_: profile version (the profile's own `board.version` is something else)
+
 **Fingerprint**:
 The set of I²C addresses whose presence on a given pin pair identifies a board. Detection matches fingerprints in order, first match winning.
 _Avoid_: signature, probe result

@@ -16,6 +16,12 @@ security floor and each slot's record) are files in THISTLE_SIM_SLOTS;
 THISTLE_SIM_KEEP_S shortens the minute a new kernel runs before it is kept.
 Each case runs on a scratch copy of simulator/sdcard and slots of its own.
 
+The board profile follows the firmware version (ticket 08): the simulator
+reads no profile to set up its board, but keeps one in
+THISTLE_SIM_SPIFFS/config/board.json and rewrites it, as a device does, once
+it knows the version of the kernel slot it booted. Settings offers Go back
+while the other slot still holds the previous version at or above the floor.
+
 The fake GitHub is two servers: one serves the catalog and answers a release
 asset's URL with a 302, as GitHub does, to the second, which serves the
 bytes. The catalog server can speak HTTPS, with a certificate of the test's
@@ -34,6 +40,7 @@ import datetime
 import ipaddress
 import json
 import os
+import re
 import shutil
 import ssl
 import struct
@@ -69,7 +76,13 @@ CHECK_NOW = "120,152"
 DOWNLOAD = "120,206"
 ALLOW_MOBILE_DATA = "120,206"
 
+GO_BACK = "120,205"
+# Install from card, with Go back above it.
+INSTALL_BELOW_GO_BACK = "120,265"
+
 RELEASE = "thistle_os-host-v0.6.0.bin"
+MAX_PROFILE = (Path(__file__).resolve().parents[2]
+               / "sdcard_layout/config/boards/tdeck-max.json").read_text()
 
 
 def kernel_image(version: str, size: int = 8192) -> bytes:
@@ -155,6 +168,20 @@ class Device:
         if not path.exists():
             return {}
         return dict(line.split("=", 1) for line in path.read_text().splitlines() if "=" in line)
+
+    def profile_path(self) -> Path:
+        return self.spiffs / "config/board.json"
+
+    def put_profile(self, text: str) -> None:
+        self.profile_path().parent.mkdir(parents=True, exist_ok=True)
+        self.profile_path().write_text(text)
+
+    def profile(self) -> str:
+        return self.profile_path().read_text()
+
+    def backup(self) -> Optional[str]:
+        path = self.spiffs / "config/board.json.bak"
+        return path.read_text() if path.exists() else None
 
     def run(self, *args: str, keep_s: float = 60, timeout_ms: int = 1500,
             env: Optional[dict] = None) -> str:
@@ -318,6 +345,32 @@ def refused_in_settings(device: Device, reason: str) -> None:
            f"System update: Not installed: {reason}")
     refuse(log, "restarting into the new kernel")
     nothing_written(device)
+
+
+def written_by(profile: Optional[str]) -> Optional[str]:
+    return None if profile is None else json.loads(profile).get("written_by")
+
+
+def stamped(profile: str, version: str) -> str:
+    """A profile as a firmware of `version` wrote it."""
+    return profile.replace("{", '{\n    "written_by": "%s",' % version, 1)
+
+
+def build_version(log: str) -> str:
+    """The version the build's own kernel reports, from `running kernel_a,
+    version X`."""
+    match = re.search(r"running kernel_a, version (\S+?)(?:,|$)", log, re.M)
+    if not match:
+        raise AssertionError(f"no running kernel_a in:\n{log[-2000:]}")
+    return match.group(1)
+
+
+def same_profile(text: str, version: str) -> None:
+    """`text` is the built-in tdeck-max profile, written by `version`."""
+    expected = json.loads(MAX_PROFILE)
+    expected["written_by"] = version
+    if json.loads(text) != expected:
+        raise AssertionError(f"not the built-in profile written by {version}:\n{text[:400]}")
 
 
 # --- the cases --------------------------------------------------------------
@@ -551,6 +604,100 @@ def on_mobile_data_the_download_waits_for_consent(device: Device, github: GitHub
     if (device.slots / "kernel_b.bin").read_bytes() != image:
         raise AssertionError("kernel_b does not hold the release's image")
 
+def a_version_change_rewrites_the_board_profile_and_keeps_the_old_one(device: Device) -> None:
+    # Written by an older firmware, and edited since.
+    old = stamped(MAX_PROFILE, "0.5.0").replace('"name"', '"name_edited"', 1)
+    device.put_profile(old)
+    log = device.run()
+    version = build_version(log)
+    expect(log, f"board profile tdeck-max rewritten from {version}'s built-in copy "
+                "(it was 0.5.0's); the previous one is board.json.bak")
+    same_profile(device.profile(), version)
+    if device.backup() != old:
+        raise AssertionError("the previous profile is not the backup")
+    # The next boot of the same version leaves it alone.
+    log = device.run()
+    refuse(log, "board profile")
+    same_profile(device.profile(), version)
+
+
+def a_board_with_no_built_in_profile_keeps_its_own(device: Device) -> None:
+    custom = stamped(MAX_PROFILE, "0.5.0").replace('"tdeck-max"', '"my-board"')
+    device.put_profile(custom)
+    log = device.run()
+    refuse(log, "board profile")
+    if device.profile() != custom or device.backup() is not None:
+        raise AssertionError("a board with no built-in profile had its profile changed")
+
+
+def go_back_boots_the_other_slot_and_the_profile_follows_it(device: Device) -> None:
+    device.put_profile(MAX_PROFILE)
+    log = device.run()
+    previous = build_version(log)
+    expect(log, f"board profile tdeck-max written by {previous}")
+    refuse(device.settings(), "Go back")  # nothing to go back to yet
+
+    device.put_release(security_version=500)
+    device.run("--install-update")
+    (device.card / "update" / RELEASE).unlink()
+    log = device.run(keep_s=1, timeout_ms=3000)
+    expect(log, "running kernel_b, version 0.6.0",
+           f"board profile tdeck-max rewritten from 0.6.0's built-in copy (it was {previous}'s)",
+           "kept the kernel in kernel_b")
+    same_profile(device.profile(), "0.6.0")
+
+    log = device.settings(GO_BACK)
+    expect(log, f"System update: Go back to {previous}",
+           f"going back to {previous} in kernel_a; restarting")
+    log = device.run(keep_s=1, timeout_ms=3000)
+    expect(log, f"running kernel_a, version {previous}, new",
+           f"board profile tdeck-max rewritten from {previous}'s built-in copy (it was 0.6.0's)",
+           "kept the kernel in kernel_a")
+    same_profile(device.profile(), previous)
+    if written_by(device.backup()) != "0.6.0":
+        raise AssertionError("the backup is not 0.6.0's profile")
+    # And from there, forward again: the other slot still holds 0.6.0.
+    expect(device.settings(), "System update: Go back to 0.6.0")
+
+
+def going_back_is_not_offered_below_the_floor(device: Device) -> None:
+    device.put_release(security_version=600)
+    device.run("--install-update")
+    (device.card / "update" / RELEASE).unlink()
+    expect(device.run(keep_s=1, timeout_ms=3000), "security floor raised from 0 to 600")
+    # The build's own kernel, in kernel_a, is security version 500.
+    log = device.settings()
+    expect(log, "System update: Running: 0.6.0")
+    refuse(log, "Go back")
+
+
+def go_back_disappears_once_an_install_starts_erasing_the_other_slot(device: Device) -> None:
+    device.put_release(security_version=500)
+    device.run("--install-update")
+    log = device.run(keep_s=1, timeout_ms=3000)
+    expect(log, "kept the kernel in kernel_b")
+    previous = device.nvs()["kernel_a_ver"]
+
+    # Refused before a byte is written: the previous version is still there.
+    device.put_release(version="0.7.0", security_version=500,
+                       on_card=lambda image: image + b"\0")
+    log = device.settings(INSTALL_BELOW_GO_BACK)
+    expect(log, f"System update: Go back to {previous}", "card update refused: the file is")
+    refuse(log, "no longer offered")
+
+    # Refused only once it is written, over the previous version.
+    def flip(image: bytes) -> bytes:
+        changed = bytearray(image)
+        changed[4000] ^= 1
+        return bytes(changed)
+    device.put_release(version="0.7.0", security_version=500, on_card=flip)
+    log = device.settings(INSTALL_BELOW_GO_BACK)
+    expect(log, f"System update: Go back to {previous}",
+           "writing 0.7.0",
+           "card update refused: the file's SHA-256 is not its manifest's",
+           f"System update: going back to {previous} is no longer offered")
+    refuse(device.settings(), "Go back")
+
 
 CASES = (
     settings_shows_the_running_version_and_the_release_on_the_card,
@@ -571,6 +718,12 @@ CASES = (
     online(a_redirect_from_https_to_http_is_refused, tls=True),
     online(six_redirects_are_refused),
     online(on_mobile_data_the_download_waits_for_consent),
+
+    a_version_change_rewrites_the_board_profile_and_keeps_the_old_one,
+    a_board_with_no_built_in_profile_keeps_its_own,
+    go_back_boots_the_other_slot_and_the_profile_follows_it,
+    going_back_is_not_offered_below_the_floor,
+    go_back_disappears_once_an_install_starts_erasing_the_other_slot,
 )
 
 

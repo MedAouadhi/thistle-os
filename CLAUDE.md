@@ -74,16 +74,24 @@ T-Deck Max exactly as on any other board: a full 2.4MB app flashes in about
 including the `cpu_start` region. The chunked flasher in the T-Deck-MAX
 vendor checkout is not needed. See `docs/tdeck-max-usb-serial-jtag.md`.
 
-### A changed board profile does not reach a board that has one
+### The board profile follows the firmware version
 
-A board writes its profile to `/spiffs/config/board.json` once, from the
-embedded copy in `components/kernel/src/board_fingerprint.c`, and reads that
-file from then on. The firmware build makes no SPIFFS image, so flashing a
-changed profile changes nothing on a board that already holds one: tickets 03,
-06, 09 and 10 all met this. Erasing the storage partition fixes it but also
-wipes `system.json` (WiFi credentials, settings) and the mesh identity.
-Rewriting only `board.json`, for instance by a build that calls
-`board_detect_and_write()` once, keeps them.
+A board writes its profile to `/spiffs/config/board.json` from the embedded
+copy in `components/kernel/src/board_fingerprint.c`; the firmware build makes
+no SPIFFS image. The stored profile says which firmware wrote it,
+`"written_by": "0.6.0"`, added when the file is written (the embedded copies
+and the catalog files stay equal, as CI checks). At boot, a profile another
+version wrote, or one that names no writer, is rewritten from the running
+kernel's embedded copy, and the previous one is kept as
+`board.json.bak`, the only backup (`board_config.rs`,
+`follow_firmware_version`; `update_policy::board_profile` decides). So a USB
+flash, an update and going back all bring their own profile, and
+`system.json`, WiFi and the mesh identity are untouched. A board id the kernel
+embeds no profile for keeps its profile. The boot log says `board profile
+tdeck-max rewritten from 0.6.0's built-in copy (it was 0.5.2's)`. A hand edit
+to `board.json` lasts until the next version boots; it is then in the backup.
+Before this (tickets 03, 06, 09 and 10), a changed profile never reached a
+board that had one.
 
 ### Two kernel slots
 
@@ -122,6 +130,15 @@ flash always boots `kernel_a`.
   kernel is kept, so one rolled back never raises it. The boot log says
   `security floor N; this kernel's security version M`, and `security floor
   raised from N to M` at the keep.
+- **Settings → System update offers Go back** to the version in the other
+  kernel slot, with no download, while that slot's record is the version its
+  image description says (`esp_ota_get_partition_description`) and its
+  security version is at or above the floor (`update_policy::go_back`,
+  `rs_update_go_back*`). An install clears the record before it erases the
+  slot, so Go back is gone from then on, whether or not the install finishes.
+  Going back selects the slot as it is and restarts; that kernel boots new,
+  kept after a minute like an update, and rewrites the board profile from
+  its own embedded copy. The simulator models the erase in its otadata.
 - **A new kernel is kept after 60 s of running**
   (`ota_keep_new_kernel()`); until then a reset rolls it back to the other
   slot (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`). On that first boot the

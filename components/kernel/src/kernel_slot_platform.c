@@ -86,6 +86,31 @@ esp_err_t kslot_platform_keep(void)
     return esp_ota_mark_app_valid_cancel_rollback();
 }
 
+/* The version the image in a kernel slot describes. ESP_ERR_NOT_FOUND once
+ * the slot is erased, as esp_ota_begin() does before an install writes it. */
+esp_err_t kslot_platform_image_version(const char *label, char *out, size_t len)
+{
+    const esp_partition_t *slot = kernel_slot(label);
+    if (!slot || !out || len == 0) return ESP_ERR_NOT_FOUND;
+    esp_app_desc_t desc;
+    esp_err_t err = esp_ota_get_partition_description(slot, &desc);
+    if (err != ESP_OK) return err;
+    strncpy(out, desc.version, len - 1);
+    out[len - 1] = '\0';
+    return ESP_OK;
+}
+
+/* Going back: boot the other kernel slot's image next, as it is. ESP-IDF
+ * checks the image first; it boots new, kept after a minute as an update
+ * is, or rolled back by a reset before then. */
+esp_err_t kslot_platform_select(const char *label)
+{
+    const esp_partition_t *slot = kernel_slot(label);
+    if (!slot) return ESP_ERR_NOT_FOUND;
+    if (slot == esp_ota_get_running_partition()) return ESP_ERR_INVALID_STATE;
+    return esp_ota_set_boot_partition(slot);
+}
+
 /* Give the running kernel up and boot the other slot's. Restarts. */
 esp_err_t kslot_platform_roll_back(void)
 {
