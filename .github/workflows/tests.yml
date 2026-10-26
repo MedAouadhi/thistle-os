@@ -256,6 +256,12 @@ jobs:
           /tmp/test_artifact_manifest
           grep -q "manifest_url" recovery/src/recovery_ota.rs
 
+      - name: Test the shared artifact manifest crate the kernel uses
+        run: |
+          rustc --edition=2021 --test crates/thistle-artifact/src/lib.rs \
+            -o /tmp/test_thistle_artifact
+          /tmp/test_thistle_artifact
+
       - name: Test Recovery firmware anti-rollback
         run: |
           rustc --edition=2021 --test recovery/src/anti_rollback.rs \
@@ -448,6 +454,14 @@ jobs:
       - name: Run AssistNow registration, fetch and hand-over tests against a fake service
         working-directory: simulator
         run: python3 tests/test_gps_assist.py --sim build/thistle_sim
+
+      - name: Run kernel slot install, keep and rollback tests
+        working-directory: simulator
+        run: python3 tests/test_kernel_slots.py --sim build/thistle_sim
+
+      - name: Run System update card install and refusal tests
+        working-directory: simulator
+        run: python3 tests/test_system_update.py --sim build/thistle_sim
 
       - name: Upload launcher framebuffer failures
         if: failure()
