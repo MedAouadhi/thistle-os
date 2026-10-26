@@ -464,7 +464,12 @@ fn install_card_release() -> Result<String, Failure> {
         s.total = size as u32;
     });
 
-    // From here the other slot's previous kernel is gone.
+    // From here the other slot's previous kernel is gone, and going back
+    // to it is no longer offered, whether or not this install finishes.
+    if platform::record(target, &Record { version: String::new(), security_version: 0 }) != ESP_OK
+    {
+        log(ESP_LOG_WARN, &format!("could not clear {target}'s record in NVS"));
+    }
     let mut writer = crate::ota::SlotWriter::begin(target, size as usize)
         .map_err(|err| error(&format!("{target} cannot be written"), err))?;
     let mut hasher = Sha256::new();
@@ -613,6 +618,51 @@ fn start_task() -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Going back
+// ---------------------------------------------------------------------------
+
+/// The other kernel slot and the version going back to it would reach, if
+/// it is offered (update_policy::go_back). Not once an install has begun
+/// erasing that slot, which clears its record, nor while one waits for its
+/// restart: the slot is then the new kernel's.
+pub(crate) fn go_back_target() -> Option<(&'static str, String)> {
+    if with(|s| s.state) == STATE_READY {
+        return None;
+    }
+    let other = crate::kernel_slot::other_kernel_slot(crate::ota::running_slot()?)?;
+    let record = slot_record(other);
+    let image = crate::ota::slot_image_version(other);
+    let floor = security_floor().ok()?;
+    let record = record.as_ref().map(|r| policy::SlotRecord {
+        version: &r.version,
+        security_version: r.security_version,
+    });
+    policy::go_back(record, image.as_deref(), floor).map(|version| (other, version))
+}
+
+/// Select the other kernel slot as it is and restart into it.
+fn go_back() -> i32 {
+    let Some((slot, version)) = go_back_target() else {
+        return ESP_ERR_NOT_FOUND;
+    };
+    // Not during an install, and no install may start meanwhile.
+    if BUSY.swap(true, Ordering::AcqRel) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    match crate::ota::select_slot(slot) {
+        ESP_OK => {
+            log(ESP_LOG_INFO, &format!("going back to {version} in {slot}; restarting"));
+            crate::ota::restart()
+        }
+        err => {
+            log(ESP_LOG_ERROR, &format!("could not select {slot} to go back: 0x{err:x}"));
+            BUSY.store(false, Ordering::Release);
+            err
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // C API: thistle/update.h
 // ---------------------------------------------------------------------------
 
@@ -699,6 +749,27 @@ pub extern "C" fn rs_update_restart() {
         log(ESP_LOG_INFO, "restarting into the new kernel");
         crate::ota::restart();
     }
+}
+
+/// Whether going back is offered; the version it would reach into
+/// `version`.
+///
+/// # Safety
+/// `version` must be NULL or point to `len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn rs_update_go_back_version(version: *mut c_char, len: usize) -> bool {
+    let Some((_, target)) = go_back_target() else { return false };
+    if !version.is_null() && len > 0 {
+        copy_c(&target, std::slice::from_raw_parts_mut(version, len));
+    }
+    true
+}
+
+/// Go back to the version in the other kernel slot: select it and restart.
+/// Returns only if going back is not offered (ESP_ERR_NOT_FOUND) or fails.
+#[no_mangle]
+pub extern "C" fn rs_update_go_back() -> i32 {
+    go_back()
 }
 
 // ---------------------------------------------------------------------------

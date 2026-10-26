@@ -86,6 +86,8 @@ mod platform {
         fn kslot_platform_finish(handle: u32, label: *const c_char) -> i32;
         fn kslot_platform_keep() -> i32;
         fn kslot_platform_roll_back() -> i32;
+        fn kslot_platform_image_version(label: *const c_char, out: *mut c_char, len: usize) -> i32;
+        fn kslot_platform_select(label: *const c_char) -> i32;
         fn esp_restart() -> !;
     }
 
@@ -147,6 +149,25 @@ mod platform {
 
     pub(super) fn roll_back() -> i32 {
         unsafe { kslot_platform_roll_back() }
+    }
+
+    /// The version `slot`'s image description says; None once it is erased.
+    pub(super) fn image_version(slot: &str) -> Option<String> {
+        let label = CString::new(slot).ok()?;
+        let mut version = [0 as c_char; 33];
+        let err = unsafe {
+            kslot_platform_image_version(label.as_ptr(), version.as_mut_ptr(), version.len())
+        };
+        (err == ESP_OK).then(|| {
+            unsafe { CStr::from_ptr(version.as_ptr()) }.to_string_lossy().into_owned()
+        })
+    }
+
+    pub(super) fn select(slot: &str) -> i32 {
+        match CString::new(slot) {
+            Ok(label) => unsafe { kslot_platform_select(label.as_ptr()) },
+            Err(_) => ESP_ERR_NOT_FOUND,
+        }
     }
 
     pub(super) fn keep_delay() -> Duration {
@@ -219,6 +240,11 @@ mod platform {
     impl Writer {
         pub(crate) fn begin(label: &'static str, _size: usize) -> Result<Writer, i32> {
             let _ = std::fs::create_dir_all(dir());
+            // As esp_ota_begin() does, erase the slot first.
+            let mut slots = read();
+            slots.erase(label);
+            write(&slots)?;
+            let _ = std::fs::remove_file(dir().join(format!("{label}.bin")));
             let file = std::fs::File::create(part(label)).map_err(|_| ESP_FAIL)?;
             Ok(Writer { label, file, head: Vec::new() })
         }
@@ -261,6 +287,25 @@ mod platform {
         ESP_ERR_NOT_SUPPORTED
     }
 
+    /// What an image description in `slot` would say: a slot no install
+    /// wrote holds the build's own kernel, as `idf.py flash` left it.
+    pub(super) fn image_version(slot: &str) -> Option<String> {
+        match read().contents(slot) {
+            kernel_slot::Contents::Written(version) => Some(version.to_string()),
+            kernel_slot::Contents::Unwritten => Some(crate::version::running().to_string()),
+            kernel_slot::Contents::Erased => None,
+        }
+    }
+
+    pub(super) fn select(slot: &str) -> i32 {
+        let mut slots = read();
+        slots.select(slot);
+        match write(&slots) {
+            Ok(()) => ESP_OK,
+            Err(err) => err,
+        }
+    }
+
     /// A minute, or `THISTLE_SIM_KEEP_S` seconds.
     pub(super) fn keep_delay() -> Duration {
         std::env::var("THISTLE_SIM_KEEP_S")
@@ -293,6 +338,17 @@ pub(crate) use platform::Writer as SlotWriter;
 #[cfg(not(target_os = "espidf"))]
 pub(crate) fn sim_slots_dir() -> PathBuf {
     platform::dir()
+}
+
+/// The version the image in `slot` describes (its `esp_app_desc_t`); None
+/// when the slot holds no image, as once an install has begun erasing it.
+pub(crate) fn slot_image_version(slot: &str) -> Option<String> {
+    platform::image_version(slot)
+}
+
+/// Select `slot`, as it is, to boot next. ESP-IDF checks its image first.
+pub(crate) fn select_slot(slot: &str) -> i32 {
+    platform::select(slot)
 }
 
 /// Restart, into the slot selected to boot next.

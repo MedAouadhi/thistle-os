@@ -181,6 +181,48 @@ pub(crate) fn pick_card_release(versions: &[Option<&str>]) -> Option<usize> {
     Some(newest.map_or(0, |(i, _)| i))
 }
 
+/// What NVS records of a kernel slot: the version and security version of
+/// the kernel written into it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SlotRecord<'a> {
+    pub version: &'a str,
+    pub security_version: u32,
+}
+
+/// The version going back to the other kernel slot would reach, if it is
+/// offered: only while the slot's `record` names the version its `image`
+/// describes (none once an install has begun erasing it) and the record's
+/// security version is at or above the `floor`.
+pub(crate) fn go_back(record: Option<SlotRecord>, image: Option<&str>, floor: u32) -> Option<String> {
+    let record = record?;
+    let image = image?;
+    if record.version.is_empty() || record.version != image || record.security_version < floor {
+        return None;
+    }
+    Some(record.version.to_string())
+}
+
+/// What to do with the stored board profile at boot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Profile {
+    /// Use it as it is.
+    Keep,
+    /// Rewrite it from the kernel's embedded copy, keeping it as the backup.
+    Rewrite,
+}
+
+/// Whether the stored board profile, written by firmware `writer` (None if
+/// it names none), is rewritten by the `running` firmware, which embeds a
+/// profile for its board id or not. Any other version rewrites it, going
+/// back included, so a profile travels with the firmware that carries it.
+pub(crate) fn board_profile(writer: Option<&str>, running: &str, embedded: bool) -> Profile {
+    if embedded && writer != Some(running) {
+        Profile::Rewrite
+    } else {
+        Profile::Keep
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -384,5 +426,66 @@ mod tests {
     fn a_card_release_whose_manifest_does_not_read_is_still_picked_to_be_refused() {
         assert_eq!(pick_card_release(&[None]), Some(0));
         assert_eq!(pick_card_release(&[None, Some("0.6.0")]), Some(1));
+    }
+
+    // --- the board profile ---------------------------------------------------
+
+    #[test]
+    fn a_profile_written_by_the_running_version_is_kept() {
+        assert_eq!(board_profile(Some("0.6.0"), "0.6.0", true), Profile::Keep);
+        assert_eq!(
+            board_profile(Some("0.5.2-108-gabc1234-dirty"), "0.5.2-108-gabc1234-dirty", true),
+            Profile::Keep
+        );
+    }
+
+    #[test]
+    fn a_profile_written_by_another_version_is_rewritten() {
+        assert_eq!(board_profile(Some("0.5.2"), "0.6.0", true), Profile::Rewrite);
+        // Going back is a version change too.
+        assert_eq!(board_profile(Some("0.6.0"), "0.5.2", true), Profile::Rewrite);
+        // A laptop build on the same tag is another build.
+        assert_eq!(board_profile(Some("0.6.0"), "0.6.0-1-gabc1234", true), Profile::Rewrite);
+    }
+
+    #[test]
+    fn a_profile_that_names_no_writer_is_rewritten() {
+        // Written before profiles recorded their writer, or by hand.
+        assert_eq!(board_profile(None, "0.6.0", true), Profile::Rewrite);
+        assert_eq!(board_profile(Some(""), "0.6.0", true), Profile::Rewrite);
+    }
+
+    // --- going back ----------------------------------------------------------
+
+    fn record(version: &str, security_version: u32) -> Option<SlotRecord<'_>> {
+        Some(SlotRecord { version, security_version })
+    }
+
+    #[test]
+    fn going_back_is_offered_to_a_slot_whose_record_is_its_image() {
+        assert_eq!(go_back(record("0.5.2", 500), Some("0.5.2"), 500), Some("0.5.2".into()));
+        assert_eq!(go_back(record("0.5.2", 600), Some("0.5.2"), 500), Some("0.5.2".into()));
+        assert_eq!(go_back(record("0.5.2", 500), Some("0.5.2"), 0), Some("0.5.2".into()));
+    }
+
+    #[test]
+    fn going_back_is_not_offered_below_the_floor() {
+        assert_eq!(go_back(record("0.5.2", 499), Some("0.5.2"), 500), None);
+    }
+
+    #[test]
+    fn going_back_is_not_offered_to_a_slot_whose_record_is_not_its_image() {
+        // An install began erasing it, or wrote another version over it.
+        assert_eq!(go_back(record("0.5.2", 500), Some("0.6.0"), 0), None);
+        assert_eq!(go_back(record("0.5.2", 500), None, 0), None);
+        // A slot with no record, or one cleared when its erase began.
+        assert_eq!(go_back(None, Some("0.5.2"), 0), None);
+        assert_eq!(go_back(record("", 0), Some(""), 0), None);
+    }
+
+    #[test]
+    fn a_board_the_kernel_has_no_profile_for_keeps_its_own() {
+        assert_eq!(board_profile(Some("0.5.2"), "0.6.0", false), Profile::Keep);
+        assert_eq!(board_profile(None, "0.6.0", false), Profile::Keep);
     }
 }

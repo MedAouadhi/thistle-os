@@ -1755,7 +1755,8 @@ static void open_about_screen(void)
 /* A release copied to the card's update/ folder installs from here, once its
  * artifact manifest holds up (update_manager.rs); anything else is refused
  * with the reason shown. The install runs on a task of the kernel's; this
- * screen polls rs_update_get_status(). */
+ * screen polls rs_update_get_status(). Go back boots the version still in
+ * the other kernel slot, while rs_update_go_back_version() offers it. */
 
 static lv_timer_t *s_update_timer      = NULL;
 static lv_obj_t   *s_update_card_lbl   = NULL;
@@ -1763,6 +1764,9 @@ static lv_obj_t   *s_update_status_lbl = NULL;
 static lv_obj_t   *s_update_install    = NULL;
 static lv_obj_t   *s_update_restart    = NULL;
 static lv_obj_t   *s_update_later      = NULL;
+static lv_obj_t   *s_update_go_back    = NULL;
+/* The version Go back reaches, as last shown; "" while it is not offered. */
+static char        s_update_back_shown[40];
 /* Later hides Restart now until the next install. */
 static bool        s_update_later_chosen = false;
 
@@ -1777,6 +1781,8 @@ static void update_forget_screen(void)
     s_update_install    = NULL;
     s_update_restart    = NULL;
     s_update_later      = NULL;
+    s_update_go_back    = NULL;
+    s_update_back_shown[0] = '\0';
 }
 
 static void update_set_shown(lv_obj_t *obj, bool shown)
@@ -1838,6 +1844,25 @@ static void update_refresh(lv_timer_t *t)
     update_set_shown(s_update_install, on_card && !busy && !ready);
     update_set_shown(s_update_restart, ready && !s_update_later_chosen);
     update_set_shown(s_update_later, ready && !s_update_later_chosen);
+
+    /* Go back, while the other kernel slot still holds the previous version
+     * (rs_update_go_back_version decides). */
+    char back[40] = "";
+    if (!rs_update_go_back_version(back, sizeof(back))) back[0] = '\0';
+    if (s_update_go_back && strcmp(back, s_update_back_shown) != 0) {
+        if (back[0]) {
+            char text[64];
+            snprintf(text, sizeof(text), "Go back to %s", back);
+            lv_label_set_text(lv_obj_get_child(s_update_go_back, 0), text);
+            ESP_LOGI(TAG, "System update: %s", text);
+        } else if (s_update_back_shown[0]) {
+            ESP_LOGI(TAG, "System update: going back to %s is no longer offered",
+                     s_update_back_shown);
+        }
+        snprintf(s_update_back_shown, sizeof(s_update_back_shown), "%s", back);
+    }
+    /* Hidden while an install runs: what it does to the slot shows after. */
+    update_set_shown(s_update_go_back, back[0] != '\0' && !busy);
 }
 
 static void update_install_cb(lv_event_t *e)
@@ -1861,6 +1886,16 @@ static void update_later_cb(lv_event_t *e)
     (void)e;
     s_update_later_chosen = true;
     toast_show("It runs after the next restart", TOAST_INFO, 3000);
+    update_refresh(NULL);
+}
+
+static void update_go_back_cb(lv_event_t *e)
+{
+    (void)e;
+    /* Restarts into the other kernel slot; returns only if it cannot. */
+    if (rs_update_go_back() != ESP_OK) {
+        toast_warn("Cannot go back to the previous version");
+    }
     update_refresh(NULL);
 }
 
@@ -1897,6 +1932,14 @@ static void open_update_screen(void)
 
     s_update_restart = create_action_row(content, "Restart now", update_restart_cb);
     s_update_later   = create_action_row(content, "Later", update_later_cb);
+    s_update_go_back = create_action_row(content, "Go back", update_go_back_cb);
+    /* A laptop build's version is longer than the row. */
+    lv_obj_t *back_lbl = lv_obj_get_child(s_update_go_back, 0);
+    lv_obj_set_width(back_lbl, LV_PCT(100));
+    lv_label_set_long_mode(back_lbl, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(back_lbl, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    s_update_back_shown[0] = '\0';
+    lv_obj_add_flag(s_update_go_back, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_update_install, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_update_restart, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_update_later, LV_OBJ_FLAG_HIDDEN);
