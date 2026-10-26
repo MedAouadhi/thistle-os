@@ -96,13 +96,16 @@ def check(tag, app_dir, releases):
     """The tag's release, or ValueError saying why it is refused: its version
     is not the package manifest's, or its min_os is newer than the newest
     firmware release (prereleases included: an app may follow a release
-    candidate, and devices hide what they cannot run)."""
+    candidate, and devices hide what they cannot run). An empty min_os is
+    any firmware's."""
     release = parse_tag(tag)
     manifest = read_json(Path(app_dir) / "manifest.json")
     if manifest.get("version") != release.version:
         raise ValueError(f"{tag} names version {release.version}, but "
                          f"{release.app}'s manifest.json says {manifest.get('version')}")
-    min_os = manifest.get("min_os", "")
+    min_os = manifest.get("min_os") or ""
+    if not min_os:
+        return release  # any firmware runs it: nothing to check against
     newest = newest_firmware(releases)
     if newest is None:
         raise ValueError(f"there is no firmware release yet for {release.app}'s "

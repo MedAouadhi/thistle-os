@@ -137,6 +137,14 @@ class CheckTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ra.check("notes-v1.0.1", app, [firmware_release("v0.7.0-rc.2")])
 
+    def test_an_empty_min_os_runs_on_any_firmware(self):
+        # The package format: an empty min_os means any firmware, so there
+        # is nothing to check it against, released or not.
+        app = write_app(self.root, version="1.0.1", min_os="")
+        self.assertEqual(ra.check("notes-v1.0.1", app, [firmware_release("v0.6.0")]).version,
+                         "1.0.1")
+        self.assertEqual(ra.check("notes-v1.0.1", app, []).version, "1.0.1")
+
     def test_no_firmware_release_at_all_is_refused(self):
         app = write_app(self.root, version="1.0.1", min_os="0.3.0")
         with self.assertRaisesRegex(ValueError, "no firmware release"):
