@@ -675,6 +675,14 @@ network and the files. LVGL window managers only; thistle-tk has its own
   the UI task's stack is (`syscall_is_ptr_allowed`). Leaving an app destroys
   it, so its `on_destroy` deletes its widgets; `lvgl_wm_widget_destroy()`
   forgets the handles of a deleted widget's children.
+- **Every download follows redirects**, as a GitHub Release asset's URL
+  answers with a 302 to another host: the catalog, a package and its
+  signature, a firmware. At most five, never from HTTPS to HTTP
+  (`redirect_policy.rs`, host-tested); the log says `Download refused:
+  more than 5 redirects, to ...` when not. The kernel follows them itself
+  (`thistle_http_client_init_download`, `thistle_http_client_redirect` in
+  `http_client_shim.c`): ESP-IDF's own following has no scheme rule. What
+  is installed is trusted for its signature and hash, never its host.
 - **Refresh and Install run on the App Store's worker** (`appstore_job.c`),
   one at a time, on a task with a 16 KB internal stack, never on
   `lvgl_task`: its 8 KB stack once took a refresh's 100 KB of catalog

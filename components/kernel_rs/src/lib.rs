@@ -89,6 +89,7 @@ pub mod phonebook;
 pub mod power_manager;
 pub mod power_policy;
 pub mod radio_antenna;
+pub mod redirect_policy;
 pub mod refresh_prefs;
 pub mod secure_wipe;
 pub mod signing;

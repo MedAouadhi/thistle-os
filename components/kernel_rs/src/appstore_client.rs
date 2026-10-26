@@ -65,7 +65,7 @@ const ESP_LOG_ERROR: i32 = 1;
 type HttpDataCb = unsafe extern "C" fn(*const u8, c_int, *mut c_void) -> i32;
 
 extern "C" {
-    #[link_name = "thistle_http_client_init"]
+    #[link_name = "thistle_http_client_init_download"]
     fn http_client_init(
         url: *const c_char,
         timeout_ms: c_int,
@@ -86,6 +86,51 @@ extern "C" {
     fn esp_http_client_read(client: *mut c_void, buf: *mut c_char, len: c_int) -> c_int;
     #[link_name = "thistle_http_client_close"]
     fn esp_http_client_close(client: *mut c_void) -> i32;
+    #[link_name = "thistle_http_client_redirect"]
+    fn http_client_redirect(client: *mut c_void, url: *mut c_char, length: c_int) -> i32;
+}
+
+/// After a redirect answered the request for `from`, having followed
+/// `followed` already, points the client where the redirect says, if
+/// redirect_policy allows; else logs why not. `from` and `followed` are
+/// then the new hop's.
+#[cfg(not(test))]
+unsafe fn follow_redirect(client: *mut c_void, from: &mut String, followed: &mut u32) -> Result<(), i32> {
+    let mut to = [0u8; 512];
+    let found = http_client_redirect(client, to.as_mut_ptr().cast::<c_char>(), to.len() as c_int);
+    let to = CStr::from_bytes_until_nul(&to)
+        .ok()
+        .and_then(|url| url.to_str().ok())
+        .unwrap_or("");
+    if found != ESP_OK || to.is_empty() {
+        esp_log_write(
+            ESP_LOG_ERROR,
+            TAG.as_ptr(),
+            b"Download refused: a redirect with no usable Location\0".as_ptr(),
+        );
+        return Err(ESP_FAIL);
+    }
+    let to_c = std::ffi::CString::new(to).unwrap_or_default();
+    if let Err(refusal) = crate::redirect_policy::follow(from, to, *followed) {
+        esp_log_write(
+            ESP_LOG_ERROR,
+            TAG.as_ptr(),
+            b"Download refused: %s, to %s\0".as_ptr(),
+            refusal.reason().as_ptr(),
+            to_c.as_ptr(),
+        );
+        return Err(ESP_FAIL);
+    }
+    *followed += 1;
+    esp_log_write(
+        ESP_LOG_INFO,
+        TAG.as_ptr(),
+        b"Redirected (%d): %s\0".as_ptr(),
+        *followed as c_int,
+        to_c.as_ptr(),
+    );
+    *from = to.to_owned();
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -741,8 +786,20 @@ unsafe fn fetch_catalog_json(catalog_url: *const c_char) -> Result<String, i32> 
         return Err(ESP_FAIL);
     }
 
-    let err = esp_http_client_perform(client);
-    let status = esp_http_client_get_status_code(client);
+    let mut err = esp_http_client_perform(client);
+    let mut status = esp_http_client_get_status_code(client);
+    let mut at = url_str.to_owned();
+    let mut followed = 0;
+    while err == ESP_OK && crate::redirect_policy::is_redirect(status) {
+        if let Err(error) = follow_redirect(client, &mut at, &mut followed) {
+            esp_http_client_cleanup(client);
+            return Err(error);
+        }
+        resp_buf.data.clear();
+        resp_buf.overflow = false;
+        err = esp_http_client_perform(client);
+        status = esp_http_client_get_status_code(client);
+    }
     esp_http_client_cleanup(client);
 
     if err != ESP_OK || status != 200 {
@@ -1308,8 +1365,26 @@ unsafe fn download_into_staged(
     }
     session.opened = true;
 
-    let content_length = esp_http_client_fetch_headers(client);
-    let status = esp_http_client_get_status_code(client);
+    let mut content_length = esp_http_client_fetch_headers(client);
+    let mut status = esp_http_client_get_status_code(client);
+    let mut at = url_str.to_owned();
+    let mut followed = 0;
+    while crate::redirect_policy::is_redirect(status) {
+        if let Err(error) = follow_redirect(client, &mut at, &mut followed) {
+            return error;
+        }
+        // The next hop is a fresh connection, maybe to another host: nothing
+        // of this answer's body is read.
+        esp_http_client_close(client);
+        session.opened = false;
+        let open_error = esp_http_client_open(client, 0);
+        if open_error != ESP_OK {
+            return open_error;
+        }
+        session.opened = true;
+        content_length = esp_http_client_fetch_headers(client);
+        status = esp_http_client_get_status_code(client);
+    }
     let mut validator = match StreamValidator::new(status, content_length, expected_size, max_size)
     {
         Ok(validator) => validator,
