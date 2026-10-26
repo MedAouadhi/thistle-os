@@ -4,7 +4,10 @@
  *
  * Two tabs:
  *   Catalog   — apps, drivers and window managers in the catalog
- *   Installed — the SD card's apps, as the boot scan loads them
+ *   Installed — the SD card's apps, as the boot scan loads them; those the
+ *               catalog has a newer release of (update_manager.rs, the
+ *               kernel's app offer) are marked, and their details have
+ *               Update, which installs the release as the Catalog's Install
  *
  * The catalog's firmware is Settings → System update's (update_manager.rs),
  * which keeps the same copy of the catalog.
@@ -27,6 +30,7 @@
 #include "ui/toast.h"
 #include "thistle/appstore_client.h"
 #include "thistle/net_manager.h"
+#include "thistle/update.h"
 
 #include "lvgl.h"
 #include "esp_log.h"
@@ -377,6 +381,22 @@ static int installed_index(const char *id)
     return -1;
 }
 
+/* The catalog's release of `id` that the kernel offers as an update to it,
+ * or -1: the kernel decides (a newer release, a min_os this firmware
+ * meets), the entry is the catalog's as this screen read it. */
+static int update_index(const char *id)
+{
+    char version[sizeof(s_store.entries[0].version)];
+    if (!rs_update_app_offer(id, version, sizeof(version))) return -1;
+    for (int i = 0; i < s_store.entry_count; i++) {
+        const catalog_entry_t *e = &s_store.entries[i];
+        if (e->type == CATALOG_TYPE_APP && strcmp(e->id, id) == 0 && strcmp(e->version, version) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
 /* ------------------------------------------------------------------ */
 /* Lists                                                                */
 /* ------------------------------------------------------------------ */
@@ -435,19 +455,32 @@ static void build_installed_list(void)
 
     s_store.filling = true;
     page->row_count = 0;
+    int updates = 0;
     char head[96], detail[64], cell[CELL_MAX];
     for (int i = 0; i < s_store.installed_count; i++) {
         const installed_app_t *app = &s_store.installed[i];
+        int update = update_index(app->id);
         snprintf(head, sizeof head, "%s  %s", app->name, app->version);
-        snprintf(detail, sizeof detail, "%u KB, %s", (unsigned)((app->size_bytes + 1023) / 1024),
-                 app->is_package ? "from the App Store" : "an ELF on the card");
+        if (update >= 0) {
+            updates++;
+            snprintf(detail, sizeof detail, "Update: %s", s_store.entries[update].version);
+            ESP_LOGI(TAG, "Update offered: %s %s -> %s", app->id, app->version,
+                     s_store.entries[update].version);
+        } else {
+            snprintf(detail, sizeof detail, "%u KB, %s", (unsigned)((app->size_bytes + 1023) / 1024),
+                     app->is_package ? "from the App Store" : "an ELF on the card");
+        }
         row_text(head, detail, cell, sizeof cell);
         page_add_row(page, i, cell);
     }
     page_finish(page, "No apps installed.\nBrowse the Catalog tab.");
 
     char status[48];
-    snprintf(status, sizeof status, "%d app(s) installed", page->row_count);
+    if (updates > 0) {
+        snprintf(status, sizeof status, "%d app(s) installed, %d update(s)", page->row_count, updates);
+    } else {
+        snprintf(status, sizeof status, "%d app(s) installed", page->row_count);
+    }
     set_status(TAB_INSTALLED, status);
 }
 
@@ -614,6 +647,27 @@ static void install_btn_cb(lv_event_t *e)
     }
 }
 
+/* Update: the release the kernel offers, installed through the same TAP
+ * path as an install from the Catalog tab. */
+static void update_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    int i = s_store.selected_installed;
+    if (i < 0 || i >= s_store.installed_count) return;
+    int idx = update_index(s_store.installed[i].id);
+    if (idx < 0) return;
+    const catalog_entry_t *entry = &s_store.entries[idx];
+
+    char status[80];
+    snprintf(status, sizeof status, "Updating %s to %s...", entry->name, entry->version);
+    ESP_LOGI(TAG, "Updating %s to %s", entry->id, entry->version);
+    if (start_job(APPSTORE_JOB_INSTALL, entry, status)) {
+        set_status(TAB_INSTALLED, status);
+        toast_show("Downloading...", TOAST_INFO, 3000);
+        close_detail();
+    }
+}
+
 static void refresh_server_cb(lv_event_t *e)
 {
     (void)e;
@@ -761,12 +815,24 @@ static void show_installed_detail(int i)
     detail_line(content, &s_styles.text, "Version: %s", app->version[0] ? app->version : "unknown");
     detail_line(content, &s_styles.text, "ID: %s", app->id);
     detail_line(content, &s_styles.text, "Size: %s", size);
+    int update = update_index(app->id);
+    if (update >= 0) {
+        detail_line(content, &s_styles.accent, "Update: %s", s_store.entries[update].version);
+    }
     detail_rule(content);
 
     lv_obj_t *row = detail_buttons(content);
-    lv_obj_t *btn = make_button(row, &s_styles.button, &s_styles.button_pressed, "Remove", 100, 26,
-                                remove_selected_installed_cb, NULL);
-    lv_obj_align(btn, LV_ALIGN_LEFT_MID, 0, 0);
+    int32_t x = 0;
+    lv_obj_t *btn;
+    if (update >= 0) {
+        btn = make_button(row, &s_styles.button, &s_styles.button_pressed, "Update", 100, 26,
+                          update_btn_cb, NULL);
+        lv_obj_align(btn, LV_ALIGN_LEFT_MID, 0, 0);
+        x = 110;
+    }
+    btn = make_button(row, &s_styles.button, &s_styles.button_pressed, "Remove", 100, 26,
+                      remove_selected_installed_cb, NULL);
+    lv_obj_align(btn, LV_ALIGN_LEFT_MID, x, 0);
 }
 
 static void row_chosen_cb(lv_event_t *e)

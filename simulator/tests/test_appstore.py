@@ -20,6 +20,13 @@ A catalog can also be on the card, with its packages, as
 tools/make_card_appstore.py writes one: file:///sdcard/... URLs, which the
 kernel reads from the card with no server asked.
 
+App updates (ticket 09 of .scratch/ota): Notes released by
+tools/release_app.py's steps with a throwaway key, which a case may have the
+simulator trust (THISTLE_SIM_PUBLISHER_KEY, simulator builds only), over an
+older Notes installed. The Installed tab marks it and its details' Update
+installs it; a release whose min_os this firmware does not meet is neither
+offered nor installed.
+
 Every case runs on a scratch copy of simulator/sdcard.
 """
 
@@ -47,6 +54,7 @@ SECOND_ROW = "100,114"
 REFRESH = "178,286"
 INSTALL = "57,272"            # on an entry's details, below a two-line description
 REMOVE_INSTALLED = "57,197"   # on an installed app's details
+UPDATE_INSTALLED = "57,216"   # on the details of an installed app with an update
 
 PACKAGE = bytes(range(256)) * 16
 SIGNATURE = bytes(64)
@@ -236,6 +244,31 @@ def released_app(card: Path, host: Host) -> None:
     catalog_from_releases), served at store/catalog.json; and the release's
     assets behind 302s to a second host, as GitHub answers them. The entry
     names github.com, which the case swaps for the local host."""
+    release_notes(card, host)
+
+
+def released_over_installed(min_os: Optional[str] = None,
+                            catalog_min_os: Optional[str] = None) -> Callable[[Path, Host], None]:
+    """Notes 1.0.1 released as released_app() releases it, over Notes 1.0.0
+    installed from the App Store; `min_os` is the package's, and
+    `catalog_min_os`, if given, what its catalog entry claims instead."""
+    def setup(card: Path, host: Host) -> None:
+        release_notes(card, host, min_os, catalog_min_os)
+        generation = card / "apps/com.thistle.notes/generations/1000000"
+        generation.mkdir(parents=True)
+        (generation / "app.app.elf").write_bytes(bytes(4096))
+        (generation / "app.app.elf.sig").write_bytes(SIGNATURE)
+        (generation / "package.json").write_text(json.dumps({
+            "schema": "thistle.app.package/v1", "type": "app", "id": "com.thistle.notes",
+            "name": "Notes", "version": "1.0.0", "release_sequence": 1_000_000,
+            "entry": "app.app.elf"}))
+        (card / "apps/com.thistle.notes/active.json").write_text(
+            '{"release_sequence": 1000000, "version": "1.0.0"}')
+    return setup
+
+
+def release_notes(card: Path, host: Host, min_os: Optional[str] = None,
+                  catalog_min_os: Optional[str] = None) -> None:
     sys.path.insert(0, str(REPOSITORY / "tools"))
     import build_catalog  # noqa: PLC0415
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey  # noqa: PLC0415
@@ -244,7 +277,10 @@ def released_app(card: Path, host: Host) -> None:
     app = work / "notes"
     shutil.copytree(REPOSITORY / "standalone_apps/notes", app)
     manifest = json.loads((app / "manifest.json").read_text())
-    (app / "manifest.json").write_text(json.dumps(dict(manifest, version="1.0.1", arch="host")))
+    manifest = dict(manifest, version="1.0.1", arch="host")
+    if min_os:
+        manifest["min_os"] = min_os
+    (app / "manifest.json").write_text(json.dumps(manifest))
     metadata = json.loads((app / "metadata.json").read_text())
     metadata["releases"].insert(0, {"version": "1.0.1", "release_sequence": 1,
                                     "released": "2026-10-26", "changes": ["Released by tag"]})
@@ -270,6 +306,8 @@ def released_app(card: Path, host: Host) -> None:
     dist = work / "dist"
     entry_asset = next(dist.glob("*.catalog-entry.json"))
     entry = json.loads(entry_asset.read_text().replace(GITHUB, host.base))
+    if catalog_min_os:
+        entry["min_os_version"] = catalog_min_os
     listing = [{"tag_name": RELEASE_TAG, "draft": False, "prerelease": False,
                 "assets": [{"name": entry_asset.name,
                             "browser_download_url": f"{host.base}/releases/download/"
@@ -288,6 +326,25 @@ def released_app(card: Path, host: Host) -> None:
     answer = host.answer
     host.answer = lambda path: ((host.catalog, 200) if path == "/store/catalog.json"
                                 else answer(path))
+
+
+def notes_updated(card: Path, host: Host) -> Optional[str]:
+    notes = card / "apps/com.thistle.notes"
+    active = json.loads((notes / "active.json").read_text())
+    if active != {"release_sequence": 1_000_001, "version": "1.0.1"}:
+        return f"active.json is {active}"
+    if not (notes / "generations/1000001/app.app.elf").is_file():
+        return "the new release's ELF is not there"
+    return None
+
+
+def notes_not_updated(card: Path, host: Host) -> Optional[str]:
+    notes = card / "apps/com.thistle.notes"
+    if json.loads((notes / "active.json").read_text())["release_sequence"] != 1_000_000:
+        return "Notes was updated"
+    if (notes / "generations/1000001").exists():
+        return "the release that needs newer firmware was unpacked"
+    return None
 
 
 def released_app_fetched(card: Path, host: Host) -> Optional[str]:
@@ -311,6 +368,8 @@ class Case:
     # Checks on the card after the run.
     check: Optional[Callable[[Path, Host], Optional[str]]] = None
     timeout_ms: int = 5000
+    # The simulator trusts the key the release was signed with.
+    trust_release_key: bool = False
 
 
 def catalog_kept_whole(card: Path, host: Host) -> Optional[str]:
@@ -442,6 +501,39 @@ CASES = (
                   f"/releases/download/{RELEASE_TAG}/com.thistle.notes-1.0.1-host.tap",
                   f"/releases/download/{RELEASE_TAG}/com.thistle.notes-1.0.1-host.tap.sig"),
          check=released_app_fetched, timeout_ms=9000),
+    # Ticket 09 of .scratch/ota: app updates.
+    Case("an-app-update-installs-from-the-installed-tab",
+         ("--tap", REFRESH, "--tap", TAB_INSTALLED, "--tap", FIRST_ROW,
+          "--tap", UPDATE_INSTALLED),
+         setup=released_over_installed(), trust_release_key=True,
+         expected=("update check (the App Store's Refresh): 1 app update: com.thistle.notes 1.0.1",
+                   "toast: Catalog updated",
+                   "Update offered: com.thistle.notes 1.0.0 -> 1.0.1",
+                   "Updating com.thistle.notes to 1.0.1",
+                   "(appstore_job) done: ESP_OK",
+                   "toast: Notes installed. Restart to open it.",
+                   "Found 1 installed apps"),
+         absent=("Download refused",),
+         check=notes_updated, timeout_ms=11000),
+    Case("an-app-release-that-needs-newer-firmware-is-not-offered",
+         ("--tap", REFRESH, "--tap", TAB_INSTALLED),
+         setup=released_over_installed(min_os="99.0.0"), trust_release_key=True,
+         expected=("update check (the App Store's Refresh): no app updates",
+                   "toast: The catalog lists nothing for this device",
+                   "Found 1 installed apps"),
+         absent=("Update offered",),
+         check=notes_not_updated, timeout_ms=7000),
+    # Its catalog entry says otherwise: the package's own min_os, which its
+    # signature covers, is what the installer checks.
+    Case("a-package-that-needs-newer-firmware-is-not-installed",
+         ("--tap", REFRESH, "--tap", FIRST_ROW, "--tap", INSTALL),
+         setup=released_over_installed(min_os="99.0.0", catalog_min_os="0.3.0"),
+         trust_release_key=True,
+         expected=("update check (the App Store's Refresh): 1 app update: com.thistle.notes 1.0.1",
+                   "App install refused: com.thistle.notes 1.0.1 needs ThistleOS 99.0.0",
+                   "(appstore_job) done: ESP_ERR_INVALID_VERSION",
+                   "toast: Notes needs a newer ThistleOS"),
+         check=notes_not_updated, timeout_ms=9000),
 )
 
 
@@ -472,6 +564,9 @@ def run_case(simulator: Path, case: Case, keep: Optional[Path]) -> None:
                 case.setup(card, host)
             env = dict(os.environ, THISTLE_SIM_SDCARD=str(card),
                        THISTLE_SIM_SPIFFS=str(Path(tmp) / "spiffs"))
+            env.pop("THISTLE_SIM_PUBLISHER_KEY", None)
+            if case.trust_release_key:
+                env["THISTLE_SIM_PUBLISHER_KEY"] = str(Path(tmp) / "release/public.key")
 
             command = [str(simulator), "--headless", "--device", "tdeck-max",
                        "--launch-app", "com.thistle.appstore",

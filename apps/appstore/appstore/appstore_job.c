@@ -137,6 +137,9 @@ static void say_result(const job_t *job)
     case ESP_ERR_NOT_SUPPORTED:
         snprintf(msg, sizeof msg, "A newer %s is already installed", name);
         break;
+    case ESP_ERR_INVALID_VERSION:
+        snprintf(msg, sizeof msg, "%s needs a newer ThistleOS", name);
+        break;
     default:
         snprintf(msg, sizeof msg, "%s: download failed", name);
         break;

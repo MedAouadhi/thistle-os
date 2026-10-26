@@ -431,7 +431,10 @@ the rest. LVGL window managers only; thistle-tk's launcher is its own.
 - **What is new reads kernel state only**, as the status bar does: no app
   has a hook in Home or code for it. The rows are a fixed set: new messages,
   a missed call (its button calls back with `rs_call_dial()`), the tailnet
-  waiting for a sign-in, else "All caught up" and the mesh. Never
+  waiting for a sign-in, updates (the ThistleOS version on offer and the
+  number of app updates, `thistle/update.h`; it opens Settings at System
+  update with `settings_app_open_next()`, or the App Store when only apps
+  have them), else "All caught up" and the mesh. Never
   `rs_msg_alert_take()` (it takes the status bar's pop-up) nor
   `rs_call_missed_seen()` (the Phone app's), and the phonebook only for a
   missed call's name. Read once a second; a label is rewritten only when its
@@ -761,6 +764,14 @@ network and the files. LVGL window managers only; thistle-tk has its own
   release. The boot scan (`app_elf_paths`) loads that and each plain
   `/sdcard/apps/*.app.elf`, so an install opens after a restart; the
   Installed tab lists the same (`installed_apps.rs`).
+- **App updates are the kernel's to decide** (`update_policy::app_offers`):
+  a catalog release of an installed package with a higher release sequence
+  and a `min_os` the running firmware meets. Every catalog read counts them
+  (the daily check, Check now, Refresh); `rs_update_app_offer()` tells the
+  Installed tab, whose details then have Update. The catalog lists no app
+  release that needs newer firmware, and the TAP installer refuses a
+  package whose own `min_os` is not met (`ESP_ERR_INVALID_VERSION`). The
+  simulator trusts `THISTLE_SIM_PUBLISHER_KEY` for apps as for firmware.
 - **Signatures are checked against the key in `kernel_boot.rs`**: upstream's
   production key in a release build, the dev key in a debug one. Apps, and
   only apps, may also be signed by the build machine's publisher key:

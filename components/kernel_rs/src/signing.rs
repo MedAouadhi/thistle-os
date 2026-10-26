@@ -132,18 +132,21 @@ pub unsafe extern "C" fn signing_verify_app(
     if ret != ESP_ERR_INVALID_CRC {
         return ret;
     }
-    let guard = match APP_PUBLISHER_KEY.lock() {
-        Ok(g) => g,
-        Err(_) => return ret,
-    };
-    let Some(publisher) = guard.as_ref() else { return ret };
     let sig_bytes: [u8; 64] = match std::slice::from_raw_parts(signature, 64).try_into() {
         Ok(b) => b,
         Err(_) => return ESP_ERR_INVALID_SIZE,
     };
-    match publisher.verify(std::slice::from_raw_parts(data, data_len), &Signature::from_bytes(&sig_bytes)) {
-        Ok(()) => ESP_OK,
-        Err(_) => ESP_ERR_INVALID_CRC,
+    let signature = Signature::from_bytes(&sig_bytes);
+    let data = std::slice::from_raw_parts(data, data_len);
+    let publisher = APP_PUBLISHER_KEY.lock().ok().and_then(|g| *g);
+    // The simulator's test key too, as for firmware, so its tests can
+    // install an app they signed.
+    if publisher.is_some_and(|key| key.verify(data, &signature).is_ok())
+        || sim_test_key().is_some_and(|key| key.verify(data, &signature).is_ok())
+    {
+        ESP_OK
+    } else {
+        ESP_ERR_INVALID_CRC
     }
 }
 
@@ -243,8 +246,8 @@ pub(crate) fn verify_firmware(data: &[u8], signature: &[u8]) -> bool {
 
 /// A key the simulator trusts beside the kernel's, so its tests can sign
 /// firmware: the file `THISTLE_SIM_PUBLISHER_KEY` names, holding the public
-/// key as 32 bytes or 64 hex digits. In simulator builds only: never on a
-/// device, nor in the host tests.
+/// key as 32 bytes or 64 hex digits; apps signed by it install too. In
+/// simulator builds only: never on a device, nor in the host tests.
 #[cfg(all(not(target_os = "espidf"), feature = "sim-bus"))]
 fn sim_test_key() -> Option<VerifyingKey> {
     let path = std::env::var_os("THISTLE_SIM_PUBLISHER_KEY")?;
