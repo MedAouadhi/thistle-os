@@ -17,6 +17,33 @@ const MAX_CONFIG_SIZE: usize = 8192;
 
 static BOARD_NAME: Mutex<[u8; 64]> = Mutex::new([0u8; 64]);
 
+/// The stored profile's `board.board_id`, which a firmware's artifact
+/// manifest must list among its compatible boards.
+static BOARD_ID: Mutex<String> = Mutex::new(String::new());
+
+/// The stored board profile's id, once it has been read.
+pub fn board_id() -> Option<String> {
+    let id = BOARD_ID.lock().ok()?.clone();
+    (!id.is_empty()).then_some(id)
+}
+
+fn set_board_id(id: &str) {
+    if let Ok(mut stored) = BOARD_ID.lock() {
+        *stored = id.to_string();
+    }
+}
+
+/// The simulator, which reads no board profile, names its device's board.
+///
+/// # Safety
+/// `id` must be NULL or a NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn board_config_set_board_id(id: *const c_char) {
+    if !id.is_null() {
+        set_board_id(&CStr::from_ptr(id).to_string_lossy());
+    }
+}
+
 // ESP-IDF FFI for bus init and driver loading
 extern "C" {
     fn hal_set_board_name(name: *const c_char) -> i32;
@@ -669,6 +696,9 @@ fn load_config(config_path: &str) -> i32 {
 
     // Parse board metadata
     if let Some(board_section) = extract_object(&json, "board") {
+        if let Some(id) = json_get_string(&board_section, "board_id") {
+            set_board_id(&id);
+        }
         if let Some(name) = json_get_string(&board_section, "name") {
             set_board_name(&name);
             if let Ok(cname) = CString::new(name.as_str()) {

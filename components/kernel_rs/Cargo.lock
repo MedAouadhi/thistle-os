@@ -789,6 +789,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "thistle-artifact"
+version = "0.1.0"
+
+[[package]]
 name = "thistle-kernel"
 version = "0.1.0"
 dependencies = [
@@ -804,6 +808,7 @@ dependencies = [
  "pbkdf2",
  "serde_json",
  "sha2 0.11.0",
+ "thistle-artifact",
  "thistle-tk",
  "x25519-dalek",
 ]

@@ -109,6 +109,8 @@ pub mod tk_flashlight;
 pub mod tk_launcher;
 pub mod tk_meshchat;
 pub mod tk_wm;
+pub mod update_manager;
+pub mod update_policy;
 pub mod version;
 pub mod widget;
 pub mod wifi_manager;

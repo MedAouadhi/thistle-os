@@ -99,9 +99,29 @@ flash always boots `kernel_a`.
   (`kernel_slot.rs`, `ota.rs`; every ESP-IDF call in
   `components/kernel/src/kernel_slot_platform.c`). Never
   `esp_ota_get_next_update_partition()`: from `kernel_b` it is `recovery`.
-  The card update, `/sdcard/update/thistle_os.bin` and its `.sig`, goes
-  there, and the slot is selected only once the signature verifies and
-  ESP-IDF has validated the image.
+  The slot is selected only once the bytes written are the artifact
+  manifest's and ESP-IDF has validated the image.
+- **A firmware installs only if its artifact manifest holds up**
+  (`update_policy.rs`, host-tested; `update_manager.rs` runs it): the
+  manifest's signature verifies against the kernel's key (never an app
+  publisher's), it is a firmware, for this chip (`manifest::current_arch()`)
+  and for the stored board id, at or above the security floor, and the file
+  is its size and SHA-256. The manifest's format and shape checks are the
+  shared crate `crates/thistle-artifact`, Recovery's module plus prerelease
+  versions, destination `kernel`, plain-HTTP URLs and the arch `host`;
+  Recovery keeps its own copy. A card install may be any version at or above
+  the floor. Settings → System update installs a release copied to
+  `/sdcard/update/` (`<name>.bin`, `.bin.manifest`, `.bin.manifest.sig`, as
+  the release assets are named), with the reason for a refusal; the log says
+  `card update refused: <reason>`. The C API is `thistle/update.h`.
+- **The security floor is Recovery's NVS key, `thistle_sec`/`fw_sec_ver`**,
+  beside each slot's record (`kernel_a_ver`, `kernel_a_sec`, ...), all in
+  `components/kernel/src/update_platform.c`. A slot's record is written with
+  the slot and by a kernel for its own slot at boot; the floor rises to a
+  kernel's security version (`version::SECURITY_VERSION`) only when that
+  kernel is kept, so one rolled back never raises it. The boot log says
+  `security floor N; this kernel's security version M`, and `security floor
+  raised from N to M` at the keep.
 - **A new kernel is kept after 60 s of running**
   (`ota_keep_new_kernel()`); until then a reset rolls it back to the other
   slot (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`). On that first boot the
@@ -116,10 +136,13 @@ flash always boots `kernel_a`.
   `/tmp/thistle_slots`): `kernel_a.bin`, `kernel_b.bin`, and `otadata`, the
   bootloader's choice and the version each slot's image describes, which is
   the version a run reports. A run that ends before the keep leaves the next
-  on the other slot. `THISTLE_SIM_KEEP_S` shortens the keep,
-  `THISTLE_SIM_PUBLISHER_KEY` names a public key it trusts for firmware, and
-  `--install-update` installs the card's update once booted, exiting where a
-  device restarts. `simulator/tests/test_kernel_slots.py`.
+  on the other slot. Its NVS is `nvs` there too, and a slot's security
+  version the one recorded when it was written. `THISTLE_SIM_KEEP_S`
+  shortens the keep, `THISTLE_SIM_PUBLISHER_KEY` names a public key it
+  trusts for firmware manifests (simulator builds only, never the host
+  tests), its board id is the `--device` name, and `--install-update`
+  installs the card's release once booted, exiting where a device restarts.
+  `simulator/tests/test_kernel_slots.py`, `test_system_update.py`.
 
 ### Internal RAM runs out first; keep stacks there and buffers out
 
@@ -803,7 +826,7 @@ Do **not** source `~/export-esp.sh` in the shell you run `idf.py` from — it ov
 ```
 Recovery (Rust, `recovery` slot, 2.5MB) — reserved, not yet flashed (ADR-0010)
 Kernel (100% Rust, `kernel_a` / `kernel_b`, 4.5MB each) — hardware-independent
-  ↑ Ed25519 verify, then written into the other kernel slot
+  ↑ signed artifact manifest checked, then written into the other kernel slot
   ├── Display Server (surfaces, compositor, input routing)
   ├── Kernel modules (57 modules: app manager, IPC, events, permissions, signing, manifest, crypto, HAL registry, drivers, WM, app store, ...)
   ├── Syscall table (~80 syscalls exported to loaded ELFs)

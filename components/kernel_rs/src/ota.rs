@@ -14,7 +14,6 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::kernel_slot::{self, Keep};
-use crate::signing::verify_exact_reader_with;
 
 // ---------------------------------------------------------------------------
 // ESP-IDF error codes
@@ -30,14 +29,8 @@ const ESP_ERR_OTA_VALIDATE_FAILED: i32 = 0x1503;
 
 const BUNDLE_TRANSACTION_PATH: &str = "/sdcard/.thistle-bundle-transaction";
 const BUNDLE_DOWNLOAD_PATH: &str = "/sdcard/.thistle-bundle-download";
-const MAX_OTA_SIZE: u64 = 16 * 1024 * 1024; // 16 MB
 
 static TAG: &[u8] = b"ota\0";
-
-/// The card update: a kernel image and its detached signature.
-fn sd_update_path() -> PathBuf {
-    crate::appstore_client::card_root().join("update/thistle_os.bin")
-}
 
 // ---------------------------------------------------------------------------
 // C FFI — logging
@@ -113,13 +106,13 @@ mod platform {
         Some(Booted { slot, pending, rolled_back_from: None, version: Some(version) })
     }
 
-    pub(super) struct Writer {
+    pub(crate) struct Writer {
         handle: u32,
         label: CString,
     }
 
     impl Writer {
-        pub(super) fn begin(label: &'static str, size: usize) -> Result<Writer, i32> {
+        pub(crate) fn begin(label: &'static str, size: usize) -> Result<Writer, i32> {
             let label = CString::new(label).map_err(|_| ESP_ERR_NOT_FOUND)?;
             let mut handle = 0u32;
             match unsafe { kslot_platform_begin(label.as_ptr(), size, &mut handle) } {
@@ -128,19 +121,19 @@ mod platform {
             }
         }
 
-        pub(super) fn write(&mut self, chunk: &[u8]) -> Result<(), i32> {
+        pub(crate) fn write(&mut self, chunk: &[u8]) -> Result<(), i32> {
             match unsafe { kslot_platform_write(self.handle, chunk.as_ptr(), chunk.len()) } {
                 ESP_OK => Ok(()),
                 err => Err(err),
             }
         }
 
-        pub(super) fn abort(self) {
+        pub(crate) fn abort(self) {
             unsafe { kslot_platform_abort(self.handle) }
         }
 
         /// Validate the image and select its slot.
-        pub(super) fn finish(self) -> Result<(), i32> {
+        pub(crate) fn finish(self) -> Result<(), i32> {
             match unsafe { kslot_platform_finish(self.handle, self.label.as_ptr()) } {
                 ESP_OK => Ok(()),
                 err => Err(err),
@@ -178,7 +171,7 @@ mod platform {
     /// `THISTLE_SIM_SLOTS`, or /tmp/thistle_slots: `kernel_a.bin` and
     /// `kernel_b.bin`, and `otadata`, the bootloader's choice and the
     /// version written into each.
-    fn dir() -> PathBuf {
+    pub(crate) fn dir() -> PathBuf {
         std::env::var_os("THISTLE_SIM_SLOTS")
             .filter(|d| !d.is_empty())
             .map(PathBuf::from)
@@ -213,7 +206,7 @@ mod platform {
         })
     }
 
-    pub(super) struct Writer {
+    pub(crate) struct Writer {
         label: &'static str,
         file: std::fs::File,
         head: Vec<u8>,
@@ -224,24 +217,24 @@ mod platform {
     }
 
     impl Writer {
-        pub(super) fn begin(label: &'static str, _size: usize) -> Result<Writer, i32> {
+        pub(crate) fn begin(label: &'static str, _size: usize) -> Result<Writer, i32> {
             let _ = std::fs::create_dir_all(dir());
             let file = std::fs::File::create(part(label)).map_err(|_| ESP_FAIL)?;
             Ok(Writer { label, file, head: Vec::new() })
         }
 
-        pub(super) fn write(&mut self, chunk: &[u8]) -> Result<(), i32> {
+        pub(crate) fn write(&mut self, chunk: &[u8]) -> Result<(), i32> {
             let want = kernel_slot::IMAGE_VERSION_BYTES.saturating_sub(self.head.len());
             self.head.extend_from_slice(&chunk[..want.min(chunk.len())]);
             self.file.write_all(chunk).map_err(|_| ESP_FAIL)
         }
 
-        pub(super) fn abort(self) {
+        pub(crate) fn abort(self) {
             let _ = std::fs::remove_file(part(self.label));
         }
 
         /// As esp_ota_end() does, refuse what is no app image; then select it.
-        pub(super) fn finish(self) -> Result<(), i32> {
+        pub(crate) fn finish(self) -> Result<(), i32> {
             let Some(version) = kernel_slot::image_version(&self.head) else {
                 self.abort();
                 return Err(ESP_ERR_OTA_VALIDATE_FAILED);
@@ -290,6 +283,21 @@ mod platform {
     pub(super) fn restart() -> ! {
         panic!("restart")
     }
+}
+
+/// Writes a kernel image into a kernel slot; update_manager streams the
+/// update through it. finish() validates the image and selects the slot.
+pub(crate) use platform::Writer as SlotWriter;
+
+/// The simulator's kernel slots: `THISTLE_SIM_SLOTS`, or /tmp/thistle_slots.
+#[cfg(not(target_os = "espidf"))]
+pub(crate) fn sim_slots_dir() -> PathBuf {
+    platform::dir()
+}
+
+/// Restart, into the slot selected to boot next.
+pub(crate) fn restart() -> ! {
+    platform::restart()
 }
 
 // ---------------------------------------------------------------------------
@@ -342,7 +350,7 @@ static VERSION: OnceLock<CString> = OnceLock::new();
 /// What to call once the running kernel is kept, and the job that waits.
 static KEEP: Mutex<(Option<extern "C" fn()>, u32)> = Mutex::new((None, 0));
 
-fn running_slot() -> Option<&'static str> {
+pub(crate) fn running_slot() -> Option<&'static str> {
     RUNNING.get().and_then(|r| r.slot.to_str().ok())
 }
 
@@ -369,12 +377,13 @@ pub extern "C" fn ota_init() -> i32 {
         );
     }
 
-    let slot = CString::new(booted.slot).unwrap_or_default();
+    let slot = CString::new(booted.slot.as_str()).unwrap_or_default();
     // A simulator slot that was never written runs the build's own version.
     #[cfg(not(target_os = "espidf"))]
     let version = booted.version.unwrap_or_else(|| crate::version::running().to_string());
     #[cfg(target_os = "espidf")]
     let version = booted.version.unwrap_or_default();
+    crate::update_manager::kernel_booted(&booted.slot, &version);
     let version = CString::new(version).unwrap_or_default();
     if booted.pending {
         log!(
@@ -446,6 +455,9 @@ unsafe extern "C" fn keep_job(_arg: *mut c_void) {
         slot.as_ptr(),
         running_for.as_secs() as u32
     );
+    // Only now, never when it was written: a kernel rolled back never
+    // raises the floor.
+    crate::update_manager::kernel_kept();
     if ota_finalize_bundle_transaction() != ESP_OK {
         // The kernel is kept. Recovery retries the cleanup later.
         log!(ESP_LOG_WARN, b"could not finalize the bundle transaction\0");
@@ -460,133 +472,32 @@ unsafe extern "C" fn keep_job(_arg: *mut c_void) {
     }
 }
 
-/// Return true if a firmware update file exists on the SD card.
+/// Whether the card holds a release in update/: an image and its artifact
+/// manifest beside it.
 #[no_mangle]
 pub extern "C" fn ota_sd_update_available() -> bool {
-    match std::fs::metadata(sd_update_path()) {
-        Ok(m) => m.len() > 0,
-        Err(_) => false,
-    }
+    crate::update_manager::card_release().is_some()
 }
 
-/// Write the card's kernel update into the other kernel slot and restart
-/// into it.
-///
-/// Opens the image once and streams those exact bytes through signature
-/// verification and into the slot; the slot is selected only once the
-/// signature verifies and ESP-IDF has validated the image.
+/// Install the card's release (update_manager.rs: its artifact manifest is
+/// checked, then it is written into the other kernel slot) and restart into
+/// it. Blocks; Settings installs on a task of its own instead, through
+/// thistle/update.h.
 ///
 /// # Safety
-/// `progress_cb` may be NULL. `user_data` is passed through to the callback.
+/// The progress callback is not called; it is kept for the C signature.
 #[no_mangle]
 pub unsafe extern "C" fn ota_apply_from_sd(
-    progress_cb: Option<OtaProgressCb>,
-    user_data: *mut c_void,
+    _progress_cb: Option<OtaProgressCb>,
+    _user_data: *mut c_void,
 ) -> i32 {
-    // A sleep halfway through would leave half an image in the slot.
-    let _awake = crate::power_manager::HoldGuard::new(b"an update is installing\0");
-    let update_path = sd_update_path();
-
-    let Some(running) = running_slot() else {
-        log!(ESP_LOG_ERROR, b"no running kernel slot; nothing to write\0");
-        return ESP_ERR_NOT_FOUND;
-    };
-    let Some(target) = kernel_slot::other_kernel_slot(running) else {
-        let running = CString::new(running).unwrap_or_default();
-        log!(
-            ESP_LOG_ERROR,
-            b"running from %s, which is no kernel slot; flash this board by USB once\0",
-            running.as_ptr()
-        );
-        return ESP_ERR_NOT_FOUND;
-    };
-
-    // Keep one file-description boundary from signature verification through
-    // flashing. The mutable pathname is never reopened.
-    let mut file = match std::fs::File::open(&update_path) {
-        Ok(f) => f,
-        Err(_) => {
-            log!(ESP_LOG_ERROR, b"Cannot open update file\0");
-            return ESP_ERR_NOT_FOUND;
+    match crate::update_manager::install_from_card_blocking() {
+        ESP_OK => {
+            log!(ESP_LOG_INFO, b"restarting into the new kernel\0");
+            platform::restart()
         }
-    };
-
-    let file_size = match file.metadata() {
-        Ok(m) => m.len(),
-        Err(_) => return ESP_ERR_NOT_FOUND,
-    };
-
-    if file_size == 0 {
-        log!(ESP_LOG_ERROR, b"Update file is empty\0");
-        return ESP_ERR_INVALID_SIZE;
+        err => err,
     }
-    if file_size > MAX_OTA_SIZE {
-        log!(ESP_LOG_ERROR, b"OTA file too large\0");
-        return ESP_ERR_INVALID_SIZE;
-    }
-
-    let signature = match std::fs::read(sig_path(&update_path)) {
-        Ok(bytes) => bytes,
-        Err(_) => {
-            log!(ESP_LOG_ERROR, b"Cannot open OTA signature\0");
-            return ESP_ERR_NOT_FOUND;
-        }
-    };
-    if signature.len() != 64 {
-        log!(ESP_LOG_ERROR, b"OTA signature has invalid size\0");
-        return ESP_ERR_INVALID_SIZE;
-    }
-
-    let target_c = CString::new(target).unwrap_or_default();
-    log!(
-        ESP_LOG_INFO,
-        b"writing the card's kernel update (%d bytes) into %s\0",
-        file_size as i32,
-        target_c.as_ptr()
-    );
-
-    let mut writer = match platform::Writer::begin(target, file_size as usize) {
-        Ok(w) => w,
-        Err(err) => {
-            log!(ESP_LOG_ERROR, b"could not start writing %s: 0x%x\0", target_c.as_ptr(), err);
-            return err;
-        }
-    };
-
-    let mut written: u32 = 0;
-    let stream_result =
-        verify_exact_reader_with(&mut file, file_size as usize, &signature, |chunk| {
-            writer.write(chunk)?;
-            written += chunk.len() as u32;
-            if let Some(cb) = progress_cb {
-                cb(written, file_size as u32, user_data);
-            }
-            Ok(())
-        });
-    if let Err(error) = stream_result {
-        log!(ESP_LOG_ERROR, b"OTA stream verification/write failed: 0x%x\0", error);
-        writer.abort();
-        return error;
-    }
-
-    if let Err(err) = writer.finish() {
-        log!(
-            ESP_LOG_ERROR,
-            b"the image in %s is not a kernel ESP-IDF can boot: 0x%x\0",
-            target_c.as_ptr(),
-            err
-        );
-        return err;
-    }
-
-    log!(ESP_LOG_INFO, b"kernel written to %s; restarting into it\0", target_c.as_ptr());
-    platform::restart();
-}
-
-fn sig_path(path: &Path) -> PathBuf {
-    let mut sig = path.as_os_str().to_owned();
-    sig.push(".sig");
-    PathBuf::from(sig)
 }
 
 /// Apply a firmware OTA update from a URL (not yet implemented).
@@ -773,11 +684,4 @@ mod tests {
         assert_eq!(ota_rollback(), ESP_ERR_NOT_SUPPORTED);
     }
 
-    #[test]
-    fn the_signature_is_beside_the_image() {
-        assert_eq!(
-            sig_path(Path::new("/sdcard/update/thistle_os.bin")),
-            PathBuf::from("/sdcard/update/thistle_os.bin.sig")
-        );
-    }
 }

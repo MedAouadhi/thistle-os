@@ -8,8 +8,10 @@ The simulator's slots are files in THISTLE_SIM_SLOTS (kernel_a.bin,
 kernel_b.bin and otadata, the bootloader's choice); the version a slot runs
 is the one its image describes. THISTLE_SIM_KEEP_S shortens the keep delay,
 and THISTLE_SIM_PUBLISHER_KEY names a key the simulator trusts to sign
-firmware. --install-update installs the card's update/thistle_os.bin once
-booted, as Settings does, and the simulator exits where a device restarts.
+firmware. An update is a release as published: the image, its artifact
+manifest (tools/sign.py's canonical form) and the manifest's signature.
+--install-update installs the card's release once booted, as Settings does,
+and the simulator exits where a device restarts.
 
 Every case runs on a scratch copy of simulator/sdcard and its own slots.
 """
@@ -30,6 +32,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 SDCARD = Path(__file__).resolve().parent.parent / "sdcard"
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
+from sign import canonical_manifest  # noqa: E402
 
 
 def kernel_image(version: str, size: int = 8192) -> bytes:
@@ -59,11 +63,17 @@ class Device:
         self.public_key.write_bytes(self.key.public_key().public_bytes(
             Encoding.Raw, PublicFormat.Raw))
 
-    def put_update(self, image: bytes, key: Optional[Ed25519PrivateKey] = None) -> None:
+    def put_update(self, image: bytes, key: Optional[Ed25519PrivateKey] = None,
+                   version: str = "0.6.0") -> None:
         update = self.card / "update"
         update.mkdir(exist_ok=True)
+        manifest = canonical_manifest(
+            artifact_type="firmware", artifact_id="thistle-os", version=version,
+            security_version=500, arch="host", compatible_boards=["tdeck-max"],
+            url="https://example.com/thistle_os.bin", payload=image)
         (update / "thistle_os.bin").write_bytes(image)
-        (update / "thistle_os.bin.sig").write_bytes((key or self.key).sign(image))
+        (update / "thistle_os.bin.manifest").write_bytes(manifest)
+        (update / "thistle_os.bin.manifest.sig").write_bytes((key or self.key).sign(manifest))
 
     def run(self, *args: str, keep_s: float = 60, timeout_ms: int = 1500) -> str:
         env = dict(os.environ,
@@ -112,7 +122,7 @@ def an_update_is_written_into_the_other_slot_and_boots_after_the_restart(
     device.put_update(kernel_image("0.6.0"))
     log = device.install()
     expect(log, "running kernel_a", "into kernel_b",
-           "kernel written to kernel_b; restarting into it")
+           "installed 0.6.0 into kernel_b", "restarting into the new kernel")
     if not (device.slots / "kernel_b.bin").is_file():
         raise AssertionError("kernel_b.bin was not written")
     if (device.slots / "kernel_b.bin").read_bytes() != kernel_image("0.6.0"):
@@ -151,10 +161,10 @@ def an_update_from_the_second_slot_writes_the_first(device: Device) -> None:
     device.install()
     device.run(keep_s=0, timeout_ms=2500)
 
-    device.put_update(kernel_image("0.7.0"))
+    device.put_update(kernel_image("0.7.0"), version="0.7.0")
     log = device.install()
     expect(log, "running kernel_b, version 0.6.0", "into kernel_a",
-           "kernel written to kernel_a")
+           "installed 0.7.0 into kernel_a")
 
     log = device.run()
     expect(log, "running kernel_a, version 0.7.0, new")
@@ -163,7 +173,8 @@ def an_update_from_the_second_slot_writes_the_first(device: Device) -> None:
 def an_update_signed_by_another_key_is_not_written(device: Device) -> None:
     device.put_update(kernel_image("0.6.0"), key=Ed25519PrivateKey.generate())
     log = device.install()
-    expect(log, "OTA stream verification/write failed", "Update not installed")
+    expect(log, "card update refused: not signed by this device's publisher",
+           "Update not installed")
     log = device.run()
     expect(log, "running kernel_a")
     refuse(log, "kernel_b")

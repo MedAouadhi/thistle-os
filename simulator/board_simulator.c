@@ -17,6 +17,8 @@
 #include "sim_spi_bus.h"
 #include "sim_devices.h"
 
+void board_config_set_board_id(const char *id);   /* board_config.rs */
+
 /* Forward declaration — defined in sim_network.c */
 esp_err_t sim_network_register(void);
 esp_err_t sim_cellular_register(void);
@@ -107,6 +109,9 @@ esp_err_t board_init(void)
     sim_display_set_title(dev->board_name);
 
     hal_set_board_name(dev->board_name);
+    /* The board id a firmware's artifact manifest must list; a device reads
+     * it from its profile (board_config.rs). */
+    board_config_set_board_id(dev->name);
     hal_display_register(sim_display_get(), NULL);
     hal_input_register(sim_input_get(), NULL);
     hal_storage_register(sim_storage_get(), NULL);

@@ -442,10 +442,10 @@ void app_main(void)
 
     /* Check for SD card firmware update */
     if (ota_sd_update_available()) {
-        ESP_LOGI(TAG, "Firmware update detected on SD card!");
+        ESP_LOGI(TAG, "A release is on the card: Settings > System update installs it");
 #ifdef THISTLE_LEGACY_C_APPS
         /* lvgl_task is running by now; post rather than show. */
-        toast_post("Update available! Settings > About to install", TOAST_INFO, 5000);
+        toast_post("Update on the card: Settings > System update", TOAST_INFO, 5000);
 #endif
     }
 

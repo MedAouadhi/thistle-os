@@ -228,10 +228,24 @@ pub(crate) fn verify_exact_reader_with(
     }
 }
 
+/// Whether `signature` is the kernel's key's over `data`: a firmware's
+/// artifact manifest. Firmware accepts the kernel's key only, never an app
+/// publisher's; the simulator also takes its test key.
+pub(crate) fn verify_firmware(data: &[u8], signature: &[u8]) -> bool {
+    let Ok(sig_bytes) = <[u8; 64]>::try_from(signature) else {
+        return false;
+    };
+    let signature = Signature::from_bytes(&sig_bytes);
+    let kernel = VERIFYING_KEY.lock().ok().and_then(|g| *g);
+    kernel.is_some_and(|key| key.verify(data, &signature).is_ok())
+        || sim_test_key().is_some_and(|key| key.verify(data, &signature).is_ok())
+}
+
 /// A key the simulator trusts beside the kernel's, so its tests can sign
 /// firmware: the file `THISTLE_SIM_PUBLISHER_KEY` names, holding the public
-/// key as 32 bytes or 64 hex digits. Never on a device.
-#[cfg(not(target_os = "espidf"))]
+/// key as 32 bytes or 64 hex digits. In simulator builds only: never on a
+/// device, nor in the host tests.
+#[cfg(all(not(target_os = "espidf"), feature = "sim-bus"))]
 fn sim_test_key() -> Option<VerifyingKey> {
     let path = std::env::var_os("THISTLE_SIM_PUBLISHER_KEY")?;
     let bytes = fs::read(path).ok()?;
@@ -242,7 +256,7 @@ fn sim_test_key() -> Option<VerifyingKey> {
     VerifyingKey::from_bytes(&key).ok()
 }
 
-#[cfg(target_os = "espidf")]
+#[cfg(not(all(not(target_os = "espidf"), feature = "sim-bus")))]
 fn sim_test_key() -> Option<VerifyingKey> {
     None
 }
@@ -490,6 +504,33 @@ mod tests {
             ),
             Err(ESP_ERR_INVALID_SIZE)
         );
+    }
+
+    #[test]
+    fn a_firmware_manifest_verifies_against_the_kernel_key_only() {
+        reset();
+        let kernel = SigningKey::from_bytes(&[0x42u8; 32]);
+        let publisher = SigningKey::from_bytes(&[0x24u8; 32]);
+        let manifest = b"THISTLE-ARTIFACT-MANIFEST-V1\ntype=firmware\n";
+        // Before the kernel has a key, nothing verifies.
+        assert!(!verify_firmware(manifest, &kernel.sign(manifest).to_bytes()));
+        assert_eq!(unsafe { signing_init(kernel.verifying_key().as_bytes().as_ptr()) }, ESP_OK);
+        assert_eq!(add_app_publisher(publisher.verifying_key().as_bytes()), ESP_OK);
+
+        assert!(verify_firmware(manifest, &kernel.sign(manifest).to_bytes()));
+        // The app publisher's key signs apps, never a firmware.
+        assert!(!verify_firmware(manifest, &publisher.sign(manifest).to_bytes()));
+        let mut changed = manifest.to_vec();
+        changed[0] ^= 1;
+        assert!(!verify_firmware(&changed, &kernel.sign(manifest).to_bytes()));
+        assert!(!verify_firmware(manifest, &[0u8; 63]));
+        reset();
+    }
+
+    #[test]
+    fn host_tests_trust_no_simulator_key() {
+        // THISTLE_SIM_PUBLISHER_KEY is read in simulator builds only.
+        assert!(sim_test_key().is_none());
     }
 
     fn remove_payload_fixture(path: &std::path::Path) {
