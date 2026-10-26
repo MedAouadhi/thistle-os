@@ -254,7 +254,7 @@ void app_main(void)
     return;
 #endif
 
-    ESP_LOGI(TAG, "ThistleOS v0.1.0 starting...");
+    ESP_LOGI(TAG, "ThistleOS %s starting...", ota_get_current_version());
 
 #if CONFIG_IDF_TARGET_ESP32S3
     /* Reserve the render stack before Wi-Fi and the driver graph fragment

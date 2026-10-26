@@ -52,9 +52,13 @@ set(APP_PUBLISHER_KEY "${CMAKE_CURRENT_SOURCE_DIR}/../../tools/local_publisher_p
 # so a simulated receiver is never registered with Thingstream.
 set(REPO_ENV "${CMAKE_CURRENT_SOURCE_DIR}/../../.env")
 
+# The firmware's version, as the top-level CMakeLists.txt described it: the
+# kernel reports exactly what the image's description holds (version.rs).
+idf_build_get_property(THISTLE_FW_VERSION PROJECT_VER)
+
 # Write a build script that sources the ESP Rust env in isolation
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/build_rust.sh"
-"#!/bin/bash\nexport PATH=\"$ENV{HOME}/.cargo/bin:$PATH\"\nif [ -f \"$ENV{HOME}/export-esp.sh\" ]; then . \"$ENV{HOME}/export-esp.sh\" 2>/dev/null; fi\ncd \"${CMAKE_CURRENT_SOURCE_DIR}\"\nexport RUSTFLAGS=\"${RUST_TARGET_FEATURES}\"\nif [ -f \"${APP_PUBLISHER_KEY}\" ]; then export THISTLE_APP_PUBLISHER_KEY=$(od -An -v -tx1 \"${APP_PUBLISHER_KEY}\" | tr -d ' \\n'); else unset THISTLE_APP_PUBLISHER_KEY; fi\nif [ -f \"${REPO_ENV}\" ]; then export THISTLE_ASSISTNOW_TOKEN=$(sed -n -E 's/^[[:space:]]*(export[[:space:]]+)?ASSISTNOW_ZTP_TOKEN[[:space:]]*=[[:space:]]*\"?([^\"]*)\"?[[:space:]]*$/\\2/p' \"${REPO_ENV}\" | tail -n 1); else unset THISTLE_ASSISTNOW_TOKEN; fi\ncargo +esp build --release --target ${RUST_TARGET} --features ${RUST_FEATURES} -Zbuild-std=std,panic_abort\n")
+"#!/bin/bash\nexport PATH=\"$ENV{HOME}/.cargo/bin:$PATH\"\nif [ -f \"$ENV{HOME}/export-esp.sh\" ]; then . \"$ENV{HOME}/export-esp.sh\" 2>/dev/null; fi\ncd \"${CMAKE_CURRENT_SOURCE_DIR}\"\nexport THISTLE_FW_VERSION=\"${THISTLE_FW_VERSION}\"\nexport RUSTFLAGS=\"${RUST_TARGET_FEATURES}\"\nif [ -f \"${APP_PUBLISHER_KEY}\" ]; then export THISTLE_APP_PUBLISHER_KEY=$(od -An -v -tx1 \"${APP_PUBLISHER_KEY}\" | tr -d ' \\n'); else unset THISTLE_APP_PUBLISHER_KEY; fi\nif [ -f \"${REPO_ENV}\" ]; then export THISTLE_ASSISTNOW_TOKEN=$(sed -n -E 's/^[[:space:]]*(export[[:space:]]+)?ASSISTNOW_ZTP_TOKEN[[:space:]]*=[[:space:]]*\"?([^\"]*)\"?[[:space:]]*$/\\2/p' \"${REPO_ENV}\" | tail -n 1); else unset THISTLE_ASSISTNOW_TOKEN; fi\ncargo +esp build --release --target ${RUST_TARGET} --features ${RUST_FEATURES} -Zbuild-std=std,panic_abort\n")
 
 # Cargo runs on every build and decides for itself what is out of date. It
 # tracks every input, including thistle-tk under crates/, which the glob of

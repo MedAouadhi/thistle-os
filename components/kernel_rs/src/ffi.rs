@@ -187,8 +187,7 @@ pub unsafe extern "C" fn manifest_path_from_elf(
 /// Returns a pointer to a static string. Do not free.
 #[no_mangle]
 pub extern "C" fn kernel_version() -> *const c_char {
-    // Include the null terminator
-    b"0.1.0\0".as_ptr() as *const c_char
+    crate::version::running_c()
 }
 
 #[cfg(test)]

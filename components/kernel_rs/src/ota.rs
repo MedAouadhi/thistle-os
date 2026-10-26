@@ -381,7 +381,7 @@ pub unsafe extern "C" fn ota_apply_from_http(
 /// Returns a pointer to a static C string. Do not free.
 #[no_mangle]
 pub extern "C" fn ota_get_current_version() -> *const c_char {
-    b"0.5.0\0".as_ptr() as *const c_char
+    crate::version::running_c()
 }
 
 /// Return the label of the currently running OTA partition.
@@ -535,14 +535,14 @@ mod tests {
 
     // -----------------------------------------------------------------------
     // test_get_current_version_matches_expected
-    // Mirrors test_ota.c: version string must match THISTLE_VERSION_STRING ("0.1.0").
+    // The OTA module reports the firmware's version, the build's describe.
     // -----------------------------------------------------------------------
 
     #[test]
     fn test_get_current_version_matches_expected() {
         let ptr = ota_get_current_version();
         let version = unsafe { CStr::from_ptr(ptr).to_str().unwrap() };
-        assert_eq!(version, "0.5.0", "OTA version must match VERSION_STRING");
+        assert_eq!(version, crate::version::running());
     }
 
     // -----------------------------------------------------------------------

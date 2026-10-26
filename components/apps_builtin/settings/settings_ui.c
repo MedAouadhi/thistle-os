@@ -1679,8 +1679,8 @@ static void open_about_screen(void)
     lv_obj_align(lbl_os, LV_ALIGN_LEFT_MID, 0, 0);
 
     /* Version */
-    char ver_buf[32];
-    snprintf(ver_buf, sizeof(ver_buf), "Version: %s", THISTLE_VERSION_STRING);
+    char ver_buf[64];
+    snprintf(ver_buf, sizeof(ver_buf), "Version: %s", ota_get_current_version());
     create_info_row(content, ver_buf);
 
     create_separator(content);

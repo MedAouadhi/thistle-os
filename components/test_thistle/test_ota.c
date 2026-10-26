@@ -14,18 +14,19 @@
 
 #include "unity.h"
 #include "thistle/ota.h"
-#include "thistle/kernel.h"   /* THISTLE_VERSION_STRING */
+#include "esp_app_desc.h"
 #include <string.h>
 
 /* --------------------------------------------------------------------------
  * test_ota_get_version
  * -------------------------------------------------------------------------- */
 
-TEST_CASE("test_ota_get_version: returns THISTLE_VERSION_STRING", "[ota]")
+TEST_CASE("test_ota_get_version: the image description's version", "[ota]")
 {
+    /* Both are ESP-IDF's PROJECT_VER, from tools/firmware_version.sh. */
     const char *ver = ota_get_current_version();
     TEST_ASSERT_NOT_NULL(ver);
-    TEST_ASSERT_EQUAL_STRING(THISTLE_VERSION_STRING, ver);
+    TEST_ASSERT_EQUAL_STRING(esp_app_get_description()->version, ver);
 }
 
 /* --------------------------------------------------------------------------
