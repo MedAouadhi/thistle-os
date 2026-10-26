@@ -49,7 +49,7 @@ TX/RX are crossed relative to the SoC pin that drives them.
 - **Simulator**: SDL2 desktop build. `cd simulator/build && cmake .. && make -j8 && ./thistle_sim`
 - **Rust kernel**: `cargo +esp check` in `components/kernel_rs/`. Tests: `cargo test --target <host-triple> -- --test-threads=1` (1878 tests)
 - **Recovery OS**: `cd recovery && cargo +esp build --release`
-- **CI**: GitHub Actions on GitHub's hosted runners, every push to main and every pull request. `ci.yml`: the firmware for each chip in its list (the S3 alone) in `espressif/idf:v5.5`, failing if a `.env` is in the workspace, its partition size check, Recovery, cargo-audit, Semgrep SAST, Trivy. `tests.yml`: the host tests (Rust kernel, Python tools, simulator). `pages.yml`: the docs and the WASM simulator to the repository's own Pages. `tools/test_ci_workflows.py` keeps them off self-hosted runners and upstream's deploy targets.
+- **CI**: GitHub Actions on GitHub's hosted runners, every push to main and every pull request. `ci.yml`: the firmware for each chip in its list (the S3 alone) in `espressif/idf:v5.5`, failing if a `.env` is in the workspace, its partition size check, Recovery, cargo-audit, Semgrep SAST, Trivy. `tests.yml`: the host tests (Rust kernel, Python tools, simulator). `pages.yml`: the docs and the WASM simulator to the repository's own Pages. `release-firmware.yml` and `release-app.yml`: releases, by tag (Releases and updates, below). `tools/test_ci_workflows.py` keeps them all off self-hosted runners and upstream's deploy targets; `tools/test_upstream_links.py` keeps the docs, the site and the apps' metadata linking to the fork.
 
 ### Sharing one USB-Serial-JTAG board between sessions
 
@@ -93,96 +93,146 @@ to `board.json` lasts until the next version boots; it is then in the backup.
 Before this (tickets 03, 06, 09 and 10), a changed profile never reached a
 board that had one.
 
-### Two kernel slots
+### Releases and updates
 
-The flash holds two 4.5 MB kernel slots, `kernel_a` (ota_0) and `kernel_b`
-(ota_1), and a 2.5 MB `recovery` slot (ota_2) that nothing writes yet
-(`partitions.csv`, ADR-0010). NVS, otadata, SPIFFS and the core dump are
-where they were before, so the one USB flash that moves a board to this
-table keeps WiFi, the mesh identity, `board.json` and `system.json`. There is
-no `factory`: `idf.py flash` writes `kernel_a` and resets otadata, so a USB
-flash always boots `kernel_a`.
+The fork, MedAouadhi/thistle-os, publishes its own releases on GitHub and a
+catalog on its Pages, and devices update themselves from them
+(`.scratch/ota/spec.md`, ADR-0010, ADR-0011; the words are `CONTEXT.md`'s).
+Upstream's pipeline, key and catalog are gone from everything but Recovery,
+whose URLs and keys stay until it is brought up. Pushing a tag is the
+user's to do, not an agent's.
 
-- **An update is written into the other kernel slot, named by its label**
-  (`kernel_slot.rs`, `ota.rs`; every ESP-IDF call in
-  `components/kernel/src/kernel_slot_platform.c`). Never
-  `esp_ota_get_next_update_partition()`: from `kernel_b` it is `recovery`.
-  The slot is selected only once the bytes written are the artifact
-  manifest's and ESP-IDF has validated the image.
+- **A release is a pushed tag.** `v0.6.0` releases the firmware
+  (`release-firmware.yml`, `tools/release_firmware.py`), `notes-v1.0.1` one
+  of the four App Store apps (`release-app.yml`, `tools/release_app.py`; the
+  App Store section has their rules). Each builds the tagged commit on a
+  hosted runner in `espressif/idf:v5.5` with no `.env`, so no key or tailnet
+  address is compiled in; publishes an immutable GitHub Release with build
+  provenance attestations; then calls `pages.yml`, which rebuilds the
+  catalog. The firmware's assets are `thistle_os-esp32s3-<tag>.bin`,
+  `.bin.manifest`, `.bin.manifest.sig`, `-full.bin`, `.catalog-entry.json`
+  and `SHA256SUMS`.
+- **A firmware tag needs its CHANGELOG.md section**, `## v0.6.0 -
+  YYYY-MM-DD`, at the tagged commit: it is the release's notes and what
+  Settings shows, and without it the run stops before anything is
+  published.
+- **A tag with a suffix, `v0.6.0-rc.1`, publishes a prerelease.** The
+  catalog leaves prereleases out, so no device is offered one; try it by USB
+  or from the card. An app tag's `min_os` may name one.
+- **The release key** is the secret `RELEASE_SIGNING_KEY` (the Ed25519
+  seed, 64 hex digits) of the `release` environment, which admits only tags
+  `v*` and `*-v*`; a tag ruleset limits who pushes them, and only the
+  signing step is given the secret. Its public half is
+  `tools/production_public.key` and `RELEASE_KEY` in `kernel_boot.rs`, tied
+  by a host test. Every build, a laptop's too, is a cargo release build and
+  trusts it; firmware, drivers and window managers take no other key. The
+  `github-pages` environment has to admit those tags too, or a release's
+  Pages deploy is refused.
+- **The firmware's version is its tag**: `tools/firmware_version.sh`
+  becomes ESP-IDF's `PROJECT_VER` and the kernel's `THISTLE_FW_VERSION`. A
+  laptop build reads `0.6.0-3-gabc123-dirty` and counts as `0.6.0`, both
+  for offers and for `min_os` (`version.rs`).
+- **Raising the security version** is by hand: `SECURITY_VERSION` in
+  `version.rs`, raised in a release that fixes a hole, which the release
+  writes into the artifact manifest. The **security floor** is Recovery's
+  NVS key, `thistle_sec`/`fw_sec_ver`, beside each slot's record
+  (`kernel_a_ver`, `kernel_a_sec`, ...; `update_platform.c`). It rises to a
+  kernel's security version only when that kernel is kept, so one rolled
+  back never raises it. Nothing below it installs, from the network or the
+  card, or is offered by Go back. A device flashed by USB has floor 0 until
+  its first kept update. The boot log says `security floor N; this kernel's
+  security version M`, and `security floor raised from N to M` at the keep.
+- **The catalog is `https://medaouadhi.github.io/thistle-os/store/catalog.json`**,
+  built by `pages.yml` from the repository's releases on every deploy
+  (`tools/build_catalog.py --releases`): each release's own
+  `*.catalog-entry.json` asset, the newest firmware by version and the
+  newest release of each app, drafts and prereleases left out. It is
+  unsigned and holds nothing of its own. A firmware entry is flat: the
+  device's parser ends an entry at its first closing brace. A card's
+  `config/appstore.json`, `{"catalog_url": "..."}`, names another.
+- **Two kernel slots.** The flash holds `kernel_a` (ota_0) and `kernel_b`
+  (ota_1), 4.5 MB each, and a 2.5 MB `recovery` slot (ota_2) that nothing
+  writes yet (`partitions.csv`). There is no `factory`: `idf.py flash`
+  writes `kernel_a` and resets otadata, so a USB flash always boots
+  `kernel_a`. An update is written into the other kernel slot, named by its
+  label (`kernel_slot.rs`, `ota.rs`; every ESP-IDF call in
+  `kernel_slot_platform.c`), never by
+  `esp_ota_get_next_update_partition()`, which from `kernel_b` is
+  `recovery`. CI measures the kernel against a kernel slot
+  (`tools/check_partition_sizes.py`); ESP-IDF's warnings that the kernel
+  overflows `recovery` and that `recovery` is also a data subtype's name are
+  expected.
 - **A firmware installs only if its artifact manifest holds up**
-  (`update_policy.rs`, host-tested; `update_manager.rs` runs it): the
-  manifest's signature verifies against the kernel's key (never an app
-  publisher's), it is a firmware, for this chip (`manifest::current_arch()`)
-  and for the stored board id, at or above the security floor, and the file
-  is its size and SHA-256. The manifest's format and shape checks are the
-  shared crate `crates/thistle-artifact`, Recovery's module plus prerelease
-  versions, destination `kernel`, plain-HTTP URLs and the arch `host`;
-  Recovery keeps its own copy. A card install may be any version at or above
-  the floor. Settings → System update installs a release copied to
-  `/sdcard/update/` (`<name>.bin`, `.bin.manifest`, `.bin.manifest.sig`, as
-  the release assets are named), with the reason for a refusal; the log says
-  `card update refused: <reason>`. The C API is `thistle/update.h`.
-- **The security floor is Recovery's NVS key, `thistle_sec`/`fw_sec_ver`**,
-  beside each slot's record (`kernel_a_ver`, `kernel_a_sec`, ...), all in
-  `components/kernel/src/update_platform.c`. A slot's record is written with
-  the slot and by a kernel for its own slot at boot; the floor rises to a
-  kernel's security version (`version::SECURITY_VERSION`) only when that
-  kernel is kept, so one rolled back never raises it. The boot log says
-  `security floor N; this kernel's security version M`, and `security floor
-  raised from N to M` at the keep.
-- **The device updates itself from the catalog** (ticket 07). Once a day
-  with a network up, at most once a boot while the clock is unset, a
-  kernel worker job (`update_manager.rs`, `tick`) starts the check on the
-  `update` task: a FreeRTOS task with a 16 KB internal stack, made for one
-  job (a check, a download, a card install) and gone after. It reads the
-  catalog the App Store reads (`appstore_get_catalog_url()`), keeps it at
-  `/sdcard/appstore/catalog.json`, and offers the newest firmware entry
-  newer than the running version for this chip and board
-  (`update_policy::pick_offer`); the App Store's Refresh counts as a check
-  (`catalog_read`). `/spiffs/update.json` records when and what. Download
-  and install fetches the manifest and signature, checks them as a card's
-  (and newer than what runs), then streams the image through the redirects
-  (`appstore_client::HttpStream`) into the other slot. On mobile data it
-  waits (`UPDATE_WAITING`) until the user allows it or WiFi comes; the
-  log says `the download waits: ...`, `update check (...): ...`,
-  `update refused: ...`. Only firmware entries are parsed into JSON
-  values: a whole catalog's tree of small allocations would land in
-  internal RAM. The App Store has no Firmware tab. The simulator checks
-  daily only with `THISTLE_SIM_UPDATE_CHECKS=1` (its card names the real
-  catalog); `THISTLE_SIM_NETWORK=mobile` takes its host network down, so
-  with mobile data on the fake modem is the network; `THISTLE_SIM_CA_BUNDLE`
-  lets a test's server speak HTTPS. `test_system_update.py` runs it against
-  a fake GitHub.
-- **Settings → System update offers Go back** to the version in the other
-  kernel slot, with no download, while that slot's record is the version its
-  image description says (`esp_ota_get_partition_description`) and its
-  security version is at or above the floor (`update_policy::go_back`,
-  `rs_update_go_back*`). An install clears the record before it erases the
-  slot, so Go back is gone from then on, whether or not the install finishes.
-  Going back selects the slot as it is and restarts; that kernel boots new,
-  kept after a minute like an update, and rewrites the board profile from
-  its own embedded copy. The simulator models the erase in its otadata.
-- **A new kernel is kept after 60 s of running**
-  (`ota_keep_new_kernel()`); until then a reset rolls it back to the other
-  slot (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`). On that first boot the
-  power manager starts only once it is kept, as deep sleep is a reset; on
-  every other boot nothing waits. The boot log says `running kernel_b,
-  version ..., new: kept after 60 s` and then `kept the kernel in kernel_b`.
-- **CI measures the kernel against a kernel slot**
-  (`tools/check_partition_sizes.py`). ESP-IDF's warning that the kernel is
-  larger than the smallest app partition, the reserved one, is expected, as
-  is its warning that `recovery` is also the name of a data subtype.
-- The simulator's slots are files in `THISTLE_SIM_SLOTS` (or
-  `/tmp/thistle_slots`): `kernel_a.bin`, `kernel_b.bin`, and `otadata`, the
-  bootloader's choice and the version each slot's image describes, which is
-  the version a run reports. A run that ends before the keep leaves the next
-  on the other slot. Its NVS is `nvs` there too, and a slot's security
-  version the one recorded when it was written. `THISTLE_SIM_KEEP_S`
-  shortens the keep, `THISTLE_SIM_PUBLISHER_KEY` names a public key it
-  trusts for firmware manifests (simulator builds only, never the host
-  tests), its board id is the `--device` name, and `--install-update`
-  installs the card's release once booted, exiting where a device restarts.
-  `simulator/tests/test_kernel_slots.py`, `test_system_update.py`.
+  (`update_policy.rs`, host-tested; `update_manager.rs` runs it): its
+  signature verifies against the kernel's key, never an app publisher's; it
+  is a firmware, for this chip and the stored board id, at or above the
+  floor; online, newer than what runs; and the file is its size and
+  SHA-256. The slot is selected only after that and ESP-IDF's own
+  validation; any failure leaves the boot choice as it was. The manifest's
+  format is the shared crate `crates/thistle-artifact` (Recovery's module,
+  plus prerelease versions, destination `kernel`, plain-HTTP URLs and the
+  arch `host`); Recovery keeps its own copy. The C API is
+  `thistle/update.h`.
+- **The daily check.** Once a day with a network up, and at most once a
+  boot while the clock is unset, a kernel worker job (`update_manager.rs`,
+  `tick`) starts the check on the `update` task: a FreeRTOS task with a
+  16 KB internal stack, made for one job (a check, a download, a card
+  install) and gone after. It reads the catalog the App Store reads
+  (`appstore_get_catalog_url()`), keeps it at
+  `/sdcard/appstore/catalog.json`, offers the newest firmware newer than
+  the running version for this chip and board (`update_policy::pick_offer`)
+  and counts app updates; the App Store's Refresh and Settings' Check now
+  count as checks. `/spiffs/update.json` records when and what. Only the
+  catalog's firmware and app entries are parsed into JSON values, one at a
+  time: a whole catalog's tree of small allocations would land in internal
+  RAM. The log says `update check (the daily check|Check now|the App
+  Store's Refresh): ...`.
+- **Download and install**, in Settings → System update, fetches the
+  manifest and its signature, checks them, then streams the image through
+  the redirects (`appstore_client::HttpStream`) into the other slot,
+  holding the device awake. On mobile data it waits (`UPDATE_WAITING`, `the
+  download waits: ...`) until the user allows it or WiFi comes. Then
+  Restart now or Later; Later means the next restart of any kind. A refusal
+  logs `update refused: <reason>` and shows the reason.
+- **A new kernel is kept after 60 s of running** (`ota_keep_new_kernel()`);
+  a reset before then rolls it back to the other slot
+  (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`). On that first boot the power
+  manager starts only once it is kept, as deep sleep is a reset; on every
+  other boot nothing waits. The boot log says `running kernel_b, version
+  ..., new: kept after 60 s`, then `kept the kernel in kernel_b`.
+- **Go back**, in Settings → System update, boots the version in the other
+  kernel slot with no download, while that slot's NVS record is the version
+  its image description says and its security version is at or above the
+  floor (`update_policy::go_back`, `rs_update_go_back*`). An install clears
+  the record before it erases the slot, so Go back is gone from then on,
+  whether or not the install finishes. That kernel boots new, is kept after
+  a minute like an update, and brings its own board profile (above).
+- **A card install** takes a release's three files from `/sdcard/update/`:
+  `<name>.bin`, `<name>.bin.manifest`, `<name>.bin.manifest.sig`, as the
+  release assets are named; with several, the one whose manifest names the
+  newest version. Settings → System update → Install from card runs the same
+  checks with no network, and any version at or above the floor installs;
+  the log says `card update refused: <reason>`.
+- **By USB**, the release's `-full.bin` written at 0x0 sets up a new
+  device; `merge_bin` fills the gaps, so it erases NVS. A device on the old
+  table (with `factory`) or upstream's key moves over with one `idf.py
+  flash` of a laptop build, which keeps NVS, SPIFFS and the core dump: WiFi,
+  settings and the mesh identity. The T-Deck Max has moved (ticket 03).
+  `docs/release-flashing.html` is the user's guide.
+- **The simulator runs the whole flow against a fake GitHub**
+  (`simulator/tests/test_system_update.py`, `test_kernel_slots.py`). Its
+  kernel slots are files in `THISTLE_SIM_SLOTS` (or `/tmp/thistle_slots`):
+  `kernel_a.bin`, `kernel_b.bin`, and `otadata`, the boot choice and each
+  slot's version, which is the version a run reports; its NVS is `nvs`
+  there too. A run that ends before the keep leaves the next on the other
+  slot. `THISTLE_SIM_KEEP_S` shortens the keep. `THISTLE_SIM_PUBLISHER_KEY`
+  names a public key trusted for firmware manifests and apps, in simulator
+  builds only. The daily check runs only with `THISTLE_SIM_UPDATE_CHECKS=1`,
+  as its card names the real catalog. `THISTLE_SIM_NETWORK=mobile` takes
+  the host network down, so with mobile data on the fake modem is the
+  network. `THISTLE_SIM_CA_BUNDLE` lets a test's server speak HTTPS. Its
+  board id is the `--device` name; `--install-update` installs the card's
+  release once booted and exits where a device restarts.
 
 ### Internal RAM runs out first; keep stacks there and buffers out
 
@@ -723,22 +773,17 @@ ticks a task off, Backspace removes it, and typing goes back to the field.
 
 ### App Store
 
-`apps/appstore/` browses a catalog, installs apps, drivers and window
-managers from it, and updates the firmware; `appstore_client.rs` does the
-network and the files. LVGL window managers only; thistle-tk has its own
+`apps/appstore/` browses a catalog and installs apps, drivers and window
+managers from it; `appstore_client.rs` does the network and the files.
+System updates are Settings' (Releases and updates, above). LVGL window managers only; thistle-tk has its own
 (`tk_appstore.rs`).
 
-- **The catalog is a static JSON file**, by default the fork's
-  `https://medaouadhi.github.io/thistle-os/store/catalog.json`, which
-  `pages.yml` builds from the repository's GitHub releases on every deploy
-  (`tools/build_catalog.py --releases`): the newest firmware by version and
-  the newest release of each app, each release's own
-  `*.catalog-entry.json` asset, drafts and prereleases left out. It holds
-  nothing of its own. A card's `config/appstore.json`,
-  `{"catalog_url": "..."}`, names another. Refresh keeps the server's JSON
-  whole at `/sdcard/appstore/catalog.json`, which the app reads with the
-  kernel's parser when it opens (`appstore_load_catalog_file`). Entries for
-  another chip are left out.
+- **The catalog is the fork's Pages catalog** (Releases and updates,
+  above), or the one a card's `config/appstore.json` names. Refresh keeps
+  the server's JSON whole at `/sdcard/appstore/catalog.json`, where the
+  daily check keeps it too, and the app reads it with the kernel's parser
+  when it opens (`appstore_load_catalog_file`). Entries for another chip are
+  left out.
 - **A catalog and its packages can be on the card**: a `file:///sdcard/...`
   URL is read from it, no network needed (`card_file()`), and nothing off
   the card. `tools/make_card_appstore.py` builds `standalone_apps/` into such
@@ -770,11 +815,9 @@ network and the files. LVGL window managers only; thistle-tk has its own
   (the daily check, Check now, Refresh); `rs_update_app_offer()` tells the
   Installed tab, whose details then have Update. The catalog lists no app
   release that needs newer firmware, and the TAP installer refuses a
-  package whose own `min_os` is not met (`ESP_ERR_INVALID_VERSION`). The
-  simulator trusts `THISTLE_SIM_PUBLISHER_KEY` for apps as for firmware.
-- **Signatures are checked against the key in `kernel_boot.rs`**: upstream's
-  production key in a release build, the dev key in a debug one. Apps, and
-  only apps, may also be signed by the build machine's publisher key:
+  package whose own `min_os` is not met (`ESP_ERR_INVALID_VERSION`).
+- **Signatures are checked against the release key in `kernel_boot.rs`**
+  (Releases and updates, above). Apps, and only apps, may also be signed by the build machine's publisher key:
   `make_card_appstore.py` makes `tools/local_publisher_{private,public}.key`
   (both git-ignored) on its first run, and a firmware built afterwards
   trusts its public half (`build_rust.sh` passes it to cargo as
@@ -818,8 +861,8 @@ network and the files. LVGL window managers only; thistle-tk has its own
   widgets, ran LVGL's pool dry.
 - The simulator's card is `/tmp/thistle_sdcard` to the kernel
   (`card_root()`). `simulator/tests/test_appstore.py` runs the app against a
-  local catalog host; the simulator trusts only the production key, so an
-  install there stops at the signature.
+  local catalog host; an install there stops at the signature unless the
+  test signs with the key `THISTLE_SIM_PUBLISHER_KEY` names.
 
 ### LVGL's pool is 64 KB
 
