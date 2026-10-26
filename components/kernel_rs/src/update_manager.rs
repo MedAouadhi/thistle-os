@@ -36,7 +36,7 @@ use sha2::{Digest, Sha256};
 use thistle_artifact::ArtifactManifest;
 
 use crate::appstore_client::{FetchError, HttpStream};
-use crate::update_policy::{self as policy, Device, FirmwareRelease, Gate, Network, Refusal, Source};
+use crate::update_policy::{self as policy, AppRelease, Device, FirmwareRelease, Gate, Network, Refusal, Source};
 
 const ESP_OK: i32 = 0;
 const ESP_FAIL: i32 = -1;
@@ -116,6 +116,10 @@ struct Status {
     checked_s: i64,
     /// When this boot last tried a check, in ms since the manager started.
     attempted_ms: Option<u64>,
+    /// The app releases the last catalog read lists for this chip.
+    app_releases: Vec<AppRelease>,
+    /// Of those, the ones offered to the installed apps: one an app at most.
+    app_offers: Vec<AppRelease>,
 }
 
 static STATUS: Mutex<Status> = Mutex::new(Status {
@@ -130,6 +134,8 @@ static STATUS: Mutex<Status> = Mutex::new(Status {
     shown_s: 0,
     checked_s: 0,
     attempted_ms: None,
+    app_releases: Vec::new(),
+    app_offers: Vec::new(),
 });
 
 /// An install is under way; only one at a time.
@@ -820,11 +826,53 @@ fn judge_catalog(json: &str) -> (Option<FirmwareRelease>, String) {
     (None, said)
 }
 
+/// Which of `releases` to offer the apps installed now (update_policy's
+/// app offer), against the running firmware as the TAP installer checks it.
+fn offer_apps(releases: &[AppRelease]) -> Vec<AppRelease> {
+    let installed = crate::installed_apps::installed_releases(
+        &crate::appstore_client::card_root().join("apps"),
+    );
+    policy::app_offers(releases, &installed, crate::version::running())
+        .into_iter()
+        .cloned()
+        .collect()
+}
+
+/// What a catalog offers the installed apps, kept with the catalog's app
+/// releases; and the log's account of it.
+fn judge_apps(json: &str) -> String {
+    let releases = policy::app_releases(json, crate::manifest::current_arch());
+    let offers = offer_apps(&releases);
+    let said = match offers.len() {
+        0 => "no app updates".to_string(),
+        n => format!(
+            "{n} app update{}: {}",
+            if n == 1 { "" } else { "s" },
+            offers.iter().map(|r| format!("{} {}", r.id, r.version)).collect::<Vec<_>>().join(", ")
+        ),
+    };
+    with(|s| {
+        s.app_releases = releases;
+        s.app_offers = offers;
+    });
+    said
+}
+
+/// The installed apps changed (an install or a removal): what the catalog
+/// last read offers them now.
+pub(crate) fn apps_changed() {
+    let releases = with(|s| s.app_releases.clone());
+    let offers = offer_apps(&releases);
+    with(|s| s.app_offers = offers);
+}
+
 /// A catalog has been read, by the daily check, Check now or the App Store's
 /// Refresh (`by`): judge what it offers and record the check.
 pub(crate) fn catalog_read(json: &str, by: &str) {
     let (offer, said) = judge_catalog(json);
     log(ESP_LOG_INFO, &format!("update check ({by}): {said}"));
+    let apps = judge_apps(json);
+    log(ESP_LOG_INFO, &format!("update check ({by}): {apps}"));
     let now = now_s().unwrap_or(0);
     with(|s| {
         s.found = match &offer {
@@ -880,6 +928,7 @@ fn run_check(by: &'static str) {
 fn reread_kept_catalog() {
     let Some(json) = crate::appstore_client::kept_catalog() else { return };
     let (offer, _) = judge_catalog(&json);
+    judge_apps(&json);
     with(|s| {
         if s.offer.is_none() && s.state == STATE_IDLE {
             if offer.is_some() {
@@ -1186,6 +1235,33 @@ pub unsafe extern "C" fn rs_update_offer(
     }
     if !notes.is_null() && notes_len > 0 {
         copy_c(&offer.notes, std::slice::from_raw_parts_mut(notes, notes_len));
+    }
+    true
+}
+
+/// How many installed apps the catalog last read offers an update to.
+#[no_mangle]
+pub extern "C" fn rs_update_app_count() -> u32 {
+    with(|s| s.app_offers.len() as u32)
+}
+
+/// Whether the installed app `id` is offered an update; its version into
+/// `version`.
+///
+/// # Safety
+/// `id` must be NULL or NUL-terminated; `version` NULL or `len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn rs_update_app_offer(id: *const c_char, version: *mut c_char, len: usize) -> bool {
+    if id.is_null() {
+        return false;
+    }
+    let id = CStr::from_ptr(id).to_string_lossy();
+    let Some(offered) = with(|s| s.app_offers.iter().find(|r| r.id == id).map(|r| r.version.clone()))
+    else {
+        return false;
+    };
+    if !version.is_null() && len > 0 {
+        copy_c(&offered, std::slice::from_raw_parts_mut(version, len));
     }
     true
 }

@@ -92,6 +92,25 @@ pub fn list_installed(apps: &Path) -> Vec<InstalledApp> {
     found
 }
 
+/// An app the App Store installed, as update_policy weighs an update to it.
+pub(crate) type InstalledRelease = crate::update_policy::InstalledApp;
+
+/// The packages the App Store installed in `apps`: each one's id (its
+/// folder) and the release it runs. ELFs copied on have no release.
+pub(crate) fn installed_releases(apps: &Path) -> Vec<InstalledRelease> {
+    let Ok(dir) = std::fs::read_dir(apps) else { return Vec::new() };
+    dir.flatten()
+        .filter_map(|entry| {
+            let id = entry.file_name().to_string_lossy().into_owned();
+            if !valid_key(&id) || !entry.path().is_dir() {
+                return None;
+            }
+            let release_sequence = crate::tap_installer::active_release_sequence(&entry.path())?;
+            Some(InstalledRelease { id, release_sequence })
+        })
+        .collect()
+}
+
 /// Remove the app `key` names in `apps`: a package's whole folder, or an ELF
 /// with its signature and manifest.
 pub fn remove_installed(apps: &Path, key: &str) -> Result<(), i32> {
@@ -145,7 +164,10 @@ pub unsafe extern "C" fn appstore_remove_installed(key: *const c_char) -> i32 {
     }
     let Ok(key) = CStr::from_ptr(key).to_str() else { return ESP_ERR_INVALID_ARG };
     match remove_installed(&card_root().join("apps"), key) {
-        Ok(()) => ESP_OK,
+        Ok(()) => {
+            crate::update_manager::apps_changed();
+            ESP_OK
+        }
         Err(error) => error,
     }
 }
@@ -225,6 +247,28 @@ mod tests {
                 ("bare", "bare", "bare", "", 3, false),
                 ("hello", "com.example.hello", "Hello World", "1.0.0", 1000, false),
                 ("com.thistle.notes", "com.thistle.notes", "Notes", "1.2.0", 2048, true),
+            ]
+        );
+        std::fs::remove_dir_all(&apps).unwrap();
+    }
+
+    #[test]
+    fn the_app_stores_installs_are_known_by_id_and_release_sequence() {
+        let apps = apps_dir();
+        install_package(&apps, "com.thistle.notes", "Notes", 2);
+        install_package(&apps, "com.thistle.weather", "Weather", 1_000_000);
+        // An ELF copied on has no release to update from.
+        std::fs::write(apps.join("hello.app.elf"), b"elf").unwrap();
+        // Unpacked but never activated.
+        std::fs::create_dir_all(apps.join("com.thistle.half/generations/1")).unwrap();
+
+        let mut releases = installed_releases(&apps);
+        releases.sort_by(|a, b| a.id.cmp(&b.id));
+        assert_eq!(
+            releases,
+            vec![
+                InstalledRelease { id: "com.thistle.notes".into(), release_sequence: 2 },
+                InstalledRelease { id: "com.thistle.weather".into(), release_sequence: 1_000_000 },
             ]
         );
         std::fs::remove_dir_all(&apps).unwrap();

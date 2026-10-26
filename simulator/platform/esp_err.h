@@ -19,6 +19,7 @@ typedef int esp_err_t;
 /* As ESP-IDF numbers them, which is what the Rust kernel returns. */
 #define ESP_ERR_INVALID_RESPONSE 0x108
 #define ESP_ERR_INVALID_CRC     0x109
+#define ESP_ERR_INVALID_VERSION 0x10A
 
 #define ESP_ERROR_CHECK(x) do { \
     esp_err_t __err = (x); \
@@ -40,6 +41,7 @@ static inline const char *esp_err_to_name(esp_err_t code) {
         case ESP_ERR_TIMEOUT:       return "ESP_ERR_TIMEOUT";
         case ESP_ERR_INVALID_RESPONSE: return "ESP_ERR_INVALID_RESPONSE";
         case ESP_ERR_INVALID_CRC:   return "ESP_ERR_INVALID_CRC";
+        case ESP_ERR_INVALID_VERSION: return "ESP_ERR_INVALID_VERSION";
         default:                    return "UNKNOWN";
     }
 }

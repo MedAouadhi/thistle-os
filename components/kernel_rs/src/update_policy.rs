@@ -421,11 +421,85 @@ pub(crate) fn board_profile(writer: Option<&str>, running: &str, embedded: bool)
     }
 }
 
+// ---------------------------------------------------------------------------
+// App updates (ticket 09)
+// ---------------------------------------------------------------------------
+
+/// An app release as the catalog lists it: what deciding an offer needs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AppRelease {
+    pub id: String,
+    pub version: String,
+    /// major x 10^6 + minor x 10^3 + patch, as the release workflow writes it.
+    pub release_sequence: u32,
+    /// The oldest firmware it runs on; empty for any.
+    pub min_os: String,
+}
+
+/// An app the App Store installed: its id and the release it runs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct InstalledApp {
+    pub id: String,
+    pub release_sequence: u32,
+}
+
+/// The app releases a catalog lists for this chip: entries of type `app`
+/// (or of no type, as the App Store reads them) with an id, a version and a
+/// release sequence, built for `chip` or for any. Each entry is parsed on
+/// its own, as `firmware_releases` does.
+pub(crate) fn app_releases(catalog_json: &str, chip: &str) -> Vec<AppRelease> {
+    use serde_json::Value;
+    let text = |entry: &Value, key: &str| -> String {
+        entry.get(key).and_then(Value::as_str).unwrap_or("").to_string()
+    };
+    entry_objects(catalog_json)
+        .into_iter()
+        .filter_map(|object| serde_json::from_str::<Value>(object).ok())
+        .filter(|entry| matches!(entry.get("type").and_then(Value::as_str), None | Some("app")))
+        .filter(|entry| matches!(entry.get("arch").and_then(Value::as_str), None | Some("")) || text(entry, "arch") == chip)
+        .filter_map(|entry| {
+            let release_sequence = entry
+                .get("release_sequence")
+                .and_then(Value::as_u64)
+                .filter(|&n| n > 0 && n <= u32::MAX as u64)? as u32;
+            let release = AppRelease {
+                id: text(&entry, "id"),
+                version: text(&entry, "version"),
+                release_sequence,
+                min_os: text(&entry, "min_os_version"),
+            };
+            (!release.id.is_empty() && !release.version.is_empty()).then_some(release)
+        })
+        .collect()
+}
+
+/// Which app releases to offer: for each installed app, in the order given,
+/// its newest release with a higher release sequence whose `min_os` the
+/// running firmware meets (a laptop build counting as its tag).
+pub(crate) fn app_offers<'a>(
+    releases: &'a [AppRelease],
+    installed: &[InstalledApp],
+    running: &str,
+) -> Vec<&'a AppRelease> {
+    let running = Version::parse(running)
+        .unwrap_or(Version { major: 0, minor: 0, patch: 0, pre: String::new() });
+    installed
+        .iter()
+        .filter_map(|app| {
+            releases
+                .iter()
+                .filter(|r| r.id == app.id && r.release_sequence > app.release_sequence)
+                .filter(|r| crate::version::meets(&running, &r.min_os))
+                .max_by_key(|r| r.release_sequence)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const SHA: &str = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+    const SHA:&str = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
 
     /// A manifest as tools/sign.py writes one for a firmware release.
     fn manifest(edit: impl FnOnce(&mut ArtifactManifest)) -> String {
@@ -877,6 +951,126 @@ mod tests {
         // A slot with no record, or one cleared when its erase began.
         assert_eq!(go_back(None, Some("0.5.2"), 0), None);
         assert_eq!(go_back(record("", 0), Some(""), 0), None);
+    }
+
+    // --- app updates (ticket 09) ---------------------------------------------
+
+    fn app(id: &str, version: &str, sequence: u32, min_os: &str) -> AppRelease {
+        AppRelease {
+            id: id.into(),
+            version: version.into(),
+            release_sequence: sequence,
+            min_os: min_os.into(),
+        }
+    }
+
+    fn installed(id: &str, sequence: u32) -> InstalledApp {
+        InstalledApp { id: id.into(), release_sequence: sequence }
+    }
+
+    /// What is offered, as (id, version).
+    fn app_offer(releases: &[AppRelease], apps: &[InstalledApp], running: &str) -> Vec<(String, String)> {
+        app_offers(releases, apps, running)
+            .into_iter()
+            .map(|r| (r.id.clone(), r.version.clone()))
+            .collect()
+    }
+
+    const NOTES: &str = "com.thistle.notes";
+
+    #[test]
+    fn an_app_release_with_a_higher_release_sequence_is_offered() {
+        let releases = [app(NOTES, "1.0.3", 1_000_003, "0.3.0")];
+        assert_eq!(
+            app_offer(&releases, &[installed(NOTES, 1_000_000)], "0.6.0"),
+            vec![(NOTES.to_string(), "1.0.3".to_string())]
+        );
+    }
+
+    #[test]
+    fn the_same_or_a_lower_release_sequence_is_not_offered() {
+        let releases = [app(NOTES, "1.0.3", 1_000_003, "0.3.0")];
+        assert!(app_offer(&releases, &[installed(NOTES, 1_000_003)], "0.6.0").is_empty());
+        assert!(app_offer(&releases, &[installed(NOTES, 1_000_004)], "0.6.0").is_empty());
+    }
+
+    #[test]
+    fn an_app_release_whose_min_os_is_above_the_running_version_is_not_offered() {
+        let at = [app(NOTES, "1.0.3", 1_000_003, "0.6.0")];
+        let above = [app(NOTES, "1.0.3", 1_000_003, "0.6.1")];
+        let below = [app(NOTES, "1.0.3", 1_000_003, "0.5.0")];
+        let notes = [installed(NOTES, 1_000_000)];
+        assert_eq!(app_offer(&at, &notes, "0.6.0").len(), 1);
+        assert!(app_offer(&above, &notes, "0.6.0").is_empty());
+        assert_eq!(app_offer(&below, &notes, "0.6.0").len(), 1);
+    }
+
+    #[test]
+    fn a_laptop_build_meets_the_min_os_its_tag_meets() {
+        let notes = [installed(NOTES, 1)];
+        let needs = |min_os: &str| [app(NOTES, "1.0.3", 2, min_os)];
+        assert_eq!(app_offer(&needs("0.6.0"), &notes, "0.6.0-3-gabc1234-dirty").len(), 1);
+        assert!(app_offer(&needs("0.6.1"), &notes, "0.6.0-3-gabc1234-dirty").is_empty());
+        // A release candidate is below its release.
+        assert!(app_offer(&needs("0.6.0"), &notes, "0.6.0-rc.1").is_empty());
+        // An untagged build counts as 0.0.0.
+        assert!(app_offer(&needs("0.1.0"), &notes, "0.0.0-unknown").is_empty());
+        assert_eq!(app_offer(&needs(""), &notes, "0.0.0-unknown").len(), 1);
+    }
+
+    #[test]
+    fn a_malformed_min_os_is_never_met() {
+        let releases = [app(NOTES, "1.0.3", 2, "soon")];
+        assert!(app_offer(&releases, &[installed(NOTES, 1)], "0.6.0").is_empty());
+    }
+
+    #[test]
+    fn only_installed_apps_are_offered_each_its_newest_release_it_can_run() {
+        let releases = [
+            app(NOTES, "1.0.1", 1_000_001, "0.3.0"),
+            app(NOTES, "1.1.0", 1_001_000, "9.0.0"),
+            app(NOTES, "1.0.2", 1_000_002, "0.3.0"),
+            app("com.thistle.weather", "2.0.0", 2_000_000, "0.3.0"),
+            app("com.thistle.flashlight", "2.0.1", 2_000_001, "0.3.0"),
+        ];
+        let apps = [installed(NOTES, 1_000_000), installed("com.thistle.flashlight", 2_000_000)];
+        assert_eq!(
+            app_offer(&releases, &apps, "0.6.0"),
+            vec![
+                (NOTES.to_string(), "1.0.2".to_string()),
+                ("com.thistle.flashlight".to_string(), "2.0.1".to_string()),
+            ]
+        );
+    }
+
+    const APP_CATALOG: &str = r#"{
+  "version": 1,
+  "entries": [
+    {"id": "com.thistle.notes", "type": "app", "name": "Notes", "version": "1.0.3", "arch": "host",
+     "release_sequence": 1000003, "min_os_version": "0.6.0", "package_url": "https://x/n.tap",
+     "changelog": "Fixed {braces}"},
+    {"id": "com.thistle.weather", "name": "Weather", "version": "1.0.0", "release_sequence": 1000000,
+     "package_url": "https://x/w.tap"},
+    {"id": "com.thistle.elsewhere", "type": "app", "version": "1.0.0", "arch": "esp32c6",
+     "release_sequence": 1000000, "package_url": "https://x/e.tap"},
+    {"id": "com.thistle.legacy", "type": "app", "version": "1.0.0", "url": "https://x/l.elf"},
+    {"id": "kbd", "type": "driver", "version": "1.0.0", "release_sequence": 3},
+    {"type": "firmware", "id": "thistle-os", "version": "0.6.0", "arch": "host"}
+  ]
+}"#;
+
+    #[test]
+    fn the_catalogs_app_releases_for_this_chip_are_read() {
+        let releases = app_releases(APP_CATALOG, "host");
+        assert_eq!(
+            releases,
+            vec![
+                app(NOTES, "1.0.3", 1_000_003, "0.6.0"),
+                // An entry with no type is an app, with no arch any chip's.
+                app("com.thistle.weather", "1.0.0", 1_000_000, ""),
+            ]
+        );
+        assert!(app_releases("<html>", "host").is_empty());
     }
 
     #[test]

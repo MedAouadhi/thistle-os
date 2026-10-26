@@ -27,6 +27,8 @@ const ESP_ERR_INVALID_SIZE: i32 = 0x104;
 const ESP_ERR_NOT_FOUND: i32 = 0x105;
 const ESP_ERR_NOT_SUPPORTED: i32 = 0x106;
 const ESP_ERR_INVALID_CRC: i32 = 0x109;
+/// A package that needs newer firmware than this.
+const ESP_ERR_INVALID_VERSION: i32 = 0x10A;
 const ESP_FAIL: i32 = -1;
 
 const DEFAULT_CATALOG_URL: &str = "https://medaouadhi.github.io/thistle-os/store/catalog.json\0";
@@ -1774,7 +1776,10 @@ unsafe fn install_tap_entry(
         |elf| std::ffi::CString::new(elf.to_string_lossy().as_bytes()).ok()
             .is_some_and(|path| unsafe { signing_verify_app_file(path.as_ptr()) == ESP_OK }),
     ) {
-        Ok(_) => ESP_OK,
+        Ok(_) => {
+            crate::update_manager::apps_changed();
+            ESP_OK
+        }
         Err(crate::tap_installer::TapError::Limit) => ESP_ERR_INVALID_SIZE,
         Err(crate::tap_installer::TapError::InvalidPath)
         | Err(crate::tap_installer::TapError::InvalidManifest)
@@ -1782,6 +1787,15 @@ unsafe fn install_tap_entry(
         Err(crate::tap_installer::TapError::Integrity)
         | Err(crate::tap_installer::TapError::Signature) => ESP_ERR_INVALID_CRC,
         Err(crate::tap_installer::TapError::Downgrade) => ESP_ERR_NOT_SUPPORTED,
+        Err(crate::tap_installer::TapError::MinOs(min_os)) => {
+            let said = std::ffi::CString::new(format!(
+                "App install refused: {id} {version} needs ThistleOS {min_os}; running {}",
+                crate::version::running()
+            ))
+            .unwrap_or_default();
+            esp_log_write(ESP_LOG_WARN, TAG.as_ptr(), b"%s\0".as_ptr(), said.as_ptr());
+            ESP_ERR_INVALID_VERSION
+        }
         Err(_) => ESP_FAIL,
     }
 }
@@ -2200,6 +2214,14 @@ fn fill_catalog_entry(obj: &str, entry: &mut CatalogEntry) {
     entry.is_signed = entry.sig_url[0] != 0 || entry.package_sig_url[0] != 0;
 }
 
+/// Whether the running firmware meets an app release's `min_os_version`:
+/// a release that needs newer firmware is not listed (the TAP installer
+/// also refuses its package).
+fn firmware_runs(entry: &CatalogEntry) -> bool {
+    entry.entry_type != CATALOG_TYPE_APP
+        || crate::version::satisfies(fixed_cstr(&entry.min_os_version).unwrap_or(""))
+}
+
 /// Parse a catalog, an array of entries or `{"entries": [...]}`, into
 /// `entries`, leaving out those built for another chip and those with no id.
 /// Returns how many it filled.
@@ -2223,7 +2245,7 @@ pub fn parse_catalog_into(json: &str, entries: &mut [CatalogEntry]) -> usize {
             continue;
         }
         fill_catalog_entry(obj, &mut entries[count]);
-        if entries[count].id[0] != 0 {
+        if entries[count].id[0] != 0 && firmware_runs(&entries[count]) {
             count += 1;
         }
     }
@@ -2259,7 +2281,7 @@ pub fn parse_catalog_entries(json: &str, category_filter: &str, entries: &mut Ve
 
         let mut entry = CatalogEntry::default();
         fill_catalog_entry(obj, &mut entry);
-        if entry.id[0] == 0 {
+        if entry.id[0] == 0 || !firmware_runs(&entry) {
             continue;
         }
 
@@ -3058,6 +3080,24 @@ mod tests {
         let ret = unsafe { appstore_load_catalog_file(missing.as_ptr(), entries.as_mut_ptr(), 4, &mut count) };
         assert_eq!((ret, count), (ESP_ERR_NOT_FOUND, 0));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn an_app_release_that_needs_newer_firmware_is_not_listed() {
+        let json = r#"{"version": 1, "entries": [
+            {"id":"com.thistle.notes","name":"Notes","version":"9.0.0","type":"app","min_os_version":"99.0.0"},
+            {"id":"com.thistle.weather","name":"Weather","version":"1.0.0","type":"app","min_os_version":"0.1.0"},
+            {"id":"com.thistle.todo","name":"To-do","version":"1.0.0","type":"app"},
+            {"id":"kbd","name":"Keys","version":"1.0.0","type":"driver","min_os_version":"99.0.0"}
+        ]}"#;
+        let mut entries: Vec<CatalogEntry> = (0..4).map(|_| CatalogEntry::default()).collect();
+        let count = parse_catalog_into(json, &mut entries);
+        let ids: Vec<_> = entries[..count].iter().map(|e| fixed_cstr(&e.id).unwrap().to_string()).collect();
+        assert_eq!(ids, ["com.thistle.weather", "com.thistle.todo", "kbd"]);
+
+        let mut listed = Vec::new();
+        parse_catalog_entries(json, "all", &mut listed);
+        assert_eq!(listed.len(), 3);
     }
 
     #[test]

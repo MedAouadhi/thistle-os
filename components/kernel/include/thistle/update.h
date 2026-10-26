@@ -67,6 +67,16 @@ esp_err_t rs_update_install_from_card(void);
 /* The release the catalog offers, if any: its version and notes. */
 bool rs_update_offer(char *version, size_t version_len, char *notes, size_t notes_len);
 
+/* App updates: the installed apps (the App Store's packages) that the
+ * catalog last read, by a check or the App Store's Refresh, lists a newer
+ * release of: a higher release sequence, with a min_os the running firmware
+ * meets. Recounted as apps are installed and removed. */
+uint32_t rs_update_app_count(void);
+
+/* Whether the installed app `id` is offered an update; the release's
+ * version into `version`. */
+bool rs_update_app_offer(const char *id, char *version, size_t len);
+
 /* What the last check found ("up to date", "0.7.0 is available", "the
  * catalog could not be read") and when (0: the clock was unset). False if
  * no check has been made. */
