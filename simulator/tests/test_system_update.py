@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Settings → System update installs a release copied to the card, and
-refuses anything else with its reason (ticket 06 of .scratch/ota, ADR-0010).
+refuses anything else with its reason (ticket 06 of .scratch/ota, ADR-0010);
+and it finds a release in the catalog, downloads it from a fake GitHub and
+installs it the same way (ticket 07).
 
 A release on the card is what a firmware release publishes: the image, its
 artifact manifest (tools/sign.py's canonical form) and the manifest's
@@ -14,23 +16,42 @@ security floor and each slot's record) are files in THISTLE_SIM_SLOTS;
 THISTLE_SIM_KEEP_S shortens the minute a new kernel runs before it is kept.
 Each case runs on a scratch copy of simulator/sdcard and slots of its own.
 
+The fake GitHub is two servers: one serves the catalog and answers a release
+asset's URL with a 302, as GitHub does, to the second, which serves the
+bytes. The catalog server can speak HTTPS, with a certificate of the test's
+own that the simulator trusts through THISTLE_SIM_CA_BUNDLE. The daily check
+runs in the simulator only with THISTLE_SIM_UPDATE_CHECKS=1, and
+THISTLE_SIM_NETWORK=mobile takes its host network down, so that with mobile
+data on the fake modem's link is the network.
+
     python3 tests/test_system_update.py --sim build/thistle_sim [--only NAME]
 """
 
 from __future__ import annotations
 
 import argparse
+import datetime
+import ipaddress
+import json
 import os
 import shutil
+import ssl
 import struct
 import subprocess
 import sys
 import tempfile
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable, Optional
 
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+from cryptography.hazmat.primitives.serialization import (Encoding, NoEncryption,
+                                                          PrivateFormat, PublicFormat)
+from cryptography.x509.oid import NameOID
 
 SDCARD = Path(__file__).resolve().parent.parent / "sdcard"
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
@@ -38,9 +59,15 @@ from sign import canonical_manifest  # noqa: E402
 
 # tdeck-max, 240x320: Settings' main list, then the System update screen.
 SYSTEM_UPDATE = "100,277"
-INSTALL = "120,152"
+INSTALL = "120,235"
 RESTART_NOW = "120,190"
 LATER = "120,219"
+# With nothing on offer: Check now. With a release on offer and one line of
+# notes: Download and install, or in its place, while the download waits on
+# mobile data, Download over mobile data.
+CHECK_NOW = "120,152"
+DOWNLOAD = "120,206"
+ALLOW_MOBILE_DATA = "120,206"
 
 RELEASE = "thistle_os-host-v0.6.0.bin"
 
@@ -71,6 +98,8 @@ class Device:
         self.public_key = root / "publisher.pub"
         self.public_key.write_bytes(self.key.public_key().public_bytes(
             Encoding.Raw, PublicFormat.Raw))
+        # What every run adds to the environment: a test's CA bundle.
+        self.extra_env: dict = {}
 
     def put_release(self, version: str = "0.6.0", security_version: int = 600,
                     arch: str = "host", boards: tuple = ("tdeck", "tdeck-max"),
@@ -90,6 +119,33 @@ class Device:
         (update / f"{RELEASE}.manifest").write_bytes(manifest)
         (update / f"{RELEASE}.manifest.sig").write_bytes((key or self.key).sign(manifest))
 
+    def put_online_release(self, github: "GitHub", version: str = "0.6.0",
+                           security_version: int = 600, arch: str = "host",
+                           boards: tuple = ("tdeck", "tdeck-max"),
+                           served: Optional[Callable[[bytes], bytes]] = None) -> bytes:
+        """Publish a release on the fake GitHub, signed by this device's
+        publisher; `served` changes the image the assets server sends."""
+        image = kernel_image(version)
+        name = f"thistle_os-{arch}-v{version}.bin"
+        manifest = canonical_manifest(
+            artifact_type="firmware", artifact_id="thistle-os", version=version,
+            security_version=security_version, arch=arch, compatible_boards=list(boards),
+            url=f"{github.base}/releases/download/v{version}/{name}", payload=image)
+        github.publish(version, name, served(image) if served else image, manifest,
+                       self.key.sign(manifest), arch=arch, boards=boards, size=len(image))
+        return image
+
+    def use_catalog(self, github: "GitHub") -> None:
+        (self.card / "config" / "appstore.json").write_text(
+            json.dumps({"catalog_url": f"{github.base}/store/catalog.json"}))
+
+    def mobile_data_on(self) -> None:
+        path = self.card / "config" / "system.json"
+        system = json.loads(path.read_text()) if path.exists() else {}
+        settings = system.setdefault("thistle_os", {})
+        settings.setdefault("cellular", {})["enabled"] = True
+        path.write_text(json.dumps(system, indent=2))
+
     def set_floor(self, floor: int) -> None:
         self.slots.mkdir(exist_ok=True)
         (self.slots / "nvs").write_text(f"fw_sec_ver={floor}\n")
@@ -100,13 +156,15 @@ class Device:
             return {}
         return dict(line.split("=", 1) for line in path.read_text().splitlines() if "=" in line)
 
-    def run(self, *args: str, keep_s: float = 60, timeout_ms: int = 1500) -> str:
+    def run(self, *args: str, keep_s: float = 60, timeout_ms: int = 1500,
+            env: Optional[dict] = None) -> str:
         env = dict(os.environ,
                    THISTLE_SIM_SDCARD=str(self.card),
                    THISTLE_SIM_SLOTS=str(self.slots),
                    THISTLE_SIM_SPIFFS=str(self.spiffs),
                    THISTLE_SIM_KEEP_S=str(keep_s),
-                   THISTLE_SIM_PUBLISHER_KEY=str(self.public_key))
+                   THISTLE_SIM_PUBLISHER_KEY=str(self.public_key),
+                   **self.extra_env, **(env or {}))
         command = [str(self.simulator), "--headless", "--device", "tdeck-max",
                    "--timeout", str(timeout_ms), *args]
         run = subprocess.run(command, text=True, capture_output=True, errors="replace",
@@ -116,12 +174,119 @@ class Device:
             raise AssertionError(f"simulator exited {run.returncode}:\n{log[-2000:]}")
         return log
 
-    def settings(self, *taps: str, timeout_ms: int = 9000) -> str:
+    def settings(self, *taps: str, timeout_ms: int = 9000, env: Optional[dict] = None) -> str:
         """Open Settings → System update and tap through it."""
         args = ["--launch-app", "com.thistle.settings", "--tap", SYSTEM_UPDATE]
         for tap in taps:
             args += ["--tap", tap]
-        return self.run(*args, timeout_ms=timeout_ms)
+        return self.run(*args, timeout_ms=timeout_ms, env=env)
+
+
+class Server:
+    """A local HTTP(S) server: what it serves, its redirects, and every path
+    asked of it."""
+
+    def __init__(self, tls: Optional[ssl.SSLContext] = None) -> None:
+        self.files: dict[str, bytes] = {}
+        self.redirects: dict[str, str] = {}
+        self.requests: list[str] = []
+        server = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802
+                server.requests.append(self.path)
+                if self.path in server.redirects:
+                    self.send_response(302)
+                    self.send_header("Location", server.redirects[self.path])
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                body = server.files.get(self.path)
+                self.send_response(200 if body is not None else 404)
+                body = body if body is not None else b"not found"
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args) -> None:
+                pass
+
+        self.http = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        if tls:
+            self.http.socket = tls.wrap_socket(self.http.socket, server_side=True)
+        scheme = "https" if tls else "http"
+        self.base = f"{scheme}://127.0.0.1:{self.http.server_address[1]}"
+        threading.Thread(target=self.http.serve_forever, daemon=True).start()
+
+    def close(self) -> None:
+        self.http.shutdown()
+        self.http.server_close()
+
+
+def certificate(root: Path) -> tuple[Path, ssl.SSLContext]:
+    """A self-signed certificate for 127.0.0.1: the simulator trusts it as
+    its CA bundle, the catalog server presents it."""
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "127.0.0.1")])
+    now = datetime.datetime.now(datetime.timezone.utc)
+    cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name)
+            .public_key(key.public_key()).serial_number(x509.random_serial_number())
+            .not_valid_before(now - datetime.timedelta(days=1))
+            .not_valid_after(now + datetime.timedelta(days=1))
+            .add_extension(x509.SubjectAlternativeName(
+                [x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]), critical=False)
+            .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+            .sign(key, hashes.SHA256()))
+    cert_path, key_path = root / "ca.pem", root / "key.pem"
+    cert_path.write_bytes(cert.public_bytes(Encoding.PEM))
+    key_path.write_bytes(key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()))
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(cert_path, key_path)
+    return cert_path, context
+
+
+class GitHub:
+    """The fake GitHub: Pages' catalog and the releases' URLs on one server,
+    each asset's URL a 302 to the second, which serves its bytes."""
+
+    def __init__(self, tls: Optional[ssl.SSLContext] = None) -> None:
+        self.pages = Server(tls)
+        self.assets = Server()
+        self.base = self.pages.base
+        self.entries: list[dict] = []
+        self.write_catalog()
+
+    def write_catalog(self) -> None:
+        self.pages.files["/store/catalog.json"] = json.dumps(
+            {"version": 1, "generated": "2026-10-26T10:00:00Z", "entries": self.entries}).encode()
+
+    def publish(self, version: str, name: str, image: bytes, manifest: bytes, signature: bytes,
+                arch: str, boards: tuple, size: int) -> None:
+        for asset, body in ((name, image), (f"{name}.manifest", manifest),
+                            (f"{name}.manifest.sig", signature)):
+            self.pages.redirects[f"/releases/download/v{version}/{asset}"] = (
+                f"{self.assets.base}/{asset}")
+            self.assets.files[f"/{asset}"] = body
+        url = f"{self.base}/releases/download/v{version}/{name}"
+        self.entries.append({
+            "type": "firmware", "id": "thistle-os", "version": version, "arch": arch,
+            "compatible_boards": sorted(boards), "url": url,
+            "manifest_url": f"{url}.manifest", "manifest_sig_url": f"{url}.manifest.sig",
+            "sha256": "00" * 32, "size_bytes": size,
+            "changelog": f"What is new in {version}", "updated": "2026-10-26"})
+        self.write_catalog()
+
+    def redirect_chain(self, path: str, hops: int) -> None:
+        """Make `path` reach its target through `hops` redirects."""
+        target = self.pages.redirects[path]
+        for hop in range(hops - 1, 0, -1):
+            self.pages.redirects[f"/hop/{hop}"] = target
+            target = f"{self.base}/hop/{hop}"
+        self.pages.redirects[path] = target
+
+    def close(self) -> None:
+        self.pages.close()
+        self.assets.close()
 
 
 def expect(log: str, *lines: str) -> None:
@@ -253,6 +418,140 @@ def a_file_with_one_byte_changed_is_refused(device: Device) -> None:
     refused_in_settings(device, "the file's SHA-256 is not its manifest's")
 
 
+# --- over the air -----------------------------------------------------------
+
+DAILY = {"THISTLE_SIM_UPDATE_CHECKS": "1"}
+
+
+def online(case: Callable[[Device, "GitHub"], None], tls: bool = False):
+    """Run `case` with a fake GitHub whose catalog the device reads."""
+    def run(device: Device) -> None:
+        context = None
+        if tls:
+            ca, context = certificate(device.card.parent)
+            device.extra_env = {"THISTLE_SIM_CA_BUNDLE": str(ca)}
+        github = GitHub(context)
+        device.use_catalog(github)
+        try:
+            case(device, github)
+        finally:
+            github.close()
+    run.__name__ = case.__name__
+    return run
+
+
+def downloaded(github: GitHub) -> list[str]:
+    return [path for path in github.assets.requests if path.endswith(".bin")]
+
+
+def refused_online(device: Device, reason: str) -> None:
+    log = device.settings(CHECK_NOW, DOWNLOAD)
+    expect(log, "update check (Check now): 0.6.0 is offered", "downloading 0.6.0: ",
+           f"update refused: {reason}", f"System update: Not installed: {reason}")
+    expect(log, "System update: Downloading 0.6.0")
+    refuse(log, "installed 0.6.0 into kernel_b")
+    nothing_written(device)
+
+
+def the_daily_check_offers_a_newer_release(device: Device, github: GitHub) -> None:
+    device.put_online_release(github)
+    log = device.settings(env=DAILY)
+    expect(log, f"update check (the daily check): reading {github.base}/store/catalog.json",
+           "update check (the daily check): 0.6.0 is offered; running ",
+           "System update: Available: ThistleOS 0.6.0",
+           "System update: What is new in 0.6.0")
+    refuse(log, "downloading")
+    kept = device.card / "appstore" / "catalog.json"
+    if not kept.exists() or b"0.6.0" not in kept.read_bytes():
+        raise AssertionError("the catalog was not kept where the App Store reads it")
+    record = json.loads((device.spiffs / "update.json").read_text())
+    if record.get("found") != "0.6.0 is available" or not record.get("checked_s"):
+        raise AssertionError(f"the check was not recorded: {record}")
+    # The next boot checked today: no check, but the offer stays.
+    log = device.settings(env=DAILY)
+    refuse(log, "update check (the daily check)")
+    expect(log, "System update: Available: ThistleOS 0.6.0")
+
+
+def the_daily_check_offers_nothing_older_or_for_another_board(device: Device,
+                                                              github: GitHub) -> None:
+    device.put_online_release(github, version="0.5.0")
+    device.put_online_release(github, version="0.9.0", boards=("tdeck-pro",))
+    device.put_online_release(github, version="0.9.1", arch="esp32s3")
+    log = device.settings(env=DAILY)
+    expect(log, "update check (the daily check): up to date; running ",
+           "the newest for this board is 0.5.0", "System update: Checked ")
+    refuse(log, "Available:")
+
+
+def a_release_downloads_through_the_redirect_and_installs(device: Device,
+                                                          github: GitHub) -> None:
+    image = device.put_online_release(github)
+    log = device.settings(CHECK_NOW, DOWNLOAD, LATER)
+    expect(log, "update check (Check now): 0.6.0 is offered",
+           "System update: Available: ThistleOS 0.6.0",
+           "downloading 0.6.0: ", "Redirected (1)",
+           "writing 0.6.0 (security version 600, 8192 bytes) into kernel_b",
+           "installed 0.6.0 into kernel_b; it runs after the next restart",
+           "System update: 0.6.0 is installed. It runs after a restart.",
+           "toast: It runs after the next restart")
+    refuse(log, "restarting into the new kernel")
+    if downloaded(github) != ["/thistle_os-host-v0.6.0.bin"]:
+        raise AssertionError(f"the image was not fetched once: {github.assets.requests}")
+    if (device.slots / "kernel_b.bin").read_bytes() != image:
+        raise AssertionError("kernel_b does not hold the release's image")
+    # Later: the next run of any kind boots it, and keeps it.
+    log = device.run(keep_s=1, timeout_ms=3000)
+    expect(log, "running kernel_b, version 0.6.0, new", "kept the kernel in kernel_b",
+           "security floor raised from 0 to 600")
+    # It is not offered again.
+    log = device.settings(CHECK_NOW)
+    expect(log, "update check (Check now): up to date; running 0.6.0")
+
+
+def a_download_of_another_size_is_refused(device: Device, github: GitHub) -> None:
+    device.put_online_release(github, served=lambda image: image + b"\0")
+    refused_online(device, "the file is 8193 bytes; its manifest says 8192")
+
+
+def a_redirect_from_https_to_http_is_refused(device: Device, github: GitHub) -> None:
+    device.put_online_release(github)
+    refused_online(device, "its manifest: the download was refused: "
+                           "a redirect from HTTPS to HTTP")
+    if github.assets.requests:
+        raise AssertionError(f"plain HTTP was reached: {github.assets.requests}")
+
+
+def six_redirects_are_refused(device: Device, github: GitHub) -> None:
+    device.put_online_release(github)
+    github.redirect_chain("/releases/download/v0.6.0/thistle_os-host-v0.6.0.bin", 6)
+    refused_online(device, "the image: the download was refused: more than 5 redirects")
+    if downloaded(github):
+        raise AssertionError("the image was fetched")
+
+
+def on_mobile_data_the_download_waits_for_consent(device: Device, github: GitHub) -> None:
+    image = device.put_online_release(github)
+    device.mobile_data_on()
+    mobile = {"THISTLE_SIM_NETWORK": "mobile"}
+    # The fake modem's link takes some seconds to come up.
+    log = device.settings("wait", "wait", "wait", CHECK_NOW, DOWNLOAD, "wait", "wait",
+                          timeout_ms=16000, env=mobile)
+    expect(log, "[sim_cellular] connected", "update check (Check now): 0.6.0 is offered",
+           "the download waits: on mobile data: waiting for WiFi, or for you to allow mobile data",
+           "System update: The download waits: on mobile data")
+    refuse(log, "downloading 0.6.0", "installed 0.6.0")
+    if downloaded(github):
+        raise AssertionError("the image was downloaded without consent")
+
+    log = device.settings("wait", "wait", "wait", CHECK_NOW, DOWNLOAD, ALLOW_MOBILE_DATA,
+                          LATER, timeout_ms=18000, env=mobile)
+    expect(log, "the download waits: on mobile data", "mobile data allowed for the download",
+           "downloading 0.6.0: ", "installed 0.6.0 into kernel_b")
+    if (device.slots / "kernel_b.bin").read_bytes() != image:
+        raise AssertionError("kernel_b does not hold the release's image")
+
+
 CASES = (
     settings_shows_the_running_version_and_the_release_on_the_card,
     a_release_installs_from_settings_and_restart_now_boots_it,
@@ -265,6 +564,13 @@ CASES = (
     a_release_below_the_floor_is_refused,
     a_file_of_another_size_is_refused,
     a_file_with_one_byte_changed_is_refused,
+    online(the_daily_check_offers_a_newer_release),
+    online(the_daily_check_offers_nothing_older_or_for_another_board),
+    online(a_release_downloads_through_the_redirect_and_installs),
+    online(a_download_of_another_size_is_refused),
+    online(a_redirect_from_https_to_http_is_refused, tls=True),
+    online(six_redirects_are_refused),
+    online(on_mobile_data_the_download_waits_for_consent),
 )
 
 

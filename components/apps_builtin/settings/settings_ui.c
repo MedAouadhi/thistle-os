@@ -1752,10 +1752,12 @@ static void open_about_screen(void)
 /* System update sub-screen                                             */
 /* ------------------------------------------------------------------ */
 
-/* A release copied to the card's update/ folder installs from here, once its
+/* What the daily check found, Check now, the release the catalog offers
+ * with its notes and Download and install (which on mobile data asks first),
+ * and a release copied to the card's update/ folder: each installs once its
  * artifact manifest holds up (update_manager.rs); anything else is refused
- * with the reason shown. The install runs on a task of the kernel's; this
- * screen polls rs_update_get_status(). */
+ * with the reason shown. The checks and installs run on a task of the
+ * kernel's; this screen polls rs_update_get_status(). */
 
 static lv_timer_t *s_update_timer      = NULL;
 static lv_obj_t   *s_update_card_lbl   = NULL;
@@ -1763,6 +1765,12 @@ static lv_obj_t   *s_update_status_lbl = NULL;
 static lv_obj_t   *s_update_install    = NULL;
 static lv_obj_t   *s_update_restart    = NULL;
 static lv_obj_t   *s_update_later      = NULL;
+static lv_obj_t   *s_update_check_lbl  = NULL;
+static lv_obj_t   *s_update_check_now  = NULL;
+static lv_obj_t   *s_update_offer_lbl  = NULL;
+static lv_obj_t   *s_update_notes_lbl  = NULL;
+static lv_obj_t   *s_update_download   = NULL;
+static lv_obj_t   *s_update_consent    = NULL;
 /* Later hides Restart now until the next install. */
 static bool        s_update_later_chosen = false;
 
@@ -1777,6 +1785,41 @@ static void update_forget_screen(void)
     s_update_install    = NULL;
     s_update_restart    = NULL;
     s_update_later      = NULL;
+    s_update_check_lbl  = NULL;
+    s_update_check_now  = NULL;
+    s_update_offer_lbl  = NULL;
+    s_update_notes_lbl  = NULL;
+    s_update_download   = NULL;
+    s_update_consent    = NULL;
+}
+
+/* A label's text, rewritten and logged only when it changes. */
+static void update_set_text(lv_obj_t *label, const char *text)
+{
+    if (!label || strcmp(lv_label_get_text(label), text) == 0) return;
+    lv_label_set_text(label, text);
+    if (text[0]) ESP_LOGI(TAG, "System update: %s", text);
+}
+
+/* What the last check found, and when. */
+static void update_check_text(const update_status_t *st, char *out, size_t len)
+{
+    char found[64] = "";
+    int64_t when = 0;
+    if (st->state == UPDATE_CHECKING) {
+        snprintf(out, len, "Checking for updates...");
+    } else if (!rs_update_last_check(&when, found, sizeof(found))) {
+        snprintf(out, len, "Not checked yet");
+    } else if (when > 0) {
+        time_t t = (time_t)when;
+        struct tm tm;
+        char date[24];
+        localtime_r(&t, &tm);
+        strftime(date, sizeof(date), "%d %b %H:%M", &tm);
+        snprintf(out, len, "Checked %s: %s", date, found);
+    } else {
+        snprintf(out, len, "Checked: %s", found);
+    }
 }
 
 static void update_set_shown(lv_obj_t *obj, bool shown)
@@ -1808,8 +1851,34 @@ static void update_refresh(lv_timer_t *t)
         ESP_LOGI(TAG, "System update: %s", card);
     }
 
+    char check[96];
+    update_check_text(&st, check, sizeof(check));
+    update_set_text(s_update_check_lbl, check);
+
+    char offer_version[40] = "";
+    static char notes[320];
+    notes[0] = '\0';
+    bool offered = rs_update_offer(offer_version, sizeof(offer_version), notes, sizeof(notes));
+    char offer[64];
+    snprintf(offer, sizeof(offer), "Available: ThistleOS %s", offer_version);
+    if (offered) {
+        update_set_text(s_update_offer_lbl, offer);
+        update_set_text(s_update_notes_lbl, notes);
+    }
+
     char status[200];
     switch (st.state) {
+    case UPDATE_DOWNLOADING:
+        if (st.total > 0) {
+            snprintf(status, sizeof(status), "Downloading %s: %lu%%", st.version,
+                     (unsigned long)((uint64_t)st.done * 100 / st.total));
+        } else {
+            snprintf(status, sizeof(status), "Downloading %s...", st.version);
+        }
+        break;
+    case UPDATE_WAITING:
+        snprintf(status, sizeof(status), "The download waits: %s", st.reason);
+        break;
     case UPDATE_WRITING:
         if (st.total > 0) {
             snprintf(status, sizeof(status), "Installing %s: %lu%%", st.version,
@@ -1833,9 +1902,17 @@ static void update_refresh(lv_timer_t *t)
         if (status[0]) ESP_LOGI(TAG, "System update: %s", status);
     }
 
-    bool busy = st.state == UPDATE_WRITING;
     bool ready = st.state == UPDATE_READY;
-    update_set_shown(s_update_install, on_card && !busy && !ready);
+    /* Nothing under way, waiting or waiting for a restart. */
+    bool settled = st.state == UPDATE_IDLE || st.state == UPDATE_UP_TO_DATE ||
+                   st.state == UPDATE_AVAILABLE || st.state == UPDATE_FAILED;
+    bool show_offer = offered && (settled || st.state == UPDATE_WAITING);
+    update_set_shown(s_update_check_now, settled && !offered);
+    update_set_shown(s_update_offer_lbl ? lv_obj_get_parent(s_update_offer_lbl) : NULL, show_offer);
+    update_set_shown(s_update_notes_lbl, show_offer && notes[0]);
+    update_set_shown(s_update_download, offered && settled);
+    update_set_shown(s_update_consent, st.state == UPDATE_WAITING && rs_update_needs_consent());
+    update_set_shown(s_update_install, on_card && settled);
     update_set_shown(s_update_restart, ready && !s_update_later_chosen);
     update_set_shown(s_update_later, ready && !s_update_later_chosen);
 }
@@ -1846,6 +1923,36 @@ static void update_install_cb(lv_event_t *e)
     s_update_later_chosen = false;
     if (rs_update_install_from_card() != ESP_OK) {
         toast_warn("An update is already installing");
+    }
+    update_refresh(NULL);
+}
+
+static void update_check_now_cb(lv_event_t *e)
+{
+    (void)e;
+    if (rs_update_check_now() != ESP_OK) {
+        toast_warn("An update is already under way");
+    }
+    update_refresh(NULL);
+}
+
+static void update_download_cb(lv_event_t *e)
+{
+    (void)e;
+    s_update_later_chosen = false;
+    if (rs_update_install(false) != ESP_OK) {
+        toast_warn("An update is already under way");
+    }
+    update_refresh(NULL);
+}
+
+/* On mobile data: the user allows the download over it. */
+static void update_consent_cb(lv_event_t *e)
+{
+    (void)e;
+    s_update_later_chosen = false;
+    if (rs_update_install(true) != ESP_OK) {
+        toast_warn("An update is already under way");
     }
     update_refresh(NULL);
 }
@@ -1880,10 +1987,27 @@ static void open_update_screen(void)
     lv_obj_align(running_lbl, LV_ALIGN_TOP_LEFT, 0, 6);
     ESP_LOGI(TAG, "System update: %s", running);
 
-    s_update_card_lbl = create_live_row(content, "");
-    s_update_install  = create_action_row(content, "Install from card", update_install_cb);
-
     const theme_colors_t *tc = theme_get_colors();
+    s_update_check_lbl = create_live_row(content, "");
+    s_update_check_now = create_action_row(content, "Check now", update_check_now_cb);
+    s_update_offer_lbl = create_live_row(content, "");
+    s_update_notes_lbl = lv_label_create(content);
+    lv_label_set_text(s_update_notes_lbl, "");
+    lv_label_set_long_mode(s_update_notes_lbl, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(s_update_notes_lbl, LV_PCT(100));
+    lv_obj_set_style_pad_left(s_update_notes_lbl, ITEM_PAD_LEFT, LV_PART_MAIN);
+    lv_obj_set_style_pad_right(s_update_notes_lbl, ITEM_PAD_RIGHT, LV_PART_MAIN);
+    lv_obj_set_style_pad_bottom(s_update_notes_lbl, 4, LV_PART_MAIN);
+    lv_obj_set_style_text_font(s_update_notes_lbl, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_color(s_update_notes_lbl, tc->text, LV_PART_MAIN);
+    s_update_download = create_action_row(content, "Download and install", update_download_cb);
+    s_update_consent  = create_action_row(content, "Download over mobile data", update_consent_cb);
+    lv_obj_add_flag(s_update_check_now, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(lv_obj_get_parent(s_update_offer_lbl), LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_update_notes_lbl, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_update_download, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_update_consent, LV_OBJ_FLAG_HIDDEN);
+
     s_update_status_lbl = lv_label_create(content);
     lv_label_set_text(s_update_status_lbl, "");
     lv_label_set_long_mode(s_update_status_lbl, LV_LABEL_LONG_WRAP);
@@ -1897,6 +2021,9 @@ static void open_update_screen(void)
 
     s_update_restart = create_action_row(content, "Restart now", update_restart_cb);
     s_update_later   = create_action_row(content, "Later", update_later_cb);
+
+    s_update_card_lbl = create_live_row(content, "");
+    s_update_install  = create_action_row(content, "Install from card", update_install_cb);
     lv_obj_add_flag(s_update_install, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_update_restart, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_update_later, LV_OBJ_FLAG_HIDDEN);

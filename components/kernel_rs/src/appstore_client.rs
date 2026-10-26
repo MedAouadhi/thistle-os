@@ -96,6 +96,16 @@ extern "C" {
 /// then the new hop's.
 #[cfg(not(test))]
 unsafe fn follow_redirect(client: *mut c_void, from: &mut String, followed: &mut u32) -> Result<(), i32> {
+    follow_redirect_why(client, from, followed).map_err(|_| ESP_FAIL)
+}
+
+/// follow_redirect(), saying why a redirect is refused.
+#[cfg(not(test))]
+unsafe fn follow_redirect_why(
+    client: *mut c_void,
+    from: &mut String,
+    followed: &mut u32,
+) -> Result<(), &'static str> {
     let mut to = [0u8; 512];
     let found = http_client_redirect(client, to.as_mut_ptr().cast::<c_char>(), to.len() as c_int);
     let to = CStr::from_bytes_until_nul(&to)
@@ -108,7 +118,7 @@ unsafe fn follow_redirect(client: *mut c_void, from: &mut String, followed: &mut
             TAG.as_ptr(),
             b"Download refused: a redirect with no usable Location\0".as_ptr(),
         );
-        return Err(ESP_FAIL);
+        return Err("a redirect with no usable Location");
     }
     let to_c = std::ffi::CString::new(to).unwrap_or_default();
     if let Err(refusal) = crate::redirect_policy::follow(from, to, *followed) {
@@ -119,7 +129,8 @@ unsafe fn follow_redirect(client: *mut c_void, from: &mut String, followed: &mut
             refusal.reason().as_ptr(),
             to_c.as_ptr(),
         );
-        return Err(ESP_FAIL);
+        let why = refusal.reason();
+        return Err(std::str::from_utf8(&why[..why.len() - 1]).unwrap_or("a redirect refused"));
     }
     *followed += 1;
     esp_log_write(
@@ -917,6 +928,8 @@ pub unsafe extern "C" fn appstore_refresh_catalog(
             cache_path,
         );
     }
+    // The system update's check and the App Store's Refresh are one check.
+    crate::update_manager::catalog_read(&json, "the App Store's Refresh");
     esp_log_write(
         ESP_LOG_INFO,
         TAG.as_ptr(),
@@ -1435,6 +1448,172 @@ unsafe fn download_into_staged(
         return ESP_FAIL;
     }
     ESP_OK
+}
+
+// ---------------------------------------------------------------------------
+// Streams for the system update (update_manager.rs)
+// ---------------------------------------------------------------------------
+
+/// Why a download did not deliver.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum FetchError {
+    /// A redirect redirect_policy refuses, and why.
+    Refused(&'static str),
+    /// The server answered with this status.
+    Status(i32),
+    /// The answer gave no length, or one over the limit.
+    Length,
+    /// The answer ended before its length, or ran past it.
+    Short,
+    /// The connection or the client failed.
+    Transport(i32),
+}
+
+impl FetchError {
+    /// The reason, as Settings and the log show it.
+    pub(crate) fn reason(&self) -> String {
+        match self {
+            FetchError::Refused(why) => format!("the download was refused: {why}"),
+            FetchError::Status(status) => format!("the server answered HTTP {status}"),
+            FetchError::Length => "the server gave no usable length".into(),
+            FetchError::Short => "the download ended early".into(),
+            FetchError::Transport(err) => format!("the download failed (0x{err:x})"),
+        }
+    }
+}
+
+/// An HTTP GET whose body is read a chunk at a time, after its redirects are
+/// followed as redirect_policy allows (at most five, never HTTPS to HTTP).
+#[cfg(not(test))]
+pub(crate) struct HttpStream {
+    session: HttpDownloadSession,
+    length: u64,
+    received: u64,
+}
+
+#[cfg(not(test))]
+impl HttpStream {
+    /// Open `url`, refusing an answer longer than `max` bytes.
+    pub(crate) fn open(url: &str, max: u64) -> Result<HttpStream, FetchError> {
+        let url_c = std::ffi::CString::new(url).map_err(|_| FetchError::Transport(ESP_ERR_INVALID_ARG))?;
+        unsafe {
+            let client = http_client_init(url_c.as_ptr(), 30000, None, std::ptr::null_mut());
+            if client.is_null() {
+                return Err(FetchError::Transport(ESP_ERR_NO_MEM));
+            }
+            let mut session = HttpDownloadSession { client, opened: false };
+            let err = esp_http_client_open(client, 0);
+            if err != ESP_OK {
+                return Err(FetchError::Transport(err));
+            }
+            session.opened = true;
+            let mut length = esp_http_client_fetch_headers(client);
+            let mut status = esp_http_client_get_status_code(client);
+            let mut at = url.to_owned();
+            let mut followed = 0;
+            while crate::redirect_policy::is_redirect(status) {
+                follow_redirect_why(client, &mut at, &mut followed).map_err(FetchError::Refused)?;
+                esp_http_client_close(client);
+                session.opened = false;
+                let err = esp_http_client_open(client, 0);
+                if err != ESP_OK {
+                    return Err(FetchError::Transport(err));
+                }
+                session.opened = true;
+                length = esp_http_client_fetch_headers(client);
+                status = esp_http_client_get_status_code(client);
+            }
+            if !(200..300).contains(&status) {
+                return Err(FetchError::Status(status));
+            }
+            if length < 0 || length as u64 > max {
+                return Err(FetchError::Length);
+            }
+            Ok(HttpStream { session, length: length as u64, received: 0 })
+        }
+    }
+
+    /// The answer's length, from its headers.
+    pub(crate) fn length(&self) -> u64 {
+        self.length
+    }
+
+    /// Read the next bytes into `buf`; 0 once the whole answer is read.
+    pub(crate) fn read(&mut self, buf: &mut [u8]) -> Result<usize, FetchError> {
+        if self.received == self.length {
+            return Ok(0);
+        }
+        let want = buf.len().min((self.length - self.received).min(i32::MAX as u64) as usize);
+        let count = unsafe {
+            esp_http_client_read(self.session.client, buf.as_mut_ptr().cast::<c_char>(), want as c_int)
+        };
+        if count < 0 {
+            return Err(FetchError::Transport(count));
+        }
+        if count == 0 {
+            return Err(FetchError::Short);
+        }
+        self.received += count as u64;
+        Ok(count as usize)
+    }
+}
+
+/// Host tests reach no network.
+#[cfg(test)]
+pub(crate) struct HttpStream;
+
+#[cfg(test)]
+impl HttpStream {
+    pub(crate) fn open(_url: &str, _max: u64) -> Result<HttpStream, FetchError> {
+        Err(FetchError::Transport(ESP_ERR_NOT_SUPPORTED))
+    }
+    pub(crate) fn length(&self) -> u64 {
+        0
+    }
+    pub(crate) fn read(&mut self, _buf: &mut [u8]) -> Result<usize, FetchError> {
+        Ok(0)
+    }
+}
+
+/// The whole of a small answer: a manifest, a signature.
+pub(crate) fn fetch_bytes(url: &str, max: u64) -> Result<Vec<u8>, FetchError> {
+    let mut stream = HttpStream::open(url, max)?;
+    let mut bytes = vec![0u8; stream.length() as usize];
+    let mut at = 0;
+    while at < bytes.len() {
+        at += stream.read(&mut bytes[at..])?;
+    }
+    Ok(bytes)
+}
+
+/// The catalog, from the configured URL (a card's config/appstore.json, or
+/// the default), as the App Store's Refresh reads it.
+#[cfg(not(test))]
+pub(crate) fn fetch_catalog() -> Result<String, i32> {
+    unsafe { fetch_catalog_json(std::ptr::null()) }
+}
+
+#[cfg(test)]
+pub(crate) fn fetch_catalog() -> Result<String, i32> {
+    Err(ESP_ERR_NOT_SUPPORTED)
+}
+
+/// Where the catalog is kept, for the App Store and the system update both.
+pub(crate) fn catalog_cache_path() -> PathBuf {
+    card_root().join("appstore/catalog.json")
+}
+
+/// Keep a fetched catalog where the App Store reads it, unless it lists
+/// nothing at all.
+pub(crate) fn keep_catalog(json: &str) -> bool {
+    let has_entries = catalog_entries_json(json).contains('{');
+    has_entries && write_file_replacing(&catalog_cache_path(), json.as_bytes()).is_ok()
+}
+
+/// The catalog kept by the last Refresh or check, if any.
+pub(crate) fn kept_catalog() -> Option<String> {
+    let bytes = std::fs::read(catalog_cache_path()).ok()?;
+    (bytes.len() <= MAX_CATALOG_JSON).then(|| String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// Download a file from `url` to `dest_path`, optionally verifying SHA-256.

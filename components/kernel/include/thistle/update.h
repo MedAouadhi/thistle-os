@@ -9,10 +9,15 @@
  * decisions are update_policy.rs's, the running of them update_manager.rs's,
  * every NVS call update_platform.c's.
  *
- * For now a release copied to the card installs: its .bin, the manifest
- * beside it (<bin>.manifest) and the manifest's signature
- * (<bin>.manifest.sig), as the release assets are named, in /sdcard/update/.
- * Settings → System update shows it.
+ * A release comes from the catalog or the card. Once a day, with a network
+ * up, the kernel reads the catalog (the App Store's, kept at
+ * /sdcard/appstore/catalog.json) and offers the newest firmware newer than
+ * the running one for this chip and board; a download streams it into the
+ * other kernel slot, and on mobile data waits until the user allows it. A
+ * release copied to the card installs too: its .bin, the manifest beside it
+ * (<bin>.manifest) and the manifest's signature (<bin>.manifest.sig), as the
+ * release assets are named, in /sdcard/update/. Settings → System update
+ * shows both.
  */
 #pragma once
 
@@ -34,6 +39,8 @@ typedef enum {
     UPDATE_WRITING,      /* checking the release and writing it */
     UPDATE_READY,        /* written: runs after the next restart */
     UPDATE_FAILED,       /* refused or failed; reason says why */
+    UPDATE_WAITING,      /* a download waits for a network, or on mobile
+                          * data for the user's leave; reason says which */
 } update_state_t;
 
 typedef struct {
@@ -56,6 +63,26 @@ bool rs_update_card_release(char *version, size_t len);
 /* Install the card's release on a task of its own; follow it with
  * rs_update_get_status(). ESP_ERR_INVALID_STATE while one is under way. */
 esp_err_t rs_update_install_from_card(void);
+
+/* The release the catalog offers, if any: its version and notes. */
+bool rs_update_offer(char *version, size_t version_len, char *notes, size_t notes_len);
+
+/* What the last check found ("up to date", "0.7.0 is available", "the
+ * catalog could not be read") and when (0: the clock was unset). False if
+ * no check has been made. */
+bool rs_update_last_check(int64_t *when_s, char *found, size_t len);
+
+/* Read the catalog now (UPDATE_CHECKING). ESP_ERR_INVALID_STATE while a
+ * check or an install is under way. */
+esp_err_t rs_update_check_now(void);
+
+/* Download and install the release on offer. On mobile data it waits
+ * (UPDATE_WAITING) unless mobile_data_allowed; with no network it waits for
+ * one. ESP_ERR_NOT_FOUND with nothing on offer. */
+esp_err_t rs_update_install(bool mobile_data_allowed);
+
+/* Whether a download waits for the user to allow mobile data. */
+bool rs_update_needs_consent(void);
 
 /* Restart into the kernel just installed (UPDATE_READY); else nothing. */
 void rs_update_restart(void);

@@ -172,6 +172,10 @@ static CURL *new_easy(struct sim_http_client *client)
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, client->follow_redirects ? 1L : 0L);
     curl_easy_setopt(curl, CURLOPT_MAXREDIRS,      10L);  /* ESP-IDF's default */
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+    /* A test's own certificate authority, so a fake server can speak HTTPS
+     * (test_system_update.py's redirect from HTTPS to HTTP). */
+    const char *ca = getenv("THISTLE_SIM_CA_BUNDLE");
+    if (ca && ca[0]) curl_easy_setopt(curl, CURLOPT_CAINFO, ca);
     return curl;
 }
 

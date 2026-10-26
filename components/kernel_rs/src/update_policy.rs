@@ -181,6 +181,153 @@ pub(crate) fn pick_card_release(versions: &[Option<&str>]) -> Option<usize> {
     Some(newest.map_or(0, |(i, _)| i))
 }
 
+// ---------------------------------------------------------------------------
+// Over the air (ticket 07): the offer, when to check, and mobile data
+// ---------------------------------------------------------------------------
+
+/// A firmware release as the catalog lists it: one flat entry, as
+/// tools/release_firmware.py writes it. Nothing here is trusted: the
+/// download is checked against the signed artifact manifest.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FirmwareRelease {
+    pub version: String,
+    pub arch: String,
+    pub compatible_boards: Vec<String>,
+    /// The image.
+    pub url: String,
+    pub manifest_url: String,
+    pub manifest_sig_url: String,
+    pub sha256: String,
+    pub size: u64,
+    /// The release's notes, CHANGELOG.md's section for its tag.
+    pub notes: String,
+}
+
+/// The firmware releases a catalog lists, each with what an install needs;
+/// an entry missing any of it is left out.
+pub(crate) fn firmware_releases(catalog_json: &str) -> Vec<FirmwareRelease> {
+    use serde_json::Value;
+    let Ok(catalog) = serde_json::from_str::<Value>(catalog_json) else {
+        return Vec::new();
+    };
+    let Some(entries) = catalog.get("entries").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let text = |entry: &Value, key: &str| -> Option<String> {
+        entry.get(key).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string)
+    };
+    entries
+        .iter()
+        .filter(|entry| entry.get("type").and_then(Value::as_str) == Some("firmware"))
+        .filter_map(|entry| {
+            Some(FirmwareRelease {
+                version: text(entry, "version")?,
+                arch: text(entry, "arch")?,
+                compatible_boards: entry
+                    .get("compatible_boards")?
+                    .as_array()?
+                    .iter()
+                    .filter_map(|b| b.as_str().map(str::to_string))
+                    .collect(),
+                url: text(entry, "url")?,
+                manifest_url: text(entry, "manifest_url")?,
+                manifest_sig_url: text(entry, "manifest_sig_url")?,
+                sha256: text(entry, "sha256").unwrap_or_default(),
+                size: entry.get("size_bytes").and_then(Value::as_u64).filter(|&n| n > 0)?,
+                notes: text(entry, "changelog").unwrap_or_default(),
+            })
+        })
+        .collect()
+}
+
+/// Which of the catalog's firmware releases to offer: the newest, by
+/// version, that is newer than the running one (a laptop build counting as
+/// the tag it was built from) and built for this chip and this board.
+pub(crate) fn pick_offer(
+    releases: &[FirmwareRelease],
+    running: &str,
+    chip: &str,
+    board: &str,
+) -> Option<usize> {
+    let running = Version::parse(running);
+    releases
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.arch == chip && r.compatible_boards.iter().any(|b| b == board))
+        .filter_map(|(i, r)| Version::parse(&r.version).map(|v| (i, v)))
+        .filter(|(_, v)| running.as_ref().map_or(true, |running| v > running))
+        .max_by(|a, b| a.1.cmp(&b.1))
+        .map(|(i, _)| i)
+}
+
+/// How long after a check the next is due.
+pub(crate) const CHECK_EVERY_S: i64 = 24 * 3600;
+/// How long after a check that failed, or any check this boot, the next may
+/// be tried.
+pub(crate) const RETRY_MS: u64 = 3600 * 1000;
+
+/// What decides whether the daily check is due.
+#[derive(Clone, Debug)]
+pub(crate) struct CheckInputs {
+    /// A network is up.
+    pub network: bool,
+    /// A check or an install is under way, or one waits for a restart.
+    pub busy: bool,
+    /// The time, if the clock is set (`time_policy::plausible`).
+    pub now_s: Option<i64>,
+    /// When the last check that read the catalog was made, if one was.
+    pub last_check_s: Option<i64>,
+    /// How long ago this boot's last check was tried, if one was.
+    pub attempted_ms_ago: Option<u64>,
+}
+
+/// The daily check is due: with a network, nothing under way, and no check
+/// tried this boot in the last hour; then, with the clock set, a day after
+/// the last check (or at once, if there was none or the clock has gone back
+/// since); with the clock unset, once a boot.
+pub(crate) fn check_due(i: &CheckInputs) -> bool {
+    if !i.network || i.busy {
+        return false;
+    }
+    if i.attempted_ms_ago.is_some_and(|ago| ago < RETRY_MS) {
+        return false;
+    }
+    match (i.now_s, i.last_check_s) {
+        (None, _) => i.attempted_ms_ago.is_none(),
+        (Some(_), None) => true,
+        (Some(now), Some(last)) => now < last || now - last >= CHECK_EVERY_S,
+    }
+}
+
+/// What the network is to a download.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Network {
+    None,
+    /// WiFi, Ethernet, or the simulator's host network.
+    Free,
+    /// Mobile data, which costs the user.
+    Mobile,
+}
+
+/// Whether a download may start.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Gate {
+    Start,
+    WaitForNetwork,
+    WaitForConsent,
+}
+
+/// A download starts on WiFi at once; on mobile data only once the user has
+/// allowed it; with no network it waits for one.
+pub(crate) fn may_download(network: Network, mobile_data_allowed: bool) -> Gate {
+    match network {
+        Network::None => Gate::WaitForNetwork,
+        Network::Free => Gate::Start,
+        Network::Mobile if mobile_data_allowed => Gate::Start,
+        Network::Mobile => Gate::WaitForConsent,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -384,5 +531,191 @@ mod tests {
     fn a_card_release_whose_manifest_does_not_read_is_still_picked_to_be_refused() {
         assert_eq!(pick_card_release(&[None]), Some(0));
         assert_eq!(pick_card_release(&[None, Some("0.6.0")]), Some(1));
+    }
+
+    // --- the online offer (ticket 07) ----------------------------------------
+
+    fn release(version: &str) -> FirmwareRelease {
+        FirmwareRelease {
+            version: version.into(),
+            arch: "esp32s3".into(),
+            compatible_boards: vec!["tdeck".into(), "tdeck-max".into()],
+            url: format!("https://github.com/x/thistle-os/releases/download/v{version}/a.bin"),
+            manifest_url: "https://example.com/a.bin.manifest".into(),
+            manifest_sig_url: "https://example.com/a.bin.manifest.sig".into(),
+            sha256: SHA.into(),
+            size: 4,
+            notes: format!("What is new in {version}"),
+        }
+    }
+
+    fn offer(releases: &[FirmwareRelease], running: &str) -> Option<String> {
+        pick_offer(releases, running, "esp32s3", "tdeck-max").map(|i| releases[i].version.clone())
+    }
+
+    #[test]
+    fn a_release_newer_than_what_runs_is_offered() {
+        assert_eq!(offer(&[release("0.6.0")], "0.5.2"), Some("0.6.0".into()));
+    }
+
+    #[test]
+    fn the_same_or_an_older_release_is_not_offered() {
+        assert_eq!(offer(&[release("0.6.0")], "0.6.0"), None);
+        assert_eq!(offer(&[release("0.5.0")], "0.6.0"), None);
+    }
+
+    #[test]
+    fn a_laptop_build_counts_as_the_tag_it_was_built_from() {
+        assert_eq!(offer(&[release("0.6.0")], "0.6.0-3-gabc1234-dirty"), None);
+        assert_eq!(offer(&[release("0.6.1")], "0.6.0-3-gabc1234-dirty"), Some("0.6.1".into()));
+        assert_eq!(offer(&[release("0.6.0")], "0.6.0-rc.1"), Some("0.6.0".into()));
+        // An untagged build is older than any release.
+        assert_eq!(offer(&[release("0.6.0")], "0.0.0-unknown"), Some("0.6.0".into()));
+    }
+
+    #[test]
+    fn of_several_releases_the_newest_by_version_is_offered() {
+        let releases = [release("0.7.0"), release("0.10.0"), release("0.9.0")];
+        assert_eq!(offer(&releases, "0.6.0"), Some("0.10.0".into()));
+    }
+
+    #[test]
+    fn a_release_for_another_chip_or_board_is_not_offered() {
+        let c3 = FirmwareRelease { arch: "esp32c3".into(), ..release("0.9.0") };
+        let pro = FirmwareRelease { compatible_boards: vec!["tdeck-pro".into()], ..release("0.8.0") };
+        assert_eq!(offer(&[c3.clone(), pro.clone()], "0.6.0"), None);
+        assert_eq!(offer(&[c3, pro, release("0.7.0")], "0.6.0"), Some("0.7.0".into()));
+    }
+
+    /// A catalog as build_catalog.py writes one: an app, then a firmware
+    /// entry as release_firmware.py writes it.
+    const CATALOG: &str = r#"{
+  "version": 1,
+  "generated": "2026-10-26T10:00:00Z",
+  "entries": [
+    {"type": "app", "id": "notes", "version": "1.0.3", "url": "https://x/notes.tap"},
+    {
+      "type": "firmware",
+      "id": "thistle-os",
+      "version": "0.6.0",
+      "arch": "esp32s3",
+      "compatible_boards": ["tdeck", "tdeck-max"],
+      "url": "https://github.com/x/thistle-os/releases/download/v0.6.0/a.bin",
+      "manifest_url": "https://github.com/x/thistle-os/releases/download/v0.6.0/a.bin.manifest",
+      "manifest_sig_url": "https://github.com/x/thistle-os/releases/download/v0.6.0/a.bin.manifest.sig",
+      "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+      "size_bytes": 3866624,
+      "changelog": "Over the air updates.\n- Check now",
+      "updated": "2026-10-26"
+    }
+  ]
+}"#;
+
+    #[test]
+    fn the_catalogs_firmware_entries_are_read() {
+        let releases = firmware_releases(CATALOG);
+        assert_eq!(releases.len(), 1);
+        let r = &releases[0];
+        assert_eq!(r.version, "0.6.0");
+        assert_eq!(r.arch, "esp32s3");
+        assert_eq!(r.compatible_boards, vec!["tdeck".to_string(), "tdeck-max".to_string()]);
+        assert!(r.url.ends_with("/a.bin"));
+        assert!(r.manifest_url.ends_with("/a.bin.manifest"));
+        assert!(r.manifest_sig_url.ends_with("/a.bin.manifest.sig"));
+        assert_eq!(r.size, 3866624);
+        assert_eq!(r.notes, "Over the air updates.\n- Check now");
+    }
+
+    #[test]
+    fn a_firmware_entry_missing_what_an_install_needs_is_left_out() {
+        let no_manifest = CATALOG.replace("\"manifest_url\"", "\"other\"");
+        assert!(firmware_releases(&no_manifest).is_empty());
+        let no_size = CATALOG.replace("\"size_bytes\": 3866624", "\"size_bytes\": 0");
+        assert!(firmware_releases(&no_size).is_empty());
+    }
+
+    #[test]
+    fn a_catalog_that_does_not_read_lists_no_firmware() {
+        assert!(firmware_releases("").is_empty());
+        assert!(firmware_releases("{\"entries\": 3}").is_empty());
+        assert!(firmware_releases("<html>").is_empty());
+    }
+
+    // --- when to check -------------------------------------------------------
+
+    const NOW: i64 = 1_793_000_000; // 2026-10-26
+    const HOUR: i64 = 3600;
+
+    fn due() -> CheckInputs {
+        CheckInputs {
+            network: true,
+            busy: false,
+            now_s: Some(NOW),
+            last_check_s: Some(NOW - 25 * HOUR),
+            attempted_ms_ago: None,
+        }
+    }
+
+    #[test]
+    fn a_check_is_due_a_day_after_the_last() {
+        assert!(check_due(&due()));
+        assert!(!check_due(&CheckInputs { last_check_s: Some(NOW - 23 * HOUR), ..due() }));
+        assert!(check_due(&CheckInputs { last_check_s: Some(NOW - 24 * HOUR), ..due() }));
+    }
+
+    #[test]
+    fn a_device_never_checked_checks_at_once() {
+        assert!(check_due(&CheckInputs { last_check_s: None, ..due() }));
+    }
+
+    #[test]
+    fn a_clock_set_back_since_the_last_check_is_no_reason_to_wait() {
+        assert!(check_due(&CheckInputs { last_check_s: Some(NOW + 5 * HOUR), ..due() }));
+    }
+
+    #[test]
+    fn nothing_is_checked_without_a_network_or_while_busy() {
+        assert!(!check_due(&CheckInputs { network: false, ..due() }));
+        assert!(!check_due(&CheckInputs { busy: true, ..due() }));
+    }
+
+    #[test]
+    fn with_the_clock_unset_it_checks_once_a_boot() {
+        let unset = CheckInputs { now_s: None, last_check_s: Some(NOW - HOUR), ..due() };
+        assert!(check_due(&unset));
+        assert!(!check_due(&CheckInputs { attempted_ms_ago: Some(1), ..unset.clone() }));
+        assert!(!check_due(&CheckInputs { attempted_ms_ago: Some(48 * 3_600_000), ..unset }));
+    }
+
+    #[test]
+    fn a_check_that_failed_is_tried_again_an_hour_later() {
+        let failed = CheckInputs { attempted_ms_ago: Some(59 * 60_000), ..due() };
+        assert!(!check_due(&failed));
+        assert!(check_due(&CheckInputs { attempted_ms_ago: Some(RETRY_MS), ..failed }));
+    }
+
+    // --- mobile data ---------------------------------------------------------
+
+    #[test]
+    fn a_download_starts_at_once_on_wifi() {
+        assert_eq!(may_download(Network::Free, false), Gate::Start);
+        assert_eq!(may_download(Network::Free, true), Gate::Start);
+    }
+
+    #[test]
+    fn on_mobile_data_a_download_waits_until_the_user_allows_it() {
+        assert_eq!(may_download(Network::Mobile, false), Gate::WaitForConsent);
+        assert_eq!(may_download(Network::Mobile, true), Gate::Start);
+    }
+
+    #[test]
+    fn with_no_network_a_download_waits_for_one() {
+        assert_eq!(may_download(Network::None, true), Gate::WaitForNetwork);
+    }
+
+    #[test]
+    fn a_release_whose_version_does_not_read_is_not_offered() {
+        assert_eq!(offer(&[release("latest")], "0.6.0"), None);
+        assert_eq!(offer(&[release("0.7.0"), release("1.0")], "0.6.0"), Some("0.7.0".into()));
     }
 }

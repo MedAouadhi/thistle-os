@@ -301,6 +301,10 @@ pub extern "C" fn kernel_init() -> i32 {
     // as it starts, if a token has been given (gps_assist.rs).
     crate::gps_assist::start();
 
+    // System updates: a kernel worker job checks the catalog once a day
+    // when a network is up, on a task made for the check (update_manager.rs).
+    crate::update_manager::start_checks();
+
     // Publish SYSTEM_BOOT event
     crate::event::event_publish_simple(0); // EVENT_SYSTEM_BOOT = 0
 
