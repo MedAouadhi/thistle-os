@@ -16,19 +16,29 @@ status bar, whose clock is allowed to move. Both runs' flush logs are checked
 too, so a change in timing fails here instead of passing for nothing: the
 first capture must hold only full-width flushes, and the second a flush whose
 width is not a multiple of 8.
+
+Nothing else on the screen may change between the two captures, or the
+comparison fails for a reason that is not the shear. The T-Deck Max's Mobile
+data row says "Starting" until the fake modem has registered and "Calls & SMS"
+after, which falls between them; so each run uses a scratch copy of the card
+with the modem switched off in system.json, and the row says "Off" in both.
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+import json
+import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+SDCARD = Path(__file__).resolve().parent.parent / "sdcard"
 STATUS_BAR_HEIGHT = 24
 # --log-flushes prints every area the window manager hands the display.
 FLUSH = re.compile(r"\[sim\] flush \((\d+),(\d+)\)-\((\d+),(\d+)\)")
@@ -51,6 +61,19 @@ CASES = (
 )
 
 
+def quiet_card(workdir: Path) -> Path:
+    """A copy of the simulator's card with the modem switched off, so no
+    row of Settings changes on its own between the two captures."""
+    card = workdir / "card"
+    if not card.exists():
+        shutil.copytree(SDCARD, card)
+        system = card / "config/system.json"
+        settings = json.loads(system.read_text())
+        settings["thistle_os"]["cellular"] = {"enabled": False, "sms": False}
+        system.write_text(json.dumps(settings, indent=2))
+    return card
+
+
 def capture(simulator: Path, case: Case, timeout_ms: int,
             out: Path) -> tuple[bytes, list[int], int]:
     run = subprocess.run(
@@ -58,6 +81,8 @@ def capture(simulator: Path, case: Case, timeout_ms: int,
          "--timeout", str(timeout_ms), "--launch-app", case.app_id,
          "--screenshot", str(out), "--log-flushes"],
         text=True, capture_output=True, check=False, timeout=60,
+        env=dict(os.environ, THISTLE_SIM_SDCARD=str(quiet_card(out.parent)),
+                 THISTLE_SIM_SPIFFS=str(out.parent / "spiffs")),
     )
     if run.returncode != 0:
         raise AssertionError(f"simulator exited {run.returncode} at {timeout_ms} ms")
