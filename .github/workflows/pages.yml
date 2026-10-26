@@ -157,6 +157,9 @@ jobs:
     if: github.event_name == 'push'
     needs: build
     runs-on: ubuntu-latest
+    # Called from a release's tag run, this deploys from the tag: the
+    # github-pages environment must admit tags v* and *-v* beside main
+    # (set up by hand, spec "The release workflows").
     environment:
       name: github-pages
     steps:

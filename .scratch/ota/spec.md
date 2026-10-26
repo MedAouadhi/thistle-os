@@ -295,7 +295,9 @@ and the core dump survive the migration:
 
 ### The release workflows
 
-All of them run on `ubuntu-latest` in the `espressif/idf:v5.5` container.
+All of them run on `ubuntu-latest`. The jobs that build firmware or apps
+run in the `espressif/idf:v5.5` container; the jobs that check a tag, sign,
+publish and deploy Pages need no ESP-IDF and run on the bare runner.
 None creates `.env`, and the release key is passed only to the step that
 signs.
 
@@ -338,7 +340,11 @@ signs.
   - the `release` environment and its secret;
   - the tag ruleset;
   - immutable releases;
-  - Pages served from GitHub Actions.
+  - Pages served from GitHub Actions;
+  - the `github-pages` environment's deployment rule admitting tags
+    matching `v*` and `*-v*` beside `main`: a release workflow calls Pages
+    from its tag's run, and by default that environment admits only the
+    default branch, so the deploy is refused.
 
 ### The catalog
 

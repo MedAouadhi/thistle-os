@@ -8,7 +8,7 @@ A release is a pushed tag: `vX.Y.Z` for the firmware, `<app>-vX.Y.Z` for each Ap
 
 The catalog is built from the latest release of each, on every Pages deploy, at a fixed URL on this repository's Pages. Releases are the record; the catalog is derived and holds nothing of its own. Devices check it once a day. Release asset URLs answer with a redirect to `release-assets.githubusercontent.com`, so the device's downloads follow redirects: at most five, HTTPS only, to any host, since what is installed is trusted for the publisher's signature and its SHA-256, never for where it came from.
 
-There is one release key, Ed25519. It signs firmware and apps. It exists only as a secret of a `release` environment that admits release tags alone, and a tag ruleset lets only the owner create those tags. Released firmware trusts that key and no other; a laptop build also trusts the laptop's publisher key for apps, as before.
+There is one release key, Ed25519. It signs firmware and apps. It exists only as a secret of a `release` environment that admits release tags alone, and a tag ruleset lets only the owner create those tags. The `github-pages` environment admits those tags too, beside `main`, since a release's run deploys Pages from its tag. Released firmware trusts that key and no other; a laptop build also trusts the laptop's publisher key for apps, as before.
 
 Released firmware compiles in nothing from `.env`. Its assets are public, so a key in the `.bin` is a published key. A device on released firmware reads its PodcastIndex, Cohere and AssistNow keys and the Hermes bridge's address from the card's `config/` files, which already override the built-in ones.
 
