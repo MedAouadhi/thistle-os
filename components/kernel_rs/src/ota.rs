@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use crate::kernel_slot::{self, Keep};
+use crate::kernel_slot::{self, Keep, KeepFailed};
 
 // ---------------------------------------------------------------------------
 // ESP-IDF error codes
@@ -238,7 +238,12 @@ mod platform {
     }
 
     impl Writer {
-        pub(crate) fn begin(label: &'static str, _size: usize) -> Result<Writer, i32> {
+        pub(crate) fn begin(label: &'static str, size: usize) -> Result<Writer, i32> {
+            // As kslot_platform_begin() does, refuse an image larger than a
+            // slot before erasing anything.
+            if size > kernel_slot::SLOT_SIZE {
+                return Err(ESP_ERR_INVALID_SIZE);
+            }
             let _ = std::fs::create_dir_all(dir());
             // As esp_ota_begin() does, erase the slot first.
             let mut slots = read();
@@ -403,8 +408,31 @@ struct Running {
 static RUNNING: OnceLock<Running> = OnceLock::new();
 static VERSION: OnceLock<CString> = OnceLock::new();
 
-/// What to call once the running kernel is kept, and the job that waits.
-static KEEP: Mutex<(Option<extern "C" fn()>, u32)> = Mutex::new((None, 0));
+/// What waits for the running kernel to be kept.
+struct Keeping {
+    /// What to call once it is kept, or keeping it is given up.
+    then: Option<extern "C" fn()>,
+    /// The kernel worker's job that keeps it; 0 if none.
+    job: u32,
+    /// How many times keeping it has failed.
+    failures: u32,
+    /// Not tried again before this.
+    next_try: Option<Instant>,
+}
+
+static KEEP: Mutex<Keeping> =
+    Mutex::new(Keeping { then: None, job: 0, failures: 0, next_try: None });
+
+/// The running kernel is kept, or was never new: nothing a reset would roll
+/// back.
+pub(crate) fn running_kernel_kept() -> bool {
+    !matches!(BOOT_VALIDATION_STATE.lock().map(|s| *s), Ok(BootValidationState::Pending))
+}
+
+/// How long this kernel has run.
+pub(crate) fn running_for() -> Duration {
+    RUNNING.get().map_or(Duration::ZERO, |r| r.booted_at.elapsed())
+}
 
 pub(crate) fn running_slot() -> Option<&'static str> {
     RUNNING.get().and_then(|r| r.slot.to_str().ok())
@@ -482,18 +510,33 @@ pub extern "C" fn ota_keep_new_kernel(then: Option<extern "C" fn()>) {
         return;
     }
     let mut keep = KEEP.lock().unwrap_or_else(|e| e.into_inner());
-    if keep.1 != 0 {
+    if keep.job != 0 {
         return;
     }
-    keep.0 = then;
+    keep.then = then;
     log!(ESP_LOG_INFO, b"the power manager starts once this kernel is kept\0");
-    keep.1 = crate::kworker::every(keep_job, std::ptr::null_mut(), Duration::from_secs(1));
+    keep.job = crate::kworker::every(keep_job, std::ptr::null_mut(), Duration::from_secs(1));
+}
+
+/// Stop the keep job and call what waited for it.
+fn keep_done() {
+    let (then, job) = {
+        let mut keep = KEEP.lock().unwrap_or_else(|e| e.into_inner());
+        (keep.then.take(), keep.job)
+    };
+    crate::kworker::cancel(job);
+    if let Some(then) = then {
+        then();
+    }
 }
 
 unsafe extern "C" fn keep_job(_arg: *mut c_void) {
-    let running_for = RUNNING.get().map_or(Duration::ZERO, |r| r.booted_at.elapsed());
-    let pending = true;
-    if kernel_slot::keep(pending, running_for, platform::keep_delay()) != Keep::Now {
+    let running_for = running_for();
+    if kernel_slot::keep(running_for, platform::keep_delay()) != Keep::Now {
+        return;
+    }
+    let now = Instant::now();
+    if KEEP.lock().map(|k| k.next_try.is_some_and(|at| now < at)).unwrap_or(false) {
         return;
     }
     let result = match BOOT_VALIDATION_STATE.lock() {
@@ -501,7 +544,27 @@ unsafe extern "C" fn keep_job(_arg: *mut c_void) {
         Err(_) => ESP_FAIL,
     };
     if result != ESP_OK {
-        log!(ESP_LOG_ERROR, b"could not keep this kernel: 0x%x\0", result);
+        let failed = {
+            let mut keep = KEEP.lock().unwrap_or_else(|e| e.into_inner());
+            keep.failures += 1;
+            let failed = kernel_slot::after_keep_failure(keep.failures);
+            if let KeepFailed::TryAgainIn(wait) = failed {
+                keep.next_try = Some(now + wait);
+            }
+            failed
+        };
+        if failed == KeepFailed::GiveUp {
+            log!(
+                ESP_LOG_ERROR,
+                b"could not keep this kernel (0x%x), tried %u times; a reset rolls it back. \
+                  Starting the power manager\0",
+                result,
+                kernel_slot::KEEP_TRIES
+            );
+            keep_done();
+        } else {
+            log!(ESP_LOG_ERROR, b"could not keep this kernel: 0x%x\0", result);
+        }
         return;
     }
     let slot = CString::new(running_slot().unwrap_or("?")).unwrap_or_default();
@@ -518,14 +581,7 @@ unsafe extern "C" fn keep_job(_arg: *mut c_void) {
         // The kernel is kept. Recovery retries the cleanup later.
         log!(ESP_LOG_WARN, b"could not finalize the bundle transaction\0");
     }
-    let (then, id) = {
-        let mut keep = KEEP.lock().unwrap_or_else(|e| e.into_inner());
-        (keep.0.take(), keep.1)
-    };
-    crate::kworker::cancel(id);
-    if let Some(then) = then {
-        then();
-    }
+    keep_done();
 }
 
 /// Whether the card holds a release in update/: an image and its artifact

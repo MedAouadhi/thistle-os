@@ -16,6 +16,9 @@ use std::time::Duration;
 pub const KERNEL_A: &str = "kernel_a";
 pub const KERNEL_B: &str = "kernel_b";
 
+/// A kernel slot's size (partitions.csv).
+pub const SLOT_SIZE: usize = 0x480000;
+
 /// How long a new kernel runs before it is kept. Until then a reset rolls it
 /// back to the other kernel slot.
 pub const KEEP_DELAY: Duration = Duration::from_secs(60);
@@ -41,26 +44,45 @@ fn index(slot: &str) -> Option<usize> {
 
 const SLOTS: [&str; 2] = [KERNEL_A, KERNEL_B];
 
-/// What to do about keeping the running kernel.
+/// When to keep a new kernel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Keep {
-    /// The kernel is not new: it was kept before, or flashed by USB.
-    NothingToKeep,
-    /// New, and not yet run for long enough: ask again after this long.
+    /// Not yet run for long enough: ask again after this long.
     Wait(Duration),
-    /// New, and run for long enough: keep it now.
+    /// Run for long enough: keep it now.
     Now,
 }
 
-/// Whether a kernel that is `pending` verification and has run for
-/// `running_for` is kept now, given the keep `delay`.
-pub fn keep(pending: bool, running_for: Duration, delay: Duration) -> Keep {
-    if !pending {
-        Keep::NothingToKeep
-    } else if running_for >= delay {
+/// Whether a new kernel that has run for `running_for` is kept now, given
+/// the keep `delay`.
+pub fn keep(running_for: Duration, delay: Duration) -> Keep {
+    if running_for >= delay {
         Keep::Now
     } else {
         Keep::Wait(delay - running_for)
+    }
+}
+
+/// How many times keeping a new kernel is tried.
+pub const KEEP_TRIES: u32 = 5;
+
+/// What follows a failure to keep a new kernel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeepFailed {
+    /// Try again after this long.
+    TryAgainIn(Duration),
+    /// Stop trying: the boot goes on without keeping it, and a reset rolls
+    /// it back as it would have before the minute was up.
+    GiveUp,
+}
+
+/// After the `failures`th failure to keep a new kernel: try again after
+/// 1, 2, 4, 8 s, then give up.
+pub fn after_keep_failure(failures: u32) -> KeepFailed {
+    if failures >= KEEP_TRIES {
+        KeepFailed::GiveUp
+    } else {
+        KeepFailed::TryAgainIn(Duration::from_secs(1 << failures.saturating_sub(1).min(16)))
     }
 }
 
@@ -292,23 +314,30 @@ mod tests {
     // --- keeping a new kernel -----------------------------------------------
 
     #[test]
-    fn a_kernel_that_is_not_new_has_nothing_to_keep() {
-        assert_eq!(keep(false, Duration::ZERO, KEEP_DELAY), Keep::NothingToKeep);
-        assert_eq!(keep(false, Duration::from_secs(600), KEEP_DELAY), Keep::NothingToKeep);
-    }
-
-    #[test]
     fn a_new_kernel_waits_out_the_rest_of_its_first_minute() {
         assert_eq!(
-            keep(true, Duration::from_secs(15), KEEP_DELAY),
+            keep(Duration::from_secs(15), KEEP_DELAY),
             Keep::Wait(Duration::from_secs(45))
         );
     }
 
     #[test]
     fn a_new_kernel_is_kept_once_it_has_run_for_the_delay() {
-        assert_eq!(keep(true, Duration::from_secs(60), KEEP_DELAY), Keep::Now);
-        assert_eq!(keep(true, Duration::from_secs(61), KEEP_DELAY), Keep::Now);
+        assert_eq!(keep(Duration::from_secs(60), KEEP_DELAY), Keep::Now);
+        assert_eq!(keep(Duration::from_secs(61), KEEP_DELAY), Keep::Now);
+    }
+
+    #[test]
+    fn keeping_that_failed_is_tried_again_after_a_doubling_wait() {
+        assert_eq!(after_keep_failure(1), KeepFailed::TryAgainIn(Duration::from_secs(1)));
+        assert_eq!(after_keep_failure(2), KeepFailed::TryAgainIn(Duration::from_secs(2)));
+        assert_eq!(after_keep_failure(4), KeepFailed::TryAgainIn(Duration::from_secs(8)));
+    }
+
+    #[test]
+    fn after_five_failures_the_boot_goes_on_without_keeping() {
+        assert_eq!(after_keep_failure(5), KeepFailed::GiveUp);
+        assert_eq!(after_keep_failure(6), KeepFailed::GiveUp);
     }
 
     // --- the version an image describes ------------------------------------
