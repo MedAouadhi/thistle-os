@@ -1871,7 +1871,13 @@ static void open_update_screen(void)
 
     char running[64];
     snprintf(running, sizeof(running), "Running: %s", rs_update_running_version());
-    create_note(content, running);   /* wrapped: a laptop build's is long */
+    /* Two lines, whatever the version: a laptop build's is long, and the
+     * rows below stay where they are. */
+    lv_obj_t *running_lbl = create_live_row(content, running);
+    lv_obj_set_height(lv_obj_get_parent(running_lbl), 2 * ITEM_H - 8);
+    lv_label_set_long_mode(running_lbl, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(running_lbl, LV_PCT(100));
+    lv_obj_align(running_lbl, LV_ALIGN_TOP_LEFT, 0, 6);
     ESP_LOGI(TAG, "System update: %s", running);
 
     s_update_card_lbl = create_live_row(content, "");

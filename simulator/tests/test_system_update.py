@@ -38,9 +38,9 @@ from sign import canonical_manifest  # noqa: E402
 
 # tdeck-max, 240x320: Settings' main list, then the System update screen.
 SYSTEM_UPDATE = "100,277"
-INSTALL = "120,130"
-RESTART_NOW = "120,171"
-LATER = "120,200"
+INSTALL = "120,152"
+RESTART_NOW = "120,190"
+LATER = "120,219"
 
 RELEASE = "thistle_os-host-v0.6.0.bin"
 
