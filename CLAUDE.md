@@ -47,7 +47,7 @@ TX/RX are crossed relative to the SoC pin that drives them.
 ## Build System
 - **Firmware**: ESP-IDF v5.5 with CMake. `idf.py build`, `idf.py flash monitor`
 - **Simulator**: SDL2 desktop build. `cd simulator/build && cmake .. && make -j8 && ./thistle_sim`
-- **Rust kernel**: `cargo +esp check` in `components/kernel_rs/`. Tests: `cargo test --target <host-triple> -- --test-threads=1` (1878 tests)
+- **Rust kernel**: `cargo +esp check` in `components/kernel_rs/`. Tests: `cargo test --target <host-triple> -- --test-threads=1` (about 2100 tests)
 - **Recovery OS**: `cd recovery && cargo +esp build --release`
 - **CI**: GitHub Actions on GitHub's hosted runners, every push to main and every pull request. `ci.yml`: the firmware for each chip in its list (the S3 alone) in `espressif/idf:v5.5`, failing if a `.env` is in the workspace, its partition size check, Recovery, cargo-audit, Semgrep SAST, Trivy. `tests.yml`: the host tests (Rust kernel, Python tools, simulator). `pages.yml`: the docs and the WASM simulator to the repository's own Pages. `release-firmware.yml` and `release-app.yml`: releases, by tag (Releases and updates, below). `tools/test_ci_workflows.py` keeps them all off self-hosted runners and upstream's deploy targets; `tools/test_upstream_links.py` keeps the docs, the site and the apps' metadata linking to the fork.
 
@@ -174,10 +174,13 @@ user's to do, not an agent's.
   arch `host`); Recovery keeps its own copy. The C API is
   `thistle/update.h`.
 - **The daily check.** Once a day with a network up, and at most once a
-  boot while the clock is unset, a kernel worker job (`update_manager.rs`,
-  `tick`) starts the check on the `update` task: a FreeRTOS task with a
-  16 KB internal stack, made for one job (a check, a download, a card
-  install) and gone after. It reads the catalog the App Store reads
+  boot while the clock is unset, but never in a boot's first two minutes
+  nor before a new kernel is kept (`update_policy::check_due`), a kernel
+  worker job (`update_manager.rs`, `tick`) starts the check on the `update`
+  task: a FreeRTOS task made for one job and gone after (`kernel_task.rs`),
+  with an 8 KB internal stack for a check and 16 KB for a download or a
+  card install, which verify a signature. Each logs how much of its stack
+  it never used. It reads the catalog the App Store reads
   (`appstore_get_catalog_url()`), keeps it at
   `/sdcard/appstore/catalog.json`, offers the newest firmware newer than
   the running version for this chip and board (`update_policy::pick_offer`)
@@ -199,13 +202,19 @@ user's to do, not an agent's.
   (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`). On that first boot the power
   manager starts only once it is kept, as deep sleep is a reset; on every
   other boot nothing waits. The boot log says `running kernel_b, version
-  ..., new: kept after 60 s`, then `kept the kernel in kernel_b`.
+  ..., new: kept after 60 s`, then `kept the kernel in kernel_b`. A keep
+  that fails is tried again after 1, 2, 4 and 8 s, then given up
+  (`kernel_slot::after_keep_failure`): the power manager starts anyway,
+  and a reset rolls the kernel back.
 - **Go back**, in Settings → System update, boots the version in the other
   kernel slot with no download, while that slot's NVS record is the version
   its image description says and its security version is at or above the
   floor (`update_policy::go_back`, `rs_update_go_back*`). An install clears
-  the record before it erases the slot, so Go back is gone from then on,
-  whether or not the install finishes. That kernel boots new, is kept after
+  the record once it has begun erasing the slot, so Go back is gone from
+  then on, whether or not the install finishes; a slot that cannot be
+  begun is left as it was, and Go back with it. Settings reads the card
+  and Go back from what the update manager last read, read again after an
+  install, a card mount, or when the page opens (`rs_update_rescan()`). That kernel boots new, is kept after
   a minute like an update, and brings its own board profile (above).
 - **A card install** takes a release's three files from `/sdcard/update/`:
   `<name>.bin`, `<name>.bin.manifest`, `<name>.bin.manifest.sig`, as the
@@ -228,7 +237,8 @@ user's to do, not an agent's.
   slot. `THISTLE_SIM_KEEP_S` shortens the keep. `THISTLE_SIM_PUBLISHER_KEY`
   names a public key trusted for firmware manifests and apps, in simulator
   builds only. The daily check runs only with `THISTLE_SIM_UPDATE_CHECKS=1`,
-  as its card names the real catalog. `THISTLE_SIM_NETWORK=mobile` takes
+  as its card names the real catalog; `THISTLE_SIM_UPDATE_SETTLE_S`
+  shortens the boot's settle before it. `THISTLE_SIM_NETWORK=mobile` takes
   the host network down, so with mobile data on the fake modem is the
   network. `THISTLE_SIM_CA_BUNDLE` lets a test's server speak HTTPS. Its
   board id is the `--device` name; `--install-update` installs the card's
@@ -690,8 +700,9 @@ client.
 - **Start and stop run on a FreeRTOS task, not a `std::thread`.** On
   ESP-IDF a Rust thread leaves its `Thread` handle behind when it ends,
   about 150 bytes of internal RAM, which a heap trace caught at two
-  threads a restart; the task leaves nothing. (`call_manager.rs` still
-  spawns one per call.)
+  threads a restart; the task leaves nothing. `kernel_task::spawn` makes
+  such a task, for the tailnet, AssistNow and updates alike.
+  (`call_manager.rs` still spawns a thread per call.)
 - **The kernel worker polls the client once a second**, in one try of the
   platform's lock (`tailnet_platform_poll`), and keeps what it read for
   the status, the peers and the Terminal, so none of them touch the
@@ -961,7 +972,7 @@ The kernel is **100% Rust and hardware-independent**. It never calls ESP-IDF har
 - **Drivers** (`components/drv_*/`): 16 drivers (13 Rust + 3 C, compiled-in + standalone `.drv.elf`): e-paper, LCD, OLED, keyboard, touch (×2), GPS, accelerometer, power, audio, RTC (PCF8563), SD card, IMU (QMI8658C), light sensor. C drivers for modem (esp_modem), radio (RadioLib) and the ES8311 audio codec (esp_codec_dev).
 - **Networking** (`components/kernel_rs/src/net_manager.rs`, `net_coordinator.rs`): WiFi and LTE (the A7682E driver) register as `hal_net_driver_t` transports. esp_netif routes over WiFi whenever it is up and LTE otherwise, with DNS following the route (ADR-0003). The coordinator keeps mobile data up while Settings has it on, and rejoins the saved WiFi network after a drop unless WiFi is switched off in Settings (`wifi.radio_off`, which stops the radio).
 - **Board config**: Per-board `board.json` files in `sdcard_layout/config/boards/` define pins, buses, and which drivers to load. Replaces compiled `board_*` components. 10 boards supported.
-- **Kernel (Rust)** (`components/kernel_rs/`): 100% Rust. 57 modules: manifest parser, permissions, IPC, events, app manager, version, crypto, HAL registry, driver manager, WM, app store, wifi/ble/net managers, OTA, and more. 1231 tests.
+- **Kernel (Rust)** (`components/kernel_rs/`): 100% Rust. 57 modules: manifest parser, permissions, IPC, events, app manager, version, crypto, HAL registry, driver manager, WM, app store, wifi/ble/net managers, OTA, and more.
 - **Display Server** (`components/kernel/src/display_server.c`): Surface management, compositor, WM vtable interface.
 - **UI** (`components/ui/`): thistle-tk WM (default). LVGL-based WM also available. Both loadable as `.wm.elf`.
 - **Apps**: 16 built in, and 4 from the App Store (Notes, Weather, WiFi

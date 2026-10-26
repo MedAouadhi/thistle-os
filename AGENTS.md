@@ -6,7 +6,7 @@ ThistleOS is a portable ESP32 family operating system with an immutable kernel, 
 ## Build System
 - **Firmware**: ESP-IDF v5.5 with CMake. `idf.py build`, `idf.py flash monitor`
 - **Simulator**: SDL2 desktop build. `cd simulator/build && cmake .. && make -j8 && ./thistle_sim`
-- **Rust kernel**: `cargo +esp check` in `components/kernel_rs/`. Tests: `cargo test --target aarch64-apple-darwin -- --test-threads=1` (1231 tests)
+- **Rust kernel**: `cargo +esp check` in `components/kernel_rs/`. Tests: `cargo test --target <host-triple> -- --test-threads=1` (about 2100 tests)
 - **Recovery OS**: `cd recovery && cargo +esp build --release`
 - **CI**: GitHub Actions — firmware build (espressif/idf:v5.5), Semgrep SAST, Trivy security scan
 
@@ -15,7 +15,7 @@ ThistleOS is a portable ESP32 family operating system with an immutable kernel, 
 ```
 Recovery (Rust, `recovery` slot, 2.5MB) — reserved, not yet flashed (ADR-0010)
 Kernel (100% Rust, `kernel_a` / `kernel_b`, 4.5MB each) — hardware-independent
-  ↑ Ed25519 verify, then written into the other kernel slot
+  ↑ signed artifact manifest checked, then written into the other kernel slot
   ├── Display Server (surfaces, compositor, input routing)
   ├── Kernel modules (57 modules: app manager, IPC, events, permissions, signing, manifest, crypto, HAL registry, drivers, WM, app store, ...)
   ├── Syscall table (~80 syscalls exported to loaded ELFs)
@@ -40,16 +40,22 @@ The kernel is **100% Rust and hardware-independent**. It never calls ESP-IDF har
 - The kernel itself does not know or care which physical chip is present — that detail lives entirely in the loaded `.drv.elf` files and `board.json`. Component-level hardware detection (I2C/SPI/UART scanning) is handled by the Recovery OS.
 
 ### Key components
-- **HAL** (`components/thistle_hal/`): Pure vtable interfaces. Bus handle sharing (SPI/I2C). 11 HAL interfaces: display, input, radio, GPS, audio, power, IMU, storage, network, crypto, RTC.
-- **Drivers** (`components/drv_*/`): 15 drivers (13 Rust + 2 C, compiled-in + standalone `.drv.elf`): e-paper, LCD, OLED, keyboard, touch (×2), GPS, accelerometer, power, audio, RTC (PCF8563), SD card, IMU (QMI8658C), light sensor. C drivers for modem (esp_modem) and radio (RadioLib).
+- **HAL** (`components/thistle_hal/`): Pure vtable interfaces. Bus handle sharing (SPI/I2C). 12 HAL interfaces: display, input, radio, GPS, audio, power, IMU, storage, network, crypto, RTC, haptic. Haptic was appended to the end of `hal_registry_t` so no existing field moved (ADR-0005); a new interface goes there too.
+- **Drivers** (`components/drv_*/`): 16 drivers (13 Rust + 3 C, compiled-in + standalone `.drv.elf`): e-paper, LCD, OLED, keyboard, touch (×2), GPS, accelerometer, power, audio, RTC (PCF8563), SD card, IMU (QMI8658C), light sensor. C drivers for modem (esp_modem), radio (RadioLib) and the ES8311 audio codec (esp_codec_dev).
+- **Networking** (`components/kernel_rs/src/net_manager.rs`, `net_coordinator.rs`): WiFi and LTE (the A7682E driver) register as `hal_net_driver_t` transports. esp_netif routes over WiFi whenever it is up and LTE otherwise, with DNS following the route (ADR-0003). The coordinator keeps mobile data up while Settings has it on, and rejoins the saved WiFi network after a drop unless WiFi is switched off in Settings (`wifi.radio_off`, which stops the radio).
 - **Board config**: Per-board `board.json` files in `sdcard_layout/config/boards/` define pins, buses, and which drivers to load. Replaces compiled `board_*` components. 10 boards supported.
-- **Kernel (Rust)** (`components/kernel_rs/`): 100% Rust. 57 modules: manifest parser, permissions, IPC, events, app manager, version, crypto, HAL registry, driver manager, WM, app store, wifi/ble/net managers, OTA, and more. 1231 tests.
+- **Kernel (Rust)** (`components/kernel_rs/`): 100% Rust. 57 modules: manifest parser, permissions, IPC, events, app manager, version, crypto, HAL registry, driver manager, WM, app store, wifi/ble/net managers, OTA, and more.
 - **Display Server** (`components/kernel/src/display_server.c`): Surface management, compositor, WM vtable interface.
 - **UI** (`components/ui/`): thistle-tk WM (default). LVGL-based WM also available. Both loadable as `.wm.elf`.
-- **Apps**: 15 apps, migrating to `.app.elf` on SPIFFS. Five remain in
-  `components/apps_builtin/`; the other ten are their own components under
+- **Apps**: 16 built in, and 4 from the App Store (Notes, Weather, WiFi
+  Scanner, Flashlight: `standalone_apps/`). Five remain in
+  `components/apps_builtin/`; the other eleven are their own components under
   `apps/`, listed once in `cmake/thistle_apps.cmake` for the simulators and
-  found by `EXTRA_COMPONENT_DIRS` for the firmware.
+  found by `EXTRA_COMPONENT_DIRS` for the firmware, which excludes the four
+  store apps' old LVGL versions still there. The app manager has 32
+  slots (`APP_SLOTS_MAX`), the built-in apps taking theirs at boot before any
+  installed `.app.elf`; an app past the last is refused, which
+  `test_app_matrix.py` shows as one that does not launch.
 - **App Store** (`components/kernel_rs/src/tk_appstore.rs`): Browsable Rust app. Rich catalog with ratings, categories, download counts, changelogs, and component-level driver matching for arch-aware installs.
 - **Recovery** (`recovery/`): Rust. WiFi AP + captive portal, OTA flashing, I2C/SPI/UART hardware scanning, multi-arch chip detection, 3-step web UI provisioning flow.
 - **Simulator** (`simulator/`): SDL2, real kernel code, fake WiFi/BLE, libcurl HTTP.
