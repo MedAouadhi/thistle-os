@@ -73,6 +73,7 @@ pub mod hal_registry;
 pub mod ipc;
 pub mod kernel_boot;
 pub mod kernel_slot;
+pub mod kernel_task;
 pub mod kworker;
 pub mod light_prefs;
 pub mod manifest;
