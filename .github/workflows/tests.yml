@@ -219,10 +219,11 @@ jobs:
       - name: Test the workflows run on hosted runners and publish nothing of upstream's
         run: python3 tools/test_ci_workflows.py
 
-      - name: Test the firmware's version and its release steps
+      - name: Test the firmware's version and the release steps
         run: |
           python3 tools/test_firmware_version.py
           python3 tools/test_release_firmware.py
+          python3 tools/test_release_app.py
 
       - name: Test board profile validation
         run: python3 tools/test_validate_board_catalog.py

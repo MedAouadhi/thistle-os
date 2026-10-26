@@ -122,10 +122,6 @@ jobs:
           cp wasm/build/thistle_wasm.wasm _site/simulator/
           cp wasm/build/thistle_wasm.data _site/simulator/ 2>/dev/null || true
 
-          # App store catalog
-          mkdir -p _site/apps
-          cp simulator/sdcard/appstore/catalog.json _site/apps/ 2>/dev/null || true
-
           # Recovery board catalog
           mkdir -p _site/config/boards
           cp sdcard_layout/config/boards/*.json _site/config/boards/
@@ -133,6 +129,25 @@ jobs:
             sdcard_layout/config/boards \
             --base-url "https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/config/boards" \
             --output _site/catalog.json
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install the catalog builder's dependencies
+        run: python3 -m pip install -r tools/requirements.txt
+
+      # The devices' catalog, derived from the releases on every deploy and
+      # holding nothing of its own: the newest firmware by version and the
+      # newest release of each app, drafts and prereleases left out
+      # (tools/build_catalog.py --releases). A docs-only push builds the same.
+      - name: Build the store catalog from the releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases" > releases.json
+          python3 tools/build_catalog.py --releases releases.json --output _site/store/catalog.json
+          cat _site/store/catalog.json
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v5
