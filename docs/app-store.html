@@ -143,7 +143,7 @@
 
     <p><span class="badge badge-blue">driver</span> — A <code>.drv.elf</code> file. Downloaded to <code>/sdcard/drivers/</code>. Loaded on next boot, before app loading. Must export <code>driver_init()</code>.</p>
 
-    <p><span class="badge badge-yellow">firmware</span> — A full <code>.bin</code> firmware image. Downloaded to <code>/sdcard/update/thistle_os.bin</code>. The OTA subsystem picks it up on next boot and flashes it to <code>ota_1</code>. This is how ThistleOS updates itself over the air.</p>
+    <p><span class="badge badge-yellow">firmware</span> — A full <code>.bin</code> firmware image. Downloaded to <code>/sdcard/update/thistle_os.bin</code>. The OTA subsystem verifies it and writes it into the other kernel slot (<code>kernel_a</code> or <code>kernel_b</code>). This is how ThistleOS updates itself over the air.</p>
 
     <h2>Hosting your own catalog</h2>
     <p>A catalog is just a static JSON file served over HTTPS. GitHub Pages is the easiest option:</p>
@@ -213,8 +213,8 @@
       <li>User opens App Store → sees "ThistleOS vX.Y.Z available"</li>
       <li>User taps "Update" — firmware binary downloaded and verified</li>
       <li>Binary written to <code>/sdcard/update/thistle_os.bin</code></li>
-      <li>Device reboots — Recovery OS checks SD card, finds the binary, flashes to <code>ota_1</code></li>
-      <li>Device boots into new firmware — <code>ota_mark_valid()</code> called to confirm success</li>
+      <li>The kernel verifies the binary, writes it into its other kernel slot, selects it and restarts</li>
+      <li>Device boots into new firmware, which is kept after a minute of running; a reset before then rolls it back</li>
     </ol>
 
     <p>If the firmware entry's <code>sig_url</code> is present and the signature does not verify, the download is rejected before the file is written to the SD card.</p>
