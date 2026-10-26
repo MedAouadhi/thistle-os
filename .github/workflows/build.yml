@@ -85,9 +85,10 @@ jobs:
           idf.py set-target "$TARGET_ARCH"
           idf.py build
 
-      - name: Check firmware size
+      - name: Check firmware size against a kernel slot
         shell: bash
         run: |
+          (cd tools && python3 -m unittest test_check_partition_sizes)
           python3 tools/check_partition_sizes.py \
             --partition-table partitions.csv \
             --firmware build/thistle_os.bin

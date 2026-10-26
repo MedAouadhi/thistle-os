@@ -449,24 +449,6 @@ void app_main(void)
 #endif
     }
 
-    /* Keep a newly flashed image rollback-eligible until all required boot
-     * services have initialized and remained alive through a short soak. */
-    ESP_LOGI(TAG, "Boot health milestone reached; soaking before OTA confirmation");
-    vTaskDelay(pdMS_TO_TICKS(5000));
-    ret = ota_mark_valid();
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to confirm healthy OTA image: %s",
-                 esp_err_to_name(ret));
-        return;
-    }
-    ret = ota_finalize_bundle_transaction();
-    if (ret != ESP_OK) {
-        /* The image is already valid. Recovery will safely retry finalization
-         * if the SD card was temporarily unavailable at this milestone. */
-        ESP_LOGW(TAG, "Could not finalize recovery bundle transaction: %s",
-                 esp_err_to_name(ret));
-    }
-
     /* Say whether every driver started. The start sequence runs inside the
      * boot burst, where this board's only console drops lines, so a failure
      * there is otherwise invisible — and a driver that did not start is the
@@ -522,10 +504,11 @@ void app_main(void)
         }
     }
 
-    /* Sleep by the clock and by the power key from here on. Not before:
-     * waking from deep sleep restarts the device, and a restart before
-     * ota_mark_valid() above would roll a new image back. */
-    power_manager_start();
+    /* Sleep by the clock and by the power key from here on, except on a new
+     * kernel's first boot: waking from deep sleep restarts the device, and a
+     * restart before the kernel is kept, after its first minute, rolls it
+     * back. Then the power manager starts once it is kept. */
+    ota_keep_new_kernel(power_manager_start);
 
     /* Internal RAM is what runs out, so every boot says what is left of it,
      * this task's 16 KB stack still counted. */

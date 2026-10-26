@@ -19,8 +19,9 @@ esp_err_t ota_init(void);
 /* Check if an OTA update file exists on SD card */
 bool ota_sd_update_available(void);
 
-/* Apply firmware update from SD card (/sdcard/update/thistle_os.bin)
- * This writes to the OTA partition and reboots on success. */
+/* Apply the firmware update on the SD card (/sdcard/update/thistle_os.bin and
+ * its .sig): writes it into the other kernel slot (kernel_a <-> kernel_b,
+ * never the reserved Recovery slot), selects it and restarts on success. */
 esp_err_t ota_apply_from_sd(ota_progress_cb_t progress_cb, void *user_data);
 
 /* Apply firmware update from HTTP URL
@@ -30,12 +31,18 @@ esp_err_t ota_apply_from_http(const char *url, ota_progress_cb_t progress_cb, vo
 /* Get the currently running firmware version string */
 const char *ota_get_current_version(void);
 
-/* Get the currently running partition label */
+/* The running kernel slot's label: "kernel_a", "kernel_b", or "unknown" */
 const char *ota_get_running_partition(void);
 
-/* Mark a pending current firmware as valid after the healthy-boot milestone.
- * Idempotent: once confirmed, later calls do not invoke the OTA API again. */
+/* Keep a new kernel now, if the running one is new. Idempotent: once kept,
+ * later calls do not invoke the OTA API again. */
 esp_err_t ota_mark_valid(void);
+
+/* Keep the running kernel once it has run for a minute, if it is new, then
+ * call `then` (from the kernel worker); on any other boot call `then` at
+ * once. Until it is kept, a reset rolls a new kernel back to the other
+ * kernel slot. */
+void ota_keep_new_kernel(void (*then)(void));
 
 /* Remove the recovery bundle journal and backups after ota_mark_valid(). */
 esp_err_t ota_finalize_bundle_transaction(void);
