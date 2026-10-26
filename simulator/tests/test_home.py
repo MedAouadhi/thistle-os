@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """Home's rows of what is new on the simulated T-Deck Max: new messages, a
-missed call with its call-back button, the tailnet waiting for a sign-in, and
-"All caught up" with nothing new; each row's tap opens what it is about.
+missed call with its call-back button, the tailnet waiting for a sign-in,
+updates to ThistleOS and the installed apps, and "All caught up" with nothing
+new; each row's tap opens what it is about.
+
+The update row reads what the kernel's update manager judged of the catalog
+the last check or Refresh kept on the card (appstore/catalog.json): no
+network is needed, as a restart reads that catalog back.
 
 The launcher prints its rows whenever they change, as
 "(launcher_ui) now: TITLE (DETAIL) | TITLE (DETAIL)", and a call back as
@@ -35,7 +40,7 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 SDCARD = Path(__file__).resolve().parent.parent / "sdcard"
 
@@ -66,6 +71,51 @@ class Case:
     absent: tuple[str, ...] = ()
     env: tuple[tuple[str, str], ...] = ()
     tailnet: bool = False
+    # Puts what the case needs on the scratch card.
+    card: Optional[Callable[[Path], None]] = None
+
+
+NOTES = "com.thistle.notes"
+
+
+def notes_installed(card: Path, version: str = "1.0.0", sequence: int = 1_000_000) -> None:
+    """Notes as the App Store installs a package (tap_installer.rs)."""
+    app = card / "apps" / NOTES
+    generation = app / "generations" / str(sequence)
+    generation.mkdir(parents=True)
+    (generation / "app.app.elf").write_bytes(bytes(4096))
+    (generation / "app.app.elf.sig").write_bytes(bytes(64))
+    (generation / "package.json").write_text(json.dumps({
+        "schema": "thistle.app.package/v1", "type": "app", "id": NOTES, "name": "Notes",
+        "version": version, "release_sequence": sequence, "entry": "app.app.elf"}))
+    (app / "active.json").write_text(json.dumps({"release_sequence": sequence, "version": version}))
+
+
+def kept_catalog(firmware: Optional[str] = None, notes: Optional[tuple[str, int, str]] = None):
+    """A catalog an earlier check kept on the card: a ThistleOS release for
+    the simulator's chip and board, and a Notes release (version, release
+    sequence, min_os); Notes 1.0.0 installed."""
+    def setup(card: Path) -> None:
+        entries = []
+        if firmware:
+            url = f"https://example.invalid/v{firmware}/thistle_os-host-v{firmware}.bin"
+            entries.append({
+                "type": "firmware", "id": "thistle-os", "version": firmware, "arch": "host",
+                "compatible_boards": ["tdeck-max"], "url": url, "manifest_url": url + ".manifest",
+                "manifest_sig_url": url + ".manifest.sig", "sha256": "00" * 32,
+                "size_bytes": 8192, "changelog": f"What is new in {firmware}"})
+        if notes:
+            version, sequence, min_os = notes
+            entries.append({
+                "type": "app", "id": NOTES, "name": "Notes", "version": version, "arch": "host",
+                "release_sequence": sequence, "min_os_version": min_os,
+                "package_url": "https://example.invalid/notes.tap",
+                "package_sig_url": "https://example.invalid/notes.tap.sig",
+                "package_sha256": "00" * 32, "package_size_bytes": 4096})
+        (card / "appstore" / "catalog.json").write_text(
+            json.dumps({"version": 1, "entries": entries}, indent=2))
+        notes_installed(card)
+    return setup
 
 
 CASES = (
@@ -124,6 +174,32 @@ CASES = (
                    (NOW + "Tailscale (Sign in to join your tailnet)",
                     "Launching app from Home: com.thistle.tailscale",
                     "(tailscale) on_create"),)),
+    # Ticket 09 of .scratch/ota: ThistleOS on offer, and an app update.
+    Case("update-row-names-thistleos-and-opens-system-update",
+         ("--tap-start", "5000", "--tap", ROW), 9000,
+         card=kept_catalog(firmware="99.0.0", notes=("1.0.1", 1_000_001, "0.1.0")),
+         expected=((NOW + "System update (ThistleOS 99.0.0 and 1 app)",
+                    "Launching app from Home: com.thistle.settings",
+                    "Settings opens at System update",
+                    "System update: Available: ThistleOS 99.0.0"),),
+         absent=("All caught up",)),
+    Case("app-updates-alone-open-the-app-store",
+         ("--tap-start", "5000", "--tap", ROW), 9000,
+         card=kept_catalog(notes=("1.0.1", 1_000_001, "0.1.0")),
+         expected=((NOW + "App updates (1 app has an update)",
+                    "Launching app from Home: com.thistle.appstore",
+                    "(appstore) on_create"),),
+         absent=("Settings opens at", "All caught up")),
+    Case("an-app-release-that-needs-newer-firmware-is-not-counted",
+         (), 5000,
+         card=kept_catalog(notes=("1.0.1", 1_000_001, "99.0.0")),
+         expected=((NOW + "All caught up (No new messages or calls)",),),
+         absent=("App updates", "System update (")),
+    Case("an-app-release-already-installed-is-not-counted",
+         (), 5000,
+         card=kept_catalog(notes=("1.0.0", 1_000_000, "0.1.0")),
+         expected=((NOW + "All caught up (No new messages or calls)",),),
+         absent=("App updates",)),
 )
 
 
@@ -153,6 +229,8 @@ def run_case(simulator: Path, case: Case) -> None:
         spiffs.mkdir()
         if case.tailnet:
             switch_tailnet_on(card)
+        if case.card:
+            case.card(card)
         env = dict(os.environ, THISTLE_SIM_SDCARD=str(card), THISTLE_SIM_SPIFFS=str(spiffs))
         env.pop("THISTLE_SIM_TAILNET", None)
         env.pop("THISTLE_SIM_TAILNET_LOGIN_S", None)

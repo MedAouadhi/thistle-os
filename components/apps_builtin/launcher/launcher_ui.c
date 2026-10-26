@@ -12,11 +12,13 @@
 #include "thistle/sms.h"
 #include "thistle/tailnet.h"
 #include "thistle/time_manager.h"
+#include "thistle/update.h"
 #include "thistle/wifi_manager.h"
 #include "ui/manager.h"
 #include "ui/statusbar.h"
 #include "ui/toast.h"
 #include "ui/theme.h"
+#include "settings/settings_app.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -800,6 +802,19 @@ static home_tailnet_t read_tailnet(void)
     }
 }
 
+/* The ThistleOS version on offer, until it is installed and waits for its
+ * restart; NULL for none. */
+static const char *read_os_update(void)
+{
+    static char version[40];
+    update_status_t st;
+    rs_update_get_status(&st);
+    if (st.state == UPDATE_READY || !rs_update_offer(version, sizeof(version), NULL, 0)) {
+        return NULL;
+    }
+    return version;
+}
+
 static void read_now(home_now_in_t *in)
 {
     memset(in, 0, sizeof(*in));
@@ -814,6 +829,8 @@ static void read_now(home_now_in_t *in)
     in->tailnet = read_tailnet();
     in->mesh_running = rs_mesh_is_running();
     in->mesh_contacts = in->mesh_running ? rs_mesh_get_contact_count() : 0;
+    in->os_update = read_os_update();
+    in->app_updates = rs_update_app_count();
 }
 
 static const char *now_symbol(home_now_kind_t kind)
@@ -823,10 +840,16 @@ static const char *now_symbol(home_now_kind_t kind)
     case HOME_NOW_MISSED_CALL: return LV_SYMBOL_CALL;
     case HOME_NOW_TAILNET:     return LV_SYMBOL_SHUFFLE;   /* as in the drawer */
     case HOME_NOW_MESH:        return LV_SYMBOL_LOOP;      /* as the quick panel's LoRa */
+    case HOME_NOW_SYSTEM_UPDATE:
+    case HOME_NOW_APP_UPDATES: return LV_SYMBOL_DOWNLOAD;
     case HOME_NOW_CAUGHT_UP:
     default:                   return LV_SYMBOL_OK;
     }
 }
+
+/* Settings, opened at System update: the update row's, told apart from
+ * any other launch of Settings by its address. */
+static const char SETTINGS_AT_UPDATE[] = "com.thistle.settings";
 
 /* What a tap on the row opens, as the status bar's envelope and the call
  * chip do; NULL for a row that is not a button. */
@@ -837,6 +860,8 @@ static const char *now_app(home_now_kind_t kind)
     case HOME_NOW_MESH:        return "com.thistle.messenger";
     case HOME_NOW_MISSED_CALL: return "com.thistle.phone";
     case HOME_NOW_TAILNET:     return "com.thistle.tailscale";
+    case HOME_NOW_SYSTEM_UPDATE: return SETTINGS_AT_UPDATE;
+    case HOME_NOW_APP_UPDATES: return "com.thistle.appstore";
     case HOME_NOW_CAUGHT_UP:
     default:                   return NULL;
     }
@@ -852,13 +877,21 @@ static lv_color_t now_icon_color(const theme_colors_t *c, home_now_kind_t kind)
     }
 }
 
+static void launch_now_cb(void *arg)
+{
+    if (arg == (void *)SETTINGS_AT_UPDATE) {
+        settings_app_open_next("System update");
+    }
+    launch_pinned_cb(arg);
+}
+
 /* Launched once this click is over, as a pinned app is: leaving Home deletes
  * its rows, this one among them. */
 static void now_clicked_cb(lv_event_t *e)
 {
     const char *app_id = (const char *)lv_obj_get_user_data(lv_event_get_current_target(e));
     if (app_id) {
-        lv_async_call(launch_pinned_cb, (void *)app_id);
+        lv_async_call(launch_now_cb, (void *)app_id);
     }
 }
 

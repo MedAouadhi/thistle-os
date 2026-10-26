@@ -151,6 +151,11 @@ extern void test_home_now_shows_the_first_two_that_apply_in_order(void);
 extern void test_home_now_something_new_leaves_out_caught_up_and_the_mesh(void);
 extern void test_home_now_keeps_to_the_room_it_is_given(void);
 extern void test_home_now_the_same_readings_give_the_same_bytes(void);
+extern void test_home_now_names_the_thistleos_version_on_offer(void);
+extern void test_home_now_counts_app_updates_alongside_the_thistleos_one(void);
+extern void test_home_now_app_updates_alone_open_the_app_store(void);
+extern void test_home_now_updates_come_after_the_tailnet_and_before_caught_up(void);
+extern void test_home_now_a_version_too_long_for_the_row_is_cut_not_overrun(void);
 
 /* test_xl9555.c */
 extern void test_xl9555_resets_to_all_inputs_with_its_latches_high(void);
@@ -334,6 +339,11 @@ int main(void)
     RUN_TEST(home_now_something_new_leaves_out_caught_up_and_the_mesh);
     RUN_TEST(home_now_keeps_to_the_room_it_is_given);
     RUN_TEST(home_now_the_same_readings_give_the_same_bytes);
+    RUN_TEST(home_now_names_the_thistleos_version_on_offer);
+    RUN_TEST(home_now_counts_app_updates_alongside_the_thistleos_one);
+    RUN_TEST(home_now_app_updates_alone_open_the_app_store);
+    RUN_TEST(home_now_updates_come_after_the_tailnet_and_before_caught_up);
+    RUN_TEST(home_now_a_version_too_long_for_the_row_is_cut_not_overrun);
 
     printf("\n[xl9555]\n");
     RUN_TEST(xl9555_resets_to_all_inputs_with_its_latches_high);

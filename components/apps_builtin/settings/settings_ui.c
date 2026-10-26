@@ -3594,9 +3594,17 @@ static void open_time_screen(void)
     s_time_timer = lv_timer_create(time_timer_cb, 2000, NULL);
 }
 
-static void item_clicked_cb(lv_event_t *e)
+/* The page the next settings_ui_create() opens at, "" for the main list. */
+static char s_next_page[32];
+
+void settings_app_open_next(const char *page)
 {
-    const char *name = (const char *)lv_event_get_user_data(e);
+    snprintf(s_next_page, sizeof(s_next_page), "%s", page ? page : "");
+}
+
+/* Open the main list's item `name`, as a tap on it does. */
+static void open_item(const char *name)
+{
     if (!name) return;
 
     if (strcmp(name, "WiFi") == 0) {
@@ -3629,6 +3637,11 @@ static void item_clicked_cb(lv_event_t *e)
     } else {
         ESP_LOGI(TAG, "Settings: %s — not implemented yet", name);
     }
+}
+
+static void item_clicked_cb(lv_event_t *e)
+{
+    open_item((const char *)lv_event_get_user_data(e));
 }
 
 static void create_list_item(lv_obj_t *list, const settings_item_t *item)
@@ -3800,6 +3813,16 @@ esp_err_t settings_ui_create(lv_obj_t *parent)
         lv_timer_delete(s_main_timer);
     }
     s_main_timer = lv_timer_create(settings_main_update_timer, 2000, NULL);
+
+    /* Opened at one of its pages (settings_app_open_next): Home's update row
+     * opens System update. Back returns to the main list. */
+    if (s_next_page[0]) {
+        char page[sizeof(s_next_page)];
+        memcpy(page, s_next_page, sizeof(page));
+        s_next_page[0] = '\0';
+        ESP_LOGI(TAG, "Settings opens at %s", page);
+        open_item(page);
+    }
 
     return ESP_OK;
 }

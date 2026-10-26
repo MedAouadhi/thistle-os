@@ -203,6 +203,26 @@ static void tailnet_row(const home_now_in_t *in, home_now_row_t *row)
                                                : "Waiting for an admin's approval");
 }
 
+static void update_row(const home_now_in_t *in, home_now_row_t *row)
+{
+    unsigned apps = (unsigned)in->app_updates;
+    if (in->os_update != NULL && in->os_update[0] != '\0') {
+        row->kind = HOME_NOW_SYSTEM_UPDATE;
+        snprintf(row->title, sizeof(row->title), "System update");
+        if (apps == 0) {
+            snprintf(row->detail, sizeof(row->detail), "ThistleOS %s", in->os_update);
+        } else {
+            snprintf(row->detail, sizeof(row->detail), "ThistleOS %s and %u app%s",
+                     in->os_update, apps, apps == 1 ? "" : "s");
+        }
+    } else {
+        row->kind = HOME_NOW_APP_UPDATES;
+        snprintf(row->title, sizeof(row->title), "App updates");
+        snprintf(row->detail, sizeof(row->detail), "%u app%s", apps,
+                 apps == 1 ? " has an update" : "s have updates");
+    }
+}
+
 static void caught_up_row(home_now_row_t *row)
 {
     row->kind = HOME_NOW_CAUGHT_UP;
@@ -238,6 +258,9 @@ int home_now_rows(const home_now_in_t *in, home_now_row_t *out, int max)
     }
     if (n < max && in->tailnet != HOME_TAILNET_QUIET) {
         tailnet_row(in, &out[n++]);
+    }
+    if (n < max && ((in->os_update != NULL && in->os_update[0] != '\0') || in->app_updates > 0)) {
+        update_row(in, &out[n++]);
     }
     if (n == 0) {
         caught_up_row(&out[n++]);
