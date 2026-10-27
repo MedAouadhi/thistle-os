@@ -858,7 +858,11 @@ System updates are Settings' (Releases and updates, above). LVGL window managers
   (`redirect_policy.rs`, host-tested); the log says `Download refused:
   more than 5 redirects, to ...` when not. The kernel follows them itself
   (`thistle_http_client_init_download`, `thistle_http_client_redirect` in
-  `http_client_shim.c`): ESP-IDF's own following has no scheme rule. What
+  `http_client_shim.c`): ESP-IDF's own following has no scheme rule. A
+  GitHub asset's signed URL carries about 1000 bytes of query, so a
+  download client's transmit buffer, which holds the request line, is
+  2 KB, not ESP-IDF's 512; the simulator's curl has no such limit, so
+  only a device shows it (`HTTP_CLIENT: Out of buffer`). What
   is installed is trusted for its signature and hash, never its host.
 - **Refresh and Install run on the App Store's worker** (`appstore_job.c`),
   one at a time, on a task with a 16 KB internal stack, never on

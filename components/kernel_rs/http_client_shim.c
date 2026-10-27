@@ -79,6 +79,11 @@ static void *new_client(const char *url,
         .user_data = client,
         .timeout_ms = timeout_ms,
         .disable_auto_redirect = !follow_redirects,
+        /* A download is redirected to a GitHub Release asset's signed URL,
+         * about 1000 bytes of query, and the request line ("GET path?query
+         * HTTP/1.1") is written into this buffer: at the default 512 every
+         * such request failed with "Out of buffer". 0 keeps the default. */
+        .buffer_size_tx = follow_redirects ? 0 : 2048,
     };
     client->inner = esp_http_client_init(&config);
     if (!client->inner) {
