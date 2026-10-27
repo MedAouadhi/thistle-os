@@ -334,6 +334,8 @@ def run_case(simulator: Path, case: Case) -> None:
             shutil.copytree(SDCARD, card)
             spiffs.mkdir()
             (card / "config/assistnow.json").unlink(missing_ok=True)
+            # What other runs on the repository's card reported.
+            shutil.rmtree(card / "gps", ignore_errors=True)
             if case.setup:
                 case.setup(card, spiffs, service)
             scenario = Path(tmp) / "no_fix.json"
