@@ -1,6 +1,6 @@
 # ThistleOS Changelog
 
-## v0.6.0-rc.1 - 2026-10-26
+## v0.6.0-rc.2 - 2026-10-27
 
 Release candidate for the first release from this fork: ThistleOS now
 updates itself over the air from the fork's own releases.

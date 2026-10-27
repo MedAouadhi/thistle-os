@@ -69,7 +69,7 @@ tag created.
   now points at it and no longer names upstream's key either. The
   Architecture diagram was already right. The CI line names the release
   workflows and the new test.
-- **CHANGELOG.md** has `## v0.6.0-rc.1 - 2026-10-26`;
+- **CHANGELOG.md** has `## v0.6.0-rc.2 - 2026-10-27` (rc.1's run stopped before publishing: the downloaded firmware was not where Stage the release looked; fixed in 43f4a4d);
   `release_firmware.changelog_notes` reads it.
 
 Tests: every `tools/test_*.py` that `tests.yml` runs passes;
