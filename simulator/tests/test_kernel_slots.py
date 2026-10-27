@@ -148,7 +148,9 @@ def a_run_ended_before_the_keep_is_rolled_back(device: Device) -> None:
     log = device.run()
     expect(log, "the new kernel in kernel_b was not kept; rolled back",
            "running kernel_a, version ")
-    refuse(log, "version 0.6.0")
+    # The slot, not the version: the simulator's own is the tag it was
+    # built from, which may well start with 0.6.0 too.
+    refuse(log, "running kernel_b")
 
     # And it stays on the first slot.
     log = device.run()
