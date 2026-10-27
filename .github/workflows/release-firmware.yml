@@ -133,13 +133,24 @@ jobs:
           cd build
           python -m esptool --chip "$CHIP" merge_bin -o thistle_os-full.bin @flash_args
 
+      # Named for the chip: a pattern that matches one artifact downloads its
+      # files straight into the path, with no folder named for the artifact.
+      - name: Name the images for the chip
+        shell: bash
+        env:
+          CHIP: ${{ matrix.chip }}
+        run: |
+          mkdir -p out
+          cp build/thistle_os.bin "out/thistle_os-$CHIP.bin"
+          cp build/thistle_os-full.bin "out/thistle_os-$CHIP-full.bin"
+
       - name: Upload firmware
         uses: actions/upload-artifact@v7
         with:
           name: thistle-os-firmware-${{ matrix.chip }}
           path: |
-            build/thistle_os.bin
-            build/thistle_os-full.bin
+            out/thistle_os-${{ matrix.chip }}.bin
+            out/thistle_os-${{ matrix.chip }}-full.bin
           if-no-files-found: error
 
   release:
@@ -169,6 +180,7 @@ jobs:
         with:
           pattern: thistle-os-firmware-*
           path: firmware
+          merge-multiple: true
 
       - name: Read the tag
         id: tag
@@ -176,11 +188,11 @@ jobs:
 
       - name: Stage the release
         run: |
-          for dir in firmware/thistle-os-firmware-*; do
-            chip="${dir##*/thistle-os-firmware-}"
+          for full in firmware/thistle_os-*-full.bin; do
+            chip="${full#firmware/thistle_os-}"; chip="${chip%-full.bin}"
             python3 tools/release_firmware.py stage \
               --tag "$TAG" --repo "$GITHUB_REPOSITORY" --arch "$chip" \
-              --image "$dir/thistle_os.bin" --full-image "$dir/thistle_os-full.bin" \
+              --image "firmware/thistle_os-$chip.bin" --full-image "$full" \
               --boards sdcard_layout/config/boards --changelog CHANGELOG.md \
               --updated "$(date -u +%F)" --dist dist --notes notes.md
           done
@@ -189,8 +201,8 @@ jobs:
         env:
           RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
         run: |
-          for dir in firmware/thistle-os-firmware-*; do
-            chip="${dir##*/thistle-os-firmware-}"
+          for full in firmware/thistle_os-*-full.bin; do
+            chip="${full#firmware/thistle_os-}"; chip="${chip%-full.bin}"
             python3 tools/release_firmware.py sign \
               --tag "$TAG" --repo "$GITHUB_REPOSITORY" --arch "$chip" \
               --boards sdcard_layout/config/boards \
