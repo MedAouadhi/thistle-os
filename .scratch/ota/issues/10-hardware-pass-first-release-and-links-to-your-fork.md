@@ -23,7 +23,7 @@ catalog), 08 (Go back, and the board profile follows the firmware version),
       prereleases, raising the security version), the catalog, the kernel
       slots, the daily check, going back, card installs and the simulator's
       fakes; the App Store section no longer names upstream's catalog.
-- [ ] Each item of the hardware checklist is recorded in this ticket's
+- [x] Each item of the hardware checklist is recorded in this ticket's
       Comments with what was seen: the USB migration, a real download
       through GitHub's redirect, Restart later, a kernel reset within its
       first minute rolled back, Go back, a card install, the power manager
@@ -79,3 +79,48 @@ Left for the user: boxes 3 to 5, the hardware pass and the tags. Before
 `v0.6.0`, add its own `## v0.6.0 - <date>` section; and if not done yet, add
 tag rules `v*` and `*-v*` to the `github-pages` environment (ticket 04), or
 a release's Pages deploy is refused. The spec's Status line waits for those.
+
+**2026-10-27, the hardware pass on the T-Deck Max.** rc.1's run published
+nothing (43f4a4d); `v0.6.0-rc.2` is published, immutable and attested, its
+signature checked against `tools/production_public.key`. The board ran a
+USB-flashed rc.1 (security floor 0) with a card catalog naming rc.2, as the
+Pages catalog leaves prereleases out. Logs were captured over USB.
+
+- **The USB migration**: one `idf.py flash` of a laptop build moved the board
+  to the two-slot table and the fork's key, keeping WiFi and settings
+  (verified by the user on the device before the release).
+- **A card install, tampered**: one byte of the image flipped: `card update
+  refused: the file's SHA-256 is not its manifest's`; `update task (Card):
+  6236 of 16384 bytes of stack never used`. The boot choice was left alone.
+- **A card install, then a reset within the first minute**: `installed
+  0.6.0-rc.2 into kernel_b`, booted from 0x4a0000, `running kernel_b,
+  version 0.6.0-rc.2, new: kept after 60 s`, the board profile rewritten
+  from rc.2's copy; reset before the keep, the board came back on rc.1 (the
+  screen's version; the port moved during the reset, so that boot's log
+  was lost).
+- **A real download through GitHub's redirect**: it failed at first,
+  `download failed 0xFFFFFFFF`, with `HTTP_CLIENT: Out of buffer` after
+  `Redirected (1): https://release-assets.githubusercontent.com/...`: the
+  signed URL is about 970 characters, the request buffer ESP-IDF's 512.
+  Fixed in a2bb096 (2 KB for downloads). With it the manifest, signature
+  and image each followed one redirect, `installed 0.6.0-rc.2 into
+  kernel_b; it runs after the next restart`, `update task (Download): 6732
+  of 16384 bytes of stack never used`. **rc.2 itself has the bug**, so it
+  cannot download a later release; `v0.6.0` has the fix.
+- **Restart later, then the keep and the power manager**: Later, then a
+  restart by hand: `running kernel_b, version 0.6.0-rc.2, new: kept after
+  60 s`, `the power manager starts once this kernel is kept`, `kept the
+  kernel in kernel_b after 60 s; starting the power manager`, `security
+  floor raised from 0 to 500`. The next boot: `security floor 500`, not new.
+- **Go back**: Settings offered `Go back to 0.6.0-rc.1`; `going back to
+  0.6.0-rc.1 in kernel_a; restarting`, booted from 0x20000 new, its own
+  board profile back, `kept the kernel in kernel_a after 60 s`, the floor
+  still 500.
+- **Internal RAM**: 132 to 134 KB free, largest block 54 to 60 KB, at every
+  boot of the pass; the App Store's Refresh, a check, left 10.8 KB of its
+  worker's stack unused.
+- The card was put back as it was afterwards.
+
+Not yet seen: a download on battery alone (the user's earlier one failed,
+most likely from the same buffer), and boxes 4 and 5, which wait for the
+`v0.6.0` tag and an app tag.

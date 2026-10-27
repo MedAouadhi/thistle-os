@@ -1,5 +1,41 @@
 # ThistleOS Changelog
 
+## v0.6.0 - 2026-10-27
+
+The first release from this fork: ThistleOS now updates itself over the
+air from the fork's own releases.
+
+- Settings → System update checks for a new ThistleOS once a day, or on
+  Check now, and shows the version on offer and its notes. Download and
+  install waits for WiFi unless you allow mobile data, then asks Restart
+  now or Later.
+- The flash holds two kernel slots. An update is written into the one not
+  running; a new version that does not run for a minute is undone at the
+  next reset, and Go back returns to the previous version without a
+  download.
+- Every firmware is checked against a manifest signed by the publisher's
+  release key: this chip, this board, its size and SHA-256, and a security
+  version no lower than the device has already kept.
+- A release copied to the card's `update/` folder installs from Settings
+  with no network, through the same checks.
+- Home shows a row when ThistleOS or an installed app has an update. The
+  App Store's Installed tab marks app updates and installs them; apps that
+  need a newer ThistleOS are not offered. The Firmware tab is gone.
+- The board profile follows the firmware: the first boot of a new version
+  rewrites it from that version's copy and keeps the old one as
+  `board.json.bak`.
+- Downloads follow GitHub's redirects, at most five and never from HTTPS
+  to HTTP. Since rc.2, they also reach a release asset's signed URL, whose
+  request line no longer overflows the HTTP client's buffer: on rc.2 every
+  download from a GitHub Release failed with 0xFFFFFFFF, so a device on
+  rc.2 updates from the card or by USB.
+- The App Store reads the fork's catalog,
+  https://medaouadhi.github.io/thistle-os/store/catalog.json.
+- Released firmware has no API keys built in: Dictation, Podcasts, Hermes
+  and AssistNow read theirs from the card and say what they lack.
+- Moving a device to this release takes one USB flash, which keeps WiFi,
+  settings and the mesh identity.
+
 ## v0.6.0-rc.2 - 2026-10-27
 
 Release candidate for the first release from this fork: ThistleOS now
