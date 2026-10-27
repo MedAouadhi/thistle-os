@@ -179,8 +179,10 @@ jobs:
         with:
           subject-path: dist/*
 
+      # The repository's Latest release stays the firmware's: GitHub gives
+      # it to the newest release unless told otherwise.
       - name: Publish the release
-        run: gh release edit "$TAG" --draft=false
+        run: gh release edit "$TAG" --draft=false --latest=false
 
   pages:
     name: Rebuild Pages

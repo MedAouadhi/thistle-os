@@ -286,6 +286,7 @@ class AppReleaseTests(unittest.TestCase):
         self.assertEqual(attest["with"]["subject-path"], "dist/*")
         publish = step_named(self.release_steps, "Publish the release")["run"]
         self.assertIn("--draft=false", publish)
+        self.assertIn("--latest=false", publish)
 
     def test_the_release_job_may_write_releases_and_attest(self):
         self.assertEqual(self.release["permissions"], {
