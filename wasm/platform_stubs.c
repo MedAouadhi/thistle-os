@@ -139,27 +139,11 @@ int esp_http_client_get_status_code(void *c) { (void)c; return 0; }
 int esp_http_client_close(void *c) { (void)c; return 0; }
 int esp_http_client_cleanup(void *c) { (void)c; return 0; }
 
-/* ── thistle_http_client stubs ────────────────────────────────────── */
-/* The Rust kernel calls the typed shim in components/kernel_rs rather than
- * esp_http_client directly. The native simulator compiles that shim on top
- * of the stubs above; the browser has no HTTP client to put under it, so it
- * is stubbed here instead and the app store finds no network. Signatures
- * must match components/kernel_rs/include/thistle_http_shim.h. */
-typedef int (*thistle_http_data_cb_t)(const uint8_t *data, int data_len, void *user_data);
-
-void *thistle_http_client_init(const char *url, int timeout_ms,
-                               thistle_http_data_cb_t data_cb, void *user_data) {
-    (void)url; (void)timeout_ms; (void)data_cb; (void)user_data; return NULL;
-}
-int thistle_http_client_perform(void *c) { (void)c; return -1; }
-int thistle_http_client_get_status_code(void *c) { (void)c; return 0; }
-int thistle_http_client_open(void *c, int write_len) { (void)c; (void)write_len; return -1; }
-int64_t thistle_http_client_fetch_headers(void *c) { (void)c; return -1; }
-int thistle_http_client_read(void *c, char *b, int l) { (void)c; (void)b; (void)l; return -1; }
-int thistle_http_client_close(void *c) { (void)c; return 0; }
-int thistle_http_client_cleanup(void *c) { (void)c; return 0; }
-
 /* ── sim_http stubs (backing for simulator/platform/esp_http_client.h inlines) */
+/* The Rust kernel calls the typed shim, components/kernel_rs/http_client_shim.c,
+ * which the browser build compiles as the native simulator does. Beneath it
+ * the browser has no HTTP client, so every request fails here and the app
+ * store, updates and the apps find no network. */
 #include "sim_http.h"
 sim_http_client_handle_t sim_http_client_init(const sim_http_client_config_t *c) { (void)c; return NULL; }
 int sim_http_client_perform(sim_http_client_handle_t c) { (void)c; return -1; }
@@ -173,6 +157,7 @@ int sim_http_client_read(sim_http_client_handle_t c, char *b, int l) { (void)c;(
 int sim_http_client_close(sim_http_client_handle_t c) { (void)c; return 0; }
 int sim_http_client_set_url(sim_http_client_handle_t c, const char *u) { (void)c;(void)u; return -1; }
 int sim_http_client_set_redirection(sim_http_client_handle_t c) { (void)c; return -1; }
+int sim_http_client_get_url(sim_http_client_handle_t c, char *u, int l) { (void)c; if (u && l > 0) u[0] = 0; return -1; }
 void sim_http_client_cleanup(sim_http_client_handle_t c) { (void)c; }
 int sim_http_client_set_method(sim_http_client_handle_t c, const char *m) { (void)c;(void)m; return -1; }
 int sim_http_client_set_header(sim_http_client_handle_t c, const char *k, const char *v) { (void)c;(void)k;(void)v; return -1; }
