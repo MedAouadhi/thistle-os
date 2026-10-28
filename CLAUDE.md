@@ -109,7 +109,8 @@ user's to do, not an agent's.
   hosted runner in `espressif/idf:v5.5` with no `.env`, so no key or tailnet
   address is compiled in; publishes an immutable GitHub Release with build
   provenance attestations; then calls `pages.yml`, which rebuilds the
-  catalog. The firmware's assets are `thistle_os-esp32s3-<tag>.bin`,
+  catalog. Push tags one at a time: GitHub starts no workflow for a push
+  of more than three tags. The firmware's assets are `thistle_os-esp32s3-<tag>.bin`,
   `.bin.manifest`, `.bin.manifest.sig`, `-full.bin`, `.catalog-entry.json`
   and `SHA256SUMS`.
 - **A firmware tag needs its CHANGELOG.md section**, `## v0.6.0 -
@@ -147,7 +148,10 @@ user's to do, not an agent's.
   (`tools/build_catalog.py --releases`): each release's own
   `*.catalog-entry.json` asset, the newest firmware by version and the
   newest release of each app, drafts and prereleases left out. It is
-  unsigned and holds nothing of its own. A firmware entry is flat: the
+  unsigned and holds nothing of its own. Each deploy names its own build
+  version (`pages.yml`): Pages keeps what it has for one it has seen, the
+  commit by default, so an app tagged on an already deployed commit once
+  never reached the catalog. A firmware entry is flat: the
   device's parser ends an entry at its first closing brace. A card's
   `config/appstore.json`, `{"catalog_url": "..."}`, names another.
 - **Two kernel slots.** The flash holds `kernel_a` (ota_0) and `kernel_b`

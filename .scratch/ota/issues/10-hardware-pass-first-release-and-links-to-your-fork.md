@@ -28,7 +28,7 @@ catalog), 08 (Go back, and the board profile follows the firmware version),
       through GitHub's redirect, Restart later, a kernel reset within its
       first minute rolled back, Go back, a card install, the power manager
       after the keep, and internal RAM around a check.
-- [ ] `v0.6.0` is published, immutable and attested, and a T-Deck Max on a
+- [x] `v0.6.0` is published, immutable and attested, and a T-Deck Max on a
       laptop build of the fork is offered it, installs it over the air and
       keeps it.
 - [ ] An app release after `v0.6.0` shows on that device's Home and installs
@@ -124,3 +124,30 @@ Pages catalog leaves prereleases out. Logs were captured over USB.
 Not yet seen: a download on battery alone (the user's earlier one failed,
 most likely from the same buffer), and boxes 4 and 5, which wait for the
 `v0.6.0` tag and an app tag.
+
+**2026-10-28, `v0.6.0` and the first app releases.** Tagged on 4212a7d
+with the user's approval: published, immutable, attested; SHA256SUMS,
+the manifest's signature against `tools/production_public.key` and the
+attestation check out, and the catalog offers it. The T-Deck Max, on
+battery (no log), went back from rc.2 to the fixed rc.1 build, was
+offered 0.6.0, downloaded and installed it over the air, and runs it.
+On rc.2 the same download failed with 0xFFFFFFFF, as expected: a device
+on rc.2 moves by the card, Go back or USB (the CHANGELOG says so).
+
+The four store apps were released as `notes-v1.0.0`,
+`weather-v1.0.0`, `wifiscanner-v1.0.0`, `flashlight-v2.0.0`, then
+`notes-v1.0.1`. Three findings, fixed:
+
+- **A push of more than three tags starts no workflow** (GitHub's rule):
+  the four were deleted and pushed one at a time. CLAUDE.md says so.
+- **Pages kept the previous catalog** when the app releases, tagged on
+  4212a7d like `v0.6.0`, deployed theirs: the deploy reported success,
+  the site still served the 19:59 files. Pages keeps what it has for a
+  build version it has seen, the commit by default. `notes-v1.0.1`, on
+  a new commit, published the catalog with all four; `pages.yml` now
+  gives each run a version of its own.
+- **GitHub marked `weather-v1.0.0` the Latest release** over `v0.6.0`:
+  app releases now publish with `--latest=false`.
+
+Box 5 waits on the device: Notes 1.0.1 shown on Home and in the
+Installed tab as an update to an installed Notes, and installed.
