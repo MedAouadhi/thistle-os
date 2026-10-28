@@ -21,6 +21,10 @@ The human-readable label for a board, distinct from its board id. Boards frequen
 A board profile duplicated as a string literal inside the kernel, written to storage when hardware detection identifies a board with no profile present. The only configuration a freshly flashed board ever sees.
 _Avoid_: fallback JSON, builtin board
 
+**Writer version**:
+The firmware version that wrote a stored board profile, kept in it as `written_by`. A kernel of another version rewrites the profile from its embedded fallback profile, so the profile follows the firmware.
+_Avoid_: profile version (the profile's own `board.version` is something else)
+
 **Fingerprint**:
 The set of I²C addresses whose presence on a given pin pair identifies a board. Detection matches fingerprints in order, first match winning.
 _Avoid_: signature, probe result
@@ -62,3 +66,33 @@ _Avoid_: clock source, time provider, sync source
 **Clock chip**:
 A battery-backed real-time clock on the board, such as a PCF8563, registered as the RTC HAL interface. Distinct from the SoC's own RTC domain, which keeps the time through sleep and restarts but not through a power-on.
 _Avoid_: RTC (ambiguous between the two), hardware clock
+
+### Releases and updates
+
+**Publisher**:
+The party whose signing key a device trusts to install firmware and packages. A fork that releases on its own is its own publisher; a device trusts the publisher its kernel was built for, and no other.
+_Avoid_: vendor, upstream (as a trust term), trusted source
+
+**Release**:
+One published version of the firmware, or of one app, made from one tagged commit and never changed once published. The firmware and each app release independently of one another.
+_Avoid_: build, drop
+
+**Catalog**:
+The index of everything a device can install (firmware, apps, drivers, window managers) and where to fetch each. Discovery only: a device trusts what it installs because the publisher signed it, never because the catalog listed it.
+_Avoid_: manifest, feed, store index
+
+**Artifact manifest**:
+The publisher's signed statement of what one firmware artifact is: its version, its chip, the boards it suits, its size and its hash. Distinct from a package manifest, which an app, driver or window manager carries to declare its id, version and permissions.
+_Avoid_: firmware manifest, manifest (unqualified)
+
+**Kernel slot**:
+One of the two flash partitions that each hold a kernel. One is running; an update is written to the other, which boots next and is kept only if it comes up.
+_Avoid_: OTA partition, A/B partition, ota_0, ota_1
+
+**Security version**:
+A number each firmware release carries in its artifact manifest, raised only by a release that fixes a security hole. Distinct from the release's version, which rises with every release.
+_Avoid_: anti-rollback version, secure version
+
+**Security floor**:
+The highest security version a device has installed. A firmware below it is never installed or booted again, so a fixed hole cannot be reopened by going back.
+_Avoid_: rollback counter, minimum version

@@ -27,6 +27,8 @@ pub enum TapError {
     Signature,
     Downgrade,
     Exists,
+    /// The package's `min_os`, which the running firmware does not meet.
+    MinOs(String),
 }
 
 impl From<std::io::Error> for TapError {
@@ -173,6 +175,11 @@ fn validate_manifest(
     let sequence = package.get("release_sequence").and_then(Value::as_u64).ok_or(TapError::InvalidManifest)?;
     if id != expected_id || version != expected_version || sequence != expected_sequence as u64
         || json_string(metadata, "id")? != id { return Err(TapError::Mismatch); }
+    // The package's own min_os, which its signature covers, not the
+    // catalog's: a release that needs newer firmware would not load.
+    if let Some(min_os) = package.get("min_os").and_then(Value::as_str) {
+        if !crate::version::satisfies(min_os) { return Err(TapError::MinOs(min_os.to_string())); }
+    }
     let releases = metadata.get("releases").and_then(Value::as_array).ok_or(TapError::InvalidManifest)?;
     let latest = releases.first().ok_or(TapError::InvalidManifest)?;
     if json_string(latest, "version")? != version
@@ -305,6 +312,14 @@ where F: FnOnce(&Path) -> bool {
     result
 }
 
+/// The release sequence an installed app runs: its `active.json`'s, if that
+/// release's ELF is there.
+pub fn active_release_sequence(app_dir: &Path) -> Option<u32> {
+    active_generation(app_dir)?;
+    let sequence = active_sequence(&app_dir.join("active.json")).ok()??;
+    u32::try_from(sequence).ok()
+}
+
 /// The folder of the release an installed app's `active.json` names, if it
 /// holds the app's ELF: `app_dir/generations/<release_sequence>`.
 pub fn active_generation(app_dir: &Path) -> Option<PathBuf> {
@@ -356,14 +371,19 @@ mod tests {
     }
 
     fn fixture(root: &Path) -> PathBuf {
+        fixture_needing(root, "0.3.0")
+    }
+
+    /// Notes 1.0.0 as a TAP whose package.json asks for ThistleOS `min_os`.
+    fn fixture_needing(root: &Path, min_os: &str) -> PathBuf {
         let elf = b"host-elf".to_vec();
         let signature = vec![0x5a; 64];
         let digest = |data: &[u8]| -> String {
             Sha256::digest(data).iter().map(|b| format!("{b:02x}")).collect()
         };
         let package = format!(
-            "{{\"schema\":\"thistle.app.package/v1\",\"type\":\"app\",\"id\":\"com.thistle.notes\",\"name\":\"Notes\",\"version\":\"1.0.0\",\"release_sequence\":1,\"author\":\"ThistleOS\",\"description\":\"Notes\",\"min_os\":\"0.3.0\",\"arch\":\"host\",\"entry\":\"app.app.elf\",\"signature\":\"app.app.elf.sig\",\"permissions\":[\"storage\"],\"background\":false,\"min_memory_kb\":48,\"files\":[{{\"path\":\"app.app.elf\",\"sha256\":\"{}\",\"size_bytes\":{}}},{{\"path\":\"app.app.elf.sig\",\"sha256\":\"{}\",\"size_bytes\":64}}]}}",
-            digest(&elf), elf.len(), digest(&signature)
+            "{{\"schema\":\"thistle.app.package/v1\",\"type\":\"app\",\"id\":\"com.thistle.notes\",\"name\":\"Notes\",\"version\":\"1.0.0\",\"release_sequence\":1,\"author\":\"ThistleOS\",\"description\":\"Notes\",\"min_os\":\"{}\",\"arch\":\"host\",\"entry\":\"app.app.elf\",\"signature\":\"app.app.elf.sig\",\"permissions\":[\"storage\"],\"background\":false,\"min_memory_kb\":48,\"files\":[{{\"path\":\"app.app.elf\",\"sha256\":\"{}\",\"size_bytes\":{}}},{{\"path\":\"app.app.elf.sig\",\"sha256\":\"{}\",\"size_bytes\":64}}]}}",
+            min_os, digest(&elf), elf.len(), digest(&signature)
         ).into_bytes();
         let metadata = b"{\"schema\":\"thistle.app.metadata/v1\",\"id\":\"com.thistle.notes\",\"category\":\"productivity\",\"summary\":\"Notes\",\"description\":\"Notes\",\"license\":\"BSD-3-Clause\",\"releases\":[{\"version\":\"1.0.0\",\"release_sequence\":1,\"released\":\"2026-08-29\",\"changes\":[\"Initial\"]}]}".to_vec();
         let path = root.join("notes.tap");
@@ -480,6 +500,31 @@ mod tests {
         );
         assert!(!apps.join("com.thistle.notes/active.json").exists());
         assert!(!apps.join("com.thistle.notes/generations/1").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_package_that_needs_newer_firmware_is_refused_before_anything_is_unpacked() {
+        let root = std::env::temp_dir().join(format!("thistle-tap-min-os-{}", STAGE_SEQUENCE.fetch_add(1, Ordering::Relaxed)));
+        std::fs::create_dir(&root).unwrap();
+        let tap = fixture_needing(&root, "99.0.0");
+        let apps = root.join("apps");
+        assert_eq!(
+            install_tap_with(&tap, &apps, "com.thistle.notes", "1.0.0", 1, |_| true, |_| true),
+            Err(TapError::MinOs("99.0.0".into()))
+        );
+        assert!(!apps.join("com.thistle.notes/active.json").exists());
+        assert!(!apps.join("com.thistle.notes/generations").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_package_whose_min_os_the_firmware_meets_installs() {
+        let root = std::env::temp_dir().join(format!("thistle-tap-min-os-met-{}", STAGE_SEQUENCE.fetch_add(1, Ordering::Relaxed)));
+        std::fs::create_dir(&root).unwrap();
+        let tap = fixture_needing(&root, "0.1.0");
+        let apps = root.join("apps");
+        assert!(install_tap_with(&tap, &apps, "com.thistle.notes", "1.0.0", 1, |_| true, |_| true).is_ok());
         std::fs::remove_dir_all(root).unwrap();
     }
 }

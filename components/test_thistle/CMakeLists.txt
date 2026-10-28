@@ -17,7 +17,7 @@ if(CONFIG_THISTLE_RUN_TESTS)
             "test_driver_loader.c"
             "test_appstore_client.c"
         INCLUDE_DIRS "."
-        REQUIRES unity thistle_hal kernel ui esp_timer freertos
+        REQUIRES unity thistle_hal kernel ui esp_timer freertos esp_app_format
         WHOLE_ARCHIVE
     )
 else()

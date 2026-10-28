@@ -3,6 +3,10 @@ name: Deploy Pages (Docs + WASM Simulator)
 on:
   push:
     branches: [main]
+  # The release workflows call this once a release is published: a release
+  # made with the workflow's own token starts no `release` event workflow.
+  # A caller's event is its tag push, so the deploy job below runs.
+  workflow_call:
   pull_request:
     paths:
       - '.github/workflows/pages.yml'
@@ -20,9 +24,9 @@ permissions:
   id-token: write
 
 env:
-  CARGO_BUILD_JOBS: 2
-  CMAKE_BUILD_PARALLEL_LEVEL: 2
-  THISTLE_CI_JOBS: 2
+  CARGO_BUILD_JOBS: 4
+  CMAKE_BUILD_PARALLEL_LEVEL: 4
+  THISTLE_CI_JOBS: 4
 
 concurrency:
   group: pages
@@ -31,11 +35,13 @@ concurrency:
 jobs:
   build:
     name: Build Docs + WASM Simulator
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork && '["ubuntu-latest"]' || '["self-hosted","linux","x64","wan0-ci","thistle-os"]') }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
           submodules: recursive
+          # The tags: the firmware's version is a describe (tools/firmware_version.sh).
+          fetch-depth: 0
 
       - name: Install native build dependencies
         run: |
@@ -78,17 +84,7 @@ jobs:
           fi
           export PATH="$HOME/.cargo/bin:$PATH"
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          # A self-hosted runner may already have a usable target even when a
-          # previously restored rustup cache has stale component metadata.
-          # Probe the compiler first so rustup does not collide with files that
-          # are already installed.
-          if ! printf '#![no_std]\n' | rustc \
-            --crate-name thistle_wasm_target_probe \
-            --crate-type lib \
-            --target wasm32-unknown-emscripten \
-            --out-dir "$RUNNER_TEMP" -; then
-            rustup target add wasm32-unknown-emscripten
-          fi
+          rustup target add wasm32-unknown-emscripten
 
       - name: Build Rust kernel for WASM
         working-directory: components/kernel_rs
@@ -126,17 +122,32 @@ jobs:
           cp wasm/build/thistle_wasm.wasm _site/simulator/
           cp wasm/build/thistle_wasm.data _site/simulator/ 2>/dev/null || true
 
-          # App store catalog
-          mkdir -p _site/apps
-          cp simulator/sdcard/appstore/catalog.json _site/apps/ 2>/dev/null || true
-
           # Recovery board catalog
           mkdir -p _site/config/boards
           cp sdcard_layout/config/boards/*.json _site/config/boards/
           python3 tools/build_board_catalog.py \
             sdcard_layout/config/boards \
-            --base-url "https://wan0net.github.io/thistle-os/config/boards" \
+            --base-url "https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/config/boards" \
             --output _site/catalog.json
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install the catalog builder's dependencies
+        run: python3 -m pip install -r tools/requirements.txt
+
+      # The devices' catalog, derived from the releases on every deploy and
+      # holding nothing of its own: the newest firmware by version and the
+      # newest release of each app, drafts and prereleases left out
+      # (tools/build_catalog.py --releases). A docs-only push builds the same.
+      - name: Build the store catalog from the releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases" > releases.json
+          python3 tools/build_catalog.py --releases releases.json --output _site/store/catalog.json
+          cat _site/store/catalog.json
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v5
@@ -145,9 +156,18 @@ jobs:
     name: Deploy to GitHub Pages
     if: github.event_name == 'push'
     needs: build
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork && '["ubuntu-latest"]' || '["self-hosted","linux","x64","wan0-ci","thistle-os"]') }}
+    runs-on: ubuntu-latest
+    # Called from a release's tag run, this deploys from the tag: the
+    # github-pages environment must admit tags v* and *-v* beside main
+    # (set up by hand, spec "The release workflows").
     environment:
       name: github-pages
     steps:
+      # Pages keeps what it has for a build version it has deployed, and
+      # the version is the commit unless told otherwise: an app tagged on
+      # the commit of the previous deploy left its release out of the
+      # catalog. Each run is a version of its own.
       - name: Deploy
         uses: actions/deploy-pages@v5
+        env:
+          GITHUB_SHA: ${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}

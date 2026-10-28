@@ -615,7 +615,6 @@ mod tests {
     #[test]
     fn test_compatibility_check() {
         let m = Manifest {
-            min_os: "0.1.0".into(),
             arch: "esp32s3".into(),
             ..Default::default()
         };
@@ -625,9 +624,10 @@ mod tests {
 
     #[test]
     fn test_version_satisfies() {
-        assert!(crate::version::satisfies("0.1.0"));
-        assert!(crate::version::satisfies("0.0.1"));
-        assert!(!crate::version::satisfies("1.0.0"));
+        // version.rs has the cases; this build's own version meets no
+        // requirement from the far future, and an empty one always.
+        assert!(crate::version::satisfies(""));
+        assert!(!crate::version::satisfies("999.0.0"));
     }
 
     #[test]
@@ -685,7 +685,7 @@ mod tests {
         };
         assert!(
             !m.is_compatible("esp32s3"),
-            "min_os 99.0.0 must not be satisfied by current kernel 0.1.0"
+            "min_os 99.0.0 must not be satisfied by this build"
         );
     }
 

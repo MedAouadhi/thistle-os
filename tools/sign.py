@@ -101,7 +101,8 @@ def cmd_verify(args):
 
 def manifest_destination(artifact_type, artifact_id):
     destinations = {
-        "firmware": "ota_1",
+        # The kernel names the slot it writes (ADR-0010): never a partition.
+        "firmware": "kernel",
         "board": f"config/boards/{artifact_id}.json",
         "driver": f"drivers/{artifact_id}.drv.elf",
         "wm": f"wm/{artifact_id}.wm.elf",

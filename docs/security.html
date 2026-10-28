@@ -17,7 +17,7 @@
       <a href="/thistle-os/docs/apps.html">Apps</a>
       <a href="/thistle-os/docs/kernel-modules.html">Modules</a>
       <a href="/thistle-os/simulator/">Simulator</a>
-      <a href="https://github.com/wan0net/thistle-os">GitHub</a>
+      <a href="https://github.com/MedAouadhi/thistle-os">GitHub</a>
     </div>
   </div>
 </nav>
@@ -65,7 +65,7 @@
       <div class="breadcrumb"><a href="index.html">ThistleOS</a> / Security</div>
       <h1>Security &amp; Signing</h1>
       <p class="lead">ThistleOS uses a layered security model: the Recovery OS verifies the main firmware, the kernel verifies apps and drivers, and each app's permissions are gated by a cryptographic signature from a trusted developer key.</p>
-      <a href="https://github.com/wan0net/thistle-os/blob/main/docs/security.html" class="edit-link">&#9998; Edit on GitHub</a>
+      <a href="https://github.com/MedAouadhi/thistle-os/blob/main/docs/security.html" class="edit-link">&#9998; Edit on GitHub</a>
     </div>
 
     <h2>Chain of trust</h2>
@@ -77,14 +77,14 @@
                           &#x2502;
                           &#x25BC;
 &#x250c;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2510;
-&#x2502;  <span class="d-green">Recovery OS</span> (ota_0)                            &#x2502;
-&#x2502;  Trusted base.  Verifies ota_1 before booting.  &#x2502;
+&#x2502;  <span class="d-green">Recovery OS</span> (ota_2)                            &#x2502;
+&#x2502;  Trusted base.  Verifies a kernel before boot.  &#x2502;
 &#x2502;  SHA-256 + (optional) secure boot signature.    &#x2502;
 &#x2514;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2518;
                           &#x2502;
                           &#x25BC;
 &#x250c;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2510;
-&#x2502;  <span class="d-blue">ThistleOS firmware</span> (ota_1)                     &#x2502;
+&#x2502;  <span class="d-blue">ThistleOS firmware</span> (kernel_a/b)                &#x2502;
 &#x2502;  Kernel verifies SHA-256 of each .app.elf and   &#x2502;
 &#x2502;  .drv.elf before loading.  Signature check for  &#x2502;
 &#x2502;  permission grants.                              &#x2502;
@@ -157,14 +157,9 @@ thistle-register-key --port /dev/ttyACM0 --key dev_key.bin</code></pre>
     <p>The app itself is not prevented from running — it just cannot do anything sensitive. This is intentional: it allows unsigned apps to be useful (e.g., a calculator or a clock) while preventing them from silently transmitting location data or sending radio packets.</p>
 
     <h2>OTA update verification</h2>
-    <p>The OTA flow has two levels of verification:</p>
+    <p>A firmware installs only if its artifact manifest, signed by the publisher's release key, holds up: the signature verifies against the key the kernel was built with, it is a firmware for this chip and this board, its security version is at or above the device's security floor, and the downloaded file is the manifest's size and SHA-256. The image is streamed into the other kernel slot (<code>kernel_a</code> or <code>kernel_b</code>), which is selected only once all of that holds and ESP-IDF has validated it; a failure leaves the running kernel as it was. Downloads follow at most five redirects and never from HTTPS to HTTP.</p>
 
-    <ol>
-      <li><strong>SHA-256</strong> — verified immediately after download, before writing to the SD card. A corrupt download is detected and discarded.</li>
-      <li><strong>Signature</strong> — verified before flashing to <code>ota_1</code>. A firmware image without a valid signature from the ThistleOS signing key is rejected outright.</li>
-    </ol>
-
-    <p>After a new firmware image boots successfully, it must call <code>ota_mark_valid()</code> within 30 seconds. If it does not, the ESP-IDF bootloader automatically rolls back to the previous partition on the next reset.</p>
+    <p>A new kernel is kept after 60 seconds of running; a reset before then rolls it back to the previous slot. Only when it is kept does the security floor rise to its security version. See <a href="release-flashing.html">Release Flashing</a>.</p>
 
     <h2>Password vault encryption</h2>
     <p>The built-in settings app includes a password vault. Vault entries are encrypted at rest on the SD card using:</p>
@@ -209,7 +204,7 @@ thistle-register-key --port /dev/ttyACM0 --key dev_key.bin</code></pre>
 
     <div class="page-footer">
       <span>ThistleOS v0.1.0 &mdash; BSD 3-Clause</span>
-      <a href="https://github.com/wan0net/thistle-os">GitHub</a>
+      <a href="https://github.com/MedAouadhi/thistle-os">GitHub</a>
     </div>
   </main>
 </div>

@@ -90,22 +90,6 @@ Full text: https://github.com/lvgl/lvgl/blob/master/LICENCE.txt
 
 ---
 
-## esp_lvgl_port
-
-**License:** Apache License 2.0
-**Source:** https://github.com/espressif/esp-bsp/tree/master/components/esp_lvgl_port
-**Used for:** Integration layer between LVGL 9 and ESP-IDF display/input drivers.
-
-```
-Copyright 2023 Espressif Systems (Shanghai) CO LTD
-
-Licensed under the Apache License, Version 2.0.
-```
-
-Full text: https://github.com/espressif/esp-bsp/blob/master/LICENSE
-
----
-
 ## RadioLib
 
 **License:** MIT
@@ -731,7 +715,7 @@ All dependencies are compatible with the ThistleOS BSD 3-Clause license:
 
 | License | Compatible with BSD 3-Clause | Components |
 |---------|------------------------------|------------|
-| Apache-2.0 | Yes | ESP-IDF, esp_lvgl_port, esp_modem, esp_codec_dev, elf_loader, NimBLE, mbedTLS |
+| Apache-2.0 | Yes | ESP-IDF, esp_modem, esp_codec_dev, elf_loader, NimBLE, mbedTLS |
 | MIT | Yes | LVGL, FreeRTOS, RadioLib, libcurl, Unity, esp-rs crates, Expat, CrossPoint Reader, diy-esp32-epub-reader, MicroLink, cJSON, md4c |
 | BSD-3-Clause | Yes | Bosch BHI260AP firmware and BHY2 SensorAPI, wireguard-lwip |
 | BSD-2-Clause | Yes | Monocypher |

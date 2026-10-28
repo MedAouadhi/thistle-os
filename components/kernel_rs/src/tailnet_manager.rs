@@ -223,55 +223,13 @@ fn spawn(job: Job) {
     }
 }
 
-/// Run `job` on a FreeRTOS task of its own, gone when done. Not a
-/// std::thread: on ESP-IDF one leaves its Thread handle behind when it
-/// ends, about 150 bytes of internal RAM, and the client is started and
-/// stopped at every change of network, and so at every sleep.
-#[cfg(target_os = "espidf")]
+/// Run `job` on a task of its own, gone when done (kernel_task: not a
+/// std::thread, whose handle outlives it; the client is started and stopped
+/// at every change of network, and so at every sleep).
 fn start_task(job: Job) -> bool {
-    extern "C" {
-        fn xTaskCreatePinnedToCore(
-            task_fn: unsafe extern "C" fn(*mut c_void),
-            name: *const c_char,
-            stack_depth: u32,
-            param: *mut c_void,
-            priority: u32,
-            task_handle: *mut *mut c_void,
-            core_id: i32,
-        ) -> i32;
-        fn vTaskDelete(task: *mut c_void);
-    }
-    const PD_PASS: i32 = 1;
-    const PRIORITY: u32 = 5; // as a pthread's (CONFIG_PTHREAD_TASK_PRIO_DEFAULT)
-    const NO_AFFINITY: i32 = 0x7fff_ffff;
-
-    unsafe extern "C" fn entry(arg: *mut c_void) {
-        {
-            // Dropped here: nothing after vTaskDelete() runs.
-            let job = unsafe { Box::from_raw(arg as *mut Job) };
-            run(*job);
-        }
-        unsafe { vTaskDelete(std::ptr::null_mut()) };
-    }
-
-    let arg = Box::into_raw(Box::new(job)) as *mut c_void;
-    let created = unsafe {
-        xTaskCreatePinnedToCore(entry, b"tailnet\0".as_ptr() as *const c_char, STACK_SIZE as u32,
-                                arg, PRIORITY, std::ptr::null_mut(), NO_AFFINITY)
-    } == PD_PASS;
-    if !created {
-        drop(unsafe { Box::from_raw(arg as *mut Job) });
-    }
-    created
-}
-
-#[cfg(not(target_os = "espidf"))]
-fn start_task(job: Job) -> bool {
-    std::thread::Builder::new()
-        .name("tailnet".to_string())
-        .stack_size(STACK_SIZE)
-        .spawn(move || run(job))
-        .is_ok()
+    crate::kernel_task::spawn(c"tailnet", STACK_SIZE, crate::kernel_task::PRIORITY_DEFAULT, move || {
+        run(job)
+    })
 }
 
 fn run(job: Job) {

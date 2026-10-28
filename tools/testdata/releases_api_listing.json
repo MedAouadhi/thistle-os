@@ -1,0 +1,673 @@
+[
+  [
+    {
+      "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/260000001",
+      "html_url": "https://github.com/MedAouadhi/thistle-os/releases/tag/v0.12.0",
+      "id": 260000001,
+      "tag_name": "v0.12.0",
+      "target_commitish": "main",
+      "name": "ThistleOS v0.12.0",
+      "draft": true,
+      "immutable": false,
+      "prerelease": false,
+      "created_at": "2026-12-20T10:00:00Z",
+      "published_at": null,
+      "assets": [
+        {
+          "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/assets/500000001",
+          "id": 500000001,
+          "name": "thistle_os-esp32s3-v0.12.0.bin",
+          "label": "",
+          "content_type": "application/octet-stream",
+          "state": "uploaded",
+          "size": 1234,
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "browser_download_url": "https://github.com/MedAouadhi/thistle-os/releases/download/v0.12.0/thistle_os-esp32s3-v0.12.0.bin"
+        },
+        {
+          "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/assets/500000002",
+          "id": 500000002,
+          "name": "thistle_os-esp32s3-v0.12.0.bin.manifest",
+          "label": "",
+          "content_type": "application/octet-stream",
+          "state": "uploaded",
+          "size": 1234,
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "browser_download_url": "https://github.com/MedAouadhi/thistle-os/releases/download/v0.12.0/thistle_os-esp32s3-v0.12.0.bin.manifest"
+        },
+        {
+          "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/assets/500000003",
+          "id": 500000003,
+          "name": "thistle_os-esp32s3-v0.12.0.bin.manifest.sig",
+          "label": "",
+          "content_type": "application/octet-stream",
+          "state": "uploaded",
+          "size": 1234,
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "browser_download_url": "https://github.com/MedAouadhi/thistle-os/releases/download/v0.12.0/thistle_os-esp32s3-v0.12.0.bin.manifest.sig"
+        },
+        {
+          "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/assets/500000004",
+          "id": 500000004,
+          "name": "thistle_os-esp32s3-v0.12.0-full.bin",
+          "label": "",
+          "content_type": "application/octet-stream",
+          "state": "uploaded",
+          "size": 1234,
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "browser_download_url": "https://github.com/MedAouadhi/thistle-os/releases/download/v0.12.0/thistle_os-esp32s3-v0.12.0-full.bin"
+        },
+        {
+          "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/assets/500000005",
+          "id": 500000005,
+          "name": "thistle_os-esp32s3-v0.12.0.catalog-entry.json",
+          "label": "",
+          "content_type": "application/json",
+          "state": "uploaded",
+          "size": 600,
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "browser_download_url": "https://github.com/MedAouadhi/thistle-os/releases/download/v0.12.0/thistle_os-esp32s3-v0.12.0.catalog-entry.json"
+        },
+        {
+          "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/assets/500000006",
+          "id": 500000006,
+          "name": "SHA256SUMS",
+          "label": "",
+          "content_type": "text/plain",
+          "state": "uploaded",
+          "size": 400,
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "browser_download_url": "https://github.com/MedAouadhi/thistle-os/releases/download/v0.12.0/SHA256SUMS"
+        }
+      ]
+    },
+    {
+      "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/260000002",
+      "html_url": "https://github.com/MedAouadhi/thistle-os/releases/tag/notes-v1.1.0-rc.1",
+      "id": 260000002,
+      "tag_name": "notes-v1.1.0-rc.1",
+      "target_commitish": "main",
+      "name": "notes-v1.1.0-rc.1",
+      "draft": false,
+      "immutable": true,
+      "prerelease": true,
+      "created_at": "2026-12-18T10:00:00Z",
+      "published_at": "2026-12-18T10:00:00Z",
+      "assets": [
+        {
+          "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/assets/500000007",
+          "id": 500000007,
+          "name": "com.thistle.notes-1.1.0-rc.1-esp32s3.tap",
+          "label": "",
+          "content_type": "application/octet-stream",
+          "state": "uploaded",
+          "size": 1234,
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "browser_download_url": "https://github.com/MedAouadhi/thistle-os/releases/download/notes-v1.1.0-rc.1/com.thistle.notes-1.1.0-rc.1-esp32s3.tap"
+        },
+        {
+          "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/assets/500000008",
+          "id": 500000008,
+          "name": "com.thistle.notes-1.1.0-rc.1-esp32s3.tap.sig",
+          "label": "",
+          "content_type": "application/octet-stream",
+          "state": "uploaded",
+          "size": 1234,
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "browser_download_url": "https://github.com/MedAouadhi/thistle-os/releases/download/notes-v1.1.0-rc.1/com.thistle.notes-1.1.0-rc.1-esp32s3.tap.sig"
+        },
+        {
+          "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/assets/500000009",
+          "id": 500000009,
+          "name": "com.thistle.notes-1.1.0-rc.1-esp32s3.catalog-entry.json",
+          "label": "",
+          "content_type": "application/json",
+          "state": "uploaded",
+          "size": 900,
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "browser_download_url": "https://github.com/MedAouadhi/thistle-os/releases/download/notes-v1.1.0-rc.1/com.thistle.notes-1.1.0-rc.1-esp32s3.catalog-entry.json"
+        },
+        {
+          "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/assets/500000010",
+          "id": 500000010,
+          "name": "SHA256SUMS",
+          "label": "",
+          "content_type": "text/plain",
+          "state": "uploaded",
+          "size": 300,
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "browser_download_url": "https://github.com/MedAouadhi/thistle-os/releases/download/notes-v1.1.0-rc.1/SHA256SUMS"
+        }
+      ]
+    },
+    {
+      "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/260000003",
+      "html_url": "https://github.com/MedAouadhi/thistle-os/releases/tag/v0.11.0-rc.1",
+      "id": 260000003,
+      "tag_name": "v0.11.0-rc.1",
+      "target_commitish": "main",
+      "name": "ThistleOS v0.11.0-rc.1",
+      "draft": false,
+      "immutable": true,
+      "prerelease": true,
+      "created_at": "2026-12-15T10:00:00Z",
+      "published_at": "2026-12-15T10:00:00Z",
+      "assets": [
+        {
+          "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/assets/500000011",
+          "id": 500000011,
+          "name": "thistle_os-esp32s3-v0.11.0-rc.1.bin",
+          "label": "",
+          "content_type": "application/octet-stream",
+          "state": "uploaded",
+          "size": 1234,
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "browser_download_url": "https://github.com/MedAouadhi/thistle-os/releases/download/v0.11.0-rc.1/thistle_os-esp32s3-v0.11.0-rc.1.bin"
+        },
+        {
+          "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/assets/500000012",
+          "id": 500000012,
+          "name": "thistle_os-esp32s3-v0.11.0-rc.1.bin.manifest",
+          "label": "",
+          "content_type": "application/octet-stream",
+          "state": "uploaded",
+          "size": 1234,
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "browser_download_url": "https://github.com/MedAouadhi/thistle-os/releases/download/v0.11.0-rc.1/thistle_os-esp32s3-v0.11.0-rc.1.bin.manifest"
+        },
+        {
+          "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/assets/500000013",
+          "id": 500000013,
+          "name": "thistle_os-esp32s3-v0.11.0-rc.1.bin.manifest.sig",
+          "label": "",
+          "content_type": "application/octet-stream",
+          "state": "uploaded",
+          "size": 1234,
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "browser_download_url": "https://github.com/MedAouadhi/thistle-os/releases/download/v0.11.0-rc.1/thistle_os-esp32s3-v0.11.0-rc.1.bin.manifest.sig"
+        },
+        {
+          "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/assets/500000014",
+          "id": 500000014,
+          "name": "thistle_os-esp32s3-v0.11.0-rc.1-full.bin",
+          "label": "",
+          "content_type": "application/octet-stream",
+          "state": "uploaded",
+          "size": 1234,
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "browser_download_url": "https://github.com/MedAouadhi/thistle-os/releases/download/v0.11.0-rc.1/thistle_os-esp32s3-v0.11.0-rc.1-full.bin"
+        },
+        {
+          "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/assets/500000015",
+          "id": 500000015,
+          "name": "thistle_os-esp32s3-v0.11.0-rc.1.catalog-entry.json",
+          "label": "",
+          "content_type": "application/json",
+          "state": "uploaded",
+          "size": 600,
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "browser_download_url": "https://github.com/MedAouadhi/thistle-os/releases/download/v0.11.0-rc.1/thistle_os-esp32s3-v0.11.0-rc.1.catalog-entry.json"
+        },
+        {
+          "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/assets/500000016",
+          "id": 500000016,
+          "name": "SHA256SUMS",
+          "label": "",
+          "content_type": "text/plain",
+          "state": "uploaded",
+          "size": 400,
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "browser_download_url": "https://github.com/MedAouadhi/thistle-os/releases/download/v0.11.0-rc.1/SHA256SUMS"
+        }
+      ]
+    },
+    {
+      "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/260000004",
+      "html_url": "https://github.com/MedAouadhi/thistle-os/releases/tag/v0.9.1",
+      "id": 260000004,
+      "tag_name": "v0.9.1",
+      "target_commitish": "main",
+      "name": "ThistleOS v0.9.1",
+      "draft": false,
+      "immutable": true,
+      "prerelease": false,
+      "created_at": "2026-12-10T10:00:00Z",
+      "published_at": "2026-12-10T10:00:00Z",
+      "assets": [
+        {
+          "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/assets/500000017",
+          "id": 500000017,
+          "name": "thistle_os-esp32s3-v0.9.1.bin",
+          "label": "",
+          "content_type": "application/octet-stream",
+          "state": "uploaded",
+          "size": 1234,
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "browser_download_url": "https://github.com/MedAouadhi/thistle-os/releases/download/v0.9.1/thistle_os-esp32s3-v0.9.1.bin"
+        },
+        {
+          "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/assets/500000018",
+          "id": 500000018,
+          "name": "thistle_os-esp32s3-v0.9.1.bin.manifest",
+          "label": "",
+          "content_type": "application/octet-stream",
+          "state": "uploaded",
+          "size": 1234,
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "browser_download_url": "https://github.com/MedAouadhi/thistle-os/releases/download/v0.9.1/thistle_os-esp32s3-v0.9.1.bin.manifest"
+        },
+        {
+          "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/assets/500000019",
+          "id": 500000019,
+          "name": "thistle_os-esp32s3-v0.9.1.bin.manifest.sig",
+          "label": "",
+          "content_type": "application/octet-stream",
+          "state": "uploaded",
+          "size": 1234,
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "browser_download_url": "https://github.com/MedAouadhi/thistle-os/releases/download/v0.9.1/thistle_os-esp32s3-v0.9.1.bin.manifest.sig"
+        },
+        {
+          "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/assets/500000020",
+          "id": 500000020,
+          "name": "thistle_os-esp32s3-v0.9.1-full.bin",
+          "label": "",
+          "content_type": "application/octet-stream",
+          "state": "uploaded",
+          "size": 1234,
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "browser_download_url": "https://github.com/MedAouadhi/thistle-os/releases/download/v0.9.1/thistle_os-esp32s3-v0.9.1-full.bin"
+        },
+        {
+          "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/assets/500000021",
+          "id": 500000021,
+          "name": "thistle_os-esp32s3-v0.9.1.catalog-entry.json",
+          "label": "",
+          "content_type": "application/json",
+          "state": "uploaded",
+          "size": 600,
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "browser_download_url": "https://github.com/MedAouadhi/thistle-os/releases/download/v0.9.1/thistle_os-esp32s3-v0.9.1.catalog-entry.json"
+        },
+        {
+          "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/assets/500000022",
+          "id": 500000022,
+          "name": "SHA256SUMS",
+          "label": "",
+          "content_type": "text/plain",
+          "state": "uploaded",
+          "size": 400,
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "browser_download_url": "https://github.com/MedAouadhi/thistle-os/releases/download/v0.9.1/SHA256SUMS"
+        }
+      ]
+    },
+    {
+      "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/260000005",
+      "html_url": "https://github.com/MedAouadhi/thistle-os/releases/tag/notes-v1.0.9",
+      "id": 260000005,
+      "tag_name": "notes-v1.0.9",
+      "target_commitish": "main",
+      "name": "notes-v1.0.9",
+      "draft": false,
+      "immutable": true,
+      "prerelease": false,
+      "created_at": "2026-12-05T10:00:00Z",
+      "published_at": "2026-12-05T10:00:00Z",
+      "assets": [
+        {
+          "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/assets/500000023",
+          "id": 500000023,
+          "name": "com.thistle.notes-1.0.9-esp32s3.tap",
+          "label": "",
+          "content_type": "application/octet-stream",
+          "state": "uploaded",
+          "size": 1234,
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "browser_download_url": "https://github.com/MedAouadhi/thistle-os/releases/download/notes-v1.0.9/com.thistle.notes-1.0.9-esp32s3.tap"
+        },
+        {
+          "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/assets/500000024",
+          "id": 500000024,
+          "name": "com.thistle.notes-1.0.9-esp32s3.tap.sig",
+          "label": "",
+          "content_type": "application/octet-stream",
+          "state": "uploaded",
+          "size": 1234,
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "browser_download_url": "https://github.com/MedAouadhi/thistle-os/releases/download/notes-v1.0.9/com.thistle.notes-1.0.9-esp32s3.tap.sig"
+        },
+        {
+          "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/assets/500000025",
+          "id": 500000025,
+          "name": "com.thistle.notes-1.0.9-esp32s3.catalog-entry.json",
+          "label": "",
+          "content_type": "application/json",
+          "state": "uploaded",
+          "size": 900,
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "browser_download_url": "https://github.com/MedAouadhi/thistle-os/releases/download/notes-v1.0.9/com.thistle.notes-1.0.9-esp32s3.catalog-entry.json"
+        },
+        {
+          "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/assets/500000026",
+          "id": 500000026,
+          "name": "SHA256SUMS",
+          "label": "",
+          "content_type": "text/plain",
+          "state": "uploaded",
+          "size": 300,
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "browser_download_url": "https://github.com/MedAouadhi/thistle-os/releases/download/notes-v1.0.9/SHA256SUMS"
+        }
+      ]
+    }
+  ],
+  [
+    {
+      "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/260000006",
+      "html_url": "https://github.com/MedAouadhi/thistle-os/releases/tag/v0.10.0",
+      "id": 260000006,
+      "tag_name": "v0.10.0",
+      "target_commitish": "main",
+      "name": "ThistleOS v0.10.0",
+      "draft": false,
+      "immutable": true,
+      "prerelease": false,
+      "created_at": "2026-12-01T10:00:00Z",
+      "published_at": "2026-12-01T10:00:00Z",
+      "assets": [
+        {
+          "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/assets/500000027",
+          "id": 500000027,
+          "name": "thistle_os-esp32s3-v0.10.0.bin",
+          "label": "",
+          "content_type": "application/octet-stream",
+          "state": "uploaded",
+          "size": 1234,
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "browser_download_url": "https://github.com/MedAouadhi/thistle-os/releases/download/v0.10.0/thistle_os-esp32s3-v0.10.0.bin"
+        },
+        {
+          "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/assets/500000028",
+          "id": 500000028,
+          "name": "thistle_os-esp32s3-v0.10.0.bin.manifest",
+          "label": "",
+          "content_type": "application/octet-stream",
+          "state": "uploaded",
+          "size": 1234,
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "browser_download_url": "https://github.com/MedAouadhi/thistle-os/releases/download/v0.10.0/thistle_os-esp32s3-v0.10.0.bin.manifest"
+        },
+        {
+          "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/assets/500000029",
+          "id": 500000029,
+          "name": "thistle_os-esp32s3-v0.10.0.bin.manifest.sig",
+          "label": "",
+          "content_type": "application/octet-stream",
+          "state": "uploaded",
+          "size": 1234,
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "browser_download_url": "https://github.com/MedAouadhi/thistle-os/releases/download/v0.10.0/thistle_os-esp32s3-v0.10.0.bin.manifest.sig"
+        },
+        {
+          "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/assets/500000030",
+          "id": 500000030,
+          "name": "thistle_os-esp32s3-v0.10.0-full.bin",
+          "label": "",
+          "content_type": "application/octet-stream",
+          "state": "uploaded",
+          "size": 1234,
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "browser_download_url": "https://github.com/MedAouadhi/thistle-os/releases/download/v0.10.0/thistle_os-esp32s3-v0.10.0-full.bin"
+        },
+        {
+          "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/assets/500000031",
+          "id": 500000031,
+          "name": "thistle_os-esp32s3-v0.10.0.catalog-entry.json",
+          "label": "",
+          "content_type": "application/json",
+          "state": "uploaded",
+          "size": 600,
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "browser_download_url": "https://github.com/MedAouadhi/thistle-os/releases/download/v0.10.0/thistle_os-esp32s3-v0.10.0.catalog-entry.json"
+        },
+        {
+          "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/assets/500000032",
+          "id": 500000032,
+          "name": "SHA256SUMS",
+          "label": "",
+          "content_type": "text/plain",
+          "state": "uploaded",
+          "size": 400,
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "browser_download_url": "https://github.com/MedAouadhi/thistle-os/releases/download/v0.10.0/SHA256SUMS"
+        }
+      ]
+    },
+    {
+      "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/260000007",
+      "html_url": "https://github.com/MedAouadhi/thistle-os/releases/tag/notes-v1.0.10",
+      "id": 260000007,
+      "tag_name": "notes-v1.0.10",
+      "target_commitish": "main",
+      "name": "notes-v1.0.10",
+      "draft": false,
+      "immutable": true,
+      "prerelease": false,
+      "created_at": "2026-11-28T10:00:00Z",
+      "published_at": "2026-11-28T10:00:00Z",
+      "assets": [
+        {
+          "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/assets/500000033",
+          "id": 500000033,
+          "name": "com.thistle.notes-1.0.10-esp32s3.tap",
+          "label": "",
+          "content_type": "application/octet-stream",
+          "state": "uploaded",
+          "size": 1234,
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "browser_download_url": "https://github.com/MedAouadhi/thistle-os/releases/download/notes-v1.0.10/com.thistle.notes-1.0.10-esp32s3.tap"
+        },
+        {
+          "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/assets/500000034",
+          "id": 500000034,
+          "name": "com.thistle.notes-1.0.10-esp32s3.tap.sig",
+          "label": "",
+          "content_type": "application/octet-stream",
+          "state": "uploaded",
+          "size": 1234,
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "browser_download_url": "https://github.com/MedAouadhi/thistle-os/releases/download/notes-v1.0.10/com.thistle.notes-1.0.10-esp32s3.tap.sig"
+        },
+        {
+          "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/assets/500000035",
+          "id": 500000035,
+          "name": "com.thistle.notes-1.0.10-esp32s3.catalog-entry.json",
+          "label": "",
+          "content_type": "application/json",
+          "state": "uploaded",
+          "size": 900,
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "browser_download_url": "https://github.com/MedAouadhi/thistle-os/releases/download/notes-v1.0.10/com.thistle.notes-1.0.10-esp32s3.catalog-entry.json"
+        },
+        {
+          "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/assets/500000036",
+          "id": 500000036,
+          "name": "SHA256SUMS",
+          "label": "",
+          "content_type": "text/plain",
+          "state": "uploaded",
+          "size": 300,
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "browser_download_url": "https://github.com/MedAouadhi/thistle-os/releases/download/notes-v1.0.10/SHA256SUMS"
+        }
+      ]
+    },
+    {
+      "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/260000008",
+      "html_url": "https://github.com/MedAouadhi/thistle-os/releases/tag/weather-v1.0.1",
+      "id": 260000008,
+      "tag_name": "weather-v1.0.1",
+      "target_commitish": "main",
+      "name": "weather-v1.0.1",
+      "draft": false,
+      "immutable": true,
+      "prerelease": false,
+      "created_at": "2026-11-20T10:00:00Z",
+      "published_at": "2026-11-20T10:00:00Z",
+      "assets": [
+        {
+          "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/assets/500000037",
+          "id": 500000037,
+          "name": "com.thistle.weather-1.0.1-esp32s3.tap",
+          "label": "",
+          "content_type": "application/octet-stream",
+          "state": "uploaded",
+          "size": 1234,
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "browser_download_url": "https://github.com/MedAouadhi/thistle-os/releases/download/weather-v1.0.1/com.thistle.weather-1.0.1-esp32s3.tap"
+        },
+        {
+          "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/assets/500000038",
+          "id": 500000038,
+          "name": "com.thistle.weather-1.0.1-esp32s3.tap.sig",
+          "label": "",
+          "content_type": "application/octet-stream",
+          "state": "uploaded",
+          "size": 1234,
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "browser_download_url": "https://github.com/MedAouadhi/thistle-os/releases/download/weather-v1.0.1/com.thistle.weather-1.0.1-esp32s3.tap.sig"
+        },
+        {
+          "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/assets/500000039",
+          "id": 500000039,
+          "name": "com.thistle.weather-1.0.1-esp32s3.catalog-entry.json",
+          "label": "",
+          "content_type": "application/json",
+          "state": "uploaded",
+          "size": 900,
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "browser_download_url": "https://github.com/MedAouadhi/thistle-os/releases/download/weather-v1.0.1/com.thistle.weather-1.0.1-esp32s3.catalog-entry.json"
+        },
+        {
+          "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/assets/500000040",
+          "id": 500000040,
+          "name": "SHA256SUMS",
+          "label": "",
+          "content_type": "text/plain",
+          "state": "uploaded",
+          "size": 300,
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "browser_download_url": "https://github.com/MedAouadhi/thistle-os/releases/download/weather-v1.0.1/SHA256SUMS"
+        }
+      ]
+    },
+    {
+      "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/260000009",
+      "html_url": "https://github.com/MedAouadhi/thistle-os/releases/tag/v0.9.0",
+      "id": 260000009,
+      "tag_name": "v0.9.0",
+      "target_commitish": "main",
+      "name": "ThistleOS v0.9.0",
+      "draft": false,
+      "immutable": true,
+      "prerelease": false,
+      "created_at": "2026-11-10T10:00:00Z",
+      "published_at": "2026-11-10T10:00:00Z",
+      "assets": [
+        {
+          "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/assets/500000041",
+          "id": 500000041,
+          "name": "thistle_os-esp32s3-v0.9.0.bin",
+          "label": "",
+          "content_type": "application/octet-stream",
+          "state": "uploaded",
+          "size": 1234,
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "browser_download_url": "https://github.com/MedAouadhi/thistle-os/releases/download/v0.9.0/thistle_os-esp32s3-v0.9.0.bin"
+        },
+        {
+          "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/assets/500000042",
+          "id": 500000042,
+          "name": "thistle_os-esp32s3-v0.9.0.bin.manifest",
+          "label": "",
+          "content_type": "application/octet-stream",
+          "state": "uploaded",
+          "size": 1234,
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "browser_download_url": "https://github.com/MedAouadhi/thistle-os/releases/download/v0.9.0/thistle_os-esp32s3-v0.9.0.bin.manifest"
+        },
+        {
+          "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/assets/500000043",
+          "id": 500000043,
+          "name": "thistle_os-esp32s3-v0.9.0.bin.manifest.sig",
+          "label": "",
+          "content_type": "application/octet-stream",
+          "state": "uploaded",
+          "size": 1234,
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "browser_download_url": "https://github.com/MedAouadhi/thistle-os/releases/download/v0.9.0/thistle_os-esp32s3-v0.9.0.bin.manifest.sig"
+        },
+        {
+          "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/assets/500000044",
+          "id": 500000044,
+          "name": "thistle_os-esp32s3-v0.9.0-full.bin",
+          "label": "",
+          "content_type": "application/octet-stream",
+          "state": "uploaded",
+          "size": 1234,
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "browser_download_url": "https://github.com/MedAouadhi/thistle-os/releases/download/v0.9.0/thistle_os-esp32s3-v0.9.0-full.bin"
+        },
+        {
+          "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/assets/500000045",
+          "id": 500000045,
+          "name": "thistle_os-esp32s3-v0.9.0.catalog-entry.json",
+          "label": "",
+          "content_type": "application/json",
+          "state": "uploaded",
+          "size": 600,
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "browser_download_url": "https://github.com/MedAouadhi/thistle-os/releases/download/v0.9.0/thistle_os-esp32s3-v0.9.0.catalog-entry.json"
+        },
+        {
+          "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/assets/500000046",
+          "id": 500000046,
+          "name": "SHA256SUMS",
+          "label": "",
+          "content_type": "text/plain",
+          "state": "uploaded",
+          "size": 400,
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "browser_download_url": "https://github.com/MedAouadhi/thistle-os/releases/download/v0.9.0/SHA256SUMS"
+        }
+      ]
+    },
+    {
+      "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/260000010",
+      "html_url": "https://github.com/MedAouadhi/thistle-os/releases/tag/v0.99.0",
+      "id": 260000010,
+      "tag_name": "v0.99.0",
+      "target_commitish": "main",
+      "name": "ThistleOS v0.99.0",
+      "draft": false,
+      "immutable": true,
+      "prerelease": false,
+      "created_at": "2026-05-03T10:00:00Z",
+      "published_at": "2026-05-03T10:00:00Z",
+      "assets": [
+        {
+          "url": "https://api.github.com/repos/MedAouadhi/thistle-os/releases/assets/500000047",
+          "id": 500000047,
+          "name": "thistle_os-esp32s3-v0.99.0.bin",
+          "label": "",
+          "content_type": "application/octet-stream",
+          "state": "uploaded",
+          "size": 1234,
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "browser_download_url": "https://github.com/MedAouadhi/thistle-os/releases/download/v0.99.0/thistle_os-esp32s3-v0.99.0.bin"
+        }
+      ]
+    }
+  ]
+]

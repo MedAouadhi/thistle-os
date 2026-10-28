@@ -388,3 +388,66 @@ TEST(home_now_the_same_readings_give_the_same_bytes) {
     home_now_rows(&in, b, HOME_NOW_ROWS);
     ASSERT_TRUE(memcmp(a, b, sizeof(a)) == 0);
 }
+
+/* --- updates (ticket 09 of .scratch/ota) ---------------------------------- */
+
+TEST(home_now_names_the_thistleos_version_on_offer) {
+    home_now_in_t in = quiet();
+    in.os_update = "0.6.0";
+    ASSERT_EQ(home_now_rows(&in, s_rows, HOME_NOW_ROWS), 1);
+    ASSERT_EQ(s_rows[0].kind, HOME_NOW_SYSTEM_UPDATE);
+    ASSERT_STR_EQ(s_rows[0].title, "System update");
+    ASSERT_STR_EQ(s_rows[0].detail, "ThistleOS 0.6.0");
+    ASSERT_STR_EQ(s_rows[0].call_back, "");
+}
+
+TEST(home_now_counts_app_updates_alongside_the_thistleos_one) {
+    home_now_in_t in = quiet();
+    in.os_update = "0.6.0";
+    in.app_updates = 1;
+    home_now_rows(&in, s_rows, HOME_NOW_ROWS);
+    ASSERT_EQ(s_rows[0].kind, HOME_NOW_SYSTEM_UPDATE);
+    ASSERT_STR_EQ(s_rows[0].detail, "ThistleOS 0.6.0 and 1 app");
+    in.app_updates = 3;
+    home_now_rows(&in, s_rows, HOME_NOW_ROWS);
+    ASSERT_STR_EQ(s_rows[0].detail, "ThistleOS 0.6.0 and 3 apps");
+}
+
+TEST(home_now_app_updates_alone_open_the_app_store) {
+    home_now_in_t in = quiet();
+    in.app_updates = 1;
+    ASSERT_EQ(home_now_rows(&in, s_rows, HOME_NOW_ROWS), 1);
+    ASSERT_EQ(s_rows[0].kind, HOME_NOW_APP_UPDATES);
+    ASSERT_STR_EQ(s_rows[0].title, "App updates");
+    ASSERT_STR_EQ(s_rows[0].detail, "1 app has an update");
+    in.app_updates = 2;
+    in.os_update = "";
+    home_now_rows(&in, s_rows, HOME_NOW_ROWS);
+    ASSERT_EQ(s_rows[0].kind, HOME_NOW_APP_UPDATES);
+    ASSERT_STR_EQ(s_rows[0].detail, "2 apps have updates");
+}
+
+TEST(home_now_updates_come_after_the_tailnet_and_before_caught_up) {
+    home_now_in_t in = quiet();
+    in.tailnet = HOME_TAILNET_LOGIN;
+    in.os_update = "0.6.0";
+    in.mesh_running = true;
+    ASSERT_EQ(home_now_rows(&in, s_rows, HOME_NOW_ROWS), 2);
+    ASSERT_EQ(s_rows[0].kind, HOME_NOW_TAILNET);
+    ASSERT_EQ(s_rows[1].kind, HOME_NOW_SYSTEM_UPDATE);
+    in.sms_unread = 1;
+    ASSERT_EQ(home_now_rows(&in, s_rows, HOME_NOW_ROWS), 2);
+    ASSERT_EQ(s_rows[0].kind, HOME_NOW_MESSAGES);
+    ASSERT_EQ(s_rows[1].kind, HOME_NOW_TAILNET);
+}
+
+TEST(home_now_a_version_too_long_for_the_row_is_cut_not_overrun) {
+    home_now_row_t a[HOME_NOW_ROWS], b[HOME_NOW_ROWS];
+    home_now_in_t in = quiet();
+    in.os_update = "0.6.0-rc.1-and-a-very-long-suffix-that-goes-on-and-on-and-on-and-on-and-on-and-on";
+    in.app_updates = 12;
+    ASSERT_EQ(home_now_rows(&in, a, HOME_NOW_ROWS), 1);
+    ASSERT_EQ(strlen(a[0].detail), (size_t)HOME_NOW_DETAIL_MAX - 1);
+    home_now_rows(&in, b, HOME_NOW_ROWS);
+    ASSERT_TRUE(memcmp(a, b, sizeof(a)) == 0);
+}

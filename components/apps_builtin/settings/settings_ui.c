@@ -18,6 +18,7 @@
 #include "esp_err.h"
 #include "esp_system.h"
 #include "esp_heap_caps.h"
+#include "esp_attr.h"
 
 #include "thistle/wifi_manager.h"
 #include "thistle/net_manager.h"
@@ -25,6 +26,7 @@
 #include "thistle/kernel.h"
 #include "thistle/signing.h"
 #include "thistle/ota.h"
+#include "thistle/update.h"
 #include "thistle/driver_loader.h"
 #include "thistle/light_prefs.h"
 #include "thistle/gps_manager.h"
@@ -78,6 +80,7 @@ typedef enum {
     SETTINGS_TIME,
     SETTINGS_TIME_ZONE,
     SETTINGS_ABOUT,
+    SETTINGS_UPDATE,
     SETTINGS_DRIVERS,
     SETTINGS_DRIVER_DETAIL,
 } settings_screen_t;
@@ -147,6 +150,8 @@ static lv_timer_t *s_main_timer = NULL;
 static void ble_update_labels(void);
 static void wifi_update_status_label(void);
 static void time_forget_screen(void);
+static void update_forget_screen(void);
+static void create_note(lv_obj_t *content, const char *text);
 static const char *wifi_main_value(void);
 static const char *cell_main_value(void);
 static void set_label_if_changed(lv_obj_t *label, const char *text);
@@ -197,6 +202,7 @@ static const settings_item_t s_items[] = {
     { "Power",       NULL  },
     { "Date & time", NULL  },
     { "Drivers",     NULL  },
+    { "System update", NULL },
     { "About",       NULL  },
 };
 #define ITEMS_COUNT (sizeof(s_items) / sizeof(s_items[0]))
@@ -390,6 +396,7 @@ static void back_to_main(lv_event_t *e)
     (void)e;
     cell_forget_screen();
     time_forget_screen();
+    update_forget_screen();
     if (s_sub_screen) {
         lv_obj_delete(s_sub_screen);
         s_sub_screen = NULL;
@@ -1521,8 +1528,8 @@ static void create_theme_row(lv_obj_t *content, const char *display_name,
 }
 
 /* Create a clickable action button row (for Browse / Clear wallpaper) */
-static void create_action_row(lv_obj_t *content, const char *label,
-                               lv_event_cb_t cb)
+static lv_obj_t *create_action_row(lv_obj_t *content, const char *label,
+                                   lv_event_cb_t cb)
 {
     const theme_colors_t *tc = theme_get_colors();
     lv_obj_t *btn = lv_obj_create(content);
@@ -1549,6 +1556,7 @@ static void create_action_row(lv_obj_t *content, const char *label,
     lv_obj_set_style_text_color(lbl, tc->text, LV_PART_MAIN);
     lv_obj_set_style_text_color(lbl, tc->bg, LV_STATE_PRESSED);
     lv_obj_align(lbl, LV_ALIGN_CENTER, 0, 0);
+    return btn;
 }
 
 static void open_appearance_screen(void)
@@ -1625,33 +1633,6 @@ static void open_appearance_screen(void)
 /* About sub-screen                                                     */
 /* ------------------------------------------------------------------ */
 
-static void install_update_cb(lv_event_t *e)
-{
-    (void)e;
-
-    /* Show progress toast */
-    toast_show("Installing update... Do not power off!", TOAST_WARNING, 30000);
-
-    /* Verify signature first */
-    const char *update_path = THISTLE_SDCARD "/update/thistle_os.bin";
-    esp_err_t sig_ret = signing_verify_file(update_path);
-    if (sig_ret == ESP_ERR_INVALID_CRC) {
-        toast_warn("Update signature INVALID - rejected!");
-        return;
-    }
-    /* Missing signature is OK for dev builds */
-    if (sig_ret == ESP_ERR_NOT_FOUND) {
-        ESP_LOGW(TAG, "Update is unsigned — proceeding anyway");
-    }
-
-    /* Apply the update (this reboots on success) */
-    esp_err_t ret = ota_apply_from_sd(NULL, NULL);
-    if (ret != ESP_OK) {
-        toast_warn("Update failed!");
-    }
-    /* If we get here, the update failed — ota_apply_from_sd reboots on success */
-}
-
 static void open_about_screen(void)
 {
     lv_obj_t *content = create_sub_screen("About");
@@ -1679,8 +1660,8 @@ static void open_about_screen(void)
     lv_obj_align(lbl_os, LV_ALIGN_LEFT_MID, 0, 0);
 
     /* Version */
-    char ver_buf[32];
-    snprintf(ver_buf, sizeof(ver_buf), "Version: %s", THISTLE_VERSION_STRING);
+    char ver_buf[64];
+    snprintf(ver_buf, sizeof(ver_buf), "Version: %s", ota_get_current_version());
     create_info_row(content, ver_buf);
 
     create_separator(content);
@@ -1766,41 +1747,340 @@ static void open_about_screen(void)
         snprintf(drv_buf, sizeof(drv_buf), "Runtime drivers: none");
     }
     create_info_row(content, drv_buf);
+}
 
-    /* Check for SD card update */
-    if (ota_sd_update_available()) {
-        const theme_colors_t *colors = theme_get_colors();
+/* ------------------------------------------------------------------ */
+/* System update sub-screen                                             */
+/* ------------------------------------------------------------------ */
 
-        /* Separator */
-        create_separator(content);
+/* What the daily check found, Check now, the release the catalog offers
+ * with its notes and Download and install (which on mobile data asks first),
+ * and a release copied to the card's update/ folder: each installs once its
+ * artifact manifest holds up (update_manager.rs); anything else is refused
+ * with the reason shown. The checks and installs run on a task of the
+ * kernel's; this screen polls rs_update_get_status(). Go back boots the
+ * version still in the other kernel slot, while
+ * rs_update_go_back_version() offers it. */
 
-        /* Update available banner */
-        lv_obj_t *update_row = lv_obj_create(content);
-        lv_obj_set_size(update_row, LV_PCT(100), 50);
-        lv_obj_set_style_bg_color(update_row, colors->primary, LV_PART_MAIN);
-        lv_obj_set_style_bg_opa(update_row, LV_OPA_COVER, LV_PART_MAIN);
-        lv_obj_set_style_radius(update_row, 6, LV_PART_MAIN);
-        lv_obj_set_style_pad_all(update_row, 8, LV_PART_MAIN);
-        lv_obj_clear_flag(update_row, LV_OBJ_FLAG_SCROLLABLE);
+static lv_timer_t *s_update_timer      = NULL;
+static lv_obj_t   *s_update_card_lbl   = NULL;
+static lv_obj_t   *s_update_status_lbl = NULL;
+static lv_obj_t   *s_update_install    = NULL;
+static lv_obj_t   *s_update_restart    = NULL;
+static lv_obj_t   *s_update_later      = NULL;
+static lv_obj_t   *s_update_check_lbl  = NULL;
+static lv_obj_t   *s_update_check_now  = NULL;
+static lv_obj_t   *s_update_offer_lbl  = NULL;
+static lv_obj_t   *s_update_notes_lbl  = NULL;
+static lv_obj_t   *s_update_download   = NULL;
+static lv_obj_t   *s_update_consent    = NULL;
+static lv_obj_t   *s_update_go_back    = NULL;
+/* The version Go back reaches, as last shown; "" while it is not offered. */
+static char        s_update_back_shown[40];
+/* Later hides Restart now until the next install. */
+static bool        s_update_later_chosen = false;
 
-        lv_obj_t *update_lbl = lv_label_create(update_row);
-        lv_label_set_text(update_lbl, "Update found on SD card");
-        lv_obj_set_style_text_color(update_lbl, lv_color_white(), LV_PART_MAIN);
-        lv_obj_set_style_text_font(update_lbl, &lv_font_montserrat_14, LV_PART_MAIN);
-        lv_obj_align(update_lbl, LV_ALIGN_LEFT_MID, 0, -8);
-
-        lv_obj_t *install_btn = lv_button_create(update_row);
-        lv_obj_set_size(install_btn, 100, 28);
-        lv_obj_align(install_btn, LV_ALIGN_RIGHT_MID, 0, 8);
-        lv_obj_set_style_bg_color(install_btn, lv_color_white(), LV_PART_MAIN);
-
-        lv_obj_t *btn_lbl = lv_label_create(install_btn);
-        lv_label_set_text(btn_lbl, "Install");
-        lv_obj_set_style_text_color(btn_lbl, colors->primary, LV_PART_MAIN);
-        lv_obj_center(btn_lbl);
-
-        lv_obj_add_event_cb(install_btn, install_update_cb, LV_EVENT_CLICKED, NULL);
+static void update_forget_screen(void)
+{
+    if (s_update_timer) {
+        lv_timer_delete(s_update_timer);
+        s_update_timer = NULL;
     }
+    s_update_card_lbl   = NULL;
+    s_update_status_lbl = NULL;
+    s_update_install    = NULL;
+    s_update_restart    = NULL;
+    s_update_later      = NULL;
+    s_update_check_lbl  = NULL;
+    s_update_check_now  = NULL;
+    s_update_offer_lbl  = NULL;
+    s_update_notes_lbl  = NULL;
+    s_update_download   = NULL;
+    s_update_consent    = NULL;
+    s_update_go_back    = NULL;
+    s_update_back_shown[0] = '\0';
+}
+
+/* A label's text, rewritten and logged only when it changes. */
+static void update_set_text(lv_obj_t *label, const char *text)
+{
+    if (!label || strcmp(lv_label_get_text(label), text) == 0) return;
+    lv_label_set_text(label, text);
+    if (text[0]) ESP_LOGI(TAG, "System update: %s", text);
+}
+
+/* What the last check found, and when. */
+static void update_check_text(const update_status_t *st, char *out, size_t len)
+{
+    char found[64] = "";
+    int64_t when = 0;
+    if (st->state == UPDATE_CHECKING) {
+        snprintf(out, len, "Checking for updates...");
+    } else if (!rs_update_last_check(&when, found, sizeof(found))) {
+        snprintf(out, len, "Not checked yet");
+    } else if (when > 0) {
+        time_t t = (time_t)when;
+        struct tm tm;
+        char date[24];
+        localtime_r(&t, &tm);
+        strftime(date, sizeof(date), "%d %b %H:%M", &tm);
+        snprintf(out, len, "Checked %s: %s", date, found);
+    } else {
+        snprintf(out, len, "Checked: %s", found);
+    }
+}
+
+static void update_set_shown(lv_obj_t *obj, bool shown)
+{
+    if (!obj) return;
+    bool hidden = lv_obj_has_flag(obj, LV_OBJ_FLAG_HIDDEN);
+    if (shown && hidden) lv_obj_remove_flag(obj, LV_OBJ_FLAG_HIDDEN);
+    if (!shown && !hidden) lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void update_refresh(lv_timer_t *t)
+{
+    (void)t;
+    update_status_t st;
+    rs_update_get_status(&st);
+
+    char card[64];
+    char version[40] = "";
+    bool on_card = rs_update_card_release(version, sizeof(version));
+    if (!on_card) {
+        snprintf(card, sizeof(card), "No release on the card");
+    } else if (version[0]) {
+        snprintf(card, sizeof(card), "On the card: %s", version);
+    } else {
+        snprintf(card, sizeof(card), "On the card: a release");
+    }
+    if (s_update_card_lbl && strcmp(lv_label_get_text(s_update_card_lbl), card) != 0) {
+        lv_label_set_text(s_update_card_lbl, card);
+        ESP_LOGI(TAG, "System update: %s", card);
+    }
+
+    char check[112];
+    update_check_text(&st, check, sizeof(check));
+    update_set_text(s_update_check_lbl, check);
+
+    char offer_version[40] = "";
+    /* Only this task reads it: PSRAM. */
+    static EXT_RAM_BSS_ATTR char notes[320];
+    notes[0] = '\0';
+    bool offered = rs_update_offer(offer_version, sizeof(offer_version), notes, sizeof(notes));
+    char offer[64];
+    snprintf(offer, sizeof(offer), "Available: ThistleOS %s", offer_version);
+    if (offered) {
+        update_set_text(s_update_offer_lbl, offer);
+        update_set_text(s_update_notes_lbl, notes);
+    }
+
+    char status[200];
+    switch (st.state) {
+    case UPDATE_DOWNLOADING:
+        if (st.total > 0) {
+            snprintf(status, sizeof(status), "Downloading %s: %lu%%", st.version,
+                     (unsigned long)((uint64_t)st.done * 100 / st.total));
+        } else {
+            snprintf(status, sizeof(status), "Downloading %s...", st.version);
+        }
+        break;
+    case UPDATE_WAITING:
+        snprintf(status, sizeof(status), "The download waits: %s", st.reason);
+        break;
+    case UPDATE_WRITING:
+        if (st.total > 0) {
+            snprintf(status, sizeof(status), "Installing %s: %lu%%", st.version,
+                     (unsigned long)((uint64_t)st.done * 100 / st.total));
+        } else {
+            snprintf(status, sizeof(status), "Checking the release...");
+        }
+        break;
+    case UPDATE_READY:
+        snprintf(status, sizeof(status), "%s is installed. It runs after a restart.", st.version);
+        break;
+    case UPDATE_FAILED:
+        snprintf(status, sizeof(status), "Not installed: %s", st.reason);
+        break;
+    default:
+        status[0] = '\0';
+        break;
+    }
+    if (s_update_status_lbl && strcmp(lv_label_get_text(s_update_status_lbl), status) != 0) {
+        lv_label_set_text(s_update_status_lbl, status);
+        if (status[0]) ESP_LOGI(TAG, "System update: %s", status);
+    }
+
+    bool ready = st.state == UPDATE_READY;
+    /* Nothing under way, waiting or waiting for a restart. */
+    bool settled = st.state == UPDATE_IDLE || st.state == UPDATE_UP_TO_DATE ||
+                   st.state == UPDATE_AVAILABLE || st.state == UPDATE_FAILED;
+    bool show_offer = offered && (settled || st.state == UPDATE_WAITING);
+    update_set_shown(s_update_check_now, settled && !offered);
+    update_set_shown(s_update_offer_lbl ? lv_obj_get_parent(s_update_offer_lbl) : NULL, show_offer);
+    update_set_shown(s_update_notes_lbl, show_offer && notes[0]);
+    update_set_shown(s_update_download, offered && settled);
+    update_set_shown(s_update_consent, st.state == UPDATE_WAITING && rs_update_needs_consent());
+    update_set_shown(s_update_install, on_card && settled);
+    update_set_shown(s_update_restart, ready && !s_update_later_chosen);
+    update_set_shown(s_update_later, ready && !s_update_later_chosen);
+
+    /* Go back, while the other kernel slot still holds the previous version
+     * (rs_update_go_back_version decides). */
+    char back[40] = "";
+    if (!rs_update_go_back_version(back, sizeof(back))) back[0] = '\0';
+    if (s_update_go_back && strcmp(back, s_update_back_shown) != 0) {
+        if (back[0]) {
+            char text[64];
+            snprintf(text, sizeof(text), "Go back to %s", back);
+            lv_label_set_text(lv_obj_get_child(s_update_go_back, 0), text);
+            ESP_LOGI(TAG, "System update: %s", text);
+        } else if (s_update_back_shown[0]) {
+            ESP_LOGI(TAG, "System update: going back to %s is no longer offered",
+                     s_update_back_shown);
+        }
+        snprintf(s_update_back_shown, sizeof(s_update_back_shown), "%s", back);
+    }
+    /* Hidden while an install runs: what it does to the slot shows after. */
+    update_set_shown(s_update_go_back, back[0] != '\0' && settled);
+}
+
+static void update_install_cb(lv_event_t *e)
+{
+    (void)e;
+    s_update_later_chosen = false;
+    if (rs_update_install_from_card() != ESP_OK) {
+        toast_warn("An update is already installing");
+    }
+    update_refresh(NULL);
+}
+
+static void update_check_now_cb(lv_event_t *e)
+{
+    (void)e;
+    if (rs_update_check_now() != ESP_OK) {
+        toast_warn("An update is already under way");
+    }
+    update_refresh(NULL);
+}
+
+static void update_download_cb(lv_event_t *e)
+{
+    (void)e;
+    s_update_later_chosen = false;
+    if (rs_update_install(false) != ESP_OK) {
+        toast_warn("An update is already under way");
+    }
+    update_refresh(NULL);
+}
+
+/* On mobile data: the user allows the download over it. */
+static void update_consent_cb(lv_event_t *e)
+{
+    (void)e;
+    s_update_later_chosen = false;
+    if (rs_update_install(true) != ESP_OK) {
+        toast_warn("An update is already under way");
+    }
+    update_refresh(NULL);
+}
+
+static void update_restart_cb(lv_event_t *e)
+{
+    (void)e;
+    rs_update_restart();
+}
+
+static void update_later_cb(lv_event_t *e)
+{
+    (void)e;
+    s_update_later_chosen = true;
+    toast_show("It runs after the next restart", TOAST_INFO, 3000);
+    update_refresh(NULL);
+}
+
+static void update_go_back_cb(lv_event_t *e)
+{
+    (void)e;
+    /* Restarts into the other kernel slot; returns only if it cannot. */
+    if (rs_update_go_back() != ESP_OK) {
+        toast_warn("Cannot go back to the previous version");
+    }
+    update_refresh(NULL);
+}
+
+static void open_update_screen(void)
+{
+    lv_obj_t *content = create_sub_screen("System update");
+    s_current_screen = SETTINGS_UPDATE;
+
+    char running[64];
+    snprintf(running, sizeof(running), "Running: %s", rs_update_running_version());
+    /* Two lines, whatever the version: a laptop build's is long, and the
+     * rows below stay where they are. */
+    lv_obj_t *running_lbl = create_live_row(content, running);
+    lv_obj_set_height(lv_obj_get_parent(running_lbl), 2 * ITEM_H - 8);
+    lv_label_set_long_mode(running_lbl, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(running_lbl, LV_PCT(100));
+    lv_obj_align(running_lbl, LV_ALIGN_TOP_LEFT, 0, 6);
+    ESP_LOGI(TAG, "System update: %s", running);
+
+    const theme_colors_t *tc = theme_get_colors();
+    s_update_check_lbl = create_live_row(content, "");
+    s_update_check_now = create_action_row(content, "Check now", update_check_now_cb);
+    s_update_offer_lbl = create_live_row(content, "");
+    s_update_notes_lbl = lv_label_create(content);
+    lv_label_set_text(s_update_notes_lbl, "");
+    lv_label_set_long_mode(s_update_notes_lbl, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(s_update_notes_lbl, LV_PCT(100));
+    lv_obj_set_style_pad_left(s_update_notes_lbl, ITEM_PAD_LEFT, LV_PART_MAIN);
+    lv_obj_set_style_pad_right(s_update_notes_lbl, ITEM_PAD_RIGHT, LV_PART_MAIN);
+    lv_obj_set_style_pad_bottom(s_update_notes_lbl, 4, LV_PART_MAIN);
+    lv_obj_set_style_text_font(s_update_notes_lbl, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_color(s_update_notes_lbl, tc->text, LV_PART_MAIN);
+    s_update_download = create_action_row(content, "Download and install", update_download_cb);
+    s_update_consent  = create_action_row(content, "Download over mobile data", update_consent_cb);
+    lv_obj_add_flag(s_update_check_now, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(lv_obj_get_parent(s_update_offer_lbl), LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_update_notes_lbl, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_update_download, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_update_consent, LV_OBJ_FLAG_HIDDEN);
+
+    s_update_status_lbl = lv_label_create(content);
+    lv_label_set_text(s_update_status_lbl, "");
+    lv_label_set_long_mode(s_update_status_lbl, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(s_update_status_lbl, LV_PCT(100));
+    lv_obj_set_style_pad_left(s_update_status_lbl, ITEM_PAD_LEFT, LV_PART_MAIN);
+    lv_obj_set_style_pad_right(s_update_status_lbl, ITEM_PAD_RIGHT, LV_PART_MAIN);
+    lv_obj_set_style_pad_top(s_update_status_lbl, 4, LV_PART_MAIN);
+    lv_obj_set_style_pad_bottom(s_update_status_lbl, 4, LV_PART_MAIN);
+    lv_obj_set_style_text_font(s_update_status_lbl, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_color(s_update_status_lbl, tc->text, LV_PART_MAIN);
+
+    s_update_restart = create_action_row(content, "Restart now", update_restart_cb);
+    s_update_later   = create_action_row(content, "Later", update_later_cb);
+    s_update_go_back = create_action_row(content, "Go back", update_go_back_cb);
+    /* A laptop build's version is longer than the row. */
+    lv_obj_t *back_lbl = lv_obj_get_child(s_update_go_back, 0);
+    lv_obj_set_width(back_lbl, LV_PCT(100));
+    lv_label_set_long_mode(back_lbl, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(back_lbl, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    s_update_back_shown[0] = '\0';
+    lv_obj_add_flag(s_update_go_back, LV_OBJ_FLAG_HIDDEN);
+
+    s_update_card_lbl = create_live_row(content, "");
+    s_update_install  = create_action_row(content, "Install from card", update_install_cb);
+    lv_obj_add_flag(s_update_install, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_update_restart, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_update_later, LV_OBJ_FLAG_HIDDEN);
+
+    create_note(content, "To install a release from the card, copy its image, "
+                         "manifest and signature to the card's update folder.");
+
+    /* The card may have changed since the page was last open. */
+    rs_update_rescan();
+    update_refresh(NULL);
+    s_update_timer = lv_timer_create(update_refresh, 500, NULL);
 }
 
 /* ------------------------------------------------------------------ */
@@ -3318,9 +3598,17 @@ static void open_time_screen(void)
     s_time_timer = lv_timer_create(time_timer_cb, 2000, NULL);
 }
 
-static void item_clicked_cb(lv_event_t *e)
+/* The page the next settings_ui_create() opens at, "" for the main list. */
+static char s_next_page[32];
+
+void settings_app_open_next(const char *page)
 {
-    const char *name = (const char *)lv_event_get_user_data(e);
+    snprintf(s_next_page, sizeof(s_next_page), "%s", page ? page : "");
+}
+
+/* Open the main list's item `name`, as a tap on it does. */
+static void open_item(const char *name)
+{
     if (!name) return;
 
     if (strcmp(name, "WiFi") == 0) {
@@ -3344,12 +3632,20 @@ static void item_clicked_cb(lv_event_t *e)
     } else if (strcmp(name, "Drivers") == 0) {
         lv_obj_add_flag(s_main_list, LV_OBJ_FLAG_HIDDEN);
         open_drivers_screen();
+    } else if (strcmp(name, "System update") == 0) {
+        lv_obj_add_flag(s_main_list, LV_OBJ_FLAG_HIDDEN);
+        open_update_screen();
     } else if (strcmp(name, "About") == 0) {
         lv_obj_add_flag(s_main_list, LV_OBJ_FLAG_HIDDEN);
         open_about_screen();
     } else {
         ESP_LOGI(TAG, "Settings: %s — not implemented yet", name);
     }
+}
+
+static void item_clicked_cb(lv_event_t *e)
+{
+    open_item((const char *)lv_event_get_user_data(e));
 }
 
 static void create_list_item(lv_obj_t *list, const settings_item_t *item)
@@ -3522,6 +3818,16 @@ esp_err_t settings_ui_create(lv_obj_t *parent)
     }
     s_main_timer = lv_timer_create(settings_main_update_timer, 2000, NULL);
 
+    /* Opened at one of its pages (settings_app_open_next): Home's update row
+     * opens System update. Back returns to the main list. */
+    if (s_next_page[0]) {
+        char page[sizeof(s_next_page)];
+        memcpy(page, s_next_page, sizeof(page));
+        s_next_page[0] = '\0';
+        ESP_LOGI(TAG, "Settings opens at %s", page);
+        open_item(page);
+    }
+
     return ESP_OK;
 }
 
@@ -3571,6 +3877,7 @@ void settings_ui_destroy(void)
 
     cell_forget_screen();
     time_forget_screen();
+    update_forget_screen();
 
     /* Nullify label pointers — LVGL will clean up widgets when s_root is deleted */
     s_wifi_value_label   = NULL;

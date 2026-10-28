@@ -15,7 +15,7 @@
       <a href="/thistle-os/docs/devices.html">Devices</a>
       <a href="/thistle-os/docs/drivers.html">Drivers</a>
       <a href="/thistle-os/docs/recovery.html">Recovery</a>
-      <a href="https://github.com/wan0net/thistle-os">GitHub</a>
+      <a href="https://github.com/MedAouadhi/thistle-os">GitHub</a>
     </div>
   </div>
 </nav>
@@ -45,44 +45,56 @@
     <div class="page-header">
       <div class="breadcrumb"><a href="index.html">ThistleOS</a> / Release Flashing</div>
       <h1>Release Flashing</h1>
-      <p class="lead">How to install a tagged ThistleOS release from GitHub assets, verify checksums, and choose the correct image for firmware versus recovery.</p>
-      <a href="https://github.com/wan0net/thistle-os/releases" class="edit-link">GitHub Releases</a>
+      <p class="lead">How a ThistleOS release is made by pushing a tag, what it publishes, and how a device installs it: over the air, from the card, or by USB.</p>
+      <a href="https://github.com/MedAouadhi/thistle-os/releases" class="edit-link">GitHub Releases</a>
     </div>
 
-    <h2>Release assets</h2>
-    <p>A release should include these downloadable assets:</p>
+    <h2>Releasing</h2>
+    <p>A release is a tag pushed to the repository. GitHub Actions builds that commit on GitHub's hosted runners, in ESP-IDF's container, with no <code>.env</code>: a released firmware compiles in no Cohere or PodcastIndex key and no tailnet address, and Dictation, Podcasts, Hermes and AssistNow read theirs from the card.</p>
     <ul>
-      <li><code>thistle_os-&lt;version&gt;.bin</code> — main ThistleOS firmware for the <code>ota_1</code> slot.</li>
-      <li><code>thistle_os-&lt;version&gt;.bin.sig</code> — Ed25519 signature for the firmware.</li>
-      <li><code>thistle_os-&lt;version&gt;.bin.pub</code> — public key used to verify the signature.</li>
-      <li><code>thistle-recovery-&lt;version&gt;</code> — recovery firmware for the <code>ota_0</code> slot.</li>
-      <li><code>SHA256SUMS</code> — checksums for every release asset.</li>
+      <li><code>v0.6.0</code> releases the firmware (<code>.github/workflows/release-firmware.yml</code>). The version the tagged commit describes must be the tag, and <code>CHANGELOG.md</code> must have a <code>## v0.6.0 - YYYY-MM-DD</code> section: it becomes the release's notes and the text Settings shows. Without it the release stops before anything is published.</li>
+      <li><code>&lt;app&gt;-v1.0.1</code> releases one of the App Store's apps (<code>notes</code>, <code>weather</code>, <code>wifiscanner</code>, <code>flashlight</code>; <code>.github/workflows/release-app.yml</code>). The version must be the app's <code>manifest.json</code> version, its notes are <code>metadata.json</code>'s newest release, and its <code>min_os</code> must be no newer than the newest firmware release.</li>
+      <li>A tag with a suffix, <code>v0.6.0-rc.1</code>, publishes a <strong>prerelease</strong>. The catalog leaves prereleases out, so no device is offered one; install it by USB or from the card to try it.</li>
     </ul>
+    <p>The release is signed with the publisher's one release key, which exists only as the secret <code>RELEASE_SIGNING_KEY</code> of the repository's <code>release</code> environment; that environment admits only tags matching <code>v*</code> and <code>*-v*</code>, and a tag ruleset limits who may push them. Its public half is <code>tools/production_public.key</code>, which every build of the kernel trusts. Releases are immutable and carry build provenance attestations; each one then redeploys Pages, which rebuilds the catalog. As the release's run deploys Pages from its tag, the <code>github-pages</code> environment must admit tags matching <code>v*</code> and <code>*-v*</code> beside <code>main</code>; by default it admits only the default branch.</p>
 
-    <h2>Verify downloads</h2>
-    <pre><code>sha256sum -c SHA256SUMS</code></pre>
-    <p>On macOS, install GNU coreutils or compare individual files with <code>shasum -a 256 &lt;file&gt;</code>.</p>
+    <h3>Raising the security version</h3>
+    <p>A release that fixes a security hole raises <code>SECURITY_VERSION</code> in <code>components/kernel_rs/src/version.rs</code> by hand before it is tagged. The release writes it into the signed artifact manifest. A device that keeps that kernel raises its <strong>security floor</strong> to it, and from then on installs nothing below it, from the network or the card, and offers no going back below it.</p>
 
-    <h2>Initial flash</h2>
-    <p>For development boards, the normal first install is still an ESP-IDF flash from source because it writes the bootloader, partition table, and factory app together:</p>
+    <h2>Release assets</h2>
+    <p>A firmware release for the ESP32-S3 holds:</p>
+    <ul>
+      <li><code>thistle_os-esp32s3-&lt;tag&gt;.bin</code> — the kernel image, written into a kernel slot.</li>
+      <li><code>thistle_os-esp32s3-&lt;tag&gt;.bin.manifest</code> and <code>.bin.manifest.sig</code> — the artifact manifest (version, security version, chip, boards, size, SHA-256) and its Ed25519 signature by the release key.</li>
+      <li><code>thistle_os-esp32s3-&lt;tag&gt;-full.bin</code> — the full flash image: bootloader, partition table, the initial boot choice and the kernel, for setting up a device by USB.</li>
+      <li><code>thistle_os-esp32s3-&lt;tag&gt;.catalog-entry.json</code> — the release's entry in the catalog.</li>
+      <li><code>SHA256SUMS</code> — checksums of every asset.</li>
+    </ul>
+    <pre><code>sha256sum -c SHA256SUMS
+gh attestation verify thistle_os-esp32s3-v0.6.0.bin --repo MedAouadhi/thistle-os
+python3 tools/sign.py verify thistle_os-esp32s3-v0.6.0.bin.manifest --pubkey tools/production_public.key</code></pre>
+
+    <h2>Updating over the air</h2>
+    <p>Devices read the catalog at <code>https://medaouadhi.github.io/thistle-os/store/catalog.json</code> once a day; a card's <code>config/appstore.json</code> can name another. Settings → System update shows a newer release and its notes, downloads it over WiFi (mobile data only when allowed), checks it against its signed manifest, writes it into the other kernel slot and asks Restart now or Later. A new kernel that has not run for a minute is rolled back at the next reset; once kept, Settings offers to go back to the previous version, still in the other slot.</p>
+
+    <h2>Installing from the card</h2>
+    <p>Copy the release's <code>.bin</code>, <code>.bin.manifest</code> and <code>.bin.manifest.sig</code> to <code>/sdcard/update/</code> and choose Install from card in Settings → System update. It goes through the same checks, with no network; any version at or above the security floor installs.</p>
+
+    <h2>Flashing by USB</h2>
+    <h3>A new device</h3>
+    <p>Write the full flash image at <code>0x0</code>. It fills the gaps between its parts, so it also erases NVS (settings kept there, the tailnet's sign-in, the security floor); SPIFFS and the card are beyond it and kept.</p>
+    <pre><code>esptool.py --chip esp32s3 -p /dev/ttyACM0 write_flash 0x0 thistle_os-esp32s3-v0.6.0-full.bin</code></pre>
+
+    <h3>Moving a device over</h3>
+    <p>A device on the older partition table (with <code>factory</code>), or one trusting upstream's key and catalog, moves to the two kernel slots, the release key and this repository's catalog with one USB flash of a build from source. NVS, SPIFFS and the core dump are where they were, so WiFi, settings and the mesh identity survive it. From then on it updates over the air.</p>
     <pre><code>. "$IDF_PATH/export.sh"
 idf.py set-target esp32s3
 idf.py build
-idf.py flash monitor</code></pre>
+idf.py -p /dev/ttyACM0 flash monitor</code></pre>
+    <p><code>idf.py flash</code> writes <code>kernel_a</code> (at <code>0x20000</code>) and resets the boot choice, so a USB flash always boots <code>kernel_a</code>. Writing a kernel image alone with esptool leaves the boot choice as it was. A build from source reports the version it was built from, such as <code>0.6.0-3-gabc123-dirty</code>, and is offered only releases newer than <code>0.6.0</code>.</p>
 
-    <h2>Updating main firmware</h2>
-    <p>Once recovery is installed, prefer the recovery web UI. Connect to <code>ThistleOS-Recovery</code>, connect the device to WiFi, choose the board, run the dry-run plan, then download and install.</p>
-    <p>For manual serial flashing, write the main firmware to <code>ota_1</code> using the offsets in <code>partitions.csv</code>. In the current 16 MB layout, <code>ota_1</code> starts at <code>0x720000</code>.</p>
-    <pre><code>esptool.py --chip esp32s3 write_flash 0x720000 thistle_os-&lt;version&gt;.bin</code></pre>
-
-    <h2>Updating recovery</h2>
-    <p>Recovery lives in <code>ota_0</code>. In the current 16 MB layout, <code>ota_0</code> starts at <code>0x4A0000</code> and has <code>0x280000</code> bytes available.</p>
-    <pre><code>esptool.py --chip esp32s3 write_flash 0x4A0000 thistle-recovery-&lt;version&gt;</code></pre>
-
-    <div class="callout warning">
-      <div class="callout-title">Do not cross-flash slots</div>
-      The main firmware and recovery firmware are different binaries. Flashing either one into the wrong app slot can leave the board unable to boot without a serial reflash.
-    </div>
+    <h2>Recovery</h2>
+    <p>Recovery's slot (<code>recovery</code>, at <code>0x920000</code>, <code>0x280000</code> bytes) is reserved: nothing writes or boots it, and no release includes it.</p>
   </main>
 </div>
 </body>

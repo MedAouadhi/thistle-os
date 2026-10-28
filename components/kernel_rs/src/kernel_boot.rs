@@ -119,6 +119,19 @@ extern "C" {
 
 static BOOT_TIME_US: Mutex<i64> = Mutex::new(0);
 
+/// The public half of the publisher's Ed25519 release key, made 2026-10-26.
+/// Its private half exists only as the secret RELEASE_SIGNING_KEY of the
+/// fork's GitHub `release` environment, which admits release tags alone
+/// (ADR-0011). tools/production_public.key holds the same 32 bytes. It
+/// replaced upstream's production key; every build, laptop or released, is a
+/// cargo release build and embeds it.
+const RELEASE_KEY: [u8; 32] = [
+    0xac, 0x87, 0x97, 0xa9, 0x11, 0x77, 0xf7, 0x94,
+    0x6a, 0x13, 0x30, 0xa1, 0x4f, 0x9d, 0x48, 0x4c,
+    0xb7, 0xfd, 0x02, 0x4d, 0x08, 0xc1, 0x3d, 0x20,
+    0x8a, 0x04, 0x84, 0x6a, 0x88, 0xdb, 0xdd, 0x3e,
+];
+
 // kernel_init, kernel_uptime_ms — same names as C
 
 #[no_mangle]
@@ -217,25 +230,10 @@ pub extern "C" fn kernel_init() -> i32 {
     // Permissions (Rust)
     crate::permissions::init();
 
-    // Signing (Rust) — Ed25519 public key for signature verification
-    // Production key: generated 2026-03-28, private key in GitHub secret THISTLE_SIGNING_KEY
-    #[cfg(not(debug_assertions))]
-    let signing_key: [u8; 32] = [
-        0xeb, 0x7b, 0xc6, 0x5c, 0x1e, 0x3f, 0xfc, 0x49, 0x96, 0x1c, 0xa8, 0x15, 0xdb, 0x34, 0x37,
-        0x58, 0x34, 0x6d, 0xbe, 0x80, 0x50, 0x38, 0xbc, 0xd4, 0x49, 0x5a, 0x7a, 0x01, 0x66, 0x5e,
-        0x60, 0x89,
-    ];
-    // Dev key — only used in debug builds. Distinct from production key
-    // so dev-signed artifacts are rejected by release firmware and vice versa.
-    // Generated: SHA-256("thistleos-dev-signing-key-2026")[0..32]
-    #[cfg(debug_assertions)]
-    let signing_key: [u8; 32] = [
-        0xa1, 0x3e, 0x7b, 0x54, 0x02, 0xd8, 0xf1, 0x6c, 0x89, 0x45, 0xbb, 0x0a, 0xe7, 0x33, 0x9d,
-        0x5f, 0x12, 0xc4, 0x68, 0xae, 0x7d, 0x01, 0xf5, 0x92, 0xb6, 0x3a, 0xde, 0x84, 0x50, 0xc7,
-        0x1b, 0xe9,
-    ];
+    // Signing (Rust): the kernel's key is the publisher's release key, in
+    // every build. Firmware, drivers and window managers take it alone.
     unsafe {
-        crate::signing::signing_init(signing_key.as_ptr());
+        crate::signing::signing_init(RELEASE_KEY.as_ptr());
     }
     // A key pair made on the build machine, which tools/make_card_appstore.py
     // signs its packages with; kernel_rs/CMakeLists.txt passes its public
@@ -270,6 +268,11 @@ pub extern "C" fn kernel_init() -> i32 {
         return ret;
     }
 
+    // The simulator's kernel slot, and so its version, is known only now; a
+    // device's board profile followed its version in board_config_init.
+    #[cfg(all(not(target_os = "espidf"), feature = "sim-bus", not(test)))]
+    crate::board_config::sim_follow_firmware_version();
+
     // WiFi (C, non-fatal)
     let ret = unsafe { wifi_manager_init() };
     if ret == ESP_OK {
@@ -303,6 +306,10 @@ pub extern "C" fn kernel_init() -> i32 {
     // as it starts, if a token has been given (gps_assist.rs).
     crate::gps_assist::start();
 
+    // System updates: a kernel worker job checks the catalog once a day
+    // when a network is up, on a task made for the check (update_manager.rs).
+    crate::update_manager::start_checks();
+
     // Publish SYSTEM_BOOT event
     crate::event::event_publish_simple(0); // EVENT_SYSTEM_BOOT = 0
 
@@ -332,4 +339,26 @@ pub extern "C" fn kernel_uptime_ms() -> u32 {
     let boot = BOOT_TIME_US.lock().map(|t| *t).unwrap_or(0);
     let now = unsafe { esp_timer_get_time() };
     ((now - boot) / 1000).min(u32::MAX as i64) as u32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RELEASE_KEY;
+
+    // The public half of the publisher's release key, whose private half is
+    // the secret RELEASE_SIGNING_KEY of the fork's `release` environment.
+    const RELEASE_KEY_HEX: &str = "ac8797a91177f7946a1330a14f9d484cb7fd024d08c13d208a04846a88dbdd3e";
+
+    #[test]
+    fn the_kernel_trusts_the_release_key() {
+        assert_eq!(crate::signing::parse_key_hex(RELEASE_KEY_HEX), Some(RELEASE_KEY));
+    }
+
+    #[test]
+    fn the_tracked_public_key_file_is_the_kernels_key() {
+        // tools/production_public.key is what `tools/sign.py verify` and the
+        // release workflow check a release's manifest against.
+        let tracked: &[u8] = include_bytes!("../../../tools/production_public.key");
+        assert_eq!(tracked, RELEASE_KEY.as_slice());
+    }
 }

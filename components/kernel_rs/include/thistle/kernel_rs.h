@@ -28,9 +28,6 @@ bool rs_manifest_is_compatible(const thistle_manifest_t *manifest, const char *c
 /* Derive manifest path from ELF path (Rust implementation). */
 void rs_manifest_path_from_elf(const char *elf_path, char *out_path, size_t out_size);
 
-/* Get kernel version string from Rust kernel. */
-const char *rs_kernel_version(void);
-
 #ifdef __cplusplus
 }
 #endif

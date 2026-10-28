@@ -62,11 +62,15 @@ void home_format_date(int wday, int mday, int mon, bool two_lines,
 #define HOME_NOW_NUMBER_MAX 33   /* as CALL_NUMBER_MAX */
 
 /* A fixed set, in the order they are shown: the first two that apply, or
- * with none of the first three, CAUGHT_UP and then MESH. */
+ * with none of the first four, CAUGHT_UP and then MESH. SYSTEM_UPDATE and
+ * APP_UPDATES are one row, the one that applies. */
 typedef enum {
     HOME_NOW_MESSAGES,     /* unread SMS and mesh messages: opens the Messenger */
     HOME_NOW_MISSED_CALL,  /* missed calls: opens Phone; its button calls back */
     HOME_NOW_TAILNET,      /* the tailnet waits for the user: opens Tailscale */
+    HOME_NOW_SYSTEM_UPDATE,/* ThistleOS has an update, and perhaps apps: opens
+                            * Settings -> System update */
+    HOME_NOW_APP_UPDATES,  /* only apps have updates: opens the App Store */
     HOME_NOW_CAUGHT_UP,    /* nothing new: not a button */
     HOME_NOW_MESH,         /* the mesh is on: opens the Messenger */
 } home_now_kind_t;
@@ -95,6 +99,10 @@ typedef struct {
     home_tailnet_t tailnet;
     bool     mesh_running;
     int      mesh_contacts;
+    /* The ThistleOS version on offer, NULL or "" for none; and how many
+     * installed apps have an update. */
+    const char *os_update;
+    uint32_t app_updates;
 } home_now_in_t;
 
 typedef struct {

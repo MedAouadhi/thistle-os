@@ -132,18 +132,21 @@ pub unsafe extern "C" fn signing_verify_app(
     if ret != ESP_ERR_INVALID_CRC {
         return ret;
     }
-    let guard = match APP_PUBLISHER_KEY.lock() {
-        Ok(g) => g,
-        Err(_) => return ret,
-    };
-    let Some(publisher) = guard.as_ref() else { return ret };
     let sig_bytes: [u8; 64] = match std::slice::from_raw_parts(signature, 64).try_into() {
         Ok(b) => b,
         Err(_) => return ESP_ERR_INVALID_SIZE,
     };
-    match publisher.verify(std::slice::from_raw_parts(data, data_len), &Signature::from_bytes(&sig_bytes)) {
-        Ok(()) => ESP_OK,
-        Err(_) => ESP_ERR_INVALID_CRC,
+    let signature = Signature::from_bytes(&sig_bytes);
+    let data = std::slice::from_raw_parts(data, data_len);
+    let publisher = APP_PUBLISHER_KEY.lock().ok().and_then(|g| *g);
+    // The simulator's test key too, as for firmware, so its tests can
+    // install an app they signed.
+    if publisher.is_some_and(|key| key.verify(data, &signature).is_ok())
+        || sim_test_key().is_some_and(|key| key.verify(data, &signature).is_ok())
+    {
+        ESP_OK
+    } else {
+        ESP_ERR_INVALID_CRC
     }
 }
 
@@ -190,9 +193,14 @@ pub(crate) fn verify_exact_reader_with(
     let verifying_key = key_guard.as_ref().ok_or(ESP_ERR_INVALID_STATE)?;
     let sig_bytes: [u8; 64] = signature.try_into().map_err(|_| ESP_ERR_INVALID_SIZE)?;
     let signature = Signature::from_bytes(&sig_bytes);
-    let mut verifier = verifying_key
-        .verify_stream(&signature)
-        .map_err(|_| ESP_ERR_INVALID_CRC)?;
+    let mut verifiers = Vec::with_capacity(2);
+    verifiers.extend(verifying_key.verify_stream(&signature).ok());
+    if let Some(test_key) = sim_test_key() {
+        verifiers.extend(test_key.verify_stream(&signature).ok());
+    }
+    if verifiers.is_empty() {
+        return Err(ESP_ERR_INVALID_CRC);
+    }
 
     let mut buffer = [0u8; 4096];
     let mut consumed = 0usize;
@@ -204,7 +212,9 @@ pub(crate) fn verify_exact_reader_with(
         if count == 0 {
             return Err(ESP_ERR_INVALID_SIZE);
         }
-        verifier.update(&buffer[..count]);
+        for verifier in verifiers.iter_mut() {
+            verifier.update(&buffer[..count]);
+        }
         consume(&buffer[..count])?;
         consumed += count;
     }
@@ -214,9 +224,44 @@ pub(crate) fn verify_exact_reader_with(
         return Err(ESP_ERR_INVALID_SIZE);
     }
 
-    verifier
-        .finalize_and_verify()
-        .map_err(|_| ESP_ERR_INVALID_CRC)
+    if verifiers.into_iter().any(|v| v.finalize_and_verify().is_ok()) {
+        Ok(())
+    } else {
+        Err(ESP_ERR_INVALID_CRC)
+    }
+}
+
+/// Whether `signature` is the kernel's key's over `data`: a firmware's
+/// artifact manifest. Firmware accepts the kernel's key only, never an app
+/// publisher's; the simulator also takes its test key.
+pub(crate) fn verify_firmware(data: &[u8], signature: &[u8]) -> bool {
+    let Ok(sig_bytes) = <[u8; 64]>::try_from(signature) else {
+        return false;
+    };
+    let signature = Signature::from_bytes(&sig_bytes);
+    let kernel = VERIFYING_KEY.lock().ok().and_then(|g| *g);
+    kernel.is_some_and(|key| key.verify(data, &signature).is_ok())
+        || sim_test_key().is_some_and(|key| key.verify(data, &signature).is_ok())
+}
+
+/// A key the simulator trusts beside the kernel's, so its tests can sign
+/// firmware: the file `THISTLE_SIM_PUBLISHER_KEY` names, holding the public
+/// key as 32 bytes or 64 hex digits; apps signed by it install too. In
+/// simulator builds only: never on a device, nor in the host tests.
+#[cfg(all(not(target_os = "espidf"), feature = "sim-bus"))]
+fn sim_test_key() -> Option<VerifyingKey> {
+    let path = std::env::var_os("THISTLE_SIM_PUBLISHER_KEY")?;
+    let bytes = fs::read(path).ok()?;
+    let key: [u8; 32] = match bytes.len() {
+        32 => bytes.try_into().ok()?,
+        _ => parse_key_hex(std::str::from_utf8(&bytes).ok()?)?,
+    };
+    VerifyingKey::from_bytes(&key).ok()
+}
+
+#[cfg(not(all(not(target_os = "espidf"), feature = "sim-bus")))]
+fn sim_test_key() -> Option<VerifyingKey> {
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -462,6 +507,33 @@ mod tests {
             ),
             Err(ESP_ERR_INVALID_SIZE)
         );
+    }
+
+    #[test]
+    fn a_firmware_manifest_verifies_against_the_kernel_key_only() {
+        reset();
+        let kernel = SigningKey::from_bytes(&[0x42u8; 32]);
+        let publisher = SigningKey::from_bytes(&[0x24u8; 32]);
+        let manifest = b"THISTLE-ARTIFACT-MANIFEST-V1\ntype=firmware\n";
+        // Before the kernel has a key, nothing verifies.
+        assert!(!verify_firmware(manifest, &kernel.sign(manifest).to_bytes()));
+        assert_eq!(unsafe { signing_init(kernel.verifying_key().as_bytes().as_ptr()) }, ESP_OK);
+        assert_eq!(add_app_publisher(publisher.verifying_key().as_bytes()), ESP_OK);
+
+        assert!(verify_firmware(manifest, &kernel.sign(manifest).to_bytes()));
+        // The app publisher's key signs apps, never a firmware.
+        assert!(!verify_firmware(manifest, &publisher.sign(manifest).to_bytes()));
+        let mut changed = manifest.to_vec();
+        changed[0] ^= 1;
+        assert!(!verify_firmware(&changed, &kernel.sign(manifest).to_bytes()));
+        assert!(!verify_firmware(manifest, &[0u8; 63]));
+        reset();
+    }
+
+    #[test]
+    fn host_tests_trust_no_simulator_key() {
+        // THISTLE_SIM_PUBLISHER_KEY is read in simulator builds only.
+        assert!(sim_test_key().is_none());
     }
 
     fn remove_payload_fixture(path: &std::path::Path) {

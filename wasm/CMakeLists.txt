@@ -16,6 +16,8 @@ set(THISTLE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/..")
 set(THISTLE_SRCS
     # HAL (registry moved to Rust — hal_registry.rs in kernel_rs)
     ${THISTLE_DIR}/components/thistle_hal/src/stub.c
+    # Typed HTTP boundary used by the Rust kernel, over the sim_http stubs
+    ${THISTLE_DIR}/components/kernel_rs/http_client_shim.c
     # Widget shims (Rust widget.rs → WM vtable bridge)
     ${THISTLE_DIR}/components/ui/src/widget_shims.c
     # thistle-tk WM C vtable + HAL bridge
@@ -32,12 +34,30 @@ set(THISTLE_SRCS
     ${THISTLE_DIR}/components/ui/src/toast.c
     ${THISTLE_DIR}/components/ui/src/power_ui.c
     ${THISTLE_DIR}/components/ui/src/wm_select.c
-    # Arabic shaping, which the Reader, Phone and Podcasts use
+    ${THISTLE_DIR}/components/ui/src/pull_gesture.c
+    ${THISTLE_DIR}/components/ui/src/quick_panel.c
+    ${THISTLE_DIR}/components/ui/src/quick_panel_tiles.c
+    ${THISTLE_DIR}/components/ui/src/call_ui.c
+    ${THISTLE_DIR}/components/ui/src/dictation.c
+    ${THISTLE_DIR}/components/ui/src/dictation_core.c
+    # Arabic text in every label and text field (the wraps are below)
     ${THISTLE_DIR}/components/ui/src/arabic_shape.c
+    ${THISTLE_DIR}/components/ui/src/arabic_text.c
+    ${THISTLE_DIR}/components/ui/src/fonts/arabic_font_14.c
+    ${THISTLE_DIR}/components/ui/src/fonts/arabic_font_14_mono.c
+    ${THISTLE_DIR}/components/ui/src/fonts/arabic_font_18.c
+    ${THISTLE_DIR}/components/ui/src/fonts/arabic_font_18_mono.c
+    ${THISTLE_DIR}/components/ui/src/fonts/arabic_font_22.c
+    ${THISTLE_DIR}/components/ui/src/fonts/arabic_font_22_mono.c
     # Built-in apps
     ${THISTLE_DIR}/components/apps_builtin/lvgl_apps.c
     ${THISTLE_DIR}/components/apps_builtin/launcher/launcher_app.c
     ${THISTLE_DIR}/components/apps_builtin/launcher/launcher_ui.c
+    ${THISTLE_DIR}/components/apps_builtin/launcher/home_core.c
+    ${THISTLE_DIR}/components/apps_builtin/launcher/fonts/home_clock_44.c
+    ${THISTLE_DIR}/components/apps_builtin/launcher/fonts/home_clock_44_mono.c
+    ${THISTLE_DIR}/components/apps_builtin/launcher/fonts/home_latin_14.c
+    ${THISTLE_DIR}/components/apps_builtin/launcher/fonts/home_latin_14_mono.c
     ${THISTLE_DIR}/components/apps_builtin/settings/settings_app.c
     ${THISTLE_DIR}/components/apps_builtin/settings/settings_ui.c
     ${THISTLE_DIR}/components/apps_builtin/messenger/messenger_app.c
@@ -172,6 +192,28 @@ target_compile_definitions(thistle_wasm PRIVATE
     THISTLE_SDCARD_PATH="/thistle_sdcard"
 )
 
+# The apps' generated headers, as the desktop simulator makes them. The page
+# is published, so it never reads .env: each reads a file that does not exist
+# and writes a header with no key, and the apps ask for theirs instead.
+set(THISTLE_WASM_NO_ENV "${CMAKE_CURRENT_BINARY_DIR}/no.env")
+include(${THISTLE_DIR}/apps/podcasts/credentials.cmake)
+set(THISTLE_PODCASTS_ENV "${THISTLE_WASM_NO_ENV}")
+thistle_podcasts_credentials("${CMAKE_CURRENT_BINARY_DIR}/podcasts")
+include(${THISTLE_DIR}/components/ui/dictation_credentials.cmake)
+set(THISTLE_DICTATION_ENV "${THISTLE_WASM_NO_ENV}")
+thistle_dictation_credentials("${CMAKE_CURRENT_BINARY_DIR}/dictation")
+include(${THISTLE_DIR}/apps/hermes/bridge_url.cmake)
+set(THISTLE_HERMES_ENV "${THISTLE_WASM_NO_ENV}")
+thistle_hermes_bridge_url("${CMAKE_CURRENT_BINARY_DIR}/hermes")
+include(${THISTLE_DIR}/apps/filexfer/web.cmake)
+thistle_filexfer_web("${CMAKE_CURRENT_BINARY_DIR}/filexfer")
+target_include_directories(thistle_wasm PRIVATE
+    "${CMAKE_CURRENT_BINARY_DIR}/podcasts"
+    "${CMAKE_CURRENT_BINARY_DIR}/dictation"
+    "${CMAKE_CURRENT_BINARY_DIR}/hermes"
+    "${CMAKE_CURRENT_BINARY_DIR}/filexfer"
+)
+
 target_compile_options(thistle_wasm PRIVATE
     ${USE_FLAGS}
     -Wno-unused-parameter
@@ -216,3 +258,15 @@ set_property(TARGET thistle_wasm APPEND PROPERTY
     LINK_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/shell.html)
 
 target_link_libraries(thistle_wasm PRIVATE ${RUST_WASM_LIB})
+
+# Arabic in every label and text field: arabic_text.c stands in for these
+# LVGL functions, as components/ui/CMakeLists.txt and the simulator's do.
+foreach(fn IN ITEMS lv_font_get_glyph_dsc lv_font_get_glyph_width lv_draw_label
+                    lv_text_get_size lv_label_get_letter_pos lv_label_get_letter_on
+                    lv_label_is_char_under_pos)
+    target_link_options(thistle_wasm PRIVATE "LINKER:--wrap=${fn}")
+endforeach()
+
+# On e-paper an animation that plays once ends at once: manager.c stands in
+# for lv_anim_start, as components/ui/CMakeLists.txt and the simulator's do.
+target_link_options(thistle_wasm PRIVATE "LINKER:--wrap=lv_anim_start")

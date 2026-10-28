@@ -3,10 +3,9 @@
 #include "esp_err.h"
 #include <stdint.h>
 
-#define THISTLE_VERSION_MAJOR 0
-#define THISTLE_VERSION_MINOR 1
-#define THISTLE_VERSION_PATCH 0
-#define THISTLE_VERSION_STRING "0.1.0"
+/* The firmware's version is its tag, described at build time
+ * (tools/firmware_version.sh): ota_get_current_version() (thistle/ota.h)
+ * gives it, "0.6.0" or, built on a laptop, "0.5.2-108-gabc1234-dirty". */
 
 /* Initialize kernel subsystems (event bus, IPC, app manager, driver manager) */
 esp_err_t kernel_init(void);

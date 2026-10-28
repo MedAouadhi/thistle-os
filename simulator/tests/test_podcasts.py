@@ -21,7 +21,9 @@ through it, and checks:
 - skipping ahead asks the host for the byte that far into the audio;
 - an episode goes on playing, to its end, after the app is left;
 - an episode pauses while the user dictates, and plays on after at its own
-  format, which dictation's 16 kHz replaced.
+  format, which dictation's 16 kHz replaced;
+- built with no key, as a release is, and none on the card, Trending says
+  there is no PodcastIndex key and asks nothing of the network.
 
 The real PodcastIndex is never asked: the card's key replaces any built in.
 """
@@ -397,6 +399,20 @@ def test_pauses_while_dictating(simulator: Path, index: FakeIndex, root: Path) -
     expect(again >= 0, "the episode played on without setting its own format again")
 
 
+def built_in_key(simulator: Path) -> bool:
+    header = simulator.parent / "podcasts" / "pod_cred_default.h"
+    return header.exists() and "POD_CRED_DEFAULT_KEY" in header.read_text()
+
+
+def test_says_it_has_no_key(simulator: Path, index: FakeIndex, root: Path) -> None:
+    card = Card(root, "no-key", index.base)
+    (card.path / "config" / "podcasts.json").unlink()
+    index.take()
+    out = run_sim(simulator, card, (HOME_TRENDING,))
+    expect_in("no podcasts: No PodcastIndex key. Set one up from the home page.", out)
+    expect(not index.take(), "a request was sent with no key")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--sim", type=Path, default=SIM_DIR / "build" / "thistle_sim")
@@ -419,6 +435,11 @@ def main() -> int:
             ("plays_on_after_leaving", lambda: test_plays_on_after_leaving(simulator, index, root)),
             ("pauses_while_dictating", lambda: test_pauses_while_dictating(simulator, index, root)),
         ]
+        # Only where the build has no key of its own from .env, as CI's.
+        if built_in_key(simulator):
+            print("SKIP says_it_has_no_key: this build has a key from .env")
+        else:
+            cases.append(("says_it_has_no_key", lambda: test_says_it_has_no_key(simulator, index, root)))
         for name, case in cases:
             try:
                 case()

@@ -1,0 +1,11 @@
+[package]
+name = "thistle-artifact"
+version = "0.1.0"
+edition = "2021"
+license = "BSD-3-Clause"
+description = "ThistleOS's signed artifact manifest: its canonical V1 format and the device checks"
+
+# No dependencies, so the kernel and Recovery can both take it whatever their
+# own versions of sha2 or ed25519 are. The signature and the hash are the
+# caller's to check; this crate reads what the signature covers.
+[dependencies]

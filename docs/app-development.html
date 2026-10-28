@@ -17,7 +17,7 @@
       <a href="/thistle-os/docs/apps.html">Apps</a>
       <a href="/thistle-os/docs/kernel-modules.html">Modules</a>
       <a href="/thistle-os/simulator/">Simulator</a>
-      <a href="https://github.com/wan0net/thistle-os">GitHub</a>
+      <a href="https://github.com/MedAouadhi/thistle-os">GitHub</a>
     </div>
   </div>
 </nav>
@@ -64,7 +64,7 @@
       <div class="breadcrumb"><a href="index.html">ThistleOS</a> / Building Apps</div>
       <h1>Building Apps</h1>
       <p class="lead">Apps are position-independent ELF files, shared objects that the App Store installs on the SD card. The kernel loads them at boot, resolves syscall symbols and a few C library functions (<code>memcpy</code>, <code>strlen</code>, <code>snprintf</code> and the like), asks each app's entry point for its callbacks, and runs those on the UI task, as it runs a built-in app's. A buffer an app hands the kernel must be its own static or <code>thistle_malloc</code>'d memory, never a local: the kernel refuses pointers into internal RAM, where the UI task's stack is.</p>
-      <a href="https://github.com/wan0net/thistle-os/blob/main/docs/app-development.html" class="edit-link">&#9998; Edit on GitHub</a>
+      <a href="https://github.com/MedAouadhi/thistle-os/blob/main/docs/app-development.html" class="edit-link">&#9998; Edit on GitHub</a>
     </div>
 
     <div class="callout info">
@@ -361,7 +361,7 @@ cmake --build build
 
     <div class="page-footer">
       <span>ThistleOS v0.1.0 &mdash; BSD 3-Clause</span>
-      <a href="https://github.com/wan0net/thistle-os">GitHub</a>
+      <a href="https://github.com/MedAouadhi/thistle-os">GitHub</a>
     </div>
   </main>
 </div>

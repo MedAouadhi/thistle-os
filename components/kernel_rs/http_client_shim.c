@@ -3,6 +3,7 @@
 
 #include "thistle_http_shim.h"
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdlib.h>
 
@@ -50,10 +51,11 @@ static esp_err_t thistle_http_event_handler(esp_http_client_event_t *event)
 }
 #endif
 
-void *thistle_http_client_init(const char *url,
-                               int timeout_ms,
-                               thistle_http_data_cb_t data_cb,
-                               void *user_data)
+static void *new_client(const char *url,
+                        int timeout_ms,
+                        thistle_http_data_cb_t data_cb,
+                        void *user_data,
+                        bool follow_redirects)
 {
     if (!url) {
         return NULL;
@@ -76,6 +78,12 @@ void *thistle_http_client_init(const char *url,
 #endif
         .user_data = client,
         .timeout_ms = timeout_ms,
+        .disable_auto_redirect = !follow_redirects,
+        /* A download is redirected to a GitHub Release asset's signed URL,
+         * about 1000 bytes of query, and the request line ("GET path?query
+         * HTTP/1.1") is written into this buffer: at the default 512 every
+         * such request failed with "Out of buffer". 0 keeps the default. */
+        .buffer_size_tx = follow_redirects ? 0 : 2048,
     };
     client->inner = esp_http_client_init(&config);
     if (!client->inner) {
@@ -85,9 +93,39 @@ void *thistle_http_client_init(const char *url,
     return client;
 }
 
+void *thistle_http_client_init(const char *url,
+                               int timeout_ms,
+                               thistle_http_data_cb_t data_cb,
+                               void *user_data)
+{
+    return new_client(url, timeout_ms, data_cb, user_data, true);
+}
+
+void *thistle_http_client_init_download(const char *url,
+                                        int timeout_ms,
+                                        thistle_http_data_cb_t data_cb,
+                                        void *user_data)
+{
+    return new_client(url, timeout_ms, data_cb, user_data, false);
+}
+
 static thistle_http_client_t *checked_client(void *opaque)
 {
     return (thistle_http_client_t *)opaque;
+}
+
+int thistle_http_client_redirect(void *opaque, char *url, int length)
+{
+    thistle_http_client_t *client = checked_client(opaque);
+    if (!client || !url || length <= 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    url[0] = '\0';
+    esp_err_t err = esp_http_client_set_redirection(client->inner);
+    if (err == ESP_OK) {
+        err = esp_http_client_get_url(client->inner, url, length);
+    }
+    return err;
 }
 
 int thistle_http_client_set_post(void *opaque,
@@ -117,7 +155,11 @@ int thistle_http_client_perform(void *opaque)
     }
     int result = esp_http_client_perform(client->inner);
 #ifndef ESP_PLATFORM
-    if (result == ESP_OK && client->data_cb) {
+    /* A redirect's own body is no part of what was asked for, as on the
+     * device (thistle_http_event_handler). */
+    int status = esp_http_client_get_status_code(client->inner);
+    bool redirect = status >= 300 && status < 400;
+    if (result == ESP_OK && client->data_cb && !redirect) {
         const char *data = sim_http_client_get_response_data(client->inner);
         size_t length = sim_http_client_get_response_length(client->inner);
         if (data && length > 0) {

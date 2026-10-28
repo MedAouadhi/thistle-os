@@ -27,9 +27,11 @@ const ESP_ERR_INVALID_SIZE: i32 = 0x104;
 const ESP_ERR_NOT_FOUND: i32 = 0x105;
 const ESP_ERR_NOT_SUPPORTED: i32 = 0x106;
 const ESP_ERR_INVALID_CRC: i32 = 0x109;
+/// A package that needs newer firmware than this.
+const ESP_ERR_INVALID_VERSION: i32 = 0x10A;
 const ESP_FAIL: i32 = -1;
 
-const DEFAULT_CATALOG_URL: &str = "https://wan0net.github.io/thistle-apps/catalog.json\0";
+const DEFAULT_CATALOG_URL: &str = "https://medaouadhi.github.io/thistle-os/store/catalog.json\0";
 // A catalog lists every chip's builds: 24 entries came to 19 KB.
 const MAX_CATALOG_JSON: usize = 64 * 1024;
 const DOWNLOAD_BUF_SIZE: usize = 4096;
@@ -65,7 +67,7 @@ const ESP_LOG_ERROR: i32 = 1;
 type HttpDataCb = unsafe extern "C" fn(*const u8, c_int, *mut c_void) -> i32;
 
 extern "C" {
-    #[link_name = "thistle_http_client_init"]
+    #[link_name = "thistle_http_client_init_download"]
     fn http_client_init(
         url: *const c_char,
         timeout_ms: c_int,
@@ -86,6 +88,62 @@ extern "C" {
     fn esp_http_client_read(client: *mut c_void, buf: *mut c_char, len: c_int) -> c_int;
     #[link_name = "thistle_http_client_close"]
     fn esp_http_client_close(client: *mut c_void) -> i32;
+    #[link_name = "thistle_http_client_redirect"]
+    fn http_client_redirect(client: *mut c_void, url: *mut c_char, length: c_int) -> i32;
+}
+
+/// After a redirect answered the request for `from`, having followed
+/// `followed` already, points the client where the redirect says, if
+/// redirect_policy allows; else logs why not. `from` and `followed` are
+/// then the new hop's.
+#[cfg(not(test))]
+unsafe fn follow_redirect(client: *mut c_void, from: &mut String, followed: &mut u32) -> Result<(), i32> {
+    follow_redirect_why(client, from, followed).map_err(|_| ESP_FAIL)
+}
+
+/// follow_redirect(), saying why a redirect is refused.
+#[cfg(not(test))]
+unsafe fn follow_redirect_why(
+    client: *mut c_void,
+    from: &mut String,
+    followed: &mut u32,
+) -> Result<(), &'static str> {
+    let mut to = [0u8; 512];
+    let found = http_client_redirect(client, to.as_mut_ptr().cast::<c_char>(), to.len() as c_int);
+    let to = CStr::from_bytes_until_nul(&to)
+        .ok()
+        .and_then(|url| url.to_str().ok())
+        .unwrap_or("");
+    if found != ESP_OK || to.is_empty() {
+        esp_log_write(
+            ESP_LOG_ERROR,
+            TAG.as_ptr(),
+            b"Download refused: a redirect with no usable Location\0".as_ptr(),
+        );
+        return Err("a redirect with no usable Location");
+    }
+    let to_c = std::ffi::CString::new(to).unwrap_or_default();
+    if let Err(refusal) = crate::redirect_policy::follow(from, to, *followed) {
+        esp_log_write(
+            ESP_LOG_ERROR,
+            TAG.as_ptr(),
+            b"Download refused: %s, to %s\0".as_ptr(),
+            refusal.reason().as_ptr(),
+            to_c.as_ptr(),
+        );
+        let why = refusal.reason();
+        return Err(std::str::from_utf8(&why[..why.len() - 1]).unwrap_or("a redirect refused"));
+    }
+    *followed += 1;
+    esp_log_write(
+        ESP_LOG_INFO,
+        TAG.as_ptr(),
+        b"Redirected (%d): %s\0".as_ptr(),
+        *followed as c_int,
+        to_c.as_ptr(),
+    );
+    *from = to.to_owned();
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -741,8 +799,20 @@ unsafe fn fetch_catalog_json(catalog_url: *const c_char) -> Result<String, i32> 
         return Err(ESP_FAIL);
     }
 
-    let err = esp_http_client_perform(client);
-    let status = esp_http_client_get_status_code(client);
+    let mut err = esp_http_client_perform(client);
+    let mut status = esp_http_client_get_status_code(client);
+    let mut at = url_str.to_owned();
+    let mut followed = 0;
+    while err == ESP_OK && crate::redirect_policy::is_redirect(status) {
+        if let Err(error) = follow_redirect(client, &mut at, &mut followed) {
+            esp_http_client_cleanup(client);
+            return Err(error);
+        }
+        resp_buf.data.clear();
+        resp_buf.overflow = false;
+        err = esp_http_client_perform(client);
+        status = esp_http_client_get_status_code(client);
+    }
     esp_http_client_cleanup(client);
 
     if err != ESP_OK || status != 200 {
@@ -860,6 +930,8 @@ pub unsafe extern "C" fn appstore_refresh_catalog(
             cache_path,
         );
     }
+    // The system update's check and the App Store's Refresh are one check.
+    crate::update_manager::catalog_read(&json, "the App Store's Refresh");
     esp_log_write(
         ESP_LOG_INFO,
         TAG.as_ptr(),
@@ -1308,8 +1380,26 @@ unsafe fn download_into_staged(
     }
     session.opened = true;
 
-    let content_length = esp_http_client_fetch_headers(client);
-    let status = esp_http_client_get_status_code(client);
+    let mut content_length = esp_http_client_fetch_headers(client);
+    let mut status = esp_http_client_get_status_code(client);
+    let mut at = url_str.to_owned();
+    let mut followed = 0;
+    while crate::redirect_policy::is_redirect(status) {
+        if let Err(error) = follow_redirect(client, &mut at, &mut followed) {
+            return error;
+        }
+        // The next hop is a fresh connection, maybe to another host: nothing
+        // of this answer's body is read.
+        esp_http_client_close(client);
+        session.opened = false;
+        let open_error = esp_http_client_open(client, 0);
+        if open_error != ESP_OK {
+            return open_error;
+        }
+        session.opened = true;
+        content_length = esp_http_client_fetch_headers(client);
+        status = esp_http_client_get_status_code(client);
+    }
     let mut validator = match StreamValidator::new(status, content_length, expected_size, max_size)
     {
         Ok(validator) => validator,
@@ -1360,6 +1450,172 @@ unsafe fn download_into_staged(
         return ESP_FAIL;
     }
     ESP_OK
+}
+
+// ---------------------------------------------------------------------------
+// Streams for the system update (update_manager.rs)
+// ---------------------------------------------------------------------------
+
+/// Why a download did not deliver.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum FetchError {
+    /// A redirect redirect_policy refuses, and why.
+    Refused(&'static str),
+    /// The server answered with this status.
+    Status(i32),
+    /// The answer gave no length, or one over the limit.
+    Length,
+    /// The answer ended before its length, or ran past it.
+    Short,
+    /// The connection or the client failed.
+    Transport(i32),
+}
+
+impl FetchError {
+    /// The reason, as Settings and the log show it.
+    pub(crate) fn reason(&self) -> String {
+        match self {
+            FetchError::Refused(why) => format!("the download was refused: {why}"),
+            FetchError::Status(status) => format!("the server answered HTTP {status}"),
+            FetchError::Length => "the server gave no usable length".into(),
+            FetchError::Short => "the download ended early".into(),
+            FetchError::Transport(err) => format!("the download failed (0x{err:x})"),
+        }
+    }
+}
+
+/// An HTTP GET whose body is read a chunk at a time, after its redirects are
+/// followed as redirect_policy allows (at most five, never HTTPS to HTTP).
+#[cfg(not(test))]
+pub(crate) struct HttpStream {
+    session: HttpDownloadSession,
+    length: u64,
+    received: u64,
+}
+
+#[cfg(not(test))]
+impl HttpStream {
+    /// Open `url`, refusing an answer longer than `max` bytes.
+    pub(crate) fn open(url: &str, max: u64) -> Result<HttpStream, FetchError> {
+        let url_c = std::ffi::CString::new(url).map_err(|_| FetchError::Transport(ESP_ERR_INVALID_ARG))?;
+        unsafe {
+            let client = http_client_init(url_c.as_ptr(), 30000, None, std::ptr::null_mut());
+            if client.is_null() {
+                return Err(FetchError::Transport(ESP_ERR_NO_MEM));
+            }
+            let mut session = HttpDownloadSession { client, opened: false };
+            let err = esp_http_client_open(client, 0);
+            if err != ESP_OK {
+                return Err(FetchError::Transport(err));
+            }
+            session.opened = true;
+            let mut length = esp_http_client_fetch_headers(client);
+            let mut status = esp_http_client_get_status_code(client);
+            let mut at = url.to_owned();
+            let mut followed = 0;
+            while crate::redirect_policy::is_redirect(status) {
+                follow_redirect_why(client, &mut at, &mut followed).map_err(FetchError::Refused)?;
+                esp_http_client_close(client);
+                session.opened = false;
+                let err = esp_http_client_open(client, 0);
+                if err != ESP_OK {
+                    return Err(FetchError::Transport(err));
+                }
+                session.opened = true;
+                length = esp_http_client_fetch_headers(client);
+                status = esp_http_client_get_status_code(client);
+            }
+            if !(200..300).contains(&status) {
+                return Err(FetchError::Status(status));
+            }
+            if length < 0 || length as u64 > max {
+                return Err(FetchError::Length);
+            }
+            Ok(HttpStream { session, length: length as u64, received: 0 })
+        }
+    }
+
+    /// The answer's length, from its headers.
+    pub(crate) fn length(&self) -> u64 {
+        self.length
+    }
+
+    /// Read the next bytes into `buf`; 0 once the whole answer is read.
+    pub(crate) fn read(&mut self, buf: &mut [u8]) -> Result<usize, FetchError> {
+        if self.received == self.length {
+            return Ok(0);
+        }
+        let want = buf.len().min((self.length - self.received).min(i32::MAX as u64) as usize);
+        let count = unsafe {
+            esp_http_client_read(self.session.client, buf.as_mut_ptr().cast::<c_char>(), want as c_int)
+        };
+        if count < 0 {
+            return Err(FetchError::Transport(count));
+        }
+        if count == 0 {
+            return Err(FetchError::Short);
+        }
+        self.received += count as u64;
+        Ok(count as usize)
+    }
+}
+
+/// Host tests reach no network.
+#[cfg(test)]
+pub(crate) struct HttpStream;
+
+#[cfg(test)]
+impl HttpStream {
+    pub(crate) fn open(_url: &str, _max: u64) -> Result<HttpStream, FetchError> {
+        Err(FetchError::Transport(ESP_ERR_NOT_SUPPORTED))
+    }
+    pub(crate) fn length(&self) -> u64 {
+        0
+    }
+    pub(crate) fn read(&mut self, _buf: &mut [u8]) -> Result<usize, FetchError> {
+        Ok(0)
+    }
+}
+
+/// The whole of a small answer: a manifest, a signature.
+pub(crate) fn fetch_bytes(url: &str, max: u64) -> Result<Vec<u8>, FetchError> {
+    let mut stream = HttpStream::open(url, max)?;
+    let mut bytes = vec![0u8; stream.length() as usize];
+    let mut at = 0;
+    while at < bytes.len() {
+        at += stream.read(&mut bytes[at..])?;
+    }
+    Ok(bytes)
+}
+
+/// The catalog, from the configured URL (a card's config/appstore.json, or
+/// the default), as the App Store's Refresh reads it.
+#[cfg(not(test))]
+pub(crate) fn fetch_catalog() -> Result<String, i32> {
+    unsafe { fetch_catalog_json(std::ptr::null()) }
+}
+
+#[cfg(test)]
+pub(crate) fn fetch_catalog() -> Result<String, i32> {
+    Err(ESP_ERR_NOT_SUPPORTED)
+}
+
+/// Where the catalog is kept, for the App Store and the system update both.
+pub(crate) fn catalog_cache_path() -> PathBuf {
+    card_root().join("appstore/catalog.json")
+}
+
+/// Keep a fetched catalog where the App Store reads it, unless it lists
+/// nothing at all.
+pub(crate) fn keep_catalog(json: &str) -> bool {
+    let has_entries = catalog_entries_json(json).contains('{');
+    has_entries && write_file_replacing(&catalog_cache_path(), json.as_bytes()).is_ok()
+}
+
+/// The catalog kept by the last Refresh or check, if any.
+pub(crate) fn kept_catalog() -> Option<String> {
+    let bytes = std::fs::read(catalog_cache_path()).ok()?;
+    (bytes.len() <= MAX_CATALOG_JSON).then(|| String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// Download a file from `url` to `dest_path`, optionally verifying SHA-256.
@@ -1520,7 +1776,10 @@ unsafe fn install_tap_entry(
         |elf| std::ffi::CString::new(elf.to_string_lossy().as_bytes()).ok()
             .is_some_and(|path| unsafe { signing_verify_app_file(path.as_ptr()) == ESP_OK }),
     ) {
-        Ok(_) => ESP_OK,
+        Ok(_) => {
+            crate::update_manager::apps_changed();
+            ESP_OK
+        }
         Err(crate::tap_installer::TapError::Limit) => ESP_ERR_INVALID_SIZE,
         Err(crate::tap_installer::TapError::InvalidPath)
         | Err(crate::tap_installer::TapError::InvalidManifest)
@@ -1528,6 +1787,15 @@ unsafe fn install_tap_entry(
         Err(crate::tap_installer::TapError::Integrity)
         | Err(crate::tap_installer::TapError::Signature) => ESP_ERR_INVALID_CRC,
         Err(crate::tap_installer::TapError::Downgrade) => ESP_ERR_NOT_SUPPORTED,
+        Err(crate::tap_installer::TapError::MinOs(min_os)) => {
+            let said = std::ffi::CString::new(format!(
+                "App install refused: {id} {version} needs ThistleOS {min_os}; running {}",
+                crate::version::running()
+            ))
+            .unwrap_or_default();
+            esp_log_write(ESP_LOG_WARN, TAG.as_ptr(), b"%s\0".as_ptr(), said.as_ptr());
+            ESP_ERR_INVALID_VERSION
+        }
         Err(_) => ESP_FAIL,
     }
 }
@@ -1946,6 +2214,14 @@ fn fill_catalog_entry(obj: &str, entry: &mut CatalogEntry) {
     entry.is_signed = entry.sig_url[0] != 0 || entry.package_sig_url[0] != 0;
 }
 
+/// Whether the running firmware meets an app release's `min_os_version`:
+/// a release that needs newer firmware is not listed (the TAP installer
+/// also refuses its package).
+fn firmware_runs(entry: &CatalogEntry) -> bool {
+    entry.entry_type != CATALOG_TYPE_APP
+        || crate::version::satisfies(fixed_cstr(&entry.min_os_version).unwrap_or(""))
+}
+
 /// Parse a catalog, an array of entries or `{"entries": [...]}`, into
 /// `entries`, leaving out those built for another chip and those with no id.
 /// Returns how many it filled.
@@ -1969,7 +2245,7 @@ pub fn parse_catalog_into(json: &str, entries: &mut [CatalogEntry]) -> usize {
             continue;
         }
         fill_catalog_entry(obj, &mut entries[count]);
-        if entries[count].id[0] != 0 {
+        if entries[count].id[0] != 0 && firmware_runs(&entries[count]) {
             count += 1;
         }
     }
@@ -2005,7 +2281,7 @@ pub fn parse_catalog_entries(json: &str, category_filter: &str, entries: &mut Ve
 
         let mut entry = CatalogEntry::default();
         fill_catalog_entry(obj, &mut entry);
-        if entry.id[0] == 0 {
+        if entry.id[0] == 0 || !firmware_runs(&entry) {
             continue;
         }
 
@@ -2807,6 +3083,24 @@ mod tests {
     }
 
     #[test]
+    fn an_app_release_that_needs_newer_firmware_is_not_listed() {
+        let json = r#"{"version": 1, "entries": [
+            {"id":"com.thistle.notes","name":"Notes","version":"9.0.0","type":"app","min_os_version":"99.0.0"},
+            {"id":"com.thistle.weather","name":"Weather","version":"1.0.0","type":"app","min_os_version":"0.1.0"},
+            {"id":"com.thistle.todo","name":"To-do","version":"1.0.0","type":"app"},
+            {"id":"kbd","name":"Keys","version":"1.0.0","type":"driver","min_os_version":"99.0.0"}
+        ]}"#;
+        let mut entries: Vec<CatalogEntry> = (0..4).map(|_| CatalogEntry::default()).collect();
+        let count = parse_catalog_into(json, &mut entries);
+        let ids: Vec<_> = entries[..count].iter().map(|e| fixed_cstr(&e.id).unwrap().to_string()).collect();
+        assert_eq!(ids, ["com.thistle.weather", "com.thistle.todo", "kbd"]);
+
+        let mut listed = Vec::new();
+        parse_catalog_entries(json, "all", &mut listed);
+        assert_eq!(listed.len(), 3);
+    }
+
+    #[test]
     fn a_file_url_names_a_file_on_the_card_and_nowhere_else() {
         assert_eq!(
             card_file("file:///sdcard/appstore/packages/catalog.json"),
@@ -2853,23 +3147,19 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // test_get_catalog_url_contains_thistle_apps
-    // Mirrors test_appstore_client.c: URL must contain "thistle-apps".
+    // With no config/appstore.json on the card, the App Store reads the
+    // catalog Pages builds from the fork's releases (spec, "The catalog").
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_get_catalog_url_contains_thistle_apps() {
+    fn the_default_catalog_is_the_forks_pages_catalog() {
         let ptr = appstore_get_catalog_url();
         assert!(
             !ptr.is_null(),
             "appstore_get_catalog_url() must not return NULL"
         );
         let url = unsafe { CStr::from_ptr(ptr).to_str().unwrap() };
-        assert!(
-            url.contains("thistle-apps"),
-            "catalog URL must contain \"thistle-apps\", got: {}",
-            url
-        );
+        assert_eq!(url, "https://medaouadhi.github.io/thistle-os/store/catalog.json");
     }
 
     // -----------------------------------------------------------------------

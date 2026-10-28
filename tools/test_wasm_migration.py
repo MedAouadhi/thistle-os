@@ -19,23 +19,12 @@ class WasmMigrationTests(unittest.TestCase):
             self.cmake,
         )
 
-    def test_deleted_c_apps_are_guarded_in_browser_entrypoint(self):
-        migrated_apps = {
-            "FILEMGR": "filemgr_app_register();",
-            "READER": "reader_app_register();",
-            "NAVIGATOR": "navigator_app_register();",
-            "NOTES": "notes_app_register();",
-            "APPSTORE": "appstore_app_register();",
-            "WIFISCANNER": "wifiscanner_app_register();",
-            "FLASHLIGHT": "flashlight_app_register();",
-            "WEATHER": "weather_app_register();",
-            "VAULT": "vault_app_register();",
-        }
-        for flag, registration in migrated_apps.items():
-            with self.subTest(flag=flag):
-                guard = f"#if THISTLE_HAVE_{flag}"
-                self.assertIn(guard, self.main)
-                self.assertGreater(self.main.index(registration), self.main.index(guard))
+    def test_browser_entrypoint_registers_the_shared_app_list(self):
+        # The apps the browser has are the firmware's list, behind the same
+        # guards (lvgl_apps.h), not a copy of their own that goes stale.
+        self.assertIn('#include "lvgl_apps.h"', self.main)
+        self.assertIn("lvgl_apps_register_builtin(", self.main)
+        self.assertNotIn("filemgr_app_register();", self.main)
 
     def test_pull_requests_build_wasm_without_deploying_pages(self):
         self.assertIn("pull_request:", self.workflow)

@@ -4,10 +4,10 @@ set(KERNEL_SRCS
     "src/kernel_shims.c" "src/tk_wm_shims.c" "src/sdcard_shim.c"
     "src/link_deps.c" "src/board_fallback.c" "src/board_fingerprint.c"
     "src/board_builtin_drivers.c" "src/power_platform.c" "src/time_platform.c"
-    "src/tailnet_platform.c"
+    "src/tailnet_platform.c" "src/kernel_slot_platform.c" "src/update_platform.c"
 )
 set(KERNEL_REQUIRES
-    thistle_hal kernel_rs esp_timer freertos esp_partition fatfs vfs app_update
+    thistle_hal kernel_rs esp_timer freertos esp_partition fatfs vfs app_update esp_app_format
     esp_wifi esp_netif esp_event mbedtls esp_http_client driver spiffs nvs_flash
     sdmmc esp_adc bt
 )

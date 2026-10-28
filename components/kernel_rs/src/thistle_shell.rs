@@ -501,7 +501,7 @@ fn cmd_uptime(_args: &[&str], print: PrintFn, ctx: *mut c_void) -> i32 {
 }
 
 fn cmd_version(_args: &[&str], print: PrintFn, ctx: *mut c_void) -> i32 {
-    sprint!(print, ctx, "ThistleOS v{}", crate::version::VERSION_STRING);
+    sprint!(print, ctx, "ThistleOS v{}", crate::version::running());
     sprint!(print, ctx, "  Kernel:   Rust (thistle-kernel)");
     sprint!(print, ctx, "  Recovery: Rust (thistle-recovery)");
 
