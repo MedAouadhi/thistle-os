@@ -148,10 +148,12 @@ user's to do, not an agent's.
   (`tools/build_catalog.py --releases`): each release's own
   `*.catalog-entry.json` asset, the newest firmware by version and the
   newest release of each app, drafts and prereleases left out. It is
-  unsigned and holds nothing of its own. Each deploy names its own build
-  version (`pages.yml`): Pages keeps what it has for one it has seen, the
-  commit by default, so an app tagged on an already deployed commit once
-  never reached the catalog. A firmware entry is flat: the
+  unsigned and holds nothing of its own. Pages keeps what it has for a
+  build version it has deployed, and the version is the commit
+  (`actions/deploy-pages` reads `GITHUB_SHA`, which a step cannot
+  change): a release tagged on a commit already deployed, main's head
+  say, leaves the catalog as it was until a deploy from another commit.
+  Tag a commit Pages has not deployed. Ticket 11. A firmware entry is flat: the
   device's parser ends an entry at its first closing brace. A card's
   `config/appstore.json`, `{"catalog_url": "..."}`, names another.
 - **Two kernel slots.** The flash holds `kernel_a` (ota_0) and `kernel_b`

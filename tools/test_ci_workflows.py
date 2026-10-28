@@ -324,11 +324,6 @@ class PagesTests(unittest.TestCase):
         # The catalog holds nothing of its own: no fixture is copied in.
         self.assertNotIn("appstore/catalog.json", self.text)
 
-    def test_each_run_deploys_a_build_version_of_its_own(self):
-        deploy = step_named(self.pages["jobs"]["deploy"]["steps"], "Deploy")
-        self.assertEqual(deploy["env"]["GITHUB_SHA"],
-                         "${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}")
-
 
 if __name__ == "__main__":
     unittest.main()
