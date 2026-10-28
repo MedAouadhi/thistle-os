@@ -116,6 +116,12 @@ class Device:
             Encoding.Raw, PublicFormat.Raw))
         # What every run adds to the environment: a test's CA bundle.
         self.extra_env: dict = {}
+        # The first slot runs 0.5.0, older than every release offered here:
+        # the build's own version is the tag it was built from, which since
+        # v0.6.0 is no older than them.
+        self.slots.mkdir()
+        (self.slots / "otadata").write_text(
+            "boot=kernel_a\nimage=valid\nkernel_a=0.5.0\n")
 
     def put_release(self, version: str = "0.6.0", security_version: int = 600,
                     arch: str = "host", boards: tuple = ("tdeck", "tdeck-max"),
@@ -621,12 +627,12 @@ def on_mobile_data_the_download_waits_for_consent(device: Device, github: GitHub
 
 def a_version_change_rewrites_the_board_profile_and_keeps_the_old_one(device: Device) -> None:
     # Written by an older firmware, and edited since.
-    old = stamped(MAX_PROFILE, "0.5.0").replace('"name"', '"name_edited"', 1)
+    old = stamped(MAX_PROFILE, "0.4.0").replace('"name"', '"name_edited"', 1)
     device.put_profile(old)
     log = device.run()
     version = build_version(log)
     expect(log, f"board profile tdeck-max rewritten from {version}'s built-in copy "
-                "(it was 0.5.0's); the previous one is board.json.bak")
+                "(it was 0.4.0's); the previous one is board.json.bak")
     same_profile(device.profile(), version)
     if device.backup() != old:
         raise AssertionError("the previous profile is not the backup")
