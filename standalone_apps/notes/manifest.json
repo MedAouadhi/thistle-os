@@ -2,7 +2,7 @@
   "type": "app",
   "id": "com.thistle.notes",
   "name": "Notes",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "release_sequence": 1,
   "author": "ThistleOS",
   "description": "Local plain-text notes for colour and e-paper devices",

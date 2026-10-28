@@ -9,6 +9,15 @@
   "source": "https://github.com/MedAouadhi/thistle-os/tree/main/standalone_apps/notes",
   "releases": [
     {
+      "version": "1.0.1",
+      "release_sequence": 1,
+      "released": "2026-10-28",
+      "changes": [
+        "Released from this fork's own pipeline; the app is unchanged since 1.0.0"
+      ],
+      "min_os": "0.3.0"
+    },
+    {
       "version": "1.0.0",
       "release_sequence": 1,
       "released": "2026-08-29",

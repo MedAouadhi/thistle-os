@@ -274,7 +274,7 @@ static void notes_on_destroy(void)
 static const thistle_app_t notes_app = {
     .id = "com.thistle.notes",
     .name = "Notes",
-    .version = "1.0.0",
+    .version = "1.0.1",
     .allow_background = false,
     .on_create = notes_on_create,
     .on_start = notes_on_start,
