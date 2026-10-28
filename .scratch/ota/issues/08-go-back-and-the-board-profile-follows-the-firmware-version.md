@@ -16,7 +16,7 @@ boots that slot, and its kernel brings back its own board profile. Spec:
 
 **Blocked by:** 06 (Firmware installs check the artifact manifest and the security floor)
 
-**Status:** done in code; hardware pass pending
+**Status:** done
 
 - [x] `update_policy` decides, tested on the host, whether the board profile
       is rewritten (writer version equal, different, missing; board id with

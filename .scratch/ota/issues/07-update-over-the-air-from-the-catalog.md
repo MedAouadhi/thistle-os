@@ -17,7 +17,7 @@ manager", "Device UI" and "Testing Decisions". ADR-0010, ADR-0011.
 **Blocked by:** 05 (Release an app by tag and install it from your catalog),
 06 (Firmware installs check the artifact manifest and the security floor)
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [x] `update_policy` decides, tested on the host: which release to offer
       (newer, equal, older, a laptop build's base, wrong chip or board),

@@ -15,7 +15,7 @@ artifact manifest and the security floor), 07 (Update over the air from the
 catalog), 08 (Go back, and the board profile follows the firmware version),
 09 (App updates and the Home row)
 
-**Status:** ready-for-agent
+**Status:** done, but for box 5: an app update seen on the device
 
 - [x] No wan0net reference remains outside history, licences and a line
       crediting the upstream project.

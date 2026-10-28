@@ -12,7 +12,7 @@ signature and hash alone, never for the host it came from. Spec: `../spec.md`,
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [x] An App Store package whose URL redirects to another host downloads,
       with its signature from a redirecting URL too, and reaches the

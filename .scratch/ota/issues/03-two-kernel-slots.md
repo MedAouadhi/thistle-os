@@ -15,7 +15,7 @@ hardware. Spec: `../spec.md`, "The partition table", "The update manager"
 
 **Blocked by:** None (can start immediately)
 
-**Status:** done in code; hardware pass pending
+**Status:** done
 
 - [x] On the T-Deck Max, one USB flash moves the board to the new table;
       WiFi, the mesh identity, `board.json` and `system.json` survive, and it

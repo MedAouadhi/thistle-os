@@ -14,7 +14,7 @@ released firmware". ADR-0011.
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] A push to the fork produces a green run with no job waiting for a
       runner.

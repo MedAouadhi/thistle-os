@@ -18,7 +18,7 @@ and "Simulator". ADR-0010.
 
 **Blocked by:** 03 (Two kernel slots), 04 (Release the firmware by tag)
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [x] The shared crate carries the canonical-format tests Recovery's module
       has; Recovery itself is not changed.

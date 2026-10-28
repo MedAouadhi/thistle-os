@@ -19,7 +19,7 @@ tags; immutable releases turned on.
 
 **Blocked by:** 02 (CI on GitHub-hosted runners)
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [x] Version reading and comparison are tested on the host: plain tags,
       `git describe` forms, `-dirty`, release candidates (`0.6.0-rc.1` is

@@ -1,6 +1,6 @@
 # Releases and over-the-air updates
 
-Status: ready-for-agent
+Status: done; v0.6.0 released 2026-10-27 (ticket 10 has the hardware pass)
 
 Decisions: ADR-0010 (the kernel updates itself into two kernel slots),
 ADR-0011 (releases on GitHub, catalog on Pages). Vocabulary: `CONTEXT.md`,

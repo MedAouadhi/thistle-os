@@ -12,7 +12,7 @@ catalog". ADR-0011.
 
 **Blocked by:** 01 (Downloads follow redirects), 04 (Release the firmware by tag)
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [x] An app tag is refused when its app is not one of the four App Store
       apps, when its version differs from the package manifest's, or when its

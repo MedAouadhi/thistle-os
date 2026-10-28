@@ -14,7 +14,7 @@ apps have updates. Spec: `../spec.md`, "Device UI" and "The update manager".
 **Blocked by:** 05 (Release an app by tag and install it from your catalog),
 07 (Update over the air from the catalog)
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [x] `update_policy`'s app offer is tested on the host: higher, equal and
       lower release sequences, and a `min_os` above, at and below the
