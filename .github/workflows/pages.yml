@@ -163,11 +163,5 @@ jobs:
     environment:
       name: github-pages
     steps:
-      # Pages keeps what it has for a build version it has deployed, and
-      # the version is the commit unless told otherwise: an app tagged on
-      # the commit of the previous deploy left its release out of the
-      # catalog. Each run is a version of its own.
       - name: Deploy
         uses: actions/deploy-pages@v5
-        env:
-          GITHUB_SHA: ${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
