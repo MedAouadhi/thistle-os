@@ -159,6 +159,8 @@ _Static_assert(sizeof(pb_contact_t) == 336, "CPbContact size");
 _Static_assert(offsetof(hal_power_driver_t, name) == 7 * sizeof(void *), "HalPowerDriver.name");
 _Static_assert(offsetof(hal_power_driver_t, is_plugged_in) == 8 * sizeof(void *),
                "HalPowerDriver.is_plugged_in");
+_Static_assert(offsetof(hal_power_driver_t, power_off) == 9 * sizeof(void *),
+               "HalPowerDriver.power_off");
 
 // time_manager.rs mirrors time_status_t as CTimeStatus.
 #include "thistle/time_manager.h"

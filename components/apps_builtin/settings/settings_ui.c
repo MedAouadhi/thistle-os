@@ -3156,6 +3156,13 @@ static void power_stay_awake_cb(lv_event_t *e)
         (bool)(uintptr_t)lv_event_get_user_data(e)));
 }
 
+static void power_off_when_idle_cb(lv_event_t *e)
+{
+    choice_check_only(lv_event_get_current_target(e));
+    power_saved_or_warn(power_manager_set_power_off_when_idle(
+        (bool)(uintptr_t)lv_event_get_user_data(e)));
+}
+
 static void power_request_or_warn(power_request_t request)
 {
     if (power_manager_request(request) != ESP_OK) {
@@ -3223,6 +3230,16 @@ static void open_power_screen(void)
                                  sizeof(DEEP_SLEEP_AFTER) / sizeof(DEEP_SLEEP_AFTER[0]),
                                  ps.deep_sleep_after_s, power_deep_sleep_after_cb);
             create_note(content, "Deep sleep turns nearly everything off. Waking from it restarts the device.");
+            if (caps.can_power_off) {
+                create_info_row(content, "At that time");
+                lv_obj_t *row = create_choice_row(content);
+                create_choice_button(row, "Deep sleep", power_off_when_idle_cb, 0,
+                                     !ps.power_off_when_idle);
+                create_choice_button(row, "Power off", power_off_when_idle_cb, 1,
+                                     ps.power_off_when_idle);
+                create_note(content, "Off, nothing wakes it, not calls or SMS, and the time is lost. "
+                                     "Hold the power-on button, or plug in USB, to turn it on.");
+            }
             if (caps.can_wake_on_modem) {
                 create_info_row(content, "Calls and SMS wake it");
                 create_on_off(content, ps.wake_on_modem, power_wake_on_modem_cb);

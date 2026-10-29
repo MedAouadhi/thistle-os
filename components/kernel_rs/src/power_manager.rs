@@ -37,6 +37,7 @@ use crate::system_json;
 
 const ESP_OK: i32 = 0;
 const ESP_ERR_INVALID_ARG: i32 = 0x102;
+const ESP_ERR_INVALID_STATE: i32 = 0x103;
 const ESP_ERR_NOT_SUPPORTED: i32 = 0x106;
 
 /// How often the power key is sampled and the clock looked at.
@@ -58,11 +59,13 @@ const UI_SHOW_SLEEP_SCREEN: u8 = 1;
 const UI_HIDE_SLEEP_SCREEN: u8 = 2;
 const UI_SHOW_MENU: u8 = 3;
 const UI_SHOW_HELD_OFF: u8 = 4;
+const UI_SHOW_OFF_SCREEN: u8 = 5;
 
 // power_request_t
 const REQUEST_SLEEP: u32 = 0;
 const REQUEST_DEEP_SLEEP: u32 = 1;
 const REQUEST_RESTART: u32 = 2;
+const REQUEST_POWER_OFF: u32 = 3;
 
 // ---------------------------------------------------------------------------
 // Logging
@@ -213,6 +216,7 @@ impl Board {
             sleep: !self.user_pins().is_empty(),
             deep_sleep: !self.deep_pins(self.user_pins().into_iter()).is_empty(),
             menu: MENU_AVAILABLE.load(Ordering::Relaxed),
+            power_off: driver_can_power_off(),
         }
     }
 }
@@ -428,17 +432,32 @@ struct Gate {
     /// Tasks stopped at their checkpoint now.
     parked: u32,
     park: bool,
+    /// Let the parked tasks go once, to draw what the window manager was
+    /// asked for, then park again: the off screen over the sleep screen.
+    /// Cleared when the request is taken.
+    redraw: bool,
 }
 
 static GATE: Mutex<Gate> = Mutex::new(Gate {
     members: 0,
     parked: 0,
     park: false,
+    redraw: false,
 });
 static GATE_MOVED: Condvar = Condvar::new();
 
 fn gate_park(park: bool) {
-    lock(&GATE).park = park;
+    let mut g = lock(&GATE);
+    g.park = park;
+    if !park {
+        g.redraw = false;
+    }
+    GATE_MOVED.notify_all();
+}
+
+/// Have the parked tasks draw once more, and park again.
+fn gate_redraw() {
+    lock(&GATE).redraw = true;
     GATE_MOVED.notify_all();
 }
 
@@ -486,6 +505,11 @@ fn driver_says_plugged_in() -> Option<bool> {
     let drv = unsafe { registry().power.as_ref() }?;
     let is_plugged_in = drv.is_plugged_in?;
     Some(unsafe { is_plugged_in() })
+}
+
+/// Whether the power driver can cut the board off from its battery.
+fn driver_can_power_off() -> bool {
+    unsafe { registry().power.as_ref() }.is_some_and(|d| d.power_off.is_some())
 }
 
 /// Whether the board runs from USB or an adapter: the driver's answer, or,
@@ -551,6 +575,7 @@ impl Runtime {
         let request = match REQUEST.swap(0, Ordering::SeqCst).checked_sub(1).map(u32::from) {
             Some(REQUEST_SLEEP) => Some(Request::Sleep),
             Some(REQUEST_DEEP_SLEEP) => Some(Request::DeepSleep),
+            Some(REQUEST_POWER_OFF) => Some(Request::PowerOff),
             _ => None,
         };
 
@@ -597,6 +622,7 @@ impl Runtime {
             Action::FallAsleep => self.fall_asleep(),
             Action::LightSleep { until } => self.light_sleep(until, now),
             Action::DeepSleep => self.deep_sleep(),
+            Action::PowerOff => self.power_off(),
             Action::Wake => {
                 log!(ESP_LOG_INFO, b"awake\0");
                 self.come_back();
@@ -608,22 +634,28 @@ impl Runtime {
         self.rest = match depth {
             Depth::Light => Rest::Sleep,
             Depth::Deep if self.policy.settings.wake_on_modem => Rest::Sleep,
-            Depth::Deep => Rest::Off,
+            Depth::Deep | Depth::Off => Rest::Off,
         };
-        log!(
-            ESP_LOG_INFO,
-            b"going to %s\0",
-            if depth == Depth::Deep {
-                b"deep sleep\0".as_ptr()
-            } else {
-                b"sleep\0".as_ptr()
-            }
-        );
+        let going_to: &[u8] = match depth {
+            Depth::Light => b"sleep\0",
+            Depth::Deep => b"deep sleep\0",
+            Depth::Off => b"power off\0",
+        };
+        log!(ESP_LOG_INFO, b"going to %s\0", going_to.as_ptr());
         // The lights go out with the sleep screen, not once settling is over:
         // the modem alone takes about 8 s to leave a data session.
         lights_out();
         self.dark = true;
-        ui_request(UI_SHOW_SLEEP_SCREEN);
+        ui_request(if depth == Depth::Off {
+            UI_SHOW_OFF_SCREEN
+        } else {
+            UI_SHOW_SLEEP_SCREEN
+        });
+        if self.drivers_asleep {
+            // Settling again from a light sleep, with the window manager
+            // parked under the sleep screen.
+            gate_redraw();
+        }
         gate_park(true);
         net_coordinator::rest(self.rest);
     }
@@ -731,9 +763,46 @@ impl Runtime {
     }
 
     fn deep_sleep(&mut self) {
-        let wake_on_modem = self.policy.settings.wake_on_modem;
         // From a light sleep the modem may be listening, and it should not be.
-        let rest = if wake_on_modem { Rest::Sleep } else { Rest::Off };
+        let rest = if self.policy.settings.wake_on_modem {
+            Rest::Sleep
+        } else {
+            Rest::Off
+        };
+        self.wind_down(rest);
+        self.enter_deep_sleep();
+    }
+
+    /// Wind down as for deep sleep, with the modem powered down, then have
+    /// the power driver cut the board off from its battery. Refused, by USB
+    /// come in since the menu asked, it goes into deep sleep instead: the
+    /// screen already says the device is off, and a key brings it back.
+    fn power_off(&mut self) {
+        if plugged_in(driver_says_plugged_in(), power_info().map(|i| i.state)) {
+            // Asleep on USB when the deep sleep time came: the driver would
+            // refuse, and the modem may as well keep listening.
+            log!(ESP_LOG_INFO, b"on USB; deep sleep instead of power off\0");
+            return self.deep_sleep();
+        }
+        self.wind_down(Rest::Off);
+        let Some(power_off) = unsafe { registry().power.as_ref() }.and_then(|d| d.power_off) else {
+            return platform::restart();
+        };
+        log!(ESP_LOG_INFO, b"powering off\0");
+        let ret = unsafe { power_off() };
+        if !self.policy.caps.deep_sleep {
+            // Nothing would wake it from deep sleep.
+            log!(ESP_LOG_WARN, b"power off refused (0x%x); restarting\0", ret);
+            return platform::restart();
+        }
+        log!(ESP_LOG_WARN, b"power off refused (0x%x); deep sleep instead\0", ret);
+        self.enter_deep_sleep();
+    }
+
+    /// Everything deep sleep and power off turn off before the end: the
+    /// network rested as `rest`, the lights, the drivers and the profile's
+    /// `deep_sleep_off` rails.
+    fn wind_down(&mut self, rest: Rest) {
         if self.rest != rest {
             self.rest = rest;
             net_coordinator::rest(rest);
@@ -756,7 +825,10 @@ impl Runtime {
             crate::drv_ioexp_xl9555::set_as_output(expander, pin);
             crate::drv_ioexp_xl9555::set_level(expander, pin, false);
         }
+    }
 
+    fn enter_deep_sleep(&mut self) {
+        let wake_on_modem = self.policy.settings.wake_on_modem;
         let user = self.board.user_pins();
         let mut pins = self.board.deep_pins(user.into_iter());
         let modem_listening = wake_on_modem && net_coordinator::modem_listening();
@@ -887,6 +959,7 @@ pub struct CPowerSettings {
     pub deep_sleep_after_s: u32,
     pub wake_on_modem: bool,
     pub stay_awake_on_usb: bool,
+    pub power_off_when_idle: bool,
 }
 
 /// power_caps_t
@@ -897,6 +970,7 @@ pub struct CPowerCaps {
     pub can_sleep: bool,
     pub can_deep_sleep: bool,
     pub can_wake_on_modem: bool,
+    pub can_power_off: bool,
 }
 
 #[no_mangle]
@@ -955,7 +1029,7 @@ pub extern "C" fn power_manager_start() {
         usb: None,
         battery: None,
     });
-    if caps.sleep {
+    if caps.sleep || caps.power_off {
         crate::kworker::every(tick, std::ptr::null_mut(), TICK);
     }
 }
@@ -976,6 +1050,7 @@ pub unsafe extern "C" fn power_manager_get_settings(out: *mut CPowerSettings) ->
         deep_sleep_after_s: power_policy::seconds(s.deep_sleep_after) as u32,
         wake_on_modem: s.wake_on_modem,
         stay_awake_on_usb: s.stay_awake_on_usb,
+        power_off_when_idle: s.power_off_when_idle,
     };
     ESP_OK
 }
@@ -995,6 +1070,7 @@ pub unsafe extern "C" fn power_manager_get_caps(out: *mut CPowerCaps) {
         can_deep_sleep: caps.deep_sleep,
         can_wake_on_modem: caps.deep_sleep
             && !board.deep_pins(board.pins(Source::Modem)).is_empty(),
+        can_power_off: caps.power_off,
     };
 }
 
@@ -1039,6 +1115,11 @@ pub extern "C" fn power_manager_set_stay_awake_on_usb(on: bool) -> i32 {
 }
 
 #[no_mangle]
+pub extern "C" fn power_manager_set_power_off_when_idle(on: bool) -> i32 {
+    save(power_policy::KEY_POWER_OFF_WHEN_IDLE, on.into(), |s| s.power_off_when_idle = on)
+}
+
+#[no_mangle]
 pub extern "C" fn power_manager_request(request: u32) -> i32 {
     match request {
         REQUEST_RESTART => {
@@ -1056,6 +1137,17 @@ pub extern "C" fn power_manager_request(request: u32) -> i32 {
             };
             if !can || lock(&RUNTIME).is_none() {
                 return ESP_ERR_NOT_SUPPORTED;
+            }
+            REQUEST.store(request as u8 + 1, Ordering::SeqCst);
+            ESP_OK
+        }
+        REQUEST_POWER_OFF => {
+            if !driver_can_power_off() || lock(&RUNTIME).is_none() {
+                return ESP_ERR_NOT_SUPPORTED;
+            }
+            // USB would keep the board running with its battery cut off.
+            if plugged_in(driver_says_plugged_in(), power_info().map(|i| i.state)) {
+                return ESP_ERR_INVALID_STATE;
             }
             REQUEST.store(request as u8 + 1, Ordering::SeqCst);
             ESP_OK
@@ -1115,12 +1207,12 @@ pub extern "C" fn power_ui_join() {
 #[no_mangle]
 pub extern "C" fn power_ui_checkpoint(ready: bool) {
     let mut g = lock(&GATE);
-    if !g.park || !ready {
+    if !g.park || !ready || g.redraw {
         return;
     }
     g.parked += 1;
     GATE_MOVED.notify_all();
-    while g.park {
+    while g.park && !g.redraw {
         g = GATE_MOVED.wait(g).unwrap_or_else(PoisonError::into_inner);
     }
     g.parked -= 1;
@@ -1128,7 +1220,11 @@ pub extern "C" fn power_ui_checkpoint(ready: bool) {
 
 #[no_mangle]
 pub extern "C" fn power_ui_take_request() -> u32 {
-    UI_REQUEST.swap(UI_NONE, Ordering::SeqCst) as u32
+    let request = UI_REQUEST.swap(UI_NONE, Ordering::SeqCst);
+    if request != UI_NONE {
+        lock(&GATE).redraw = false;
+    }
+    request as u32
 }
 
 #[no_mangle]

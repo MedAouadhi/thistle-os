@@ -17,6 +17,13 @@
  * line while "wake on calls and SMS" is on (the modem then stays asleep but
  * powered, about 2 mA against the board's 0.34 mA with it off).
  *
+ * Power off, from the power menu, or at the deep sleep time when
+ * power_off_when_idle is set, winds down as deep sleep does with
+ * the modem powered down, then has the power driver cut the board off from
+ * its battery (hal_power_driver_t.power_off). Only USB, or a button wired to
+ * the charger, turns it on again, as a power-on. It is refused while USB
+ * powers the board, which would keep running with its battery cut off.
+ *
  * Which pins wake the device, and which rails deep sleep turns off, come from
  * the "power" section of the board profile. A board without one never sleeps.
  * Implemented in components/kernel_rs/src/power_manager.rs.
@@ -36,6 +43,8 @@ typedef struct {
     uint32_t deep_sleep_after_s;  /* 0: never */
     bool wake_on_modem;           /* keep the modem listening in deep sleep */
     bool stay_awake_on_usb;       /* no sleeping by the clock while on USB power */
+    bool power_off_when_idle;     /* power off at the deep sleep time, if the
+                                     board can (can_power_off) */
 } power_settings_t;
 
 typedef struct {
@@ -43,12 +52,14 @@ typedef struct {
     bool can_sleep;          /* something other than a timer can wake it */
     bool can_deep_sleep;     /* ...and can wake it from deep sleep */
     bool can_wake_on_modem;  /* the modem's RI line can wake it */
+    bool can_power_off;      /* the power driver can cut the battery off */
 } power_caps_t;
 
 typedef enum {
     POWER_REQUEST_SLEEP,
     POWER_REQUEST_DEEP_SLEEP,
     POWER_REQUEST_RESTART,
+    POWER_REQUEST_POWER_OFF,
 } power_request_t;
 
 /* Start watching for idle time and the power key. app_main() calls this once
@@ -64,9 +75,11 @@ esp_err_t power_manager_set_sleep_after(uint32_t seconds);
 esp_err_t power_manager_set_deep_sleep_after(uint32_t seconds);
 esp_err_t power_manager_set_wake_on_modem(bool on);
 esp_err_t power_manager_set_stay_awake_on_usb(bool on);
+esp_err_t power_manager_set_power_off_when_idle(bool on);
 
-/* Sleep, deep sleep or restart now. Returns at once; the power manager acts
- * on it from its own job. ESP_ERR_NOT_SUPPORTED if the board cannot. */
+/* Sleep, deep sleep, restart or power off now. Returns at once; the power
+ * manager acts on it from its own job. ESP_ERR_NOT_SUPPORTED if the board
+ * cannot; ESP_ERR_INVALID_STATE for a power off while USB powers it. */
 esp_err_t power_manager_request(power_request_t request);
 
 /* Someone used the device. Window managers call this for every input event;
@@ -105,6 +118,7 @@ typedef enum {
     POWER_UI_HIDE_SLEEP_SCREEN,
     POWER_UI_SHOW_MENU,
     POWER_UI_SHOW_HELD_OFF,   /* sleep was asked for; say what holds it off */
+    POWER_UI_SHOW_OFF_SCREEN, /* the sleep screen, saying the device is off */
 } power_ui_request_t;
 
 /* The next thing the power manager wants shown, once. Polled by a window

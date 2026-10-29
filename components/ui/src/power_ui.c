@@ -7,7 +7,8 @@
  * lv_timer_handler() with the LVGL lock held, as the Home key's handling does.
  *
  * The sleep screen stays on the e-paper for as long as the device sleeps,
- * and through deep sleep, since the panel keeps its picture with no power.
+ * and through deep sleep and power off, since the panel keeps its picture
+ * with no power.
  * It is drawn at once rather than at LVGL's next refresh, so that the panel's
  * own refresh, and with it the sleep, is not held up.
  */
@@ -73,13 +74,18 @@ static lv_obj_t *add_label(lv_obj_t *parent, const char *text, const lv_font_t *
     return label;
 }
 
-static void show_sleep_screen(void)
+static void show_sleep_screen(bool off)
 {
     close_menu();
     toast_dismiss();
     lv_obj_t *screen = ui_manager_get_screen();
-    if (s_sleep_screen || !screen) {
+    if (!screen) {
         return;
+    }
+    /* Powering off from a sleep: the off screen replaces the sleep screen. */
+    if (s_sleep_screen) {
+        lv_obj_delete(s_sleep_screen);
+        s_sleep_screen = NULL;
     }
 
     lv_obj_t *panel = lv_obj_create(screen);
@@ -95,13 +101,16 @@ static void show_sleep_screen(void)
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_row(panel, 10, LV_PART_MAIN);
 
-    add_label(panel, "Asleep", &lv_font_montserrat_22);
+    add_label(panel, off ? "Off" : "Asleep", &lv_font_montserrat_22);
 
     power_caps_t caps;
     power_manager_get_caps(&caps);
+    /* Off, no key wakes it: the device comes back as a power-on, from a
+     * long press of the button wired to the charger, or from USB. */
     add_label(panel,
-              caps.has_key ? "Press the power key\nor any key to wake"
-                           : "Press any key to wake",
+              off            ? "Hold the power-on button\nor plug in USB to turn on"
+              : caps.has_key ? "Press the power key\nor any key to wake"
+                             : "Press any key to wake",
               &lv_font_montserrat_14);
 
     const hal_registry_t *reg = hal_get_registry();
@@ -148,7 +157,10 @@ static void menu_choice_cb(lv_event_t *e)
     if (choice == CHOICE_CANCEL) {
         return;
     }
-    if (power_manager_request((power_request_t)choice) != ESP_OK) {
+    esp_err_t ret = power_manager_request((power_request_t)choice);
+    if (ret == ESP_ERR_INVALID_STATE) {
+        toast_warn("Unplug USB to power off");
+    } else if (ret != ESP_OK) {
         toast_warn("Not available on this device");
     }
 }
@@ -256,6 +268,9 @@ static void show_menu(void)
         add_choice(dialog, "Deep sleep", POWER_REQUEST_DEEP_SLEEP, content_w);
     }
     add_choice(dialog, "Restart", POWER_REQUEST_RESTART, content_w);
+    if (caps.can_power_off) {
+        add_choice(dialog, "Power off", POWER_REQUEST_POWER_OFF, content_w);
+    }
     add_choice(dialog, "Cancel", CHOICE_CANCEL, content_w);
 
     lv_obj_move_foreground(backdrop);
@@ -271,7 +286,10 @@ static void request_timer_cb(lv_timer_t *timer)
     (void)timer;
     switch (power_ui_take_request()) {
     case POWER_UI_SHOW_SLEEP_SCREEN:
-        show_sleep_screen();
+        show_sleep_screen(false);
+        break;
+    case POWER_UI_SHOW_OFF_SCREEN:
+        show_sleep_screen(true);
         break;
     case POWER_UI_HIDE_SLEEP_SCREEN:
         hide_sleep_screen();

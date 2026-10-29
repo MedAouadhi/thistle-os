@@ -54,6 +54,20 @@ const CHG_REG_ADC_CONTROL: u8 = 0x02;
 const CHG_REG_TERMINATION: u8 = 0x05;
 /// Charge termination and timer control, holding the I²C watchdog setting.
 const CHG_REG_TIMER_CONTROL: u8 = 0x07;
+/// Miscellaneous operation control, holding the battery switch (the BATFET).
+const CHG_REG_MISC_CONTROL: u8 = 0x09;
+/// Turn the BATFET off: the battery is cut off from the board, which is then
+/// powered only from USB, if at all. Pressing the charger's /QON input or
+/// plugging in USB turns it back on (`shutdown()` and its comment in
+/// XPowersLib's `PowersSY6970.tpp`, which the vendor's factory firmware calls
+/// for its Shutdown screen).
+const MISC_BATFET_DIS: u8 = 1 << 5;
+/// Delay turning the BATFET off by tSM_DLY after `MISC_BATFET_DIS` is set,
+/// rather than at once.
+const MISC_BATFET_DLY: u8 = 1 << 3;
+/// How long a power off waits to be cut off before it gives up: the BATFET
+/// goes off at once, so a board still running after this is powered by USB.
+const POWER_OFF_WAIT_MS: i32 = 500;
 /// System status: bus status in bits 7:5, charge status in bits 4:3,
 /// power good in bit 2.
 const CHG_REG_STATUS: u8 = 0x0B;
@@ -301,6 +315,17 @@ pub fn with_adc_continuous(adc_control: u8) -> u8 {
 /// termination and the safety timer as they were.
 pub fn with_watchdog_disabled(timer_control: u8) -> u8 {
     timer_control & !WATCHDOG_BITS
+}
+
+/// The control register with the battery cut off at once, leaving the rest
+/// as the charger had it.
+pub fn with_battery_off(misc_control: u8) -> u8 {
+    (misc_control | MISC_BATFET_DIS) & !MISC_BATFET_DLY
+}
+
+/// The control register with the battery connected.
+pub fn with_battery_on(misc_control: u8) -> u8 {
+    misc_control & !MISC_BATFET_DIS
 }
 
 // ── Fuel gauge decoding ──────────────────────────────────────────────────────
@@ -1016,6 +1041,15 @@ fn attach_charger(bus: *mut c_void) -> Option<AttachedCharger> {
 /// register to its default while the system idles, and a converter that is not
 /// running leaves the voltage register reading whatever it last converted.
 fn configure_charger(dev: *mut c_void) -> bool {
+    // A power off that USB kept from happening, or one the charger came back
+    // from without clearing it, would leave the battery cut off: the board
+    // runs on USB, and the battery neither charges nor takes over.
+    if read_reg(dev, CHG_REG_MISC_CONTROL).is_some_and(|misc| misc & MISC_BATFET_DIS != 0) {
+        power_logi!(b"power: the battery was cut off; connecting it\n\0");
+        if !update_reg(dev, CHG_REG_MISC_CONTROL, with_battery_on) {
+            return false;
+        }
+    }
     update_reg(dev, CHG_REG_TIMER_CONTROL, with_watchdog_disabled)
         && update_reg(dev, CHG_REG_ADC_CONTROL, with_adc_continuous)
 }
@@ -1414,6 +1448,31 @@ unsafe extern "C" fn power_is_plugged_in() -> bool {
     charger_status(&power).is_some_and(plugged_in)
 }
 
+/// Cut the battery off, the vendor's Shutdown. Refused on USB, which would
+/// keep the board running with its battery cut off.
+///
+/// # Safety
+/// Called from C via the HAL vtable.
+unsafe extern "C" fn power_power_off() -> i32 {
+    let Ok(power) = POWER.lock() else {
+        return ESP_FAIL;
+    };
+    match charger_status(&power) {
+        None => return ESP_FAIL,
+        Some(status) if plugged_in(status) => return ESP_ERR_INVALID_STATE,
+        Some(_) => {}
+    }
+    power_logi!(b"power: cutting the battery off\n\0");
+    if !update_reg(power.charger, CHG_REG_MISC_CONTROL, with_battery_off) {
+        return ESP_FAIL;
+    }
+    delay_ms(POWER_OFF_WAIT_MS);
+    // Still here: USB came in meanwhile, or the charger did not act on it.
+    update_reg(power.charger, CHG_REG_MISC_CONTROL, with_battery_on);
+    power_logi!(b"power: still powered after cutting the battery off; connected it again\n\0");
+    ESP_FAIL
+}
+
 /// Sleep and wake are nothing to these two chips: the charger goes on
 /// charging with the SoC asleep, which is the point of it, and the gauge's own
 /// consumption is below what turning it off would save.
@@ -1437,6 +1496,7 @@ static POWER_DRIVER: HalPowerDriver = HalPowerDriver {
     // One driver, two parts. Which one this board carries is in the init log.
     name: b"SY6970/BQ25896\0".as_ptr() as *const c_char,
     is_plugged_in: Some(power_is_plugged_in),
+    power_off: Some(power_power_off),
 };
 
 // ── Registration ─────────────────────────────────────────────────────────────
@@ -1648,6 +1708,15 @@ mod tests {
         assert!(!plugged_in(0b000_00_011), "bits below power good say nothing of it");
         // OTG: the board powers the bus, nothing powers the board.
         assert!(!plugged_in(0b111_00_000));
+    }
+
+    // ── The battery switch ───────────────────────────────────────────────────
+
+    #[test]
+    fn cutting_the_battery_off_sets_batfet_dis_and_does_not_delay_it() {
+        // Bit 3 set: a delayed turn-off, as nobody here asks for.
+        assert_eq!(with_battery_off(0b0100_1100), 0b0110_0100);
+        assert_eq!(with_battery_on(0b0110_0100), 0b0100_0100);
     }
 
     // ── Charge current ───────────────────────────────────────────────────────
@@ -2027,6 +2096,51 @@ mod tests {
                 ADC_CONTINUOUS_BITS,
                 "the converter should be running every second, not waiting to be asked"
             );
+        }
+
+        #[test]
+        fn coming_up_connects_a_battery_left_cut_off() {
+            an_empty_board();
+            let address = ChargerVariant::Sy6970.address();
+            a_charger_at(address, SY6970_IDENTIFICATION);
+            esp_ffi::set(address, CHG_REG_MISC_CONTROL, 0b0110_0100);
+
+            configured("{\"i2c_bus\": 0}");
+            assert_eq!(unsafe { power_init(std::ptr::null()) }, ESP_OK);
+
+            assert_eq!(esp_ffi::get(address, CHG_REG_MISC_CONTROL), 0b0100_0100);
+        }
+
+        #[test]
+        fn power_off_on_usb_is_refused_and_leaves_the_battery_connected() {
+            an_empty_board();
+            let address = ChargerVariant::Sy6970.address();
+            a_charger_at(address, SY6970_IDENTIFICATION);
+            esp_ffi::set(address, CHG_REG_STATUS, 0b001_10_100); // USB host, charging
+            esp_ffi::set(address, CHG_REG_MISC_CONTROL, 0b0100_0100);
+
+            configured("{\"i2c_bus\": 0}");
+            assert_eq!(unsafe { power_init(std::ptr::null()) }, ESP_OK);
+
+            assert_eq!(unsafe { power_power_off() }, ESP_ERR_INVALID_STATE);
+            assert_eq!(esp_ffi::get(address, CHG_REG_MISC_CONTROL), 0b0100_0100);
+        }
+
+        #[test]
+        fn a_power_off_the_board_survives_connects_the_battery_again() {
+            an_empty_board();
+            let address = ChargerVariant::Sy6970.address();
+            a_charger_at(address, SY6970_IDENTIFICATION);
+            esp_ffi::set(address, CHG_REG_STATUS, 0b000_00_000); // on battery
+            esp_ffi::set(address, CHG_REG_MISC_CONTROL, 0b0100_0100);
+
+            configured("{\"i2c_bus\": 0}");
+            assert_eq!(unsafe { power_init(std::ptr::null()) }, ESP_OK);
+
+            // The fake charger never cuts anything off, so the driver is still
+            // running afterwards, as it would be if USB came in meanwhile.
+            assert_eq!(unsafe { power_power_off() }, ESP_FAIL);
+            assert_eq!(esp_ffi::get(address, CHG_REG_MISC_CONTROL), 0b0100_0100);
         }
 
         #[test]
