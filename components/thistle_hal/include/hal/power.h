@@ -31,4 +31,10 @@ typedef struct {
      * driver cannot tell; the kernel then takes charging or charged for
      * plugged in. Last, so that no field before it moved. */
     bool (*is_plugged_in)(void);
+    /* Cut the board off from its battery, so that nothing draws from it
+     * until the board is turned on again: by USB, or by whatever button the
+     * charger has for it. Does not return when it works. ESP_ERR_INVALID_STATE
+     * while USB or an adapter powers the board, which then stays on whatever
+     * the driver does. NULL when the part cannot. Last, as above. */
+    esp_err_t (*power_off)(void);
 } hal_power_driver_t;

@@ -311,6 +311,21 @@ running of them in `power_manager.rs`; every ESP-IDF sleep call in
 - **A task that draws or reads input** calls `power_ui_join()` once and
   `power_ui_checkpoint()` at the top of each pass, so sleep never lands in
   the middle of a bus transfer.
+- **Power off**, in the power menu, winds down as deep sleep does with the
+  modem powered down, then cuts the battery off: the SY6970's BATFET_DIS
+  (REG09 bit 5), as the vendor's factory Shutdown does, through the power
+  HAL's `power_off` (the last field). Refused on USB, which would keep the
+  board running with its battery cut off ("Unplug USB to power off"); refused
+  by the charger, it deep-sleeps instead. Plugging in USB turns the board on
+  again, and so does a long press on the T-Deck Max's small side button,
+  which is neither BOOT nor RST and appears on no vendor schematic we have:
+  the charger's /QON, by all appearances. The driver connects a battery it
+  finds cut off at init. The time is lost, as at any power-on.
+- **Settings → Power → "At that time"** chooses what the deep sleep timer
+  does: deep sleep (the default) or power off (`power_off_when_idle`). From
+  a light sleep the power manager settles again first, letting the parked
+  window manager draw the off screen once (`gate_redraw`). A critical battery
+  still deep-sleeps, and a sleeping board on USB deep-sleeps instead.
 - **The log's timestamps stop during light sleep**; they count FreeRTOS ticks.
 
 ### SMS and the message history

@@ -1,5 +1,20 @@
 # ThistleOS Changelog
 
+## v0.7.0 - 2026-10-29
+
+ThistleOS can now power the device off, not only put it to sleep.
+
+- Power off, in the power menu, cuts the battery off at the charger, as
+  the factory firmware's Shutdown does. A device that is off draws next to
+  nothing. A long press on the T-Deck Max's small side button, or plugging
+  in USB, turns it on again. Nothing wakes it while it is off, not calls
+  or SMS, and the clock must be set again.
+- Power off is refused while USB is plugged in: unplug it first.
+- Settings → Power → "At that time" chooses what happens when the deep
+  sleep time comes: deep sleep, the default, or power off. A critical
+  battery still deep-sleeps, and a device asleep on USB deep-sleeps
+  instead.
+
 ## v0.6.0 - 2026-10-27
 
 The first release from this fork: ThistleOS now updates itself over the

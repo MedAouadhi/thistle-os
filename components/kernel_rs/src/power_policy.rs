@@ -16,13 +16,17 @@
 //!   MeshCore to handle it, with the screen left as it is.
 //!
 //! Deep sleep is entered from any phase and is never left: waking from it
-//! restarts the device.
+//! restarts the device. Powering off settles as deep sleep does, then cuts
+//! the board off from its battery. The power menu asks for it, and so does
+//! the deep sleep timer when `power_off_when_idle` is on and the power driver
+//! can: from a light sleep it settles again first, so the screen says so.
 //!
 //! The settings live in system.json:
 //!
 //! ```json
 //! "power": { "sleep_after_s": 300, "deep_sleep_after_s": 3600,
-//!            "wake_on_modem": true, "stay_awake_on_usb": true }
+//!            "wake_on_modem": true, "stay_awake_on_usb": true,
+//!            "power_off_when_idle": false }
 //! ```
 //!
 //! A time of 0 is "never".
@@ -36,6 +40,7 @@ pub(crate) const KEY_SLEEP_AFTER: &str = "sleep_after_s";
 pub(crate) const KEY_DEEP_SLEEP_AFTER: &str = "deep_sleep_after_s";
 pub(crate) const KEY_WAKE_ON_MODEM: &str = "wake_on_modem";
 pub(crate) const KEY_STAY_AWAKE_ON_USB: &str = "stay_awake_on_usb";
+pub(crate) const KEY_POWER_OFF_WHEN_IDLE: &str = "power_off_when_idle";
 
 /// The shortest idle time accepted. Less would put the device to sleep
 /// between two keystrokes of anyone who stops to think.
@@ -81,6 +86,9 @@ pub(crate) struct Settings {
     /// the S3's USB-Serial-JTAG, so a board left to sleep on a desk drops
     /// off the USB bus it is being flashed and watched over.
     pub(crate) stay_awake_on_usb: bool,
+    /// When the deep sleep time comes, power off instead: nothing then
+    /// wakes the device, not the modem, and the clock is lost.
+    pub(crate) power_off_when_idle: bool,
 }
 
 impl Default for Settings {
@@ -90,6 +98,7 @@ impl Default for Settings {
             deep_sleep_after: Some(Duration::from_secs(60 * 60)),
             wake_on_modem: true,
             stay_awake_on_usb: true,
+            power_off_when_idle: false,
         }
     }
 }
@@ -131,6 +140,7 @@ pub(crate) fn settings_in(json: Option<&str>) -> Settings {
         ),
         wake_on_modem: bool_in(json, KEY_WAKE_ON_MODEM, d.wake_on_modem),
         stay_awake_on_usb: bool_in(json, KEY_STAY_AWAKE_ON_USB, d.stay_awake_on_usb),
+        power_off_when_idle: bool_in(json, KEY_POWER_OFF_WHEN_IDLE, d.power_off_when_idle),
     }
 }
 
@@ -210,12 +220,15 @@ impl PowerKey {
 pub(crate) enum Depth {
     Light,
     Deep,
+    /// Powered off: the board cut off from its battery.
+    Off,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Request {
     Sleep,
     DeepSleep,
+    PowerOff,
 }
 
 /// Why the CPU came back from a light sleep.
@@ -256,6 +269,7 @@ pub(crate) enum Action {
     /// Halt the CPU, until `until` at the latest.
     LightSleep { until: Option<Instant> },
     DeepSleep,
+    PowerOff,
     /// Bring the drivers, the network and the screen back.
     Wake,
 }
@@ -269,6 +283,8 @@ pub(crate) struct Caps {
     pub(crate) deep_sleep: bool,
     /// A window manager can show the power menu.
     pub(crate) menu: bool,
+    /// The power driver can cut the board off from its battery.
+    pub(crate) power_off: bool,
 }
 
 /// What the power manager saw since it last asked.
@@ -362,6 +378,15 @@ impl Policy {
         self.deep_sleep_at(last_activity).is_some_and(|at| now >= at)
     }
 
+    /// Where the deep sleep timer takes the device: deep sleep, or off.
+    fn idle_depth(&self) -> Depth {
+        if self.settings.power_off_when_idle && self.caps.power_off {
+            Depth::Off
+        } else {
+            Depth::Deep
+        }
+    }
+
     /// Whether the clock alone says it is time to sleep, whatever holds or
     /// USB power say: the power manager asks before reading the charger.
     pub(crate) fn idle_due(&self, now: Instant, last_activity: Instant) -> bool {
@@ -381,7 +406,11 @@ impl Policy {
 
     /// Sleep someone asked for, at `depth`.
     fn asked(&mut self, depth: Depth, f: &Facts) -> Action {
-        if !self.caps.sleep {
+        let can = match depth {
+            Depth::Off => self.caps.power_off,
+            Depth::Light | Depth::Deep => self.caps.sleep,
+        };
+        if !can {
             return Action::Nothing;
         }
         if f.held {
@@ -408,13 +437,14 @@ impl Policy {
                 match f.request {
                     Some(Request::Sleep) => return self.asked(Depth::Light, f),
                     Some(Request::DeepSleep) => return self.asked(Depth::Deep, f),
+                    Some(Request::PowerOff) => return self.asked(Depth::Off, f),
                     None => {}
                 }
                 if !self.caps.sleep || f.held || (f.on_usb && self.settings.stay_awake_on_usb) {
                     return Action::Nothing;
                 }
                 if self.deep_due(f.now, f.last_activity) {
-                    return self.settle(Depth::Deep, f.now);
+                    return self.settle(self.idle_depth(), f.now);
                 }
                 if self.sleep_due(f.now, f.last_activity) {
                     return self.settle(Depth::Light, f.now);
@@ -433,6 +463,7 @@ impl Policy {
                             Action::FallAsleep
                         }
                         Depth::Deep => Action::DeepSleep,
+                        Depth::Off => Action::PowerOff,
                     };
                 }
                 Action::Nothing
@@ -442,6 +473,10 @@ impl Policy {
                     self.phase = Phase::Awake;
                     self.early = None;
                     return Action::Wake;
+                }
+                if self.deep_due(f.now, f.last_activity) && self.idle_depth() == Depth::Off {
+                    // Settled again, for the screen to say it is off.
+                    return self.settle(Depth::Off, f.now);
                 }
                 if self.deep_due(f.now, f.last_activity) || (f.battery_critical && self.caps.deep_sleep) {
                     return Action::DeepSleep;
@@ -499,6 +534,7 @@ mod tests {
         sleep: true,
         deep_sleep: true,
         menu: true,
+        power_off: true,
     };
 
     fn secs(s: u64) -> Duration {
@@ -511,6 +547,14 @@ mod tests {
             deep_sleep_after: (deep > 0).then(|| secs(deep)),
             wake_on_modem: true,
             stay_awake_on_usb: true,
+            power_off_when_idle: false,
+        }
+    }
+
+    fn powering_off_when_idle(sleep: u64, deep: u64) -> Settings {
+        Settings {
+            power_off_when_idle: true,
+            ..settings(sleep, deep)
         }
     }
 
@@ -551,7 +595,7 @@ mod tests {
     fn saved_settings_read_back() {
         let json = r#"{ "thistle_os": { "power": { "sleep_after_s": 120,
             "deep_sleep_after_s": 7200, "wake_on_modem": false,
-            "stay_awake_on_usb": false } } }"#;
+            "stay_awake_on_usb": false, "power_off_when_idle": true } } }"#;
         assert_eq!(
             settings_in(Some(json)),
             Settings {
@@ -559,6 +603,7 @@ mod tests {
                 deep_sleep_after: Some(secs(7200)),
                 wake_on_modem: false,
                 stay_awake_on_usb: false,
+                power_off_when_idle: true,
             }
         );
     }
@@ -733,6 +778,7 @@ mod tests {
             sleep: true,
             deep_sleep: false,
             menu: true,
+            power_off: false,
         };
         let mut p = Policy::new(settings(600, 60), caps);
         assert_eq!(p.decide(&facts(t0, 60, 0)), Action::Nothing);
@@ -777,6 +823,127 @@ mod tests {
         f.request = Some(Request::DeepSleep);
         assert_eq!(p.decide(&f), Action::HeldOff);
         assert_eq!(p.phase(), Phase::Awake);
+    }
+
+    #[test]
+    fn powering_off_settles_then_powers_off() {
+        let t0 = Instant::now();
+        let mut p = Policy::new(settings(600, 6000), ALL);
+        let mut f = facts(t0, 5, 4);
+        f.request = Some(Request::PowerOff);
+        assert_eq!(p.decide(&f), Action::Settle(Depth::Off));
+        let mut f = facts(t0, 6, 4);
+        f.settled = true;
+        assert_eq!(p.decide(&f), Action::PowerOff);
+    }
+
+    #[test]
+    fn powering_off_goes_ahead_after_the_settle_timeout() {
+        let t0 = Instant::now();
+        let mut p = Policy::new(settings(600, 6000), ALL);
+        let mut f = facts(t0, 5, 4);
+        f.request = Some(Request::PowerOff);
+        p.decide(&f);
+        assert_eq!(p.decide(&facts(t0, 10, 4)), Action::Nothing);
+        assert_eq!(p.decide(&facts(t0, 5 + SETTLE_TIMEOUT.as_secs(), 4)), Action::PowerOff);
+    }
+
+    #[test]
+    fn a_key_while_powering_off_calls_it_off() {
+        let t0 = Instant::now();
+        let mut p = Policy::new(settings(600, 6000), ALL);
+        let mut f = facts(t0, 5, 4);
+        f.request = Some(Request::PowerOff);
+        p.decide(&f);
+        assert_eq!(p.decide(&facts(t0, 6, 6)), Action::Resume);
+        assert_eq!(p.phase(), Phase::Awake);
+    }
+
+    #[test]
+    fn a_board_that_cannot_power_off_ignores_the_request() {
+        let t0 = Instant::now();
+        let mut p = Policy::new(
+            settings(600, 6000),
+            Caps {
+                power_off: false,
+                ..ALL
+            },
+        );
+        let mut f = facts(t0, 5, 4);
+        f.request = Some(Request::PowerOff);
+        assert_eq!(p.decide(&f), Action::Nothing);
+        assert_eq!(p.phase(), Phase::Awake);
+    }
+
+    #[test]
+    fn a_board_that_cannot_sleep_may_still_power_off() {
+        let t0 = Instant::now();
+        let caps = Caps {
+            power_off: true,
+            ..Caps::default()
+        };
+        let mut p = Policy::new(settings(600, 6000), caps);
+        let mut f = facts(t0, 5, 4);
+        f.request = Some(Request::PowerOff);
+        assert_eq!(p.decide(&f), Action::Settle(Depth::Off));
+    }
+
+    #[test]
+    fn asked_to_power_off_while_held_it_says_so_and_stays_up() {
+        let t0 = Instant::now();
+        let mut p = Policy::new(settings(600, 6000), ALL);
+        let mut f = facts(t0, 5, 4);
+        f.held = true;
+        f.request = Some(Request::PowerOff);
+        assert_eq!(p.decide(&f), Action::HeldOff);
+    }
+
+    #[test]
+    fn the_deep_sleep_timer_deep_sleeps_unless_told_to_power_off() {
+        let t0 = Instant::now();
+        let mut p = Policy::new(settings(0, 600), ALL);
+        assert_eq!(p.decide(&facts(t0, 600, 0)), Action::Settle(Depth::Deep));
+        let mut p = Policy::new(powering_off_when_idle(0, 600), ALL);
+        assert_eq!(p.decide(&facts(t0, 600, 0)), Action::Settle(Depth::Off));
+    }
+
+    #[test]
+    fn a_board_that_cannot_power_off_deep_sleeps_when_told_to_power_off() {
+        let t0 = Instant::now();
+        let caps = Caps {
+            power_off: false,
+            ..ALL
+        };
+        let mut p = Policy::new(powering_off_when_idle(0, 600), caps);
+        assert_eq!(p.decide(&facts(t0, 600, 0)), Action::Settle(Depth::Deep));
+    }
+
+    #[test]
+    fn asleep_when_the_deep_sleep_time_comes_it_settles_again_to_power_off() {
+        let t0 = Instant::now();
+        let mut p = Policy::new(powering_off_when_idle(60, 600), ALL);
+        p.decide(&facts(t0, 60, 0));
+        let mut f = facts(t0, 61, 0);
+        f.settled = true;
+        assert_eq!(p.decide(&f), Action::FallAsleep);
+        assert_eq!(p.decide(&facts(t0, 600, 0)), Action::Settle(Depth::Off));
+        assert!(matches!(p.phase(), Phase::Settling { depth: Depth::Off, .. }));
+        let mut f = facts(t0, 601, 0);
+        f.settled = true;
+        assert_eq!(p.decide(&f), Action::PowerOff);
+    }
+
+    #[test]
+    fn a_critical_battery_still_deep_sleeps_when_told_to_power_off() {
+        let t0 = Instant::now();
+        let mut p = Policy::new(powering_off_when_idle(60, 6000), ALL);
+        p.decide(&facts(t0, 60, 0));
+        let mut f = facts(t0, 61, 0);
+        f.settled = true;
+        p.decide(&f);
+        let mut f = facts(t0, 100, 0);
+        f.battery_critical = true;
+        assert_eq!(p.decide(&f), Action::DeepSleep);
     }
 
     // ── Settling ────────────────────────────────────────────────────────

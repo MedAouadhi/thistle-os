@@ -387,6 +387,9 @@ pub struct HalPowerDriver {
     /// USB or an adapter there, charging or not. None if the driver cannot
     /// tell (hal/power.h).
     pub is_plugged_in: Option<unsafe extern "C" fn() -> bool>,
+    /// Cut the board off from its battery; returns only if that failed.
+    /// None if the part cannot (hal/power.h).
+    pub power_off: Option<unsafe extern "C" fn() -> i32>,
 }
 
 unsafe impl Send for HalPowerDriver {}
@@ -1850,6 +1853,7 @@ mod tests {
         let ptr = std::mem::size_of::<*const c_void>();
         assert_eq!(std::mem::offset_of!(HalPowerDriver, name), 7 * ptr);
         assert_eq!(std::mem::offset_of!(HalPowerDriver, is_plugged_in), 8 * ptr);
+        assert_eq!(std::mem::offset_of!(HalPowerDriver, power_off), 9 * ptr);
     }
 
     #[test]
@@ -1879,6 +1883,7 @@ mod tests {
             sleep: None,
             name: b"test-power\0".as_ptr() as *const c_char,
             is_plugged_in: None,
+            power_off: None,
         };
 
         let rc = unsafe { hal_power_register(&drv as *const HalPowerDriver, std::ptr::null()) };
@@ -1927,6 +1932,7 @@ mod tests {
             sleep: None,
             name: b"test-power\0".as_ptr() as *const c_char,
             is_plugged_in: None,
+            power_off: None,
         };
 
         unsafe {

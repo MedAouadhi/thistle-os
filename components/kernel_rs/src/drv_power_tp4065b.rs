@@ -563,6 +563,7 @@ static POWER_DRIVER: HalPowerDriver = HalPowerDriver {
     // Its one status pin, CHRG, reads the same for a full battery on USB as
     // for no USB at all.
     is_plugged_in: None,
+    power_off: None,
 };
 
 /// Return the TP4065B power driver vtable.
