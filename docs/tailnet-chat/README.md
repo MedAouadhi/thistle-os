@@ -106,3 +106,9 @@ Its options: `--identity FILE` (the seed in hex, made on first start;
 without it a key for this run only), `--db PATH` (SQLite; `:memory:` by
 default), `--address HOST`, `--port N` (or `--listen HOST:PORT`), `--name`,
 `--loopback`, `--no-read-receipts`, `--call-policy`, `--verbose`.
+
+## The companion app
+
+`companion/app/` is the Flutter app over the core, on Linux for now
+(Android is ticket 11). `companion/app/README.md` has how to build, test
+and run it, and its options for a second instance or a peer on loopback.

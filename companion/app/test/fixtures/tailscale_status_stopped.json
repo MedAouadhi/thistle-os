@@ -1,0 +1,8 @@
+{
+  "Version": "1.90.6-t0123456789-gabcdef012",
+  "BackendState": "Stopped",
+  "AuthURL": "",
+  "TailscaleIPs": ["100.91.10.1", "fd7a:115c:a1e0::aa01"],
+  "Self": {"HostName": "laptop", "DNSName": "laptop.tail0000.ts.net.", "TailscaleIPs": ["100.91.10.1"], "Online": false},
+  "Peer": null
+}
