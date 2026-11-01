@@ -1,7 +1,8 @@
 /// Desktop notifications for messages, requests and calls while the app is
 /// not in front (user story 55). flutter_local_notifications speaks to the
 /// freedesktop notification service over D-Bus on Linux, and to Android's
-/// notification manager on Android (ticket 11).
+/// notification manager on Android, on the channel `messages`;
+/// there notifications are a runtime permission (permissions.dart).
 library;
 
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
@@ -26,7 +27,7 @@ class SystemNotifier implements Notifier {
           await _plugin.initialize(
             settings: const InitializationSettings(
               linux: LinuxInitializationSettings(defaultActionName: 'Open'),
-              android: AndroidInitializationSettings('@mipmap/ic_launcher'),
+              android: AndroidInitializationSettings('ic_stat_chat'),
             ),
             onDidReceiveNotificationResponse: (r) => onOpen?.call(r.payload),
           ) ??

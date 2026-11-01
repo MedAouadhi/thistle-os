@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tailnet_chat_core/tailnet_chat_core.dart';
 import 'package:thistle_chat/src/chat_model.dart';
+import 'package:thistle_chat/src/permissions.dart';
 import 'package:thistle_chat/src/tailnet.dart';
 
 import 'helpers.dart';
@@ -176,6 +177,26 @@ void main() {
       expect(app.contacts.single.key, other.identity.keyHex);
       expect(app.contacts.single.flaggedKey, isNull);
     });
+
+    test('on Android, coming to the front dials the contacts known, as no peer list says who is online', () async {
+      tailnet.status = statusFromInterfaces({
+        'tun0': ['100.99.0.7'],
+      });
+      await app.refresh();
+      // The device restarts, same key, same port: our connection to it is gone.
+      final port = other.address.port;
+      final id = other.identity;
+      await other.stop();
+      other = ChatPeer(identity: id, store: Store.open(':memory:'), name: 'thistle-46cf20', port: port, loopback: true);
+      await other.start();
+      await eventually(() => !app.connectedTo(key));
+
+      app.foreground = false;
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      expect(app.connectedTo(key), isFalse);
+      app.foreground = true;
+      await eventually(() => app.connectedTo(key));
+    });
   });
 
   test('discovery lists the tailnet peers that answer, and adds one', () async {
@@ -215,6 +236,57 @@ void main() {
     expect(app.backgroundListening, isTrue);
     app.backgroundListening = false;
     expect(app.backgroundListening, isFalse);
+  });
+
+  group('the background service (Android)', () {
+    late FakeService service;
+    late FakePermissions permissions;
+    setUp(() async {
+      await app.close();
+      service = FakeService();
+      permissions = FakePermissions();
+      app = testModel(tailnet, notifier, service: service, permissions: permissions);
+    });
+
+    test('on by default: started with the app, after notifications are asked for', () async {
+      await app.start();
+      await eventually(() => service.running);
+      expect(permissions.asked, [AppPermission.notifications]);
+    });
+
+    test('switched off, it stops, and stays off at the next start', () async {
+      final dir = Directory.systemTemp.createTempSync('thistle_chat_');
+      addTearDown(() => dir.deleteSync(recursive: true));
+      final db = '${dir.path}/chat.db';
+      await app.close();
+      app = testModel(tailnet, notifier, service: service, permissions: permissions, store: db);
+      await app.start();
+      app.backgroundListening = false;
+      await eventually(() => !service.running);
+      await app.close();
+
+      final again = FakeService();
+      app = testModel(tailnet, notifier, service: again, permissions: permissions, store: db);
+      await app.start();
+      await eventually(() => again.calls.isNotEmpty);
+      expect(again.running, isFalse);
+      expect(again.calls, [false]);
+    });
+
+    test('switched back on, it starts', () async {
+      await app.start();
+      app.backgroundListening = false;
+      await eventually(() => !service.running);
+      app.backgroundListening = true;
+      await eventually(() => service.running);
+    });
+
+    test('notifications refused: the service still runs, and the refusal is explained', () async {
+      permissions.answer = PermissionAnswer.denied;
+      await app.start();
+      await eventually(() => service.running);
+      expect(app.permissions!.refusal(AppPermission.notifications), contains('Notifications are not allowed'));
+    });
   });
 
   test('parsePeerInput', () {

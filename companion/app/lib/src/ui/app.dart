@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../chat_model.dart';
+import '../permissions.dart';
 import 'contacts_page.dart';
 import 'conversation_page.dart';
 import 'requests_page.dart';
@@ -63,7 +64,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) => ListenableBuilder(
-    listenable: widget.model,
+    listenable: Listenable.merge([widget.model, ?widget.model.permissions]),
     builder: (context, _) {
       final model = widget.model;
       final requests = model.requests.length;
@@ -83,6 +84,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       final body = Column(
         children: [
           if (model.problem != null) _ProblemBanner(model.problem!),
+          if (model.permissions case final permissions?)
+            for (final p in permissions.refusals.keys) _RefusalBanner(permissions, p),
           Expanded(child: page),
         ],
       );
@@ -140,6 +143,42 @@ class _ProblemBanner extends StatelessWidget {
             const SizedBox(width: 12),
             Expanded(
               child: Text(text, style: TextStyle(color: scheme.onErrorContainer)),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// A permission refused, what that stops, and the way to allow it.
+class _RefusalBanner extends StatelessWidget {
+  const _RefusalBanner(this.permissions, this.permission);
+  final Permissions permissions;
+  final AppPermission permission;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Material(
+      color: scheme.tertiaryContainer,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 8, 4, 8),
+        child: Row(
+          children: [
+            Icon(
+              permission == AppPermission.microphone ? Icons.mic_off : Icons.notifications_off,
+              color: scheme.onTertiaryContainer,
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(permissions.refusal(permission) ?? '', style: TextStyle(color: scheme.onTertiaryContainer)),
+            ),
+            TextButton(onPressed: permissions.openSettings, child: const Text('Open settings')),
+            IconButton(
+              tooltip: 'Dismiss',
+              icon: const Icon(Icons.close),
+              onPressed: () => permissions.dismiss(permission),
             ),
           ],
         ),

@@ -29,9 +29,12 @@ class SettingsPage extends StatelessWidget {
         ),
         SwitchListTile(
           title: const Text('Listen in the background'),
-          subtitle: const Text(
-            'On Android, a persistent notification keeps the app reachable. '
-            'On Linux the app listens while it runs.',
+          subtitle: Text(
+            model.background != null
+                ? 'A persistent notification keeps the app reachable after it is swiped away. '
+                      'Off, messages wait with their sender until you open the app.'
+                : 'On Android, a persistent notification keeps the app reachable. '
+                      'On Linux the app listens while it runs.',
           ),
           value: model.backgroundListening,
           onChanged: (on) => model.backgroundListening = on,

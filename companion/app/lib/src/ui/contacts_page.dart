@@ -34,7 +34,10 @@ class ContactsPage extends StatelessWidget {
           child: Row(
             children: [
               Expanded(child: Text('On your tailnet', style: Theme.of(context).textTheme.titleSmall)),
-              if (model.discovering)
+              // Android has no peer list to look through: add by name or address.
+              if (!model.status.hasPeerList)
+                const SizedBox.shrink()
+              else if (model.discovering)
                 const Padding(
                   padding: EdgeInsets.all(12),
                   child: SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)),
@@ -57,7 +60,9 @@ class ContactsPage extends StatelessWidget {
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
             child: Text(
-              'Look for chat peers among the machines Tailscale shows online, or add one by name or address.',
+              model.status.hasPeerList
+                  ? 'Look for chat peers among the machines Tailscale shows online, or add one by name or address.'
+                  : 'Add a chat peer by its tailnet name (MagicDNS) or its 100.x address.',
               style: small,
             ),
           ),
