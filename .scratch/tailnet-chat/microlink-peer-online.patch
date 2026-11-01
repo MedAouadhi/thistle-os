@@ -1,0 +1,204 @@
+diff -ru a/include/microlink_internal.h b/include/microlink_internal.h
+--- a/include/microlink_internal.h	2026-11-01 23:43:12.689466117 +0100
++++ b/include/microlink_internal.h	2026-11-02 00:02:44.404715143 +0100
+@@ -20,11 +20,11 @@
+ #include "sdkconfig.h"
+ #include "freertos/FreeRTOS.h"
+ #include "freertos/task.h"
+-#include "freertos/queue.h"
+-#include "freertos/event_groups.h"
+-#include "freertos/semphr.h"
+-#include "mbedtls/ssl.h"
+-#include "esp_heap_caps.h"
++#include "freertos/queue.h"
++#include "freertos/event_groups.h"
++#include "freertos/semphr.h"
++#include "mbedtls/ssl.h"
++#include "esp_heap_caps.h"
+ 
+ #ifdef CONFIG_ML_ZERO_COPY_WG
+ #include "lwip/udp.h"
+@@ -249,7 +249,13 @@
+         ML_PEER_ADD,
+         ML_PEER_REMOVE,
+         ML_PEER_UPDATE_ENDPOINT,
++        ML_PEER_SET_ONLINE,     /* node_id is online, or not */
+     } action;
++    /* The control plane's id for the node (tailcfg.Node.ID), which
++     * OnlineChange and PeersChangedPatch name it by; 0 if not given */
++    int64_t node_id;
++    /* tailcfg.Node.Online: 1 online, 0 offline, -1 not said */
++    int8_t online;
+     uint32_t vpn_ip;
+     uint8_t public_key[32];
+     uint8_t disco_key[32];
+@@ -275,6 +281,8 @@
+     uint8_t disco_key[32];
+     char hostname[64];
+     bool active;
++    int64_t node_id;            /* the control plane's id; 0 until a netmap gives it */
++    bool online;                /* as the control plane last said */
+ 
+     /* Endpoints */
+     struct {
+@@ -353,10 +361,10 @@
+  * ========================================================================== */
+ 
+ typedef struct {
+-    int sockfd;                     /* Raw TCP socket */
+-    mbedtls_ssl_context ssl;        /* TLS context (owned exclusively by DERP I/O task) */
+-    mbedtls_ssl_config ssl_conf;
+-    bool connected;
++    int sockfd;                     /* Raw TCP socket */
++    mbedtls_ssl_context ssl;        /* TLS context (owned exclusively by DERP I/O task) */
++    mbedtls_ssl_config ssl_conf;
++    bool connected;
+     uint64_t last_recv_ms;          /* For keepalive watchdog */
+ } ml_derp_conn_t;
+ 
+diff -ru a/src/microlink.c b/src/microlink.c
+--- a/src/microlink.c	2026-11-01 23:43:12.690077600 +0100
++++ b/src/microlink.c	2026-11-02 00:02:44.407780284 +0100
+@@ -223,11 +223,11 @@
+  * Public API
+  * ========================================================================== */
+ 
+-microlink_t *microlink_init(const microlink_config_t *config) {
+-    if (!config) {
+-        ESP_LOGE(TAG, "Invalid config");
+-        return NULL;
+-    }
++microlink_t *microlink_init(const microlink_config_t *config) {
++    if (!config) {
++        ESP_LOGE(TAG, "Invalid config");
++        return NULL;
++    }
+ 
+     /* Route cJSON to PSRAM */
+     cJSON_Hooks hooks = {
+@@ -670,7 +670,7 @@
+     info->vpn_ip = p->vpn_ip;
+     strncpy(info->hostname, p->hostname, sizeof(info->hostname) - 1);
+     memcpy(info->public_key, p->public_key, 32);
+-    info->online = p->active;
++    info->online = p->online;
+     info->direct_path = p->has_direct_path;
+     return ESP_OK;
+ }
+diff -ru a/src/ml_coord.c b/src/ml_coord.c
+--- a/src/ml_coord.c	2026-11-01 23:43:12.690721564 +0100
++++ b/src/ml_coord.c	2026-11-02 00:02:44.406486060 +0100
+@@ -1213,6 +1213,19 @@
+  * State: FETCH_PEERS - Send MapRequest, parse MapResponse
+  * ========================================================================== */
+ 
++/* Tell wg_mgr that a node came online or went. */
++static void queue_online(microlink_t *ml, int64_t node_id, bool online) {
++    if (node_id == 0) return;
++    ml_peer_update_t *update = ml_psram_calloc(1, sizeof(ml_peer_update_t));
++    if (!update) return;
++    update->action = ML_PEER_SET_ONLINE;
++    update->node_id = node_id;
++    update->online = online ? 1 : 0;
++    if (xQueueSend(ml->peer_update_queue, &update, pdMS_TO_TICKS(100)) != pdTRUE) {
++        free(update);
++    }
++}
++
+ static void parse_peers_from_map_response(microlink_t *ml, cJSON *root) {
+     /* Try all field names used by Tailscale (copied from v1 lines 3176-3184):
+      *   "Peers"        - Full peer list (initial Stream=false response)
+@@ -1243,6 +1256,13 @@
+ 
+         update->action = ML_PEER_ADD;
+ 
++        /* The node's id, which online changes name it by, and whether it is
++         * online: Tailscale lists offline peers too. */
++        cJSON *node_id = cJSON_GetObjectItem(peer, "ID");
++        update->node_id = cJSON_IsNumber(node_id) ? (int64_t)node_id->valuedouble : 0;
++        cJSON *online = cJSON_GetObjectItem(peer, "Online");
++        update->online = cJSON_IsBool(online) ? (cJSON_IsTrue(online) ? 1 : 0) : -1;
++
+         /* Hostname */
+         cJSON *name = cJSON_GetObjectItem(peer, "Name");
+         if (name && name->valuestring) {
+@@ -1333,6 +1353,31 @@
+     }
+ 
+ check_removed:
++    /* OnlineChange: {"<node id>": true|false}, a long-poll's word that a
++     * peer came online or went. */
++    cJSON *online_change = cJSON_GetObjectItem(root, "OnlineChange");
++    if (online_change && cJSON_IsObject(online_change)) {
++        cJSON *change;
++        cJSON_ArrayForEach(change, online_change) {
++            if (!change->string || !cJSON_IsBool(change)) continue;
++            queue_online(ml, strtoll(change->string, NULL, 10), cJSON_IsTrue(change));
++        }
++    }
++    /* PeersChangedPatch, as Tailscale sends it, is an array of PeerChange
++     * objects named by NodeID; the object form handled below is keyed by
++     * node key. Only Online is taken from the array form. */
++    cJSON *patch_list = cJSON_GetObjectItem(root, "PeersChangedPatch");
++    if (patch_list && cJSON_IsArray(patch_list)) {
++        cJSON *change;
++        cJSON_ArrayForEach(change, patch_list) {
++            cJSON *id = cJSON_GetObjectItem(change, "NodeID");
++            cJSON *on = cJSON_GetObjectItem(change, "Online");
++            if (cJSON_IsNumber(id) && cJSON_IsBool(on)) {
++                queue_online(ml, (int64_t)id->valuedouble, cJSON_IsTrue(on));
++            }
++        }
++    }
++
+     /* Handle PeersRemoved — array of nodekey strings (long-poll delta updates) */
+     cJSON *removed = cJSON_GetObjectItem(root, "PeersRemoved");
+     if (removed && cJSON_IsArray(removed)) {
+diff -ru a/src/ml_wg_mgr.c b/src/ml_wg_mgr.c
+--- a/src/ml_wg_mgr.c	2026-11-01 23:43:12.692114253 +0100
++++ b/src/ml_wg_mgr.c	2026-11-02 00:02:44.407405191 +0100
+@@ -418,6 +418,7 @@
+ 
+     /* Check if peer already exists */
+     int idx = find_peer_by_key(ml, update->public_key);
++    bool found = idx >= 0;
+     if (idx >= 0) {
+         ESP_LOGI(TAG, "Updating existing peer %s (idx=%d)", update->hostname, idx);
+     } else {
+@@ -478,6 +479,16 @@
+     p->hostname[sizeof(p->hostname) - 1] = '\0';
+     p->derp_region = update->derp_region;
+     p->active = true;
++    if (update->node_id != 0) {
++        p->node_id = update->node_id;
++    }
++    /* A netmap that says nothing of it leaves it as it was, and a new peer
++     * online: what every peer was before this was kept. */
++    if (update->online >= 0) {
++        p->online = update->online == 1;
++    } else if (!found) {
++        p->online = true;
++    }
+ 
+     /* Copy endpoints */
+     p->endpoint_count = update->endpoint_count;
+@@ -663,6 +674,19 @@
+         case ML_PEER_REMOVE:
+             remove_peer(ml, update);
+             break;
++        case ML_PEER_SET_ONLINE:
++            for (int i = 0; i < ml->peer_count; i++) {
++                ml_peer_t *p = &ml->peers[i];
++                if (p->active && p->node_id == update->node_id) {
++                    if (p->online != (update->online == 1)) {
++                        ESP_LOGI(TAG, "Peer %s is %s", p->hostname,
++                                 update->online == 1 ? "online" : "offline");
++                    }
++                    p->online = update->online == 1;
++                    break;
++                }
++            }
++            break;
+         case ML_PEER_UPDATE_ENDPOINT:
+             /* Update endpoint/DERP for existing peer (delta patch) */
+             {

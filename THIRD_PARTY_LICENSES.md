@@ -585,6 +585,16 @@ Full text: https://github.com/lieff/minimp3/blob/master/LICENSE
 
 ---
 
+## libopus
+
+**License:** BSD-3-Clause (Xiph.Org Foundation, Skype Limited, Octasic, Jean-Marc Valin, Timothy B. Terriberry, CSIRO, Gregory Maxwell, Mark Borgerding, Erik de Castro Lopo, Mozilla, Amazon)
+**Source:** https://downloads.xiph.org/releases/opus/opus-1.5.2.tar.gz, SHA-256 `65c1d2f78b9f2fb20082c38cbe47c951ad5839345876e46941612ee87f9a7ce1`
+**Used for:** Opus at 16 kHz mono for Tailnet chat's calls and voice messages. Vendored unchanged in `components/opus/opus-1.5.2/` with its `COPYING`, less the DNN, the float SILK, the ARM, x86 and MIPS code, the tests and the demos (`components/opus/opus.cmake`).
+
+Full text: `components/opus/opus-1.5.2/COPYING`
+
+---
+
 ## DejaVu fonts
 
 **License:** Bitstream Vera Fonts license; DejaVu changes are in the public domain

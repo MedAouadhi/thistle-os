@@ -5,6 +5,7 @@ set(KERNEL_SRCS
     "src/link_deps.c" "src/board_fallback.c" "src/board_fingerprint.c"
     "src/board_builtin_drivers.c" "src/power_platform.c" "src/time_platform.c"
     "src/tailnet_platform.c" "src/kernel_slot_platform.c" "src/update_platform.c"
+    "src/tailnet_chat_spike.c"
 )
 set(KERNEL_REQUIRES
     thistle_hal kernel_rs esp_timer freertos esp_partition fatfs vfs app_update esp_app_format
@@ -29,6 +30,8 @@ if(IDF_TARGET STREQUAL "esp32s3")
     # only the S3 boards have; elsewhere tailnet_platform.c answers as a
     # board without it.
     list(APPEND KERNEL_PRIV_REQUIRES microlink)
+    # libopus (components/opus), for Tailnet chat's calls and voice messages
+    list(APPEND KERNEL_PRIV_REQUIRES opus)
 endif()
 
 idf_component_register(
