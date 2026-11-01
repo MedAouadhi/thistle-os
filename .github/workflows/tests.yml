@@ -439,6 +439,10 @@ jobs:
         working-directory: simulator
         run: python3 tests/test_tailscale.py --sim build/thistle_sim
 
+      - name: Run background check tests
+        working-directory: simulator
+        run: python3 tests/test_background_check.py --sim build/thistle_sim
+
       - name: Run Dictation tests against a fake Cohere
         working-directory: simulator
         run: python3 tests/test_dictation.py --sim build/thistle_sim

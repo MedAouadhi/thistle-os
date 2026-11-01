@@ -20,6 +20,8 @@
 pub mod app_manager;
 pub mod appstore_client;
 pub mod audio_volume;
+pub mod background_check;
+pub mod background_check_policy;
 pub mod tap_installer;
 pub mod installed_apps;
 pub mod ble_manager;
