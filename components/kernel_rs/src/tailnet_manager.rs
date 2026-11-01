@@ -600,8 +600,8 @@ pub(crate) fn peer_name(ip: std::net::Ipv4Addr) -> Option<String> {
     let ip = u32::from(ip);
     peers()
         .into_iter()
-        .find(|(p, _, _)| *p == ip)
-        .map(|(_, name, _)| name.split('.').next().unwrap_or("").to_string())
+        .find(|p| p.ip == ip)
+        .map(|p| p.name.split('.').next().unwrap_or("").to_string())
         .filter(|n| !n.is_empty())
 }
 

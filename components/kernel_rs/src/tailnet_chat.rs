@@ -136,98 +136,25 @@ fn book_path() -> PathBuf {
     spiffs().join("tailnet_chat.json")
 }
 
-fn identity_path() -> PathBuf {
-    spiffs().join("config").join("mesh_identity")
-}
-
 /// The simulator alone admits loopback and listens on it.
 const SIMULATOR: bool = cfg!(not(target_os = "espidf"));
 
 // ---------------------------------------------------------------------------
-// The identity: MeshCore's
+// The identity: MeshCore's (mesh_identity.rs, made at boot)
 // ---------------------------------------------------------------------------
 
-/// "MCI1": meshcore_shim.cpp's IDENTITY_MAGIC, little-endian.
-const IDENTITY_MAGIC: u32 = 0x3149_434d;
-/// magic, then MeshCore's LocalIdentity::writeTo: the private key (here the
-/// 32-byte seed and the public key again, ed_25519.h) and the public key.
-const IDENTITY_LEN: usize = 4 + 64 + 32;
-
-struct Identity {
-    seed: [u8; 32],
-    key: Key,
-}
-
-impl Drop for Identity {
-    fn drop(&mut self) {
-        for b in self.seed.iter_mut() {
-            // SAFETY: a valid, aligned byte of our own; volatile so it is not optimised away
-            unsafe { std::ptr::write_volatile(b, 0) };
-        }
-    }
-}
-
-/// The identity in MeshCore's file, if it is one: the seed's public key
-/// must be the one stored.
-fn identity_from(buf: &[u8]) -> Option<Identity> {
-    if buf.len() != IDENTITY_LEN || u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) != IDENTITY_MAGIC {
-        return None;
-    }
-    let mut seed = [0u8; 32];
-    seed.copy_from_slice(&buf[4..36]);
-    let mut key = [0u8; 32];
-    key.copy_from_slice(&buf[68..100]);
-    let mut derived = [0u8; 32];
-    let ok = unsafe { crate::crypto::thistle_crypto_ed25519_derive_public(seed.as_ptr(), derived.as_mut_ptr()) };
-    let id = Identity { seed, key };
-    (ok == ESP_OK && derived == key).then_some(id)
-}
+use crate::mesh_identity::Identity;
 
 fn load_identity() -> Option<Identity> {
-    let path = identity_path();
-    match std::fs::read(&path) {
-        Ok(buf) => {
-            let id = identity_from(&buf);
-            if id.is_none() {
-                warn(&format!("{} is not a MeshCore identity", path.display()));
-            }
-            id
-        }
-        // The simulator has no MeshCore to make one: it makes one as
-        // MeshCore would, so the simulated device has a key that lasts.
-        Err(_) if SIMULATOR => make_sim_identity(),
-        Err(_) => None,
-    }
+    crate::mesh_identity::identity()
 }
 
-#[cfg(not(target_os = "espidf"))]
-fn make_sim_identity() -> Option<Identity> {
-    let mut seed = [0u8; 32];
-    let mut key = [0u8; 32];
-    if unsafe { crate::crypto::thistle_crypto_ed25519_keygen(seed.as_mut_ptr(), key.as_mut_ptr()) } != ESP_OK {
-        return None;
-    }
-    let mut buf = Vec::with_capacity(IDENTITY_LEN);
-    buf.extend_from_slice(&IDENTITY_MAGIC.to_le_bytes());
-    buf.extend_from_slice(&seed);
-    buf.extend_from_slice(&key);
-    buf.extend_from_slice(&key);
-    let path = identity_path();
-    let _ = std::fs::create_dir_all(path.parent()?);
-    std::fs::write(&path, &buf).ok()?;
-    info(&format!("made an identity for the simulator in {}", path.display()));
-    identity_from(&buf)
-}
-
-#[cfg(target_os = "espidf")]
-fn make_sim_identity() -> Option<Identity> {
-    None
+fn own_key(id: &Identity) -> Key {
+    id.public
 }
 
 fn sign(id: &Identity, msg: &[u8]) -> [u8; 64] {
-    let mut sig = [0u8; 64];
-    unsafe { crate::crypto::thistle_crypto_ed25519_sign(id.seed.as_ptr(), msg.as_ptr(), msg.len(), sig.as_mut_ptr()) };
-    sig
+    id.sign(msg)
 }
 
 fn verify(key: &Key, msg: &[u8], sig: &[u8; 64]) -> bool {
@@ -558,7 +485,7 @@ fn look(s: &mut State) {
     if shown == Shown::Listening && s.identity.is_none() {
         s.identity = load_identity();
         if let Some(id) = &s.identity {
-            info(&format!("identity {}", wire::fingerprint(&id.key)));
+            info(&format!("identity {}", wire::fingerprint(&own_key(id))));
         }
     }
     if shown == Shown::Listening && s.identity.is_none() {
@@ -595,7 +522,7 @@ fn listen(s: &mut State, tailnet_ip: &str) -> std::io::Result<()> {
     let listener = TcpListener::bind(SocketAddr::new(ip, port))?;
     listener.set_nonblocking(true)?;
     let addr = listener.local_addr()?;
-    let fp = s.identity.as_ref().map(|i| wire::fingerprint(&i.key)).unwrap_or_default();
+    let fp = s.identity.as_ref().map(|i| wire::fingerprint(&own_key(i))).unwrap_or_default();
     info(&format!("listening on {addr} as {fp}"));
     s.listener = Some(listener);
     s.listening_on = Some(addr);
@@ -748,7 +675,7 @@ fn read_conn(s: &mut State, i: usize, now: u64) {
                     c.rx = Vec::new();
                     c.ws.push(&rest);
                     c.phase = Phase::Hello;
-                    let key = s.identity.as_ref().map(|id| id.key).unwrap_or_default();
+                    let key = s.identity.as_ref().map(own_key).unwrap_or_default();
                     let hello = wire::hello(&key, &s.name, &c.nonce);
                     s.conns[i].send_text(&hello);
                 }
@@ -816,7 +743,7 @@ fn on_handshake(s: &mut State, i: usize, text: &[u8]) {
         Err(e) => return refuse(&mut s.conns[i], e, "a malformed frame in the handshake"),
     };
     let Some(id) = s.identity.as_ref() else { return };
-    let own = id.key;
+    let own = own_key(id);
     let kind = wire::frame_type(&frame).to_string();
     let c = &mut s.conns[i];
     match (&c.phase, kind.as_str()) {
@@ -1187,7 +1114,7 @@ pub(crate) fn messages(key: &Key) -> Vec<Message> {
 /// (shown, why, own key, port listened on, own name)
 fn status() -> Option<(Shown, String, Option<Key>, u16, String, usize)> {
     with(|s| {
-        (s.shown, s.why.clone(), s.identity.as_ref().map(|i| i.key),
+        (s.shown, s.why.clone(), s.identity.as_ref().map(own_key),
          s.listening_on.map_or(0, |a| a.port()), s.name.clone(),
          s.conns.iter().filter(|c| matches!(c.phase, Phase::Open { .. }) && !c.closing).count())
     })
@@ -1536,26 +1463,17 @@ mod tests {
     }
 
     #[test]
-    fn meshcores_identity_file_is_read_and_a_wrong_one_refused() {
-        use ed25519_dalek::SigningKey;
-        let seed = [9u8; 32];
-        let key = SigningKey::from_bytes(&seed).verifying_key().to_bytes();
-        let mut buf = IDENTITY_MAGIC.to_le_bytes().to_vec();
-        buf.extend_from_slice(&seed);
-        buf.extend_from_slice(&key);
-        buf.extend_from_slice(&key);
-        let id = identity_from(&buf).unwrap();
-        assert_eq!(id.key, key);
-        // What it signs verifies against the key MeshCore announces
-        let t = wire::transcript(Role::Listener, &[1; 32], &[2; 32], &[3; 32], &key);
-        assert!(verify(&key, &t, &sign(&id, &t)));
-        let mut wrong = buf.clone();
-        wrong[99] ^= 1;
-        assert!(identity_from(&wrong).is_none());
-        assert!(identity_from(&buf[..99]).is_none());
-        let mut magic = buf.clone();
-        magic[0] = 0;
-        assert!(identity_from(&magic).is_none());
+    fn a_dialler_s_signature_verifies_against_its_transcript() {
+        let h: serde_json::Value =
+            serde_json::from_str(include_str!("../../../docs/tailnet-chat/vectors/handshake.json")).unwrap();
+        let key = wire::unhex::<32>(h["dialler"]["key"].as_str().unwrap()).unwrap();
+        let t = wire::unhex::<149>(h["transcripts"]["dialler"].as_str().unwrap()).unwrap();
+        let auth = wire::check(h["dialler"]["auth"].as_str().unwrap().as_bytes()).unwrap();
+        let sig = wire::unhex::<64>(wire::str_of(&auth, "sig")).unwrap();
+        assert!(verify(&key, &t, &sig));
+        let mut bad = sig;
+        bad[0] ^= 1;
+        assert!(!verify(&key, &t, &bad));
     }
 
     fn m(id: &str, ts: u64) -> Message {
