@@ -120,8 +120,53 @@ class Target:
         """Look for `who` now, as when it is seen online, and send what waits for it."""
         return self.call({"cmd": "flush", "to": list(who) if isinstance(who, tuple) else who})
 
+    # Voice messages and calls (ticket 10; ticket 09 runs them against the simulator).
+
+    def send_voice(self, to, path: str, ms: int) -> str:
+        return self.call({"cmd": "send_voice", "to": to, "file": path, "ms": ms})
+
+    def set_call_policy(self, policy: str):
+        """`ignore`: let an offer ring for the user; `answer`: take every call.
+        A target whose calls always ring for its user (the simulator) need
+        only accept `ignore`."""
+        return self.call({"cmd": "set", "call_policy": policy})
+
+    def place_call(self, to) -> str:
+        return self.call({"cmd": "call", "to": list(to) if isinstance(to, tuple) else to})
+
+    def calls(self) -> dict:
+        return self.call({"cmd": "calls"})
+
+    def answer_call(self, call: str, decline: str | None = None):
+        command = {"cmd": "answer_call", "call": call}
+        if decline:
+            command["decline"] = decline
+        return self.call(command)
+
+    def end_call(self, call: str, reason: str = "hangup"):
+        return self.call({"cmd": "end_call", "call": call, "reason": reason})
+
+    def talk(self, call: str):
+        """Have the target send audio on a connected call for about a second.
+        A target whose microphone streams by itself (the headless core, the
+        simulator) answers `true` and does nothing more."""
+        return self.call({"cmd": "talk", "call": call})
+
+    def cellular_call(self):
+        """A cellular call takes the device over. A target with no cellular
+        modem raises Skipped (`can_cellular` False)."""
+        if not self.can_cellular:
+            raise Skipped("the target has no cellular calls")
+        return self.call({"cmd": "cellular_call"})
+
+    can_cellular = True
+
     def stop(self):
         pass
+
+
+class Skipped(Exception):
+    """A scenario the target cannot do, such as a cellular call without a modem."""
 
 
 class ReferenceTarget(Target):
@@ -175,6 +220,8 @@ class ProcessTarget(Target):
                 if reply.get("seq") == self.seq:
                     break
         if "error" in reply:
+            if command["cmd"] == "cellular_call" and "no command" in reply["error"]:
+                raise Skipped("the target has no cellular calls")
             raise RuntimeError(f"{command['cmd']}: {reply['error']}")
         return reply["ok"]
 
@@ -694,15 +741,262 @@ MESSAGE_SCENARIOS = [outbox_across_disconnect, messages_in_order_written, read_r
 SCENARIOS += MESSAGE_SCENARIOS
 
 
-def run(make_target, scenarios=None, out=None) -> int:
-    """Run each scenario against a fresh target; the number that failed."""
+# -- voice messages and calls ----------------------------------------------------
+# (ticket 10; ticket 09 points them at the simulator.) The target's side of a
+# call is driven through Target: place_call, calls, answer_call, end_call,
+# talk, set_call_policy, cellular_call; the other side is a RawConn.
+
+def _vector(name: str) -> dict:
+    with open(os.path.join(VECTORS, name), encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _voice_file() -> tuple[str, bytes]:
+    path = os.path.join(VECTORS, "voice.opus")
+    with open(path, "rb") as f:
+        return path, f.read()
+
+
+def _receive_voice(conn: RawConn, timeout: float = 5.0, stop_after_chunks: int | None = None):
+    """The next `voice` frame and its chunks, in order: (frame, data). With
+    `stop_after_chunks`, return as soon as that many have arrived."""
+    voice = conn.expect("voice", timeout=timeout)
+    assert voice.get("codec") == "ogg-opus", voice
+    data, seq = b"", 0
+    deadline = time.monotonic() + timeout
+    while len(data) < voice["bytes"]:
+        got = conn.recv(max(0.05, deadline - time.monotonic()))
+        if not (isinstance(got, tuple) and got[0] == "binary"):
+            continue
+        kind, stream, s, payload = protocol.unpack_binary(got[1])
+        if kind != protocol.KIND_VOICE or stream != voice["stream"]:
+            continue
+        assert s == seq, f"voice chunk {s} where {seq} was due"
+        assert len(payload) <= protocol.MAX_CHUNK, len(payload)
+        data += payload
+        seq += 1
+        if stop_after_chunks and seq >= stop_after_chunks:
+            break
+    return voice, data
+
+
+def _call_audio(conn: RawConn, stream: int, count: int, timeout: float = 5.0) -> list:
+    """`count` call audio frames from the target on `stream`: [(seq, payload)]."""
+    out, deadline = [], time.monotonic() + timeout
+    while len(out) < count:
+        try:
+            got = conn.recv(max(0.05, deadline - time.monotonic()))
+        except AssertionError:
+            raise AssertionError(f"{len(out)} of {count} call audio frames in {timeout} s")
+        if isinstance(got, tuple) and got[0] == "binary":
+            kind, s, seq, payload = protocol.unpack_binary(got[1])
+            if kind == protocol.KIND_CALL_AUDIO:
+                assert s == stream, f"call audio on stream {s}, not the call's {stream}"
+                out.append((seq, payload))
+        if time.monotonic() > deadline:
+            raise AssertionError(f"{len(out)} of {count} call audio frames in {timeout} s")
+    return out
+
+
+def _speak(conn: RawConn, stream: int, frames: int, start_seq: int = 0) -> None:
+    """Send the vector's Opus packets as call audio, 20 ms apart."""
+    packets = [bytes.fromhex(f["hex"]) for f in _vector("voice.json")["frames"]]
+    t0 = time.monotonic()
+    for i in range(frames):
+        conn.send_binary(protocol.pack_binary(protocol.KIND_CALL_AUDIO, stream, start_seq + i,
+                                              packets[i % len(packets)]))
+        time.sleep(max(0.0, t0 + (i + 1) * 0.02 - time.monotonic()))
+
+
+def _call_state(target: Target, call: str):
+    return (target.calls().get(call) or {}).get("state")
+
+
+def _offer(conn: RawConn, target: Target) -> tuple[str, int]:
+    """`conn` offers a call; the target rings. (call id, stream)."""
+    call, stream = new_id(), int.from_bytes(os.urandom(4), "big") | 1
+    conn.send({"type": "call_offer", "call": call, "transports": ["ws-opus"], "stream": stream})
+    eventually(lambda: _call_state(target, call) == "ringing", what="the target to ring")
+    return call, stream
+
+
+def _connected_call(target: Target, name: str) -> tuple[RawConn, str, int]:
+    """A contact calls the target, and its user answers."""
+    target.set_call_policy("ignore")
+    conn = RawConn(target.address, name=name).handshake()
+    _become_contact(target, conn)
+    call, stream = _offer(conn, target)
+    target.answer_call(call)
+    answer = conn.expect("call_answer", call=call)
+    assert answer.get("transport") == "ws-opus" and "decline" not in answer, answer
+    eventually(lambda: _call_state(target, call) == "connected", what="the call to connect")
+    return conn, call, stream
+
+
+def voice_message_from_target(target: Target) -> None:
+    """The target's voice message goes as `voice` and chunks of the whole file; once acked it is delivered."""
+    conn = RawConn(target.address, name="listener").handshake()
+    _become_contact(target, conn)
+    path, data = _voice_file()
+    mid = target.send_voice(conn.key_hex, path, 1500)
+    voice, got = _receive_voice(conn)
+    assert voice["id"] == mid and voice["bytes"] == len(data) and voice["ms"] == 1500, voice
+    assert got == data, "the voice message's bytes differ from the file sent"
+    conn.send({"type": "ack", "id": mid})
+    eventually(lambda: target.waiting(conn.key_hex) == [], what="the voice message to leave the outbox")
+    eventually(lambda: [m for m in target.messages(conn.key_hex) if m["id"] == mid and m["state"] == "delivered"],
+               what="the voice message to show as delivered")
+    conn.close()
+
+
+def voice_message_broken_and_restarted(target: Target) -> None:
+    """A transfer broken by a closed connection is sent again, whole, on the next one."""
+    conn = RawConn(target.address, name="flaky").handshake()
+    _become_contact(target, conn)
+    path, data = _voice_file()
+    mid = target.send_voice(conn.key_hex, path, 1500)
+    voice, partial = _receive_voice(conn, stop_after_chunks=1)
+    assert voice["id"] == mid and len(partial) < len(data)
+    conn.close()
+    assert target.waiting(conn.key_hex) == [mid], "a voice message not acked left the outbox"
+    again = RawConn(target.address, name="flaky", seed=conn.seed).handshake()
+    target.flush(again.key_hex)
+    voice2, whole = _receive_voice(again)
+    assert voice2["id"] == mid and whole == data, "the voice message was not sent again whole"
+    again.send({"type": "ack", "id": mid})
+    eventually(lambda: target.waiting(again.key_hex) == [], what="the outbox to clear")
+    again.close()
+
+
+def call_answered(target: Target) -> None:
+    """A contact's call rings; answered, audio flows both ways on the offer's stream; a hangup ends it."""
+    conn, call, stream = _connected_call(target, "caller")
+    target.talk(call)
+    speaker = threading.Thread(target=_speak, args=(conn, stream, 25), daemon=True)
+    speaker.start()
+    audio = _call_audio(conn, stream, 10)
+    speaker.join()
+    seqs = [s for s, _ in audio]
+    assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs), f"call audio out of order: {seqs}"
+    assert all(1 <= len(p) <= protocol.MAX_CHUNK for _, p in audio)
+    eventually(lambda: (target.calls().get(call) or {}).get("frames", 0) >= 20, what="the target to receive audio")
+    conn.send({"type": "call_end", "call": call, "reason": "hangup"})
+    eventually(lambda: _call_state(target, call) == "ended:hangup", what="the call to end")
+    conn.close()
+
+
+def call_placed_by_target(target: Target) -> None:
+    """The target offers ws-opus; answered, it sends audio on its stream; its hangup sends `call_end`."""
+    conn = RawConn(target.address, name="callee").handshake()
+    _become_contact(target, conn)
+    call = target.place_call(conn.key_hex)
+    offer = conn.expect("call_offer", call=call)
+    assert "ws-opus" in offer["transports"], offer
+    conn.send({"type": "call_answer", "call": call, "transport": "ws-opus"})
+    eventually(lambda: _call_state(target, call) == "connected", what="the call to connect")
+    target.talk(call)
+    _call_audio(conn, offer["stream"], 10)
+    _speak(conn, offer["stream"], 10)
+    target.end_call(call)
+    end = conn.expect("call_end", call=call)
+    assert end["reason"] == "hangup", end
+    conn.close()
+
+
+def call_declined(target: Target) -> None:
+    """The user declines a ringing call; a call the other side declines shows as declined."""
+    target.set_call_policy("ignore")
+    conn = RawConn(target.address, name="pest").handshake()
+    _become_contact(target, conn)
+    call, _ = _offer(conn, target)
+    target.answer_call(call, decline="declined")
+    answer = conn.expect("call_answer", call=call)
+    assert answer.get("decline") == "declined" and "transport" not in answer, answer
+    mine = target.place_call(conn.key_hex)
+    conn.expect("call_offer", call=mine)
+    conn.send({"type": "call_answer", "call": mine, "decline": "declined"})
+    eventually(lambda: _call_state(target, mine) == "declined:declined", what="the target's call to be declined")
+    conn.close()
+
+
+def call_busy(target: Target) -> None:
+    """A second call while one is up gets `busy`; a stranger's call gets `declined`."""
+    first, call, stream = _connected_call(target, "first")
+    second = RawConn(target.address, name="second").handshake()
+    _become_contact(target, second)
+    other = new_id()
+    second.send({"type": "call_offer", "call": other, "transports": ["ws-opus"], "stream": 7})
+    answer = second.expect("call_answer", call=other)
+    assert answer.get("decline") == "busy", answer
+    assert _call_state(target, call) == "connected", "the call in progress was disturbed"
+    stranger = RawConn(target.address, name="stranger").handshake()
+    odd = new_id()
+    stranger.send({"type": "call_offer", "call": odd, "transports": ["ws-opus"], "stream": 9})
+    assert stranger.expect("call_answer", call=odd).get("decline") == "declined"
+    first.send({"type": "call_end", "call": call, "reason": "hangup"})
+    for c in (first, second, stranger):
+        c.close()
+
+
+def call_ended_by_cellular(target: Target) -> None:
+    """A cellular call takes over: the tailnet call ends with `call_end` `cellular`."""
+    if not target.can_cellular:
+        raise Skipped("the target has no cellular calls")
+    conn, call, stream = _connected_call(target, "interrupted")
+    target.cellular_call()
+    end = conn.expect("call_end", call=call)
+    assert end["reason"] == "cellular", end
+    eventually(lambda: _call_state(target, call) == "ended:cellular", what="the call to end")
+    conn.close()
+
+
+def call_far_end_silent(target: Target) -> None:
+    """A connected call that hears nothing for 10 s is ended by the target, `call_end` `timeout`."""
+    conn, call, stream = _connected_call(target, "silent")
+    t0 = time.monotonic()
+    end = conn.expect("call_end", call=call, timeout=15)
+    waited = time.monotonic() - t0
+    assert end["reason"] == "timeout", end
+    assert 9.5 <= waited <= 13.5, f"ended after {waited:.1f} s, not 10"
+    eventually(lambda: _call_state(target, call) == "ended:timeout", what="the call to end")
+    conn.close()
+
+
+def call_unreachable(target: Target) -> None:
+    """A call to a contact that cannot be reached fails at once as `unreachable`, and is not queued."""
+    away = ChatPeer(name="away").start()
+    address = away.address
+    away.stop()
+    target.add_contact(address, name="away")
+    t0 = time.monotonic()
+    call = target.place_call(address)
+    eventually(lambda: _call_state(target, call) == "ended:unreachable", timeout=8,
+               what="the call to fail as unreachable")
+    assert time.monotonic() - t0 < 8
+    assert target.waiting(address) == [], "a call went into the outbox"
+
+
+VOICE_SCENARIOS = [voice_message_from_target, voice_message_broken_and_restarted]
+CALL_SCENARIOS = [call_answered, call_placed_by_target, call_declined, call_busy, call_ended_by_cellular,
+                  call_far_end_silent, call_unreachable]
+SCENARIOS += VOICE_SCENARIOS + CALL_SCENARIOS
+
+
+def run(make_target, scenarios=None, out=None, skipped: list | None = None) -> int:
+    """Run each scenario against a fresh target; the number that failed.
+    A scenario the target cannot do is reported as skipped, not failed, and
+    its name added to `skipped`."""
     out = out or sys.stdout
+    skipped = skipped if skipped is not None else []
     failed = 0
     for scenario in scenarios or SCENARIOS:
         target = make_target()
         try:
             scenario(target)
             print(f"ok    {scenario.__name__}", file=out)
+        except Skipped as e:
+            skipped.append(scenario.__name__)
+            print(f"skip  {scenario.__name__}: {e}", file=out)
         except (AssertionError, Refused, ws.Closed, OSError, RuntimeError):
             failed += 1
             print(f"FAIL  {scenario.__name__}\n{traceback.format_exc()}", file=out)
@@ -730,8 +1024,10 @@ def main(argv=None) -> int:
         host, _, port = args.address.rpartition(":")
         make, pool = (lambda: AddressTarget((host.strip("[]"), int(port)), args.key)), WIRE_ONLY
     chosen = [s for s in pool if not args.only or s.__name__ in args.only]
-    failed = run(make, chosen)
-    print(f"{len(chosen) - failed} of {len(chosen)} scenarios passed")
+    skipped: list = []
+    failed = run(make, chosen, skipped=skipped)
+    print(f"{len(chosen) - failed - len(skipped)} of {len(chosen)} scenarios passed"
+          + (f", {len(skipped)} skipped" if skipped else ""))
     return 1 if failed else 0
 
 

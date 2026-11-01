@@ -165,3 +165,27 @@ CallAnswer answerOffer({
     CallPolicy.ignore => const CallAnswer.ring(),
   };
 }
+
+/// How long a call may ring unanswered before it ends as `timeout`.
+const ringTimeout = Duration(seconds: 45);
+
+/// A connected call ends after this long without a frame (protocol 4.8).
+const silenceTimeout = Duration(seconds: 10);
+
+/// The reason a call ends by itself now, or null: `since` is when it
+/// entered `state`, `lastFrame` when the other side's audio last came.
+String? callEndDue({
+  required String state,
+  required DateTime since,
+  required DateTime lastFrame,
+  required DateTime now,
+}) => switch (state) {
+  'connected' when now.difference(lastFrame) > silenceTimeout => 'timeout',
+  'offered' || 'ringing' when now.difference(since) > ringTimeout => 'timeout',
+  _ => null,
+};
+
+/// A call to show as missed: someone called, and it ended without being
+/// answered and without the user turning it down.
+bool isMissedCall({required bool mine, required bool answered, required String state}) =>
+    !mine && !answered && (state.startsWith('ended:') || state == 'declined:busy');

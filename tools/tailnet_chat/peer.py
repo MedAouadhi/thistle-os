@@ -34,9 +34,9 @@ from dataclasses import dataclass, field
 
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from tailnet_chat import ed25519, protocol, ws
+    from tailnet_chat import ed25519, ogg, protocol, ws
 else:
-    from . import ed25519, protocol, ws
+    from . import ed25519, ogg, protocol, ws
 
 HANDSHAKE_S = 10.0
 
@@ -212,6 +212,7 @@ class ChatPeer:
         self.caps = list(caps)
         self.read_receipts = read_receipts
         self.call_policy = call_policy   # answer, decline, busy, ignore
+        self.call_silence_s = 10.0       # a connected call ends after this long without a frame
         self.ping_s, self.idle_s = ping_s, idle_s
         self.sign_override = None        # a test may set fn(transcript) -> signature
         self.log_fn = log
@@ -453,12 +454,39 @@ class ChatPeer:
 
     def end_call(self, call_id: str, reason: str = "hangup") -> None:
         call = self.calls[call_id]
+        if call["state"] not in ("offered", "ringing", "connected"):
+            return  # already over
         conn = self.connected(call["peer"])
         if conn:
             conn.send({"type": "call_end", "call": call_id, "reason": reason})
         with self.cond:
             call["state"] = "ended:" + reason
             self.cond.notify_all()
+
+    def cellular_call(self) -> None:
+        """A cellular call took over the device: every live call ends as `cellular`."""
+        with self.cond:
+            live = [k for k, c in self.calls.items() if c["state"] in ("offered", "ringing", "connected")]
+        for call_id in live:
+            self.end_call(call_id, "cellular")
+
+    def talk(self, call_id: str, seconds: float = 1.0) -> None:
+        """Send the vector's Opus packets on a call for `seconds`, 20 ms apart, in the background."""
+        def run():
+            path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "docs",
+                                "tailnet-chat", "vectors", "voice.opus")
+            with open(path, "rb") as f:
+                packets = ogg.read_opus(f.read()).frames
+            start = time.monotonic()
+            for seq in range(int(seconds * 50)):
+                if self.calls.get(call_id, {}).get("state") != "connected" or not self._running:
+                    return
+                try:
+                    self.send_call_audio(call_id, seq, packets[seq % len(packets)])
+                except (AttributeError, ws.Closed, OSError):
+                    return
+                time.sleep(max(0.0, start + (seq + 1) * 0.02 - time.monotonic()))
+        threading.Thread(target=run, daemon=True).start()
 
     def _send_now(self, key: str | None, frame: dict) -> bool:
         """Typing and read receipts: sent on an open connection, never queued,
@@ -901,10 +929,11 @@ class ChatPeer:
             with self.cond:
                 conns = [c for c in self.connections if c.authenticated and not c.closed]
                 in_call = {c["peer"] for c in self.calls.values() if c["state"] == "connected"}
-                for call_id, call in self.calls.items():
-                    if call["state"] == "connected" and now - call.get("last_frame", now) > 10:
-                        call["state"] = "ended:timeout"
-                        self.cond.notify_all()
+                silent = [call_id for call_id, call in self.calls.items()
+                          if call["state"] == "connected"
+                          and now - call.get("last_frame", now) > self.call_silence_s]
+            for call_id in silent:  # protocol 4.8: either side MUST end it, and says so
+                self.end_call(call_id, "timeout")
             if now - last_ping >= self.ping_s:
                 last_ping = now
                 for c in conns:
@@ -991,10 +1020,19 @@ def control(peer: ChatPeer, command: dict):
         peer.flush(to)
         return True
     if cmd == "calls":
-        return {k: {"peer": v["peer"], "state": v["state"], "frames": len(v["frames"])}
+        return {k: {"peer": v["peer"], "state": v["state"], "frames": len(v["frames"]), "mine": v["mine"]}
                 for k, v in peer.calls.items()}
     if cmd == "call":
         return peer.call(to)
+    if cmd == "answer_call":
+        peer.answer_call(command["call"], decline=command.get("decline"))
+        return True
+    if cmd == "talk":
+        peer.talk(command["call"], command.get("seconds", 1.0))
+        return True
+    if cmd == "cellular_call":
+        peer.cellular_call()
+        return True
     if cmd == "end_call":
         peer.end_call(command["call"], command.get("reason", "hangup"))
         return True

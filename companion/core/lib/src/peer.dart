@@ -48,14 +48,40 @@ class ProbeResult {
 }
 
 class Call {
-  Call({required this.peer, required this.stream, required this.mine, required this.state});
+  Call({required this.peer, required this.stream, required this.mine, required String state}) : _state = state;
   final String peer;
   final int stream;
   final bool mine;
-  String state; // offered, ringing, connected, declined:<reason>, ended:<reason>
+  String _state;
+
+  /// offered, ringing, connected, declined:<reason>, ended:<reason>.
+  String get state => _state;
+  set state(String s) {
+    if (s == _state) return;
+    _state = s;
+    since = DateTime.now();
+    if (s == 'connected') answered = true;
+  }
+
+  /// When it entered its state.
+  DateTime since = DateTime.now();
+
+  /// Whether it was ever connected.
+  bool answered = false;
   int frames = 0;
   DateTime lastFrame = DateTime.now();
   bool get live => state == 'offered' || state == 'ringing' || state == 'connected';
+
+  /// Someone called, and it ended unanswered without the user declining.
+  bool get missed => isMissedCall(mine: mine, answered: answered, state: state);
+}
+
+/// One packet of the other side's call audio, as it arrived.
+class CallAudio {
+  CallAudio(this.call, this.seq, this.packet);
+  final String call;
+  final int seq;
+  final Uint8List packet;
 }
 
 class _Transfer {
@@ -152,12 +178,17 @@ class ChatPeer {
   final Map<String, int> _failures = {};
   final Map<String, DateTime> _nextTry = {};
   final StreamController<ChatEvent> _events = StreamController.broadcast();
+  final StreamController<CallAudio> _audio = StreamController.broadcast(sync: true);
   ServerSocket? _socket;
   HttpServer? _server;
   Timer? _ticker;
   bool _running = false;
 
   Stream<ChatEvent> get events => _events.stream;
+
+  /// The other side's audio on connected calls, packet by packet: for a
+  /// jitter buffer and a decoder.
+  Stream<CallAudio> get callAudio => _audio.stream;
   PeerAddress get address => PeerAddress(host, port);
 
   bool get readReceipts => store.setting('read_receipts') != 'off';
@@ -198,6 +229,7 @@ class ChatPeer {
     await _socket?.close();
     _connections.clear();
     await _events.close();
+    await _audio.close();
     store.close();
   }
 
@@ -365,7 +397,7 @@ class ChatPeer {
     return true;
   }
 
-  // -- calls (signalling only; audio is the app's) -------------------------------
+  // -- calls: signalling and frames; the codec and devices are CallMedia's ------
 
   /// Offer a call; its outcome is in [calls]. Unreachable fails at once.
   Future<String> call(Object who) async {
@@ -396,13 +428,17 @@ class ChatPeer {
     _answer(conn, id, decline == null ? const CallAnswer.pick('ws-opus') : CallAnswer.refuse(decline));
   }
 
+  /// One packet of our audio on a connected call.
   void sendCallAudio(String id, int seq, List<int> packet) {
-    final call = calls[id]!;
+    final call = calls[id];
+    if (call == null || call.state != 'connected') return;
     _connected(call.peer)?.sendBinary(kindCallAudio, call.stream, seq, packet);
   }
 
+  /// Hang up (or cancel an offer); a call already over is left as it is.
   void endCall(String id, {String reason = 'hangup'}) {
     final call = calls[id] ?? (throw ArgumentError('no call $id'));
+    if (!call.live) return;
     _connected(call.peer)?.send({'type': 'call_end', 'call': id, 'reason': reason});
     call.state = 'ended:$reason';
     _emit(ChatEvent('call', key: call.peer, id: id, detail: call.state));
@@ -645,6 +681,15 @@ class ChatPeer {
       conn.ready.completeError(Refused('closed during the handshake (${conn.ws.closeCode})', code: conn.ws.closeCode));
     }
     if (wasOpen) _emit(ChatEvent('disconnected', key: conn.key, detail: '${conn.ws.closeCode}'));
+    // A call lives on its connection: with it gone, the call is over.
+    if (wasOpen && _connected(conn.key) == null) {
+      for (final MapEntry(key: id, value: call) in calls.entries) {
+        if (call.live && call.peer == conn.key) {
+          call.state = 'ended:error';
+          _emit(ChatEvent('call', key: call.peer, id: id, detail: call.state));
+        }
+      }
+    }
   }
 
   Never _refuse(_Connection conn, String code, String why) {
@@ -805,14 +850,14 @@ class ChatPeer {
         _onCallOffer(conn, frame);
       case 'call_answer':
         final call = calls[frame['call']];
-        if (call != null && call.peer == conn.key) {
+        if (call != null && call.peer == conn.key && call.state == 'offered') {
           call.state = frame.containsKey('transport') ? 'connected' : 'declined:${frame['decline']}';
           call.lastFrame = DateTime.now();
           _emit(ChatEvent('call', key: conn.key, id: frame['call'] as String, detail: call.state));
         }
       case 'call_end':
         final call = calls[frame['call']];
-        if (call != null && call.peer == conn.key) {
+        if (call != null && call.peer == conn.key && call.live) {
           call.state = 'ended:${frame['reason']}';
           _emit(ChatEvent('call', key: conn.key, id: frame['call'] as String, detail: call.state));
         }
@@ -928,10 +973,11 @@ class ChatPeer {
         );
       }
     } else if (b.kind == kindCallAudio) {
-      for (final call in calls.values) {
+      for (final MapEntry(key: id, value: call) in calls.entries) {
         if (call.stream == b.stream && call.peer == conn.key && call.state == 'connected') {
           call.frames++;
           call.lastFrame = DateTime.now();
+          if (!_audio.isClosed) _audio.add(CallAudio(id, b.seq, b.payload));
         }
       }
     } else {
@@ -977,9 +1023,9 @@ class ChatPeer {
       if (key != null && _connected(key) != null) continue;
       if (due == null || !now.isBefore(due)) _flushSoon(box);
     }
-    for (final MapEntry(key: id, value: call) in calls.entries) {
-      if (call.state == 'connected' && now.difference(call.lastFrame) > const Duration(seconds: 10)) {
-        endCall(id, reason: 'timeout');
+    for (final MapEntry(key: id, value: call) in List.of(calls.entries)) {
+      if (callEndDue(state: call.state, since: call.since, lastFrame: call.lastFrame, now: now) case final why?) {
+        endCall(id, reason: why);
       }
     }
     final inCall = {

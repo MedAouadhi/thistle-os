@@ -11,6 +11,7 @@ library;
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:tailnet_chat_core/tailnet_chat_core.dart';
 
@@ -25,6 +26,8 @@ usage: tailnet_chat_core [options]
   --loopback          admit loopback too, for tests
   --no-read-receipts  send no read receipts
   --call-policy P     answer, decline, busy or ignore (default answer)
+  --mic FILE.wav      what a call sends: a 16 kHz mono WAV file, looped (default: silence)
+  --speaker FILE.wav  where a call's audio goes, written when the call ends (default: nowhere)
   --verbose           log to stderr''';
 
 Never fail(String why) {
@@ -33,7 +36,7 @@ Never fail(String why) {
 }
 
 Future<void> main(List<String> args) async {
-  String? identityPath, db = ':memory:', host = '127.0.0.1', name, callPolicy;
+  String? identityPath, db = ':memory:', host = '127.0.0.1', name, callPolicy, mic, speaker;
   var port = defaultPort;
   var loopback = false, verbose = false, readReceipts = true;
   for (var i = 0; i < args.length; i++) {
@@ -61,6 +64,10 @@ Future<void> main(List<String> args) async {
         readReceipts = false;
       case '--call-policy':
         callPolicy = value();
+      case '--mic':
+        mic = value();
+      case '--speaker':
+        speaker = value();
       case '--verbose':
         verbose = true;
       case '-h' || '--help':
@@ -83,6 +90,24 @@ Future<void> main(List<String> args) async {
   );
   if (!readReceipts) peer.readReceipts = false;
   await peer.start();
+
+  // A connected call streams audio, as a device's microphone does: the
+  // --mic file, or silence. Without libopus the call is signalling only.
+  final media = <String, CallMedia>{};
+  peer.events.where((e) => e.kind == 'call' && e.id != null).listen((e) {
+    final call = peer.calls[e.id!];
+    if (call?.state != 'connected' || media.containsKey(e.id)) return;
+    if (!opusAvailable) {
+      stderr.writeln('call ${e.id}: no audio: ${OpusUnavailable('libopus.so.0 not found')}');
+      return;
+    }
+    media[e.id!] = CallMedia(
+      peer,
+      e.id!,
+      mic: mic == null ? pacedAudio((_) => Int16List(samplesPerFrame)) : wavFileIn(mic),
+      speaker: speaker == null ? NoAudioOut() : WavFileOut(speaker),
+    )..start();
+  });
   stdout.writeln(jsonEncode({'ready': identityJson(peer)}));
 
   // One command at a time, in order, each answered before the next is read.
@@ -101,6 +126,9 @@ Future<void> main(List<String> args) async {
     if (command is Map && command.containsKey('seq')) reply['seq'] = command['seq'];
     stdout.writeln(jsonEncode(reply));
     if (command is Map && command['cmd'] == 'stop') break;
+  }
+  for (final m in media.values) {
+    await m.stop();
   }
   await peer.stop();
   await stdout.flush();
