@@ -1,0 +1,232 @@
+"""Tailnet chat, protocol version 1: the parts with no I/O.
+
+docs/tailnet-chat/protocol.md is the authority; this module is its reference
+reading. Everything here is pure: the handshake's transcript, the key
+fingerprint, the binary frame header, building and checking JSON frames.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import ipaddress
+import json
+import struct
+
+VERSION = 1
+PORT = 4810
+PATH = "/tailnet-chat/1"
+
+CAPS_V1 = ("text", "receipts", "typing", "reply", "react", "voice-message", "call:ws-opus")
+
+LABEL = b"tailnet-chat/1 auth\x00"
+ROLES = {"dialler": 1, "listener": 2}
+
+KIND_VOICE = 0x01
+KIND_CALL_AUDIO = 0x02
+KIND_FILE = 0x03  # reserved for the `file` message; no v1 peer sends it
+KINDS = (KIND_VOICE, KIND_CALL_AUDIO)
+HEADER = struct.Struct(">BII")
+MAX_CHUNK = 4096
+
+MAX_TEXT_BYTES = 4096
+MAX_JSON_FRAME = 16384
+MAX_VOICE_MS = 120_000
+MAX_VOICE_BYTES = 512 * 1024
+MAX_NAME_BYTES = 64
+
+# WebSocket close codes (RFC 6455 leaves 4000-4999 to applications).
+CLOSE_HANDSHAKE = 4000
+CLOSE_DUPLICATE = 4001
+CLOSE_KEY_CHANGED = 4002
+CLOSE_IDLE = 1000
+
+TAILNET_RANGES = (ipaddress.ip_network("100.64.0.0/10"),
+                  ipaddress.ip_network("fd7a:115c:a1e0::/48"))
+
+
+def _check(name: str, value: bytes, size: int) -> None:
+    if not isinstance(value, (bytes, bytearray)) or len(value) != size:
+        raise ValueError(f"{name} must be {size} bytes")
+
+
+def transcript(role: str, dialler_nonce: bytes, listener_nonce: bytes,
+               dialler_key: bytes, listener_key: bytes) -> bytes:
+    """What `role` ("dialler" or "listener") signs in its `auth`."""
+    if role not in ROLES:
+        raise ValueError(f"no role {role!r}")
+    _check("dialler_nonce", dialler_nonce, 32)
+    _check("listener_nonce", listener_nonce, 32)
+    _check("dialler_key", dialler_key, 32)
+    _check("listener_key", listener_key, 32)
+    return (LABEL + bytes([ROLES[role]]) + bytes(dialler_nonce) + bytes(listener_nonce)
+            + bytes(dialler_key) + bytes(listener_key))
+
+
+def fingerprint_id(key: bytes) -> str:
+    """The key's fingerprint as one word: a file name, a log line."""
+    _check("key", key, 32)
+    return hashlib.sha256(key).hexdigest()[:20]
+
+
+def fingerprint(key: bytes) -> str:
+    """The key's fingerprint as a person compares it: five groups of four."""
+    word = fingerprint_id(key)
+    return " ".join(word[i:i + 4] for i in range(0, 20, 4))
+
+
+def pack_binary(kind: int, stream: int, seq: int, payload: bytes) -> bytes:
+    if len(payload) > MAX_CHUNK:
+        raise ValueError("a binary frame's payload is at most 4096 bytes")
+    return HEADER.pack(kind, stream, seq) + bytes(payload)
+
+
+def unpack_binary(frame: bytes) -> tuple[int, int, int, bytes]:
+    if len(frame) < HEADER.size:
+        raise ValueError("a binary frame is at least its 9-byte header")
+    if len(frame) - HEADER.size > MAX_CHUNK:
+        raise ValueError("a binary frame's payload is at most 4096 bytes")
+    kind, stream, seq = HEADER.unpack_from(frame)
+    return kind, stream, seq, bytes(frame[HEADER.size:])
+
+
+def admitted(address: str, loopback: bool = False) -> bool:
+    """Whether a connection from `address` may reach the handshake."""
+    try:
+        ip = ipaddress.ip_address(address.split("%", 1)[0])
+    except ValueError:
+        return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+        ip = ip.ipv4_mapped
+    if loopback and ip.is_loopback:
+        return True
+    return any(ip in net for net in TAILNET_RANGES)
+
+
+def encode(frame: dict) -> str:
+    """A JSON frame as the reference peer and the vectors write it.
+
+    Receivers MUST accept any valid JSON (key order, spacing, escapes);
+    this compact form is only what makes the vectors byte-exact."""
+    return json.dumps(frame, separators=(",", ":"), ensure_ascii=False)
+
+
+def hello(key: bytes, name: str, caps, nonce: bytes, version: int = VERSION) -> dict:
+    return {"type": "hello", "version": version, "key": bytes(key).hex(), "name": name,
+            "caps": list(caps), "nonce": bytes(nonce).hex()}
+
+
+def auth(signature: bytes) -> dict:
+    return {"type": "auth", "sig": bytes(signature).hex()}
+
+
+# -- checking a JSON frame -----------------------------------------------------
+
+def _hex(n):
+    def ok(v):
+        return (isinstance(v, str) and len(v) == n
+                and all(c in "0123456789abcdef" for c in v))
+    return ok
+
+
+_ID = _hex(32)
+_KEY = _hex(64)
+_SIG = _hex(128)
+
+
+def _int(lo, hi):
+    return lambda v: isinstance(v, int) and not isinstance(v, bool) and lo <= v <= hi
+
+
+def _str(max_bytes, empty=True):
+    return lambda v: (isinstance(v, str) and (empty or v != "")
+                      and len(v.encode("utf-8")) <= max_bytes)
+
+
+def _one_of(*values):
+    return lambda v: v in values
+
+
+def _list(item, lo, hi):
+    return lambda v: isinstance(v, list) and lo <= len(v) <= hi and all(item(x) for x in v)
+
+
+_BOOL = lambda v: isinstance(v, bool)  # noqa: E731
+_U32 = _int(1, 0xFFFFFFFF)
+_TS = _int(0, 2 ** 53)
+
+# type -> (required fields, optional fields). Fields not listed are ignored.
+SCHEMA = {
+    "hello": ({"version": _int(0, 2 ** 31), "key": _KEY, "name": _str(MAX_NAME_BYTES),
+               "caps": _list(_str(64, empty=False), 0, 64), "nonce": _KEY}, {}),
+    "auth": ({"sig": _SIG}, {}),
+    "msg": ({"id": _ID, "ts": _TS, "text": lambda v: isinstance(v, str)},
+            {"reply_to": _ID}),
+    "ack": ({"id": _ID}, {}),
+    "read": ({"ids": _list(_ID, 1, 100)}, {}),
+    "typing": ({"on": _BOOL}, {}),
+    "react": ({"id": _ID, "ts": _TS, "to": _ID, "emoji": _str(32)}, {}),
+    "contact": ({"id": _ID, "state": _one_of("accepted", "declined")}, {}),
+    "voice": ({"id": _ID, "ts": _TS, "ms": _int(1, MAX_VOICE_MS),
+               "bytes": _int(1, MAX_VOICE_BYTES), "codec": _str(32, empty=False),
+               "stream": _U32}, {"reply_to": _ID}),
+    "call_offer": ({"call": _ID, "transports": _list(_str(32, empty=False), 1, 8),
+                    "stream": _U32}, {}),
+    "call_answer": ({"call": _ID}, {"transport": _str(32, empty=False),
+                                    "decline": _str(32, empty=False)}),
+    "call_end": ({"call": _ID, "reason": _str(32, empty=False)}, {}),
+    "error": ({"code": _str(32, empty=False)},
+              {"what": _str(256), "id": _ID, "detail": _str(512)}),
+}
+
+ERROR_CODES = ("unsupported", "bad_request", "too_large", "version", "bad_signature",
+               "key_changed")
+
+
+def error(code: str, what: str | None = None, id: str | None = None,
+          detail: str | None = None) -> dict:
+    frame = {"type": "error", "code": code}
+    if what is not None:
+        frame["what"] = what
+    if id is not None:
+        frame["id"] = id
+    if detail is not None:
+        frame["detail"] = detail
+    return frame
+
+
+def check(text) -> tuple[dict | None, dict | None]:
+    """Parse and check one JSON text frame.
+
+    Returns (frame, None) when it is well formed, or (None, error frame) for
+    the receiver to send back: `unsupported` for a type or codec it does not
+    know, `too_large` for text over 4096 bytes or a frame over 16 KB,
+    `bad_request` for anything else malformed."""
+    if isinstance(text, (bytes, bytearray)):
+        text = bytes(text).decode("utf-8", "replace")
+    if len(text.encode("utf-8")) > MAX_JSON_FRAME:
+        return None, error("too_large", detail="frame over 16384 bytes")
+    try:
+        frame = json.loads(text)
+    except ValueError:
+        return None, error("bad_request", detail="not JSON")
+    if not isinstance(frame, dict) or not isinstance(frame.get("type"), str):
+        return None, error("bad_request", detail="not an object with a type")
+    kind = frame["type"]
+    if kind not in SCHEMA:
+        return None, error("unsupported", what=kind[:256])
+    required, optional = SCHEMA[kind]
+    for name, ok in required.items():
+        if name not in frame or not ok(frame[name]):
+            return None, error("bad_request", what=kind, detail=f"field {name}")
+    for name, ok in optional.items():
+        if name in frame and not ok(frame[name]):
+            return None, error("bad_request", what=kind, detail=f"field {name}")
+    if kind == "msg" and len(frame["text"].encode("utf-8")) > MAX_TEXT_BYTES:
+        return None, error("too_large", what="msg", id=frame["id"])
+    if kind == "msg" and frame["text"] == "":
+        return None, error("bad_request", what="msg", detail="empty text")
+    if kind == "voice" and frame["codec"] != "ogg-opus":
+        return None, error("unsupported", what="codec:" + frame["codec"], id=frame["id"])
+    if kind == "call_answer" and ("transport" in frame) == ("decline" in frame):
+        return None, error("bad_request", what=kind, detail="transport or decline")
+    return frame, None

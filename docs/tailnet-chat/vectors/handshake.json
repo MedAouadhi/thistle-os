@@ -1,0 +1,39 @@
+{
+  "description": "A dialler and a listener's hello and auth. Each signs its own transcript; each verifies the other's with the key in its hello. 'refused' holds dialler auths a listener MUST refuse.",
+  "dialler": {
+    "seed": "2f74d1014b54660538894bc0330b762b58240b8fbda75a4cc75197a2eed54435",
+    "key": "a2157afb87ed182ef45d1c3b9f43a8e3761f576c7ba3e0a9af4c9b5a0c32973c",
+    "name": "laptop",
+    "fingerprint": "c97e 4847 4843 83b6 ac51",
+    "nonce": "6ee783bd8977fef1d93c9f4a70b5c10dbb20b546f841a9000643eefe26fdf507",
+    "hello": "{\"type\":\"hello\",\"version\":1,\"key\":\"a2157afb87ed182ef45d1c3b9f43a8e3761f576c7ba3e0a9af4c9b5a0c32973c\",\"name\":\"laptop\",\"caps\":[\"text\",\"receipts\",\"typing\",\"reply\",\"react\",\"voice-message\",\"call:ws-opus\"],\"nonce\":\"6ee783bd8977fef1d93c9f4a70b5c10dbb20b546f841a9000643eefe26fdf507\"}",
+    "auth": "{\"type\":\"auth\",\"sig\":\"fafc6e3b06e11977cd79b7f984e349327bf52ae2fdd6399af9a29a249a87b7587a5f6e7563b0b402cae849817104b5bf4d46de1f304a7c99174581a414837406\"}"
+  },
+  "listener": {
+    "seed": "fda48eca53122d03d96203f1ae64066ce98294e045d974a96f13ddf5152b3714",
+    "key": "34adb51cee8f5a6c6424620b2d454fb63823272c056f982a989c156ddd6cddaf",
+    "name": "T-Deck Max",
+    "fingerprint": "e9cc f8aa 5126 86b0 1490",
+    "nonce": "ce38861e60fc564e15bb51b1e52e8d0288c16e35335123600d3debc92d8eb202",
+    "hello": "{\"type\":\"hello\",\"version\":1,\"key\":\"34adb51cee8f5a6c6424620b2d454fb63823272c056f982a989c156ddd6cddaf\",\"name\":\"T-Deck Max\",\"caps\":[\"text\",\"receipts\",\"typing\",\"reply\",\"react\",\"voice-message\",\"call:ws-opus\"],\"nonce\":\"ce38861e60fc564e15bb51b1e52e8d0288c16e35335123600d3debc92d8eb202\"}",
+    "auth": "{\"type\":\"auth\",\"sig\":\"cc74fdbffcb10a74fca144078980d95d09f7785edcb8b8696ec94d59a1aaa23c83fb3a194bde7bf20342762cba4fc3020a232c6b0c6eedafff0c6c066827ea07\"}"
+  },
+  "transcripts": {
+    "dialler": "7461696c6e65742d636861742f31206175746800016ee783bd8977fef1d93c9f4a70b5c10dbb20b546f841a9000643eefe26fdf507ce38861e60fc564e15bb51b1e52e8d0288c16e35335123600d3debc92d8eb202a2157afb87ed182ef45d1c3b9f43a8e3761f576c7ba3e0a9af4c9b5a0c32973c34adb51cee8f5a6c6424620b2d454fb63823272c056f982a989c156ddd6cddaf",
+    "listener": "7461696c6e65742d636861742f31206175746800026ee783bd8977fef1d93c9f4a70b5c10dbb20b546f841a9000643eefe26fdf507ce38861e60fc564e15bb51b1e52e8d0288c16e35335123600d3debc92d8eb202a2157afb87ed182ef45d1c3b9f43a8e3761f576c7ba3e0a9af4c9b5a0c32973c34adb51cee8f5a6c6424620b2d454fb63823272c056f982a989c156ddd6cddaf"
+  },
+  "refused": [
+    {
+      "why": "the dialler signed the listener's transcript (the wrong role byte)",
+      "auth": "{\"type\":\"auth\",\"sig\":\"bed1b4eef71346ad26397ec5fb70fa9fd5a015b43582f230b2508e75769c413e2bb091098daa8353330859790c7a9bdc2574e8899095ebb89e747f02494d720a\"}"
+    },
+    {
+      "why": "the nonces in the wrong order",
+      "auth": "{\"type\":\"auth\",\"sig\":\"c3c2edf50bef98fa113386ac6ba99cf489b4e61b65b15937f87b20f190d3cc9b2e518b887e93bb7e8370ec289db37001cf5d90f192d8f7072cf915e3c0e3ea07\"}"
+    },
+    {
+      "why": "signed by another key than the hello announced",
+      "auth": "{\"type\":\"auth\",\"sig\":\"ad672e283f356a215b099cd0ca4d808b6fe0583cacd2cafdc65d5a8a0d0aaef8836bcde208f426b5d783045b802802e2a13759ff144af9b179b5c941b1f5ba0c\"}"
+    }
+  ]
+}

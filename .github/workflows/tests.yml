@@ -231,6 +231,11 @@ jobs:
       - name: Test board profile validation
         run: python3 tools/test_validate_board_catalog.py
 
+      - name: Test Tailnet chat's reference peer against its vectors and the conformance suite
+        run: |
+          python3 tools/tailnet_chat/make_vectors.py --check
+          python3 tools/test_tailnet_chat.py
+
       - name: Test transactional recovery bundle activation
         run: |
           rustc --edition=2021 --test recovery/src/bundle_transaction.rs \
