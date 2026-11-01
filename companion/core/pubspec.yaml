@@ -1,0 +1,12 @@
+name: tailnet_chat_core
+description: Tailnet chat for the companion app, protocol version 1, with no Flutter dependency.
+publish_to: none
+version: 0.1.0
+environment:
+  sdk: ^3.10.0
+dependencies:
+  crypto: 3.0.8
+  ed25519_edwards: 0.3.2
+  sqlite3: 3.8.0
+dev_dependencies:
+  test: 1.33.0

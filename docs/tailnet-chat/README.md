@@ -43,7 +43,9 @@ python3 tools/tailnet_chat/conformance.py --reference --only key_changed_refused
 From Python, `conformance.run(make_target, scenarios)` takes any factory
 of `Target`s: a target for the simulator implements `Target`'s methods
 (`add_contact`, `contacts`, `requests`, `accept`, `decline`,
-`accept_new_key`, `messages`, `send_text`, `waiting`, `stop`) with the
+`accept_new_key`, `messages`, `send_text`, `waiting`, `stop`, and for the
+message scenarios `react`, `mark_read`, `set_typing`, `is_typing`,
+`set_read_receipts`, `flush`) with the
 simulator's keys, screen and card, and gives its `address` and `key`.
 
 ## The control protocol
@@ -90,6 +92,17 @@ or `read` for one of the peer's own, `received` or `read` for one it
 received. A call's `state` is `offered`, `ringing`, `connected`,
 `declined:<reason>` or `ended:<reason>`.
 
-The companion app's headless Dart core implements the same commands, so
-`--control 'dart run ... --listen 127.0.0.1:0 --loopback'` runs the suite
-against it.
+The companion app's headless Dart core (`companion/core/`) implements the
+same commands, plus `rename` and `remove_contact` (`to` or `contact`, and
+`name`), so the suite runs against it as against the reference peer:
+
+```sh
+cd companion/core && dart pub get && dart test && dart build cli && cd ../..
+python3 tools/tailnet_chat/conformance.py \
+    --control 'companion/core/build/cli/linux_x64/bundle/bin/tailnet_chat_core --listen 127.0.0.1:0 --loopback'
+```
+
+Its options: `--identity FILE` (the seed in hex, made on first start;
+without it a key for this run only), `--db PATH` (SQLite; `:memory:` by
+default), `--address HOST`, `--port N` (or `--listen HOST:PORT`), `--name`,
+`--loopback`, `--no-read-receipts`, `--call-policy`, `--verbose`.

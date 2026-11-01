@@ -18,6 +18,14 @@ file(GLOB_RECURSE LVGL_SRCS
 
 # ThistleOS source files (kernel, UI, HAL, apps)
 set(THISTLE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/..")
+
+# libopus, as the firmware builds it (components/opus/opus.cmake)
+include(${THISTLE_DIR}/components/opus/opus.cmake)
+add_library(thistle_opus STATIC ${THISTLE_OPUS_SRCS})
+target_include_directories(thistle_opus PUBLIC ${THISTLE_OPUS_PUBLIC_INCLUDES}
+                                        PRIVATE ${THISTLE_OPUS_PRIVATE_INCLUDES})
+target_compile_definitions(thistle_opus PRIVATE ${THISTLE_OPUS_DEFINITIONS})
+target_compile_options(thistle_opus PRIVATE -O2 ${THISTLE_OPUS_WARNINGS})
 set(THISTLE_SRCS
     # HAL (registry moved to Rust — hal_registry.rs in kernel_rs)
     ${THISTLE_DIR}/components/thistle_hal/src/stub.c
@@ -240,7 +248,7 @@ target_include_directories(thistle_sim PRIVATE
 )
 
 target_link_directories(thistle_sim PRIVATE ${SDL2_LIBRARY_DIRS})
-target_link_libraries(thistle_sim PRIVATE ${SDL2_LIBRARIES} ${RUST_HOST_LIB} pthread m curl dl)
+target_link_libraries(thistle_sim PRIVATE ${SDL2_LIBRARIES} ${RUST_HOST_LIB} thistle_opus pthread m curl dl)
 
 # Arabic in every label and text field: arabic_text.c stands in for these
 # LVGL functions, as components/ui/CMakeLists.txt has the firmware's link do.
@@ -287,6 +295,7 @@ add_executable(thistle_sim_tests
     ${THISTLE_DIR}/components/apps_builtin/launcher/home_core.c
     tests/test_dictation_core.c
     ${THISTLE_DIR}/components/ui/src/dictation_core.c
+    tests/test_opus.c
     tests/test_arabic_shape.c
     ${THISTLE_DIR}/components/ui/src/arabic_shape.c
     tests/test_xl9555.c
@@ -333,4 +342,4 @@ target_compile_options(thistle_sim_tests PRIVATE
     -Wno-unused-variable
 )
 
-target_link_libraries(thistle_sim_tests PRIVATE pthread m curl)
+target_link_libraries(thistle_sim_tests PRIVATE thistle_opus pthread m curl)

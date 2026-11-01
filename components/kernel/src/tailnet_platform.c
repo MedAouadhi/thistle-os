@@ -42,6 +42,12 @@ typedef struct {
     uint32_t ip;          /* host byte order */
     char     name[64];    /* "homelab.tail1234.ts.net" */
     bool     direct;      /* reached without a DERP relay */
+    /* MicroLink's microlink_peer_info_t.online. At the pinned commit that is
+     * true for every peer in its map, offline ones too (ticket 01 of
+     * .scratch/tailnet-chat measured it); MicroLink has to take the control
+     * plane's Online, OnlineChange and PeersChangedPatch for it to mean
+     * online, a change to the fork that the ticket describes. */
+    bool     online;
 } tailnet_platform_peer_t;
 
 /* What the client is doing, read in one go (tailnet_platform_poll) */
@@ -248,6 +254,7 @@ int tailnet_platform_poll(tailnet_platform_poll_t *out, tailnet_platform_peer_t 
             peers[i].ip = info.vpn_ip;
             strlcpy(peers[i].name, info.hostname, sizeof(peers[i].name));
             peers[i].direct = info.direct_path;
+            peers[i].online = info.online;
         }
     }
     xSemaphoreGive(s_lock);

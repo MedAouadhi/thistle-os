@@ -214,6 +214,11 @@ pub extern "C" fn kernel_init() -> i32 {
     // internal one, and nothing has transmitted yet.
     crate::radio_antenna::radio_antenna_restore();
 
+    // The device's identity key, the MeshCore node's, which Tailnet chat
+    // proves too: made now if the mesh never made it, whether or not the
+    // mesh is on or the board has a radio (mesh_identity.rs).
+    crate::mesh_identity::ensure();
+
     // The MeshCore node, on whichever antenna that left selected. It runs from
     // boot so messages arrive whether or not an app is open; system.json can
     // switch it off. A board with no radio skips it.

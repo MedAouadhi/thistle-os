@@ -63,6 +63,14 @@ extern void test_epaper_refresh_does_not_show_a_press_about_to_be_let_go(void);
 extern void test_epaper_refresh_waits_for_lvgl_to_draw_a_let_go(void);
 extern void test_epaper_refresh_waits_for_a_dragging_finger(void);
 
+/* test_opus.c */
+extern void test_opus_a_clip_comes_back_as_long_as_it_went_in(void);
+extern void test_opus_a_clip_comes_back_as_loud_as_it_went_in(void);
+extern void test_opus_a_clip_costs_about_the_bitrate_asked_for(void);
+extern void test_opus_silence_stays_silent(void);
+extern void test_opus_a_lost_frame_is_concealed_with_a_whole_frame(void);
+extern void test_opus_the_pseudostack_is_measured(void);
+
 /* test_dictation_core.c */
 extern void test_dictation_wav_header_says_16k_mono_16_bit_pcm(void);
 extern void test_dictation_a_minute_fits_the_buffer_it_is_given(void);
@@ -372,6 +380,14 @@ int main(void)
     RUN_TEST(http_shim_delivers_fixture_bytes_status_and_cleanup);
     RUN_TEST(http_shim_streams_a_body_in_pieces);
     RUN_TEST(http_shim_stream_of_a_missing_file_fails);
+
+    printf("\n[opus]\n");
+    RUN_TEST(opus_a_clip_comes_back_as_long_as_it_went_in);
+    RUN_TEST(opus_a_clip_comes_back_as_loud_as_it_went_in);
+    RUN_TEST(opus_a_clip_costs_about_the_bitrate_asked_for);
+    RUN_TEST(opus_silence_stays_silent);
+    RUN_TEST(opus_a_lost_frame_is_concealed_with_a_whole_frame);
+    RUN_TEST(opus_the_pseudostack_is_measured);
 
     TEST_SUMMARY();
     return _tests_failed > 0 ? 1 : 0;
