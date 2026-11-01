@@ -90,11 +90,35 @@ class Target:
     def messages(self, who) -> list:
         return self.call({"cmd": "messages", "to": who})
 
-    def send_text(self, to, text: str) -> str:
-        return self.call({"cmd": "send_text", "to": list(to) if isinstance(to, tuple) else to, "text": text})
+    def send_text(self, to, text: str, reply_to: str | None = None) -> str:
+        command = {"cmd": "send_text", "to": list(to) if isinstance(to, tuple) else to, "text": text}
+        if reply_to:
+            command["reply_to"] = reply_to
+        return self.call(command)
 
     def waiting(self, who) -> list:
         return self.call({"cmd": "waiting", "to": list(who) if isinstance(who, tuple) else who})
+
+    # Messages, receipts, typing, reactions and the outbox (tickets 04 and 05).
+
+    def react(self, to, message: str, emoji: str) -> str:
+        return self.call({"cmd": "react", "to": to, "message": message, "emoji": emoji})
+
+    def mark_read(self, to, ids=None):
+        return self.call({"cmd": "mark_read", "to": to, "ids": ids})
+
+    def set_typing(self, to, on: bool):
+        return self.call({"cmd": "typing", "to": to, "on": on})
+
+    def is_typing(self, key: str) -> bool:
+        return self.call({"cmd": "is_typing", "key": key})
+
+    def set_read_receipts(self, on: bool):
+        return self.call({"cmd": "set", "read_receipts": on})
+
+    def flush(self, who=None):
+        """Look for `who` now, as when it is seen online, and send what waits for it."""
+        return self.call({"cmd": "flush", "to": list(who) if isinstance(who, tuple) else who})
 
     def stop(self):
         pass
@@ -506,6 +530,168 @@ SCENARIOS = [handshake, bad_signature_refused, unknown_type_answered, invalid_fr
              contact_request_accepted, contact_request_declined, message_delivered_once,
              outbox_delivered_and_cleared, key_changed_refused, voice_message_whole_and_broken]
 WIRE_ONLY = [handshake, bad_signature_refused, unknown_type_answered, invalid_frames_answered]
+
+
+# -- messages: the outbox, order, receipts, typing, replies, reactions ----------
+# (ticket 05; ticket 04 runs them against the simulator)
+
+def _theirs(target: Target, key: str, message_id: str):
+    return [m for m in target.messages(key) if m["id"] == message_id]
+
+
+def outbox_across_disconnect(target: Target) -> None:
+    """A message to a chat peer that is away waits in the outbox, and is delivered once it is back."""
+    away = ChatPeer(name="away").start()
+    address, seed = away.address, away.seed
+    away.stop()
+    back = None
+    try:
+        target.add_contact(address, name="away")
+        mid = target.send_text(address, "while you were away")
+        time.sleep(0.5)
+        assert target.waiting(address) == [mid], target.waiting(address)
+        back = ChatPeer(name="away", seed=seed, port=address[1]).start()
+        target.flush(address)
+        req = back.wait_for(lambda: back.requests.get(target.key))
+        assert [m.id for m in req.held] == [mid], req.held
+        eventually(lambda: target.waiting(address) == [], what="the target's outbox to clear")
+        mine = [m for m in target.messages(address) if m["id"] == mid]
+        assert mine and mine[0]["state"] == "delivered", mine
+    finally:
+        if back:
+            back.stop()
+
+
+def messages_in_order_written(target: Target) -> None:
+    """A conversation is ordered by when each message was written, not by arrival."""
+    conn = RawConn(target.address, name="late").handshake()
+    _become_contact(target, conn)
+    late, early = _msg("written second"), _msg("written first")
+    early["ts"] = late["ts"] - 60_000
+    for m in (late, early):
+        conn.send(m)
+        conn.expect("ack", id=m["id"])
+    shown = eventually(lambda: len(_shown(target, conn.key_hex)) >= 3 and _shown(target, conn.key_hex),
+                       what="both messages")
+    texts = [m["text"] for m in shown if m["id"] in (late["id"], early["id"])]
+    assert texts == ["written first", "written second"], texts
+    conn.close()
+
+
+def read_receipts_on_and_off(target: Target) -> None:
+    """Reading sends `read` with the ids; with read receipts off, nothing goes."""
+    conn = RawConn(target.address, name="reader").handshake()
+    _become_contact(target, conn)
+    m = _msg("did you read this?")
+    conn.send(m)
+    conn.expect("ack", id=m["id"])
+    eventually(lambda: _theirs(target, conn.key_hex, m["id"]), what="the message")
+    target.mark_read(conn.key_hex)
+    read = conn.expect("read")
+    assert m["id"] in read["ids"], read
+    target.set_read_receipts(False)
+    try:
+        quiet = _msg("and this one?")
+        conn.send(quiet)
+        conn.expect("ack", id=quiet["id"])
+        eventually(lambda: _theirs(target, conn.key_hex, quiet["id"]), what="the second message")
+        target.mark_read(conn.key_hex)
+        sent = [f for f in conn.drain(0.7) if isinstance(f, dict) and f.get("type") == "read"]
+        assert not sent, f"read receipts are off, yet the target sent {sent}"
+        assert _theirs(target, conn.key_hex, quiet["id"])[0]["state"] == "read"
+    finally:
+        target.set_read_receipts(True)
+    # Ours, read by the other side.
+    mid = target.send_text(conn.key_hex, "read mine")
+    conn.expect("msg", id=mid)
+    conn.send({"type": "ack", "id": mid})
+    conn.send({"type": "read", "ids": [mid]})
+    eventually(lambda: [x for x in target.messages(conn.key_hex) if x["id"] == mid and x["state"] == "read"],
+               what="our message to show as read")
+    conn.close()
+
+
+def typing_both_ways(target: Target) -> None:
+    """`typing` shows and stops; the target's own is sent; a stranger's is ignored."""
+    conn = RawConn(target.address, name="typist").handshake()
+    _become_contact(target, conn)
+    conn.send({"type": "typing", "on": True})
+    eventually(lambda: target.is_typing(conn.key_hex), what="typing to show")
+    conn.send({"type": "typing", "on": False})
+    eventually(lambda: not target.is_typing(conn.key_hex), what="typing to stop")
+    target.set_typing(conn.key_hex, True)
+    conn.expect("typing", on=True)
+    target.set_typing(conn.key_hex, False)
+    conn.expect("typing", on=False)
+    stranger = RawConn(target.address, name="nosy").handshake()
+    stranger.send({"type": "typing", "on": True})
+    time.sleep(0.3)
+    assert not target.is_typing(stranger.key_hex), "a stranger's typing was shown"
+    stranger.close()
+    conn.close()
+
+
+def replies_both_ways(target: Target) -> None:
+    """A reply names what it answers, in both directions."""
+    conn = RawConn(target.address, name="replier").handshake()
+    _become_contact(target, conn)
+    question = _msg("tea or coffee?")
+    conn.send(question)
+    conn.expect("ack", id=question["id"])
+    eventually(lambda: _theirs(target, conn.key_hex, question["id"]), what="the question")
+    answer = target.send_text(conn.key_hex, "tea", reply_to=question["id"])
+    got = conn.expect("msg", id=answer)
+    assert got.get("reply_to") == question["id"], got
+    conn.send({"type": "ack", "id": answer})
+    follow = _msg("milk?", reply_to=answer)
+    conn.send(follow)
+    conn.expect("ack", id=follow["id"])
+    shown = eventually(lambda: _theirs(target, conn.key_hex, follow["id"]), what="the reply")
+    assert shown[0].get("reply_to") == answer, shown
+    conn.close()
+
+
+def reactions_both_ways(target: Target) -> None:
+    """A reaction is acked, shown once, replaced and removed; the target's own is sent."""
+    conn = RawConn(target.address, name="reactor").handshake()
+    _become_contact(target, conn)
+    mid = target.send_text(conn.key_hex, "I passed!")
+    conn.expect("msg", id=mid)
+    conn.send({"type": "ack", "id": mid})
+
+    def theirs():
+        mine = [m for m in target.messages(conn.key_hex) if m["id"] == mid]
+        return (mine[0].get("reactions") or {}).get("them") if mine else None
+
+    thumbs = {"type": "react", "id": new_id(), "ts": now_ms(), "to": mid, "emoji": "👍"}
+    for _ in range(2):  # a duplicate is acked again and applied once
+        conn.send(thumbs)
+        conn.expect("ack", id=thumbs["id"])
+    eventually(lambda: theirs() == "👍", what="the reaction")
+    party = dict(thumbs, id=new_id(), ts=thumbs["ts"] + 1000, emoji="🎉")
+    conn.send(party)
+    conn.expect("ack", id=party["id"])
+    eventually(lambda: theirs() == "🎉", what="the reaction replaced")
+    removed = dict(thumbs, id=new_id(), ts=thumbs["ts"] + 2000, emoji="")
+    conn.send(removed)
+    conn.expect("ack", id=removed["id"])
+    eventually(lambda: theirs() is None, what="the reaction removed")
+
+    m = _msg("well done")
+    conn.send(m)
+    conn.expect("ack", id=m["id"])
+    eventually(lambda: _theirs(target, conn.key_hex, m["id"]), what="the message")
+    rid = target.react(conn.key_hex, m["id"], "❤️")
+    react = conn.expect("react", id=rid)
+    assert react["to"] == m["id"] and react["emoji"] == "❤️", react
+    conn.send({"type": "ack", "id": rid})
+    eventually(lambda: target.waiting(conn.key_hex) == [], what="the reaction to leave the outbox")
+    conn.close()
+
+
+MESSAGE_SCENARIOS = [outbox_across_disconnect, messages_in_order_written, read_receipts_on_and_off,
+                     typing_both_ways, replies_both_ways, reactions_both_ways]
+SCENARIOS += MESSAGE_SCENARIOS
 
 
 def run(make_target, scenarios=None, out=None) -> int:
