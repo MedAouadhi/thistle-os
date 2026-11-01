@@ -79,6 +79,7 @@ pub mod kernel_task;
 pub mod kworker;
 pub mod light_prefs;
 pub mod manifest;
+pub mod mesh_identity;
 pub mod mesh_manager;
 pub mod msg_alert;
 pub mod msg_crypto;

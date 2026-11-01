@@ -1,0 +1,13 @@
+menu "ThistleOS debug"
+    config THISTLE_TAILNET_CHAT_SPIKE
+        bool "Tailnet chat spike: a WebSocket echo on the tailnet, and an Opus bench"
+        default n
+        depends on IDF_TARGET_ESP32S3
+        help
+            Ticket 01 of Tailnet chat (.scratch/tailnet-chat/issues/). While
+            the tailnet is connected, echoes WebSocket frames on TCP port
+            4810 of the device's tailnet address, refusing any connection
+            not from the tailnet, logs the lwIP sockets open, and once times
+            Opus at 16 kHz mono on a task of its own. It holds the device
+            awake. Throwaway: leave it off.
+endmenu

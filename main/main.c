@@ -510,6 +510,13 @@ void app_main(void)
      * back. Then the power manager starts once it is kept. */
     ota_keep_new_kernel(power_manager_start);
 
+#if CONFIG_THISTLE_TAILNET_CHAT_SPIKE
+    /* A debug switch, off by default: Tailnet chat's hardware spike
+     * (components/kernel/src/tailnet_chat_spike.c). */
+    extern void tailnet_chat_spike_start(void);
+    tailnet_chat_spike_start();
+#endif
+
     /* Internal RAM is what runs out, so every boot says what is left of it,
      * this task's 16 KB stack still counted. */
     ESP_LOGI(TAG, "ThistleOS ready; internal RAM %u KB free, largest block %u KB",

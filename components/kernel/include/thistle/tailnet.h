@@ -56,6 +56,8 @@ typedef struct {
     char ip[16];
     char name[64];            /* "homelab.tail1234.ts.net" */
     bool direct;              /* reached directly rather than by a relay */
+    bool online;              /* online, as the client says; see
+                                 tailnet_platform.c for what that is worth */
 } tailnet_peer_t;
 
 /* Whether this board has the client. */
