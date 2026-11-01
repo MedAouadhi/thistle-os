@@ -310,6 +310,10 @@ pub extern "C" fn kernel_init() -> i32 {
     // when a network is up, on a task made for the check (update_manager.rs).
     crate::update_manager::start_checks();
 
+    // Background checks: a kernel worker job runs the checks kernel modules
+    // register, each on a task made for it (background_check.rs).
+    crate::background_check::start();
+
     // Publish SYSTEM_BOOT event
     crate::event::event_publish_simple(0); // EVENT_SYSTEM_BOOT = 0
 

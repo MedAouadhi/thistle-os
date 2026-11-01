@@ -328,6 +328,39 @@ running of them in `power_manager.rs`; every ESP-IDF sleep call in
   still deep-sleeps, and a sleeping board on USB deep-sleeps instead.
 - **The log's timestamps stop during light sleep**; they count FreeRTOS ticks.
 
+### Background checks
+
+A kernel module that wants to look for news while nothing in front asks,
+WhatsApp's messages say, registers a **background check** (ADR-0014):
+`background_check::register(name, every, ram_needed, stack, || Outcome)`,
+or `background_check_register()` from C (`thistle/background_check.h`).
+Decisions are in `background_check_policy.rs`, host-tested; the running of
+them in `background_check.rs`. Packaged apps cannot register one: there is
+no syscall.
+
+- **A kernel worker job looks once a second.** A check is due an interval
+  after it last ended (first, an interval after registering); 0 is off.
+  A due check waits up to 90 s for a network and the clock, then is
+  skipped; one that finds less internal RAM free than it declared is
+  skipped at once. Skipped or failed, it is tried again an interval later,
+  never sooner. `set_interval`, `set_paused` (while its module holds a
+  live connection); a check that returns `StoppedUntil(t)` runs no more
+  before `t`.
+- **It runs on a task made for it**, `check` (`kernel_task::spawn`, its
+  stack in internal RAM), gone after, and holds the device awake meanwhile
+  under its name. The log says `check sim: done (nothing new) in 0.2 s;
+  internal RAM 120 KB free before, 119 KB after`, or `check sim: skipped:
+  no network`.
+- **Light sleep wakes on a timer for it.** The power manager sleeps until
+  the earlier of deep sleep and the next check; woken with one due, it
+  brings back only the network (`up for a background check`), leaving the
+  screen and the drivers asleep, rests it again once the checks are over
+  (`background checks over; sleeping again`), and sleeps. At most 5
+  minutes (`power_policy::CHECK_WAKE_MAX`). Deep sleep runs none.
+- The simulator's board does not sleep. `THISTLE_SIM_BACKGROUND_CHECK=
+  SECONDS[:done|failed|skipped|stopped|lowram]` registers a check named
+  `sim`; `simulator/tests/test_background_check.py`.
+
 ### SMS and the message history
 
 The kernel, not an app, receives SMS: the network coordinator fetches them

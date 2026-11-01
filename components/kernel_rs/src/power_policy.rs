@@ -68,6 +68,11 @@ pub(crate) const RADIO_DOZE_MAX: Duration = Duration::from_secs(10);
 /// ahead without them: a modem that never answers must not keep the device
 /// awake all night.
 pub(crate) const SETTLE_TIMEOUT: Duration = Duration::from_secs(15);
+/// The longest the CPU stays up, with the network back, for background
+/// checks after a light sleep: a check that never ends must not keep the
+/// device awake. It covers a check's wait for the network
+/// (background_check_policy::NETWORK_WAIT) and its run.
+pub(crate) const CHECK_WAKE_MAX: Duration = Duration::from_secs(5 * 60);
 
 // ---------------------------------------------------------------------------
 // Settings
@@ -268,6 +273,11 @@ pub(crate) enum Action {
     FallAsleep,
     /// Halt the CPU, until `until` at the latest.
     LightSleep { until: Option<Instant> },
+    /// Asleep, a background check wants the network: bring it back, with
+    /// the screen and the drivers left asleep.
+    RaiseNetwork,
+    /// The checks are over: rest the network again before the CPU sleeps.
+    RestNetwork,
     DeepSleep,
     PowerOff,
     /// Bring the drivers, the network and the screen back.
@@ -306,6 +316,21 @@ pub(crate) struct Facts {
     pub(crate) battery_critical: bool,
     /// MeshCore has packets queued to go out.
     pub(crate) radio_busy: bool,
+    /// When the next background check falls due, if any is waiting.
+    pub(crate) next_check: Option<Instant>,
+    /// A background check is due or running.
+    pub(crate) checks_busy: bool,
+    /// The network has rested as sleep asked it to.
+    pub(crate) network_rested: bool,
+}
+
+/// Asleep, the CPU is up for background checks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CheckWake {
+    /// The network was brought back for them, at `since`.
+    Up { since: Instant },
+    /// They are over and the network is resting again, since `since`.
+    Resting { since: Instant },
 }
 
 /// An early bedtime: after a wake nobody asked for, the device sleeps again
@@ -325,6 +350,7 @@ pub(crate) struct Policy {
     early: Option<Early>,
     /// After a packet woke the CPU, how long it may stay up for MeshCore.
     radio_limit: Option<Instant>,
+    check_wake: Option<CheckWake>,
 }
 
 impl Policy {
@@ -335,6 +361,7 @@ impl Policy {
             phase: Phase::Awake,
             early: None,
             radio_limit: None,
+            check_wake: None,
         }
     }
 
@@ -472,6 +499,7 @@ impl Policy {
                 if f.user_waiting || f.key != KeyPress::None {
                     self.phase = Phase::Awake;
                     self.early = None;
+                    self.check_wake = None;
                     return Action::Wake;
                 }
                 if self.deep_due(f.now, f.last_activity) && self.idle_depth() == Depth::Off {
@@ -481,15 +509,48 @@ impl Policy {
                 if self.deep_due(f.now, f.last_activity) || (f.battery_critical && self.caps.deep_sleep) {
                     return Action::DeepSleep;
                 }
+                if let Some(action) = self.checks(f) {
+                    return action;
+                }
                 let sending = f.radio_busy && self.radio_limit.is_some_and(|l| f.now < l);
                 if doze_until.is_some_and(|t| f.now < t) || sending {
                     return Action::Nothing;
                 }
                 self.phase = Phase::Asleep { doze_until: None };
                 self.radio_limit = None;
-                Action::LightSleep {
-                    until: self.deep_sleep_at(f.last_activity),
+                let deep = self.deep_sleep_at(f.last_activity);
+                let until = match (deep, f.next_check) {
+                    (Some(d), Some(c)) => Some(d.min(c)),
+                    (d, c) => d.or(c),
+                };
+                Action::LightSleep { until }
+            }
+        }
+    }
+
+    /// Asleep, what background checks ask for, if anything: the network
+    /// back while one is due or running, then rested again before the CPU
+    /// sleeps.
+    fn checks(&mut self, f: &Facts) -> Option<Action> {
+        match self.check_wake {
+            None if f.checks_busy => {
+                self.check_wake = Some(CheckWake::Up { since: f.now });
+                Some(Action::RaiseNetwork)
+            }
+            None => None,
+            Some(CheckWake::Up { since }) => {
+                if f.checks_busy && f.now.duration_since(since) < CHECK_WAKE_MAX {
+                    return Some(Action::Nothing);
                 }
+                self.check_wake = Some(CheckWake::Resting { since: f.now });
+                Some(Action::RestNetwork)
+            }
+            Some(CheckWake::Resting { since }) => {
+                if !f.network_rested && f.now.duration_since(since) < SETTLE_TIMEOUT {
+                    return Some(Action::Nothing);
+                }
+                self.check_wake = None;
+                None
             }
         }
     }
@@ -500,10 +561,12 @@ impl Policy {
             Woke::User => {
                 self.phase = Phase::Awake;
                 self.early = None;
+                self.check_wake = None;
                 Action::Wake
             }
             Woke::Modem => {
                 self.phase = Phase::Awake;
+                self.check_wake = None;
                 self.early = Some(Early {
                     set_at: now,
                     at: now + UNASKED_WAKE_GRACE,
@@ -570,6 +633,9 @@ mod tests {
             user_waiting: false,
             battery_critical: false,
             radio_busy: false,
+            next_check: None,
+            checks_busy: false,
+            network_rested: true,
         }
     }
 
@@ -1122,5 +1188,114 @@ mod tests {
         p.booted_by_modem(t0);
         assert_eq!(p.decide(&facts(t0, 30, 10)), Action::Nothing);
         assert_eq!(p.decide(&facts(t0, 70, 10)), Action::Settle(Depth::Light));
+    }
+
+    // ── Background checks ───────────────────────────────────────────────
+
+    fn checking(t0: Instant, at: u64) -> Facts {
+        let mut f = facts(t0, at, 0);
+        f.checks_busy = true;
+        f
+    }
+
+    #[test]
+    fn asleep_it_wakes_for_the_next_check_before_deep_sleep() {
+        let t0 = Instant::now();
+        let mut p = asleep(t0);
+        let mut f = facts(t0, 62, 0);
+        f.next_check = Some(t0 + secs(300));
+        assert_eq!(p.decide(&f), Action::LightSleep { until: Some(t0 + secs(300)) });
+    }
+
+    #[test]
+    fn deep_sleep_falling_first_still_wakes_first() {
+        let t0 = Instant::now();
+        let mut p = asleep(t0);
+        let mut f = facts(t0, 62, 0);
+        f.next_check = Some(t0 + secs(900));
+        assert_eq!(p.decide(&f), Action::LightSleep { until: Some(t0 + secs(600)) });
+    }
+
+    #[test]
+    fn with_deep_sleep_off_a_check_still_sets_the_timer() {
+        let t0 = Instant::now();
+        let mut p = Policy::new(settings(60, 0), ALL);
+        p.decide(&facts(t0, 60, 0));
+        let mut f = facts(t0, 61, 0);
+        f.settled = true;
+        p.decide(&f);
+        let mut f = facts(t0, 62, 0);
+        f.next_check = Some(t0 + secs(900));
+        assert_eq!(p.decide(&f), Action::LightSleep { until: Some(t0 + secs(900)) });
+    }
+
+    #[test]
+    fn woken_for_a_check_it_brings_the_network_back_runs_it_and_sleeps_again() {
+        let t0 = Instant::now();
+        let mut p = asleep(t0);
+        let mut f = facts(t0, 62, 0);
+        f.next_check = Some(t0 + secs(300));
+        p.decide(&f);
+        assert_eq!(p.woke(Woke::Timer, t0 + secs(300)), Action::Nothing);
+        assert_eq!(p.decide(&checking(t0, 300)), Action::RaiseNetwork);
+        assert_eq!(p.decide(&checking(t0, 301)), Action::Nothing);
+        assert_eq!(p.decide(&checking(t0, 340)), Action::Nothing);
+        // The check is over: the network rests again before the CPU sleeps.
+        assert_eq!(p.decide(&facts(t0, 341, 0)), Action::RestNetwork);
+        let mut f = facts(t0, 342, 0);
+        f.network_rested = false;
+        assert_eq!(p.decide(&f), Action::Nothing);
+        assert!(matches!(p.decide(&facts(t0, 345, 0)), Action::LightSleep { .. }));
+        assert!(matches!(p.phase(), Phase::Asleep { .. }));
+    }
+
+    #[test]
+    fn a_network_that_never_rests_after_a_check_does_not_keep_it_up() {
+        let t0 = Instant::now();
+        let mut p = asleep(t0);
+        p.decide(&checking(t0, 100));
+        assert_eq!(p.decide(&facts(t0, 120, 0)), Action::RestNetwork);
+        let mut f = facts(t0, 120 + SETTLE_TIMEOUT.as_secs(), 0);
+        f.network_rested = false;
+        assert!(matches!(p.decide(&f), Action::LightSleep { .. }));
+    }
+
+    #[test]
+    fn a_check_that_never_ends_does_not_keep_it_up_for_ever() {
+        let t0 = Instant::now();
+        let mut p = asleep(t0);
+        assert_eq!(p.decide(&checking(t0, 100)), Action::RaiseNetwork);
+        assert_eq!(p.decide(&checking(t0, 99 + CHECK_WAKE_MAX.as_secs())), Action::Nothing);
+        assert_eq!(p.decide(&checking(t0, 100 + CHECK_WAKE_MAX.as_secs())), Action::RestNetwork);
+    }
+
+    #[test]
+    fn deep_sleep_runs_no_check() {
+        let t0 = Instant::now();
+        let mut p = asleep(t0);
+        assert_eq!(p.decide(&checking(t0, 590)), Action::RaiseNetwork);
+        assert_eq!(p.decide(&checking(t0, 600)), Action::DeepSleep);
+    }
+
+    #[test]
+    fn the_user_waking_it_during_a_check_wakes_it_for_good() {
+        let t0 = Instant::now();
+        let mut p = asleep(t0);
+        p.decide(&checking(t0, 100));
+        let mut f = checking(t0, 110);
+        f.user_waiting = true;
+        assert_eq!(p.decide(&f), Action::Wake);
+        // Asleep again later, a check raises the network afresh.
+        let mut p2 = asleep(t0);
+        p2.decide(&checking(t0, 100));
+        p2.woke(Woke::User, t0 + secs(110));
+        assert_eq!(p2.phase(), Phase::Awake);
+    }
+
+    #[test]
+    fn awake_a_check_needs_nothing_from_the_power_manager() {
+        let t0 = Instant::now();
+        let mut p = Policy::new(settings(60, 600), ALL);
+        assert_eq!(p.decide(&checking(t0, 10)), Action::Nothing);
     }
 }
