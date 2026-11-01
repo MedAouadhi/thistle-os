@@ -122,3 +122,23 @@ _Avoid_: poll, sync, background job, push
 **Linked device**:
 A device that a phone's WhatsApp account has linked as one of its companions, by a QR code or a pairing code, and that then sends and receives as that account. It is identified by keys it made at linking, not by a credential, and stays linked until the phone unlinks it or it is gone too long.
 _Avoid_: WhatsApp account, session, login
+
+**Tailnet chat**:
+Messaging and voice between installs that speak its protocol over the user's tailnet: the T-Deck's own app, and the companion app on Linux and phones. Peers connect to each other directly; there is no server. A message to a peer that is away waits with its sender until it is delivered.
+_Avoid_: tailnet messenger, Tailscale chat, P2P chat
+
+**Chat peer**:
+An install that answers Tailnet chat's hello: the T-Deck's app or a companion app. A tailnet peer is any node on the tailnet, Tailscale's meaning, whether or not it speaks Tailnet chat.
+_Avoid_: peer (unqualified, in Tailnet chat), node, client
+
+**Identity key**:
+The key a chat peer proves at every connection. It, not the tailnet name or address, is who a contact is. A companion app makes its own on first start; the T-Deck uses its MeshCore identity, so a device is one key on LoRa and on the tailnet.
+_Avoid_: node key, device key, account
+
+**Contact** (Tailnet chat):
+A chat peer whose identity key the user has accepted. The first acceptance trusts the tailnet alone; from then on a chat peer under that contact's name or address with another key is refused and flagged, until the user accepts the new key in its place.
+_Avoid_: friend, buddy, chat peer (for an accepted one)
+
+**Contact request**:
+What a chat peer that is not yet a contact sends, with or without messages. It waits, with its tailnet name and key fingerprint, until the user accepts it, which makes the sender a contact and delivers its messages, or declines it, which drops them.
+_Avoid_: invite, friend request
