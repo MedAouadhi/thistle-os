@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tailnet_chat_core/tailnet_chat_core.dart';
 import 'package:thistle_chat/src/chat_model.dart';
+import 'package:thistle_chat/src/permissions.dart';
 import 'package:thistle_chat/src/tailnet.dart';
 import 'package:thistle_chat/src/ui/app.dart';
 
@@ -29,12 +30,12 @@ void main() {
     throw TestFailure('the screen never got there');
   }
 
-  Future<void> launch(WidgetTester tester) async {
+  Future<void> launch(WidgetTester tester, {FakePermissions? permissions, FakeService? service}) async {
     tester.view.physicalSize = const Size(1000, 800);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.reset);
     await tester.runAsync(() async {
-      app = testModel(tailnet, RecordingNotifier());
+      app = testModel(tailnet, RecordingNotifier(), permissions: permissions, service: service);
       device = ChatPeer(
         identity: Identity.generate(),
         store: Store.open(':memory:'),
@@ -288,6 +289,43 @@ void main() {
     await tester.tap(find.text('Listen in the background'));
     await tester.pump();
     expect(app.backgroundListening, isFalse);
+    await finish(tester);
+  });
+
+  testWidgets('Android: says when the Tailscale app is not connected, and offers no discovery', (tester) async {
+    tailnet.status = statusFromInterfaces({
+      'wlan0': ['192.168.1.23'],
+    });
+    await launch(tester, permissions: FakePermissions(), service: FakeService());
+    expect(find.textContaining('The Tailscale app is not connected'), findsOneWidget);
+
+    tailnet.status = statusFromInterfaces({
+      'tun0': ['100.99.0.7'],
+    });
+    await tester.runAsync(app.refresh);
+    await tester.pump();
+    expect(find.textContaining('Tailscale'), findsNothing);
+
+    await tester.tap(find.text('Contacts'));
+    await tester.pump();
+    expect(find.byTooltip('Look for chat peers'), findsNothing);
+    expect(find.byTooltip('Add by name or address'), findsOneWidget);
+    expect(find.textContaining('Add a chat peer by its tailnet name'), findsOneWidget);
+    await finish(tester);
+  });
+
+  testWidgets('a refused permission is explained, with the way to Android\'s settings', (tester) async {
+    final permissions = FakePermissions()..answer = PermissionAnswer.permanentlyDenied;
+    await launch(tester, permissions: permissions, service: FakeService());
+    await until(tester, () => find.textContaining('Notifications are not allowed').evaluate().isNotEmpty);
+
+    await tester.tap(find.text('Open settings'));
+    await tester.pump();
+    expect(permissions.settingsOpened, 1);
+
+    await tester.tap(find.byTooltip('Dismiss'));
+    await tester.pump();
+    expect(find.textContaining('Notifications are not allowed'), findsNothing);
     await finish(tester);
   });
 }

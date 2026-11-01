@@ -1,7 +1,7 @@
 # Thistle Chat, the companion app
 
 Tailnet chat's companion app (`.scratch/tailnet-chat/spec.md`, ADR-0015) for
-Linux; Android comes in ticket 11 from the same code. The protocol, the
+Linux and Android, from the same code. The protocol, the
 policy, the outbox and the database are the Dart core's
 (`companion/core/`, `tailnet_chat_core`); this app is the screens and the
 platform glue:
@@ -18,8 +18,16 @@ platform glue:
   30 s), discovery, a peer added by name or address, the conversation on
   screen (read when in front), typing, notifications in the background, and
   the settings.
-- `lib/src/notifier.dart`: desktop notifications (`flutter_local_notifications`,
-  the freedesktop service over D-Bus).
+- `lib/src/notifier.dart`: notifications (`flutter_local_notifications`: the
+  freedesktop service over D-Bus, Android's notification manager).
+- Android only: `lib/src/android.dart` over the app's own method channel
+  (`android/app/src/main/kotlin/org/thistleos/thistle_chat/`): the identity's
+  seed sealed by an AES-GCM key in the Android Keystore (`KeystoreVault.kt`;
+  no plugin, so the Linux build stays free of libsecret); the listening
+  service (`ListenService.kt`, `background.dart`); runtime permissions
+  (`Platform.kt`, `permissions.dart`). The tailnet is read from the network
+  interfaces (`readAndroidTailnet` in `tailnet.dart`): the Tailscale app
+  connected is a `tun` interface with a 100.64.0.0/10 address.
 - `lib/src/ui/`: Conversations, Contacts (discovery, add by name, a contact's
   fingerprint, a changed key to accept, rename, remove), Requests, Settings
   (read receipts, background listening).
@@ -73,15 +81,60 @@ and type on its standard input, a command a line (the control protocol in
 It shows in Requests with its fingerprint; Accept, and the conversation
 opens in Conversations.
 
+## Android
+
+The Tailscale app must be installed and connected on the phone: the chat
+app has no peer list there, so chat peers are added by tailnet name
+(MagicDNS) or 100.x address, and the contacts known are dialled when the
+tailnet comes up and whenever the app comes to the front.
+
+- **Listening in the background**: a foreground service with a persistent
+  notification ("Thistle Chat is listening") keeps the process, and the
+  Flutter engine whose chat peer listens, alive after the app is swiped
+  away. On by default; Settings, Listen in the background, switches it.
+  Off, a message waits with its sender until the app is opened. The engine
+  is the activity's and the service's both (`Engines.kt`): the window
+  attaches to it, and Android restarting the service restarts it.
+- **Permissions, when first needed**: notifications when the service starts
+  or a contact is added or accepted, the microphone when a recording or a
+  call first needs it (`model.permissions?.need(AppPermission.microphone)`).
+  A refusal shows a banner saying what it stops, with Open settings.
+- Nothing is backed up (`allowBackup="false"`, `data_extraction_rules.xml`):
+  the sealed seed is useless without this phone's Keystore key.
+
+Building needs the Android SDK (platform 35 and 36, build tools, the NDK
+Flutter names, all installed by the Gradle build once the licences are
+accepted) and JDK 17 or newer:
+
+```sh
+export PATH=$HOME/flutter/bin:$PATH
+flutter config --android-sdk ~/Android/Sdk --jdk-dir /path/to/jdk-17-or-21
+flutter doctor --android-licenses
+cd companion/app
+flutter build apk --release     # build/app/outputs/flutter-apk/app-release.apk
+adb install -r build/app/outputs/flutter-apk/app-release.apk
+```
+
+The APK is signed with the debug key, for installing by hand; CI keeps the
+one it builds as the artifact `thistle-chat-apk`.
+
 ## Tests
 
 - `test/tailnet_test.dart`: `tailscale status --json` fixtures
   (`test/fixtures/`, made up) running, stopped and signed out; discovery.
+- `test/android_tailnet_test.dart`: Android's tailnet from the interfaces:
+  a `tun` with a 100.64.0.0/10 address, carrier NAT on the mobile interface
+  not taken for it, the Tailscale app not connected.
+- `test/permissions_test.dart`: asked when first needed, once; a refusal
+  explained; refused for good sends to the settings.
 - `test/identity_test.dart`: the key made once and kept; the real Secret
   Service when a desktop session bus is there (skipped in CI).
 - `test/chat_model_test.dart`: the model against a real core peer on
   loopback: requests, accept and decline, delivered and read, replies,
   reactions, typing, notifications, read receipts off, rename, remove, a
-  changed key flagged and accepted, discovery, a peer by name.
+  changed key flagged and accepted, discovery, a peer by name; on Android,
+  the contacts dialled on coming to the front, and the listening service
+  started, switched off and on, with notifications asked for first.
 - `test/ui_test.dart`: the same flows through the screens, by taps and
-  typing.
+  typing; Android's banner for the Tailscale app, no discovery there, and a
+  refused permission's banner.

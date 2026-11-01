@@ -13,7 +13,9 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:tailnet_chat_core/tailnet_chat_core.dart';
 
+import 'background.dart';
 import 'notifier.dart';
+import 'permissions.dart';
 import 'tailnet.dart';
 
 /// `host`, `host:port`, `[v6]:port` or a bare IPv6 address.
@@ -46,6 +48,8 @@ class ChatModel extends ChangeNotifier {
     this.refreshEvery = const Duration(seconds: 30),
     this.lookup = InternetAddress.lookup,
     this.log,
+    this.background,
+    this.permissions,
   }) : notifier = notifier ?? _Silent();
 
   final Identity identity;
@@ -64,6 +68,12 @@ class ChatModel extends ChangeNotifier {
   final Duration refreshEvery;
   final Lookup lookup;
   final void Function(String line)? log;
+
+  /// Android's foreground service; null on Linux.
+  final BackgroundService? background;
+
+  /// Android's runtime permissions; null on Linux, which asks for none.
+  final Permissions? permissions;
 
   TailscaleStatus status = const TailscaleStatus(TailnetState.starting);
   late ChatPeer _peer = _newPeer('127.0.0.1');
@@ -109,6 +119,8 @@ class ChatModel extends ChangeNotifier {
 
   Future<void> start() async {
     await refresh();
+    // Not awaited: the notification prompt waits on the user, the screens do not.
+    unawaited(_applyBackground());
     if (refreshEvery > Duration.zero) _refresh = Timer.periodic(refreshEvery, (_) => refresh());
     _tick = Timer.periodic(const Duration(seconds: 1), (_) => _typingLapse());
   }
@@ -116,9 +128,13 @@ class ChatModel extends ChangeNotifier {
   /// Read Tailscale's status again: listen on its address if it changed,
   /// and dial the contacts it shows online, so their outboxes flush.
   Future<void> refresh() async {
+    final was = status.address;
     status = await readStatus();
     if (_closed) return;
     final host = status.state == TailnetState.running ? (listenHost ?? status.address) : null;
+    // Without a peer list (Android), the tailnet coming up or moving is
+    // when to dial the contacts known.
+    final dialKnown = !status.hasPeerList && status.address != null && status.address != was;
     if (host != null && (!_started || host != _peer.host)) {
       if (_started || host != _peer.host) {
         final old = _peer;
@@ -134,9 +150,24 @@ class ChatModel extends ChangeNotifier {
         log?.call('cannot listen on $host:$port: $e');
       }
     }
-    if (_started) unawaited(_peer.seenOnline(status.onlineNames));
+    if (_started) unawaited(_peer.seenOnline(dialKnown ? _knownNames : status.onlineNames));
     notifyListeners();
   }
+
+  /// The contacts' tailnet names: who to dial when nothing says who is online.
+  Set<String> get _knownNames => {for (final c in contacts) ?c.tailnetName};
+
+  /// Start or stop the background service as the setting says; it shows a
+  /// notification, so notifications are asked for first.
+  /// One after another, so a switch flipped during the prompt lands last.
+  Future<void> _applyBackground() => _background = _background.then((_) async {
+    final service = background;
+    if (service == null || _closed) return;
+    final on = backgroundListening;
+    if (on) await permissions?.need(AppPermission.notifications);
+    await service.setRunning(on);
+  });
+  Future<void> _background = Future.value();
 
   Future<void> close() async {
     _closed = true;
@@ -151,8 +182,12 @@ class ChatModel extends ChangeNotifier {
   /// Whether the window is in front; set from the app's lifecycle.
   bool get foreground => _foreground;
   set foreground(bool on) {
+    final back = on && !_foreground;
     _foreground = on;
     if (on && _open != null) _markRead(_open!);
+    // Without a peer list, coming to the front is when to look for the
+    // contacts again: a message held for us while we were away comes now.
+    if (back && _started && !status.hasPeerList) unawaited(_peer.seenOnline(_knownNames));
   }
 
   String? get openConversationBox => _open;
@@ -244,8 +279,14 @@ class ChatModel extends ChangeNotifier {
 
   Contact addContact(PeerAddress address, {String? name}) {
     final c = _peer.addContact(address, name: name);
+    _wantNotifications();
     notifyListeners();
     return c;
+  }
+
+  /// A contact can now message us: notifications are first needed.
+  void _wantNotifications() {
+    if (permissions != null) unawaited(permissions!.need(AppPermission.notifications));
   }
 
   /// A peer typed in by tailnet name, MagicDNS name, DNS name or address,
@@ -275,6 +316,7 @@ class ChatModel extends ChangeNotifier {
 
   Contact accept(String key) {
     final c = _peer.accept(key);
+    _wantNotifications();
     notifyListeners();
     return c;
   }
@@ -388,6 +430,7 @@ class ChatModel extends ChangeNotifier {
   bool get backgroundListening => _peer.store.setting('background_listening') != 'off';
   set backgroundListening(bool on) {
     _peer.store.setSetting('background_listening', on ? 'on' : 'off');
+    unawaited(_applyBackground());
     notifyListeners();
   }
 }

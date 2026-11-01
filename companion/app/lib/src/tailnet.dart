@@ -2,8 +2,10 @@
 /// runs, our tailnet address, and the peers online. And discovery: which of
 /// those peers answer as chat peers (spec, The companion app: Discovery).
 ///
-/// Linux only: Android has no peer list (ticket 11 adds peers by name or
-/// address, and from the contacts already known).
+/// On Android there is no `tailscale` command and no peer list: the
+/// Tailscale app is a VPN, and its interface's address is all there is
+/// to read ([statusFromInterfaces]). Peers are added there by name or
+/// address, and dialled from the contacts already known.
 library;
 
 import 'dart:convert';
@@ -11,7 +13,17 @@ import 'dart:io';
 
 import 'package:tailnet_chat_core/tailnet_chat_core.dart';
 
-enum TailnetState { running, starting, stopped, needsLogin, notRunning, notInstalled }
+enum TailnetState {
+  running,
+  starting,
+  stopped,
+  needsLogin,
+  notRunning,
+  notInstalled,
+
+  /// Android: no VPN interface with a tailnet address.
+  appNotConnected,
+}
 
 class TailnetPeer {
   const TailnetPeer({required this.hostName, required this.dnsName, required this.ips});
@@ -28,7 +40,14 @@ class TailnetPeer {
 }
 
 class TailscaleStatus {
-  const TailscaleStatus(this.state, {this.selfName, this.selfIps = const [], this.peers = const [], this.authUrl});
+  const TailscaleStatus(
+    this.state, {
+    this.selfName,
+    this.selfIps = const [],
+    this.peers = const [],
+    this.authUrl,
+    this.hasPeerList = true,
+  });
 
   final TailnetState state;
   final String? selfName;
@@ -37,6 +56,10 @@ class TailscaleStatus {
   /// Online peers only, with at least one address.
   final List<TailnetPeer> peers;
   final String? authUrl;
+
+  /// Whether [peers] is the tailnet's peer list (Linux), so discovery can
+  /// probe it; false on Android, where nothing lists the peers.
+  final bool hasPeerList;
 
   /// The address to listen on: our tailnet IPv4 address, while running.
   String? get address {
@@ -58,6 +81,8 @@ class TailscaleStatus {
       'Tailscale needs you to sign in${authUrl == null || authUrl!.isEmpty ? '' : ' at $authUrl'}.',
     TailnetState.notRunning => 'Tailscale is not running, so nothing can connect. Start tailscaled.',
     TailnetState.notInstalled => 'Tailscale is not installed: the `tailscale` command was not found.',
+    TailnetState.appNotConnected =>
+      'The Tailscale app is not connected, so nothing can reach this phone. Open Tailscale and connect.',
   };
 }
 
@@ -111,6 +136,47 @@ Future<TailscaleStatus> readTailscaleStatus({RunProcess run = Process.run}) asyn
     return parseTailscaleStatus('${r.stdout}');
   } on ProcessException {
     return const TailscaleStatus(TailnetState.notInstalled);
+  }
+}
+
+// -- Android ----------------------------------------------------------------------
+
+/// Whether `ip` is in 100.64.0.0/10, where Tailscale gives its addresses.
+bool isTailnetAddress(String ip) {
+  final a = InternetAddress.tryParse(ip);
+  if (a == null || a.type != InternetAddressType.IPv4) return false;
+  final b = a.rawAddress;
+  return b[0] == 100 && b[1] >= 64 && b[1] < 128;
+}
+
+/// The tailnet as Android shows it: the Tailscale app connected is a VPN
+/// interface (`tun0`) holding a 100.64.0.0/10 address. That range is also
+/// carrier-grade NAT, so such an address on the mobile interface does not
+/// count. `addresses` is each interface's addresses, by name.
+TailscaleStatus statusFromInterfaces(Map<String, List<String>> addresses) {
+  for (final MapEntry(key: name, value: ips) in addresses.entries) {
+    if (!name.startsWith('tun')) continue;
+    final ip = ips.where(isTailnetAddress).firstOrNull;
+    if (ip != null) {
+      return TailscaleStatus(TailnetState.running, selfIps: [ip, ...ips.where((a) => a != ip)], hasPeerList: false);
+    }
+  }
+  return const TailscaleStatus(TailnetState.appNotConnected, hasPeerList: false);
+}
+
+Future<Map<String, List<String>>> _listInterfaces() async => {
+  for (final i in await NetworkInterface.list(includeLinkLocal: false))
+    i.name: [for (final a in i.addresses) a.address],
+};
+
+/// Read the tailnet on Android from the network interfaces.
+Future<TailscaleStatus> readAndroidTailnet({
+  Future<Map<String, List<String>>> Function() list = _listInterfaces,
+}) async {
+  try {
+    return statusFromInterfaces(await list());
+  } on SocketException {
+    return const TailscaleStatus(TailnetState.appNotConnected, hasPeerList: false);
   }
 }
 
