@@ -594,6 +594,17 @@ fn peers() -> Vec<Peer> {
     .unwrap_or_default()
 }
 
+/// The tailnet hostname of the peer at `ip`, its first label ("homelab"),
+/// while connected and the peer is in the list last seen.
+pub(crate) fn peer_name(ip: std::net::Ipv4Addr) -> Option<String> {
+    let ip = u32::from(ip);
+    peers()
+        .into_iter()
+        .find(|p| p.ip == ip)
+        .map(|p| p.name.split('.').next().unwrap_or("").to_string())
+        .filter(|n| !n.is_empty())
+}
+
 /// # Safety
 /// `out` must be null or point to a writable `tailnet_status_t`.
 #[no_mangle]

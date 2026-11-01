@@ -51,7 +51,7 @@ DEVICES = (
 UNGATED_APPS = (
     "launcher", "settings", "filemgr", "reader", "podcasts",
     "appstore", "assistant", "terminal", "vault",
-    "phone", "filexfer", "tailscale", "hermes", "todo",
+    "phone", "filexfer", "tailscale", "hermes", "todo", "tailchat",
 )
 # lvgl_apps_register_builtin() registers these only on a capable board.
 RADIO_APPS = ("messenger",)

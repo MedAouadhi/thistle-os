@@ -143,6 +143,7 @@ static const char *app_icon_symbol(const char *app_id)
     if (strstr(app_id, "filemgr"))     return LV_SYMBOL_DIRECTORY;
     if (strstr(app_id, "filexfer"))    return LV_SYMBOL_UPLOAD;
     if (strstr(app_id, "tailscale"))   return LV_SYMBOL_SHUFFLE;
+    if (strstr(app_id, "tailchat"))    return LV_SYMBOL_BELL;
     if (strstr(app_id, "hermes"))      return LV_SYMBOL_CHARGE;
     if (strstr(app_id, "reader"))      return LV_SYMBOL_FILE;
     if (strstr(app_id, "messenger"))   return LV_SYMBOL_ENVELOPE;

@@ -200,6 +200,9 @@ jobs:
       - name: Test the To-do app's list and checklist file under sanitizers
         run: apps/todo/tests/run_tests.sh
 
+      - name: Test the Chat app's text under sanitizers
+        run: apps/tailchat/tests/run_tests.sh
+
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
@@ -535,6 +538,10 @@ jobs:
       - name: Run To-do add, tick, remove and clear tests
         working-directory: simulator
         run: python3 tests/test_todo.py --sim build/thistle_sim
+
+      - name: Run Tailnet chat conformance, card, restart and app tests
+        working-directory: simulator
+        run: python3 tests/test_tailnet_chat.py --sim build/thistle_sim
 
       - name: Run App Store list, refresh, install and remove tests
         working-directory: simulator

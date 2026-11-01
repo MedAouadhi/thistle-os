@@ -19,6 +19,7 @@ set(THISTLE_OPTIONAL_APPS
     "phone|PHONE|phone"
     "podcasts|PODCASTS|podcasts"
     "reader|READER|reader"
+    "tailchat|TAILCHAT|tailchat"
     "tailscale|TAILSCALE|tailscale"
     "todo|TODO|todo"
     "vault|VAULT|vault"
