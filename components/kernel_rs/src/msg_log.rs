@@ -518,6 +518,195 @@ pub unsafe extern "C" fn rs_msg_log_read_back(
 }
 
 // ---------------------------------------------------------------------------
+// Tailnet chat: the third kind
+// ---------------------------------------------------------------------------
+//
+//   /sdcard/messages/tailnet/630dcd2966c433669112.jsonl            a contact
+//   /sdcard/messages/tailnet/requests/630dcd2966c433669112.jsonl   a contact request
+//
+// One file per chat peer, named by its key's fingerprint. A contact
+// request's messages are kept apart until it is accepted, when they join
+// the contact's file; declined, they are deleted. Each line carries the
+// peer's key and the name it came under, the message's id, when it was
+// written (`ts`, ms, the sender's clock) and its delivery state.
+
+/// The directory under the history's root.
+pub(crate) const CHAT_DIR: &str = "tailnet";
+const CHAT_REQUESTS: &str = "requests";
+
+/// One Tailnet chat message, as it goes into the history.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ChatLine {
+    pub dir: Direction,
+    /// The chat peer's identity key, hex.
+    pub key: String,
+    /// The name it came under.
+    pub name: String,
+    pub id: String,
+    /// When it was written, ms since 1970 by the writer's clock.
+    pub ts: u64,
+    pub text: String,
+    pub reply_to: Option<String>,
+    /// "received"; for one sent, "waiting", "delivered" or "read".
+    pub state: String,
+}
+
+pub(crate) fn chat_line(l: &ChatLine, time: Option<u64>) -> String {
+    let mut obj = serde_json::Map::new();
+    let (dir, who) = match l.dir {
+        Direction::In => ("in", "from"),
+        Direction::Out => ("out", "to"),
+    };
+    obj.insert("dir".into(), dir.into());
+    obj.insert(who.into(), l.key.as_str().into());
+    obj.insert("name".into(), l.name.as_str().into());
+    obj.insert("id".into(), l.id.as_str().into());
+    obj.insert("ts".into(), l.ts.into());
+    obj.insert("time".into(), time.into());
+    obj.insert("text".into(), l.text.as_str().into());
+    if let Some(r) = &l.reply_to {
+        obj.insert("reply_to".into(), r.as_str().into());
+    }
+    obj.insert("state".into(), l.state.as_str().into());
+    let mut line = serde_json::Value::Object(obj).to_string();
+    line.push('\n');
+    line
+}
+
+pub(crate) fn parse_chat_line(line: &str) -> Option<ChatLine> {
+    let v: serde_json::Value = serde_json::from_str(line).ok()?;
+    let (dir, who) = match v.get("dir")?.as_str()? {
+        "in" => (Direction::In, "from"),
+        "out" => (Direction::Out, "to"),
+        _ => return None,
+    };
+    let s = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
+    Some(ChatLine {
+        dir,
+        key: s(who)?,
+        name: s("name").unwrap_or_default(),
+        id: s("id")?,
+        ts: v.get("ts")?.as_u64()?,
+        text: s("text")?,
+        reply_to: s("reply_to"),
+        state: s("state").unwrap_or_default(),
+    })
+}
+
+fn chat_path(root: &Path, request: bool, fp: &str) -> PathBuf {
+    let mut dir = root.join(CHAT_DIR);
+    if request {
+        dir.push(CHAT_REQUESTS);
+    }
+    dir.join(file_name(fp))
+}
+
+/// Append `line` to the file of the chat peer whose fingerprint is `fp`:
+/// its contact request's if `request`.
+pub(crate) fn chat_append(root: &Path, request: bool, fp: &str, line: &ChatLine, time: Option<u64>,
+                          marks: &mut Marks) -> std::io::Result<()> {
+    let path = chat_path(root, request, fp);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+    if !marks.contains_key(&path) {
+        let end = file.metadata()?.len();
+        marks.insert(path, end);
+    }
+    file.write_all(chat_line(line, time).as_bytes())
+}
+
+/// A contact request accepted: its messages join the contact's file.
+pub(crate) fn chat_accept(root: &Path, fp: &str) -> std::io::Result<()> {
+    let from = chat_path(root, true, fp);
+    let held = match std::fs::read(&from) {
+        Ok(h) => h,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let to = chat_path(root, false, fp);
+    if let Some(dir) = to.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    OpenOptions::new().create(true).append(true).open(&to)?.write_all(&held)?;
+    std::fs::remove_file(&from)
+}
+
+/// A contact request declined: its messages go.
+pub(crate) fn chat_drop_request(root: &Path, fp: &str) {
+    let _ = std::fs::remove_file(chat_path(root, true, fp));
+}
+
+/// The last `count` messages of a file, oldest first.
+pub(crate) fn chat_read(root: &Path, request: bool, fp: &str, count: usize) -> Vec<ChatLine> {
+    let Ok(mut file) = File::open(chat_path(root, request, fp)) else {
+        return Vec::new();
+    };
+    let Ok(end) = file.metadata().map(|m| m.len()) else {
+        return Vec::new();
+    };
+    last_lines(&mut file, end, count)
+        .map(|text| text.lines().filter_map(parse_chat_line).collect())
+        .unwrap_or_default()
+}
+
+/// The fingerprints of the contact requests on the card.
+pub(crate) fn chat_requests(root: &Path) -> Vec<String> {
+    let Ok(dir) = std::fs::read_dir(root.join(CHAT_DIR).join(CHAT_REQUESTS)) else {
+        return Vec::new();
+    };
+    let mut fps: Vec<String> = dir
+        .flatten()
+        .filter_map(|e| {
+            let p = e.path();
+            if p.extension()? != "jsonl" {
+                return None;
+            }
+            p.file_stem()?.to_str().map(str::to_string)
+        })
+        .collect();
+    fps.sort();
+    fps
+}
+
+/// Where the history is, on the card.
+pub(crate) fn root() -> &'static Path {
+    Path::new(ROOT)
+}
+
+/// Record a Tailnet chat message, if history is kept.
+pub(crate) fn chat_record(request: bool, fp: &str, line: &ChatLine) {
+    if cfg!(test) || !enabled() {
+        return;
+    }
+    let mut marks = WRITING.lock().unwrap_or_else(PoisonError::into_inner);
+    match chat_append(Path::new(ROOT), request, fp, line, now(), &mut marks) {
+        Ok(()) => WARNED.store(false, Ordering::Relaxed),
+        Err(_) => {
+            if !WARNED.swap(true, Ordering::Relaxed) {
+                warn!(b"cannot write the message history to %s; is there an SD card?\0", ROOT_C.as_ptr());
+            }
+        }
+    }
+}
+
+/// A contact request accepted or declined, on the card.
+pub(crate) fn chat_settle_request(fp: &str, accepted: bool) {
+    if cfg!(test) {
+        return;
+    }
+    let _guard = WRITING.lock().unwrap_or_else(PoisonError::into_inner);
+    if accepted {
+        if chat_accept(Path::new(ROOT), fp).is_err() {
+            warn!(b"could not move a contact request's messages into its conversation\0");
+        }
+    } else {
+        chat_drop_request(Path::new(ROOT), fp);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -768,4 +957,53 @@ mod tests {
         assert_eq!(scts_to_unix("25/13/13,12:34:56+08"), None);
         assert_eq!(scts_to_unix("not a time stamp"), None);
     }
+    fn chat(id: &str, text: &str, ts: u64) -> ChatLine {
+        ChatLine {
+            dir: Direction::In,
+            key: "ab".repeat(32),
+            name: "laptop".into(),
+            id: id.into(),
+            ts,
+            text: text.into(),
+            reply_to: None,
+            state: "received".into(),
+        }
+    }
+
+    #[test]
+    fn a_chat_line_reads_back_as_it_was_written() {
+        let mut l = chat(&"1".repeat(32), "Are you home? مرحبا\n", 1_793_541_600_000);
+        l.reply_to = Some("2".repeat(32));
+        let text = chat_line(&l, Some(1_793_541_601));
+        assert_eq!(text.matches('\n').count(), 1);
+        let v: serde_json::Value = serde_json::from_str(text.trim_end()).unwrap();
+        assert_eq!(v["from"], "ab".repeat(32));
+        assert_eq!(v["time"], 1_793_541_601u64);
+        assert_eq!(parse_chat_line(&text), Some(l));
+        assert_eq!(parse_chat_line("{\"dir\":\"in\""), None);
+    }
+
+    #[test]
+    fn a_request_is_kept_apart_until_accepted_or_declined() {
+        let root = temp_root("chat");
+        let mut marks = Marks::new();
+        let fp = "630dcd2966c433669112";
+        chat_append(&root, true, fp, &chat(&"1".repeat(32), "first", 1), None, &mut marks).unwrap();
+        chat_append(&root, true, fp, &chat(&"2".repeat(32), "second", 2), None, &mut marks).unwrap();
+        assert!(root.join("tailnet/requests/630dcd2966c433669112.jsonl").is_file());
+        assert_eq!(chat_requests(&root), vec![fp.to_string()]);
+        assert!(chat_read(&root, false, fp, 20).is_empty());
+        chat_accept(&root, fp).unwrap();
+        assert!(chat_requests(&root).is_empty());
+        let texts: Vec<String> = chat_read(&root, false, fp, 20).into_iter().map(|l| l.text).collect();
+        assert_eq!(texts, ["first", "second"]);
+        assert_eq!(chat_read(&root, false, fp, 1)[0].text, "second");
+
+        chat_append(&root, true, "other", &chat(&"3".repeat(32), "spam", 3), None, &mut marks).unwrap();
+        chat_drop_request(&root, "other");
+        assert!(chat_requests(&root).is_empty());
+        chat_accept(&root, "nothing-held").unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
 }

@@ -60,6 +60,9 @@
 #ifndef THISTLE_HAVE_TODO
 #define THISTLE_HAVE_TODO 1
 #endif
+#ifndef THISTLE_HAVE_TAILCHAT
+#define THISTLE_HAVE_TAILCHAT 1
+#endif
 
 #if THISTLE_HAVE_LAUNCHER
 #include "launcher/launcher_app.h"
@@ -96,6 +99,9 @@
 #endif
 #if THISTLE_HAVE_TODO
 #include "todo/todo_app.h"
+#endif
+#if THISTLE_HAVE_TAILCHAT
+#include "tailchat/tailchat_app.h"
 #endif
 #if THISTLE_HAVE_APPSTORE
 #include "appstore/appstore_app.h"
@@ -147,6 +153,10 @@ esp_err_t lvgl_apps_register_builtin(bool has_radio, bool has_gps)
 #if THISTLE_HAVE_HERMES
     /* On every board: on one without the tailnet it says so. */
     REGISTER(hermes_app_register);
+#endif
+#if THISTLE_HAVE_TAILCHAT
+    /* On every board: on one without the tailnet it says so. */
+    REGISTER(tailchat_app_register);
 #endif
 #if THISTLE_HAVE_READER
     REGISTER(reader_app_register);
