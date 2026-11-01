@@ -777,6 +777,8 @@ class ChatPeer:
             self.cond.notify_all()
 
     def _on_typing(self, conn, key, frame):
+        if self.contact(key) is None:
+            return  # a stranger's typing is ignored (protocol section 7)
         with self.cond:
             self.typing[key] = time.monotonic() + 6 if frame["on"] else 0
             self.cond.notify_all()

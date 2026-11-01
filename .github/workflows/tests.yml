@@ -279,6 +279,39 @@ jobs:
           grep -q "advance_security_version_and_select" recovery/src/recovery_ota.rs
           grep -q "EspDefaultNvsPartition::take_with(false)" recovery/src/main.rs
 
+  companion-core:
+    name: Companion Core (Dart, headless, conformance)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: companion/core
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dart-lang/setup-dart@v1.7.1
+        with:
+          sdk: 3.13.7
+
+      - name: Fetch the core's packages, as locked
+        run: dart pub get --enforce-lockfile
+
+      - name: Analyze the core
+        run: |
+          dart format --output=none --set-exit-if-changed .
+          dart analyze --fatal-infos
+
+      - name: Test the core against the protocol's vectors, its policy and two peers
+        run: dart test
+
+      - name: Build the headless core
+        run: dart build cli
+
+      - name: Run Tailnet chat's conformance suite against the headless core
+        working-directory: .
+        run: |
+          python3 tools/tailnet_chat/conformance.py \
+            --control 'companion/core/build/cli/linux_x64/bundle/bin/tailnet_chat_core --listen 127.0.0.1:0 --loopback'
+
   simulator-boot:
     name: Simulator Boot Test
     runs-on: ubuntu-latest
