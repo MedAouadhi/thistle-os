@@ -96,3 +96,29 @@ _Avoid_: anti-rollback version, secure version
 **Security floor**:
 The highest security version a device has installed. A firmware below it is never installed or booted again, so a fixed hole cannot be reopened by going back.
 _Avoid_: rollback counter, minimum version
+
+### Credentials
+
+**Service**:
+An outside provider a device authenticates to, such as PodcastIndex, Cohere, Anthropic or Thingstream. Credentials are kept per service, not per app.
+_Avoid_: provider, account, API
+
+**Credential**:
+What a device presents to one service to prove it may use it: an API key, a token, or a key and secret pair. Never a setting with a sensible default, such as an address or a model name.
+_Avoid_: secret, token, API key (as the general term), config
+
+**Credential requirement**:
+A consumer's declaration that it uses a service's credential. An app, a system feature or a kernel service may read only the credentials it has declared, and one entry serves every consumer that declares its service.
+_Avoid_: credential permission, secret request
+
+### Background work
+
+**Background check**:
+A short, periodic piece of work a kernel module registers to look for news while nothing in front asks for it, such as fetching the WhatsApp messages that came in since the last one. It runs at an interval, only with a network up, may wake the device from light sleep, and finishes on its own; it is paused while the module's app holds a live connection.
+_Avoid_: poll, sync, background job, push
+
+### Messaging
+
+**Linked device**:
+A device that a phone's WhatsApp account has linked as one of its companions, by a QR code or a pairing code, and that then sends and receives as that account. It is identified by keys it made at linking, not by a credential, and stays linked until the phone unlinks it or it is gone too long.
+_Avoid_: WhatsApp account, session, login
