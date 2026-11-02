@@ -7,6 +7,7 @@ import 'dart:io';
 
 import 'peer.dart';
 import 'policy.dart';
+import 'protocol.dart' show SharedPeer;
 import 'store.dart';
 
 Map<String, Object?> identityJson(ChatPeer peer) => {
@@ -122,6 +123,15 @@ Future<Object?> control(ChatPeer peer, Map<String, dynamic> command) async {
     case 'end_call':
       peer.endCall(command['call'] as String, reason: (command['reason'] as String?) ?? 'hangup');
       return true;
+    case 'set_peers':
+      final given = [
+        for (final p in (command['peers'] as List).cast<Map<String, dynamic>>())
+          SharedPeer(p['name'] as String, (p['addrs'] as List).cast<String>()),
+      ];
+      peer.tailnetPeers = () async => given;
+      return [for (final p in sharedPeers(given, contact: true)) p.toJson()];
+    case 'ask_peers':
+      return (await peer.askPeers(_who(to)))?.map((p) => p.toJson()).toList();
     case 'stop':
       return true; // the caller stops the peer after answering
     default:

@@ -3,9 +3,10 @@
 /// reactions and the call rules (spec, "Policy apart from I/O").
 library;
 
+import 'dart:convert';
 import 'dart:math';
 
-import 'protocol.dart' show admitted, typingLapse;
+import 'protocol.dart' show SharedPeer, admitted, inTailnet, ipOf, maxNameBytes, maxPeerAddrs, maxPeers, typingLapse;
 
 /// A chat peer's address to dial.
 class PeerAddress {
@@ -189,3 +190,50 @@ String? callEndDue({
 /// answered and without the user turning it down.
 bool isMissedCall({required bool mine, required bool answered, required String state}) =>
     !mine && !answered && (state.startsWith('ended:') || state == 'declined:busy');
+
+// -- sharing the tailnet's peer list ----------------------------------------------
+
+String _cut(String s, int maxBytes) {
+  var out = s;
+  while (utf8.encode(out).length > maxBytes) {
+    out = out.substring(0, out.length - 1);
+  }
+  return out;
+}
+
+/// What a `peers_ask` is answered with (protocol section 4.10): for a
+/// contact, the tailnet peers `online` lists (the platform's online peers),
+/// less the one at the asker's address, each with a name cut to 64 bytes
+/// and at most two of its addresses inside the tailnet's ranges, at most 64
+/// of them; for a stranger, none.
+List<SharedPeer> sharedPeers(List<SharedPeer> online, {String? asker, required bool contact}) {
+  if (!contact) return const [];
+  final mine = asker == null ? null : ipOf(asker)?.address;
+  final out = <SharedPeer>[];
+  for (final p in online) {
+    final ips = [for (final a in p.addrs) ipOf(a)?.address];
+    if (mine != null && ips.contains(mine)) continue;
+    final addrs = [
+      for (final a in ips)
+        if (a != null && inTailnet(a)) a,
+    ].take(maxPeerAddrs).toList();
+    final name = _cut(p.name, maxNameBytes);
+    if (name.isNotEmpty && addrs.isNotEmpty) out.add(SharedPeer(name, addrs));
+    if (out.length == maxPeers) break;
+  }
+  return out;
+}
+
+/// The addresses an asker may probe from a `peers` answer: those inside the
+/// tailnet's ranges, each once. Nothing else of the list is taken: no key,
+/// no name, no trust (protocol section 4.10).
+List<String> addressesToProbe(List<SharedPeer> peers) {
+  final out = <String>[];
+  for (final p in peers) {
+    for (final a in p.addrs) {
+      final ip = ipOf(a)?.address;
+      if (ip != null && inTailnet(ip) && !out.contains(ip)) out.add(ip);
+    }
+  }
+  return out;
+}

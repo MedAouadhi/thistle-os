@@ -17,7 +17,7 @@ const int protocolVersion = 1;
 const int defaultPort = 4810;
 const String wsPath = '/tailnet-chat/1';
 
-const List<String> capsV1 = ['text', 'receipts', 'typing', 'reply', 'react', 'voice-message', 'call:ws-opus'];
+const List<String> capsV1 = ['text', 'receipts', 'typing', 'reply', 'react', 'voice-message', 'call:ws-opus', 'peers'];
 
 const int kindVoice = 0x01;
 const int kindCallAudio = 0x02;
@@ -27,6 +27,8 @@ const int maxJsonFrame = 16384;
 const int maxVoiceMs = 120000;
 const int maxVoiceBytes = 512 * 1024;
 const int maxNameBytes = 64;
+const int maxPeers = 64;
+const int maxPeerAddrs = 2;
 
 const int closeHandshake = 4000;
 const int closeDuplicate = 4001;
@@ -149,6 +151,41 @@ Map<String, Object?> errorFrame(String code, {String? what, String? id, String? 
   if (detail != null) 'detail': detail,
 };
 
+/// A tailnet peer as a `peers` answer lists it (protocol section 4.10).
+class SharedPeer {
+  const SharedPeer(this.name, this.addrs);
+
+  /// Its tailnet hostname
+  final String name;
+  final List<String> addrs;
+
+  Map<String, Object?> toJson() => {'name': name, 'addrs': addrs};
+
+  @override
+  bool operator ==(Object other) =>
+      other is SharedPeer &&
+      other.name == name &&
+      other.addrs.length == addrs.length &&
+      Iterable<int>.generate(addrs.length).every((i) => other.addrs[i] == addrs[i]);
+  @override
+  int get hashCode => Object.hash(name, Object.hashAll(addrs));
+  @override
+  String toString() => '$name ${addrs.join(',')}';
+}
+
+Map<String, Object?> peersAskFrame() => {'type': 'peers_ask'};
+
+Map<String, Object?> peersFrame(List<SharedPeer> peers) => {
+  'type': 'peers',
+  'peers': [for (final p in peers) p.toJson()],
+};
+
+/// The `peers` of a checked `peers` frame.
+List<SharedPeer> peersOf(Map<String, dynamic> frame) => [
+  for (final p in (frame['peers'] as List).cast<Map<String, dynamic>>())
+    SharedPeer(p['name'] as String, (p['addrs'] as List).cast<String>()),
+];
+
 /// A JSON frame as the vectors write it: compact, UTF-8, not ASCII-escaped.
 String encodeFrame(Map<String, Object?> frame) => jsonEncode(frame);
 
@@ -181,17 +218,29 @@ BinaryFrame unpackBinary(List<int> frame) {
 
 // -- admission ------------------------------------------------------------------
 
-/// Whether a connection from `address` may reach the WebSocket upgrade.
-bool admitted(String address, {bool loopback = false}) {
+/// `address` as an IP address, an IPv4-mapped one as its IPv4 address; null
+/// if it is not one.
+InternetAddress? ipOf(String address) {
   final ip = InternetAddress.tryParse(address.split('%').first);
-  if (ip == null) return false;
-  var raw = ip.rawAddress;
+  if (ip == null) return null;
+  final raw = ip.rawAddress;
   if (ip.type == InternetAddressType.IPv6 &&
       raw.sublist(0, 10).every((b) => b == 0) &&
       raw[10] == 0xff &&
       raw[11] == 0xff) {
-    raw = raw.sublist(12); // an IPv4-mapped address counts as its IPv4 address
+    return InternetAddress.fromRawAddress(raw.sublist(12));
   }
+  return ip;
+}
+
+/// Whether `address` is inside the tailnet's ranges.
+bool inTailnet(String address) => admitted(address);
+
+/// Whether a connection from `address` may reach the WebSocket upgrade.
+bool admitted(String address, {bool loopback = false}) {
+  final ip = ipOf(address);
+  if (ip == null) return false;
+  final raw = ip.rawAddress;
   if (raw.length == 4) {
     if (loopback && raw[0] == 127) return true;
     return raw[0] == 100 && (raw[1] & 0xc0) == 64; // 100.64.0.0/10
@@ -218,6 +267,10 @@ _Ok _oneOf(List<String> values) =>
     (v) => values.contains(v);
 _Ok _list(_Ok item, int lo, int hi) =>
     (v) => v is List && v.length >= lo && v.length <= hi && v.every(item);
+bool _peer(Object? v) =>
+    v is Map &&
+    _str(maxNameBytes, empty: false)(v['name']) &&
+    _list(_str(64, empty: false), 1, maxPeerAddrs)(v['addrs']);
 bool _bool(Object? v) => v is bool;
 bool _anyString(Object? v) => v is String;
 
@@ -264,6 +317,8 @@ final Map<String, (Map<String, _Ok>, Map<String, _Ok>)> _schema = {
   'call_offer': ({'call': _id, 'transports': _list(_str(32, empty: false), 1, 8), 'stream': _u32}, {}),
   'call_answer': ({'call': _id}, {'transport': _str(32, empty: false), 'decline': _str(32, empty: false)}),
   'call_end': ({'call': _id, 'reason': _str(32, empty: false)}, {}),
+  'peers_ask': ({}, {}),
+  'peers': ({'peers': _list(_peer, 0, maxPeers)}, {}),
   'error': ({'code': _str(32, empty: false)}, {'what': _str(256), 'id': _id, 'detail': _str(512)}),
 };
 

@@ -110,6 +110,7 @@ class _Connection {
   Uint8List? peerNonce;
   String? peerName;
   List<String> peerCaps = const [];
+  Completer<List<SharedPeer>>? peersAsked; // a `peers_ask` sent and not yet answered
   bool closed = false;
   DateTime lastActivity = DateTime.now();
   Timer? handshakeTimer;
@@ -136,6 +137,7 @@ class _Connection {
     handshakeTimer?.cancel();
     ws.close(code, reason);
     if (!ready.isCompleted) ready.completeError(Refused('closed: $reason', code: code));
+    if (peersAsked?.isCompleted == false) peersAsked!.complete(const []);
   }
 
   Uint8List transcriptFor(Role signer) {
@@ -172,6 +174,12 @@ class ChatPeer {
   final void Function(String line)? log;
 
   final Map<String, Call> calls = {};
+
+  /// The tailnet peers the platform shows online, shared with a contact
+  /// that asks (protocol section 4.10): Linux's `tailscale status`; none
+  /// where the platform has no peer list (Android).
+  Future<List<SharedPeer>> Function()? tailnetPeers;
+
   final List<_Connection> _connections = [];
   final Map<String, DateTime> _typing = {};
   final Map<int, Future<_Connection?>> _dialling = {};
@@ -496,6 +504,42 @@ class ChatPeer {
     }
   }
 
+  /// Ask contact `who` for its tailnet's peer list (protocol section 4.10),
+  /// dialling it if need be. Null if it cannot be reached or either side
+  /// does not announce `peers`; a stranger to it gets an empty list. Only
+  /// the addresses are to be taken from it, to probe
+  /// (`addressesToProbe`).
+  Future<List<SharedPeer>?> askPeers(Object who, {Duration timeout = const Duration(seconds: 5)}) async {
+    final c = contact(who);
+    if (c == null) return null;
+    final conn = await _connectionFor(c);
+    if (conn == null || !mayUse('peers', caps, conn.peerCaps)) return null;
+    final asked = conn.peersAsked ??= Completer<List<SharedPeer>>();
+    conn.send(peersAskFrame());
+    try {
+      return await asked.future.timeout(timeout);
+    } on TimeoutException {
+      return null;
+    } finally {
+      if (identical(conn.peersAsked, asked)) conn.peersAsked = null;
+    }
+  }
+
+  Future<void> _answerPeers(_Connection conn) async {
+    final isContact = store.contactByKey(conn.key) != null;
+    var online = const <SharedPeer>[];
+    if (isContact && tailnetPeers != null) {
+      try {
+        online = await tailnetPeers!();
+      } on Object catch (e) {
+        _emit(ChatEvent('peers', key: conn.key, detail: 'no peer list: $e'));
+      }
+    }
+    final shared = sharedPeers(online, asker: conn.remoteHost, contact: isContact);
+    _emit(ChatEvent('peers', key: conn.key, detail: 'told ${conn.peerName} ${shared.length} tailnet peers'));
+    conn.send(peersFrame(shared));
+  }
+
   /// The tailnet's peer list says these hostnames are online: dial each
   /// contact among them, and each contact with something waiting, so
   /// their outboxes flush. Also what to call after a wake or a network
@@ -818,7 +862,18 @@ class ChatPeer {
       conn.send(checked.error!);
       return;
     }
+    if ((frame['type'] == 'peers_ask' || frame['type'] == 'peers') && !mayUse('peers', caps, conn.peerCaps)) {
+      _emit(ChatEvent('answered', key: conn.key, detail: 'error unsupported ${frame['type']}'));
+      conn.send(errorFrame('unsupported', what: frame['type'] as String));
+      return;
+    }
     switch (frame['type']) {
+      case 'peers_ask':
+        unawaited(_answerPeers(conn));
+      case 'peers':
+        // An unasked list is ignored.
+        final asked = conn.peersAsked;
+        if (asked != null && !asked.isCompleted) asked.complete(peersOf(frame));
       case 'msg':
         _store(
           conn,
