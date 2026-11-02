@@ -71,6 +71,20 @@ pub struct Contact {
     pub flagged_key: Option<Key>,
     /// What it answered this device's contact request, if anything.
     pub accepted_by_them: Option<bool>,
+    /// Added by the user by address and never dialled yet: `key` is a
+    /// placeholder until the first handshake proves the real one.
+    pub pending: bool,
+    /// Where the user said to dial it, if they did.
+    pub dial: Option<Dial>,
+    /// Its messages received and not yet read.
+    pub unread: u32,
+}
+
+/// Where a chat peer is dialled: a tailnet address or name, and a port.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Dial {
+    pub host: String,
+    pub port: u16,
 }
 
 /// Who a chat peer is, as its connection showed it.
@@ -122,6 +136,9 @@ impl Book {
             return Trust::Contact(i);
         }
         let impostor = self.contacts.iter().position(|c| {
+            if c.pending {
+                return false;
+            }
             let by_address = seen.address.is_some() && c.address == seen.address;
             by_address || same_name(&c.seen_name, seen.name)
         });
@@ -165,8 +182,65 @@ impl Book {
             address: seen.address,
             flagged_key: None,
             accepted_by_them: None,
+            pending: false,
+            dial: None,
+            unread: 0,
         });
         Some(self.contacts.len() - 1)
+    }
+
+    /// The contact dialled at `at`: one added there, or one last seen at
+    /// that tailnet address on the default port.
+    pub fn by_dial(&self, at: &Dial) -> Option<usize> {
+        self.contacts.iter().position(|c| c.dial.as_ref() == Some(at)).or_else(|| {
+            let ip: IpAddr = at.host.parse().ok()?;
+            (at.port == wire::PORT).then_some(())?;
+            self.contacts.iter().position(|c| c.address == Some(ip))
+        })
+    }
+
+    /// A contact the user adds by address, its key pinned when it is first
+    /// dialled; `placeholder` stands for the key until then. The contact
+    /// already dialled there if there is one; None when the book is full.
+    pub fn add(&mut self, at: Dial, name: &str, placeholder: Key) -> Option<usize> {
+        if let Some(i) = self.by_dial(&at) {
+            return Some(i);
+        }
+        if self.contacts.len() >= CONTACTS_MAX {
+            return None;
+        }
+        let name = clean_name(name).unwrap_or_else(|| at.host.clone());
+        self.contacts.push(Contact {
+            name: name.clone(),
+            key: placeholder,
+            seen_name: name,
+            address: None,
+            flagged_key: None,
+            accepted_by_them: None,
+            pending: true,
+            dial: Some(at),
+            unread: 0,
+        });
+        Some(self.contacts.len() - 1)
+    }
+
+    /// The first handshake with contact `i`, dialled where the user added
+    /// it, proved `key`: pin it. The placeholder it replaces, or None if the
+    /// contact was pinned already.
+    pub fn pin(&mut self, i: usize, key: &Key) -> Option<Key> {
+        let c = self.contacts.get_mut(i)?;
+        if !c.pending {
+            return None;
+        }
+        c.pending = false;
+        Some(std::mem::replace(&mut c.key, *key))
+    }
+
+    /// Where contact `i` is dialled: where the user added it, else its
+    /// tailnet address on the default port; None if it was never seen there.
+    pub fn dial_of(&self, i: usize) -> Option<Dial> {
+        let c = self.contacts.get(i)?;
+        c.dial.clone().or_else(|| c.address.map(|a| Dial { host: a.to_string(), port: wire::PORT }))
     }
 
     /// Put contact `i`'s flagged key in place of its pinned one. The old
@@ -201,6 +275,105 @@ impl Book {
 }
 
 // ---------------------------------------------------------------------------
+// The outbox's retries, and who to dial
+// ---------------------------------------------------------------------------
+
+/// The first wait after a failed dial; it doubles up to RETRY_MAX_MS.
+pub const RETRY_FIRST_MS: u64 = 30_000;
+pub const RETRY_MAX_MS: u64 = 30 * 60_000;
+/// How long `typing on` lasts without a repeat.
+pub const TYPING_LAPSE_MS: u64 = 6_000;
+
+/// The wait after the `failures`th failed dial in a row: 30 s doubling to
+/// 30 minutes, and never longer. Nothing expires.
+pub fn retry_delay_ms(failures: u32) -> u64 {
+    let doublings = failures.saturating_sub(1).min(16);
+    (RETRY_FIRST_MS << doublings).min(RETRY_MAX_MS)
+}
+
+/// When a chat peer with something in the outbox is dialled next. Kept in
+/// memory: after a restart everything waiting is tried at once.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Retry {
+    pub failures: u32,
+    /// Not before this, in the module's ms; 0 is now.
+    pub next_ms: u64,
+}
+
+impl Retry {
+    pub fn due(&self, now_ms: u64) -> bool {
+        now_ms >= self.next_ms
+    }
+
+    /// A dial failed, or the connection closed before the outbox was out.
+    pub fn failed(&mut self, now_ms: u64) {
+        self.failures = self.failures.saturating_add(1);
+        self.next_ms = now_ms + retry_delay_ms(self.failures);
+    }
+
+    /// The peer was seen online, or the network came back: try now, the
+    /// backoff carrying on from where it was if that fails too.
+    pub fn seen_online(&mut self) {
+        self.next_ms = 0;
+    }
+
+    /// Connected and authenticated: the backoff starts over.
+    pub fn connected(&mut self) {
+        *self = Retry::default();
+    }
+}
+
+/// Whether a frame of this type waits in the outbox until acked (protocol
+/// section 8): messages, reactions, voice messages and contact answers;
+/// never typing, read receipts nor calls.
+pub fn is_queued(kind: &str) -> bool {
+    matches!(kind, "msg" | "react" | "voice" | "contact")
+}
+
+/// A contact, as dialling sees it.
+#[derive(Clone, Copy, Debug)]
+pub struct DialCandidate {
+    /// Something waits in its outbox.
+    pub waiting: bool,
+    /// It has a connection, open or opening.
+    pub connected: bool,
+    /// There is an address to dial it at.
+    pub dialable: bool,
+    pub retry: Retry,
+}
+
+/// Which of `list` to dial now: those with something waiting, not
+/// connected, with an address, whose retry is due; at most `free` of them,
+/// the connections left.
+pub fn to_dial(list: &[DialCandidate], now_ms: u64, free: usize) -> Vec<usize> {
+    list.iter()
+        .enumerate()
+        .filter(|(_, c)| c.waiting && !c.connected && c.dialable && c.retry.due(now_ms))
+        .map(|(i, _)| i)
+        .take(free)
+        .collect()
+}
+
+/// Two connections between the same pair: whether to keep the new one,
+/// dialled by `new_dialler`, over the one dialled by `existing_dialler`.
+/// The one dialled by the lower key is kept; dialled by the same side
+/// again, the newer.
+pub fn keep_new_connection(existing_dialler: &Key, new_dialler: &Key) -> bool {
+    new_dialler <= existing_dialler
+}
+
+/// Whether a peer that last sent `typing on` at `last_on_ms` still is.
+pub fn is_typing(last_on_ms: Option<u64>, now_ms: u64) -> bool {
+    last_on_ms.is_some_and(|t| now_ms < t + TYPING_LAPSE_MS)
+}
+
+/// One reaction per sender per message: one written at `new_ts` replaces
+/// one written at `existing_ts` unless it is older.
+pub fn reaction_replaces(existing_ts: Option<u64>, new_ts: u64) -> bool {
+    existing_ts.is_none_or(|t| new_ts >= t)
+}
+
+// ---------------------------------------------------------------------------
 // The module's file
 // ---------------------------------------------------------------------------
 
@@ -230,6 +403,15 @@ pub fn to_file(book: &Book, outbox: &Outbox) -> String {
             }
             if let Some(b) = c.accepted_by_them {
                 m.insert("accepted_by_them".into(), b.into());
+            }
+            if c.pending {
+                m.insert("pending".into(), true.into());
+            }
+            if let Some(d) = &c.dial {
+                m.insert("dial".into(), json!([d.host, d.port]));
+            }
+            if c.unread > 0 {
+                m.insert("unread".into(), c.unread.into());
             }
             Value::Object(m)
         })
@@ -268,6 +450,14 @@ pub fn from_file(text: &str) -> (Book, Outbox) {
                         address: c.get("address").and_then(Value::as_str).and_then(|a| a.parse().ok()),
                         flagged_key: key(c.get("flagged_key")),
                         accepted_by_them: c.get("accepted_by_them").and_then(Value::as_bool),
+                        pending: c.get("pending").and_then(Value::as_bool).unwrap_or(false),
+                        dial: c.get("dial").and_then(Value::as_array).and_then(|d| {
+                            Some(Dial {
+                                host: d.first()?.as_str()?.to_string(),
+                                port: u16::try_from(d.get(1)?.as_u64()?).ok()?,
+                            })
+                        }),
+                        unread: c.get("unread").and_then(Value::as_u64).map_or(0, |n| n.min(9999) as u32),
                     })
                 })
                 .take(CONTACTS_MAX)
@@ -408,6 +598,125 @@ mod tests {
         assert_eq!(b.accept(&seen(&BOB, "late", None)), None);
     }
 
+    // -- the outbox's retries ------------------------------------------------
+
+    #[test]
+    fn retries_back_off_from_30_s_doubling_to_30_minutes() {
+        let delays: Vec<u64> = (1..=8).map(retry_delay_ms).collect();
+        assert_eq!(delays, [30_000, 60_000, 120_000, 240_000, 480_000, 960_000, 1_800_000, 1_800_000]);
+        assert_eq!(retry_delay_ms(1000), 1_800_000, "and stays there, never expiring");
+    }
+
+    #[test]
+    fn something_new_to_send_is_tried_at_once_then_on_the_backoff() {
+        let mut r = Retry::default();
+        assert!(r.due(0), "a first message is dialled at once");
+        r.failed(10_000);
+        assert!(!r.due(39_999));
+        assert!(r.due(40_000));
+        r.failed(40_000);
+        assert!(!r.due(40_000 + 59_999));
+        assert!(r.due(40_000 + 60_000));
+    }
+
+    #[test]
+    fn a_connection_or_the_peer_seen_online_tries_again_now() {
+        let mut r = Retry::default();
+        for t in 0..5 {
+            r.failed(t * 1000);
+        }
+        assert!(!r.due(10_000));
+        r.seen_online();
+        assert!(r.due(10_000), "seen online: dialled at once");
+        r.failed(10_000);
+        assert!(!r.due(10_000 + 30_000), "the backoff carries on where it was");
+        r.connected();
+        assert_eq!(r, Retry::default(), "a connection starts the backoff over");
+    }
+
+    #[test]
+    fn typing_and_read_receipts_are_not_queued() {
+        for kind in ["msg", "react", "voice", "contact"] {
+            assert!(is_queued(kind), "{kind}");
+        }
+        for kind in ["read", "typing", "call_offer", "call_answer", "call_end", "ack", "hello"] {
+            assert!(!is_queued(kind), "{kind}");
+        }
+    }
+
+    fn peer(waiting: bool, connected: bool, dialable: bool, retry: Retry) -> DialCandidate {
+        DialCandidate { waiting, connected, dialable, retry }
+    }
+
+    #[test]
+    fn those_with_something_waiting_are_dialled_as_slots_allow() {
+        let mut later = Retry::default();
+        later.failed(0);
+        let list = [
+            peer(true, false, true, Retry::default()), // dialled
+            peer(false, false, true, Retry::default()), // nothing waits
+            peer(true, true, true, Retry::default()),  // connected already
+            peer(true, false, false, Retry::default()), // no address to dial
+            peer(true, false, true, later),            // backing off
+            peer(true, false, true, Retry::default()), // dialled, if there is room
+        ];
+        assert_eq!(to_dial(&list, 1000, 4), vec![0, 5]);
+        assert_eq!(to_dial(&list, 1000, 1), vec![0], "at most the free connections");
+        assert_eq!(to_dial(&list, 1000, 0), Vec::<usize>::new());
+        assert_eq!(to_dial(&list, 31_000, 4), vec![0, 4, 5], "the backoff over");
+    }
+
+    #[test]
+    fn of_two_connections_between_a_pair_the_lower_keys_dial_is_kept() {
+        let (low, high) = ([1u8; 32], [2u8; 32]);
+        assert!(keep_new_connection(&high, &low), "the new one dialled by the lower key");
+        assert!(!keep_new_connection(&low, &high));
+        assert!(keep_new_connection(&low, &low), "dialled again by the same side: the newer");
+    }
+
+    #[test]
+    fn typing_lapses_after_6_s() {
+        assert!(!is_typing(None, 0));
+        assert!(is_typing(Some(1000), 1000));
+        assert!(is_typing(Some(1000), 6999));
+        assert!(!is_typing(Some(1000), 7000));
+    }
+
+    #[test]
+    fn a_later_reaction_replaces_an_earlier_one() {
+        assert!(reaction_replaces(None, 5));
+        assert!(reaction_replaces(Some(5), 5));
+        assert!(reaction_replaces(Some(5), 6));
+        assert!(!reaction_replaces(Some(6), 5), "one delivered late changes nothing");
+    }
+
+    #[test]
+    fn a_contact_added_by_address_is_pinned_when_first_dialled() {
+        let mut b = book_with_alice();
+        let at = Dial { host: "100.101.1.9".into(), port: 4810 };
+        let i = b.add(at.clone(), "phone", [9; 32]).unwrap();
+        assert!(b.contacts[i].pending);
+        assert_eq!(b.by_dial(&at), Some(i));
+        assert_eq!(b.add(at.clone(), "again", [8; 32]), Some(i), "one contact per address");
+        // a key seen anywhere else is not this contact's
+        assert_eq!(b.classify(&seen(&BOB, "phone", None)), Trust::Stranger);
+        assert_eq!(b.pin(i, &BOB), Some([9; 32]), "the placeholder it had");
+        assert!(!b.contacts[i].pending);
+        assert_eq!(b.classify(&seen(&BOB, "x", None)), Trust::Contact(i));
+        assert_eq!(b.pin(i, &BOB), None, "pinned already");
+        // the address of a contact pinned already is its own again
+        assert_eq!(b.add(Dial { host: "100.101.1.2".into(), port: 4810 }, "laptop", [7; 32]), Some(0));
+    }
+
+    #[test]
+    fn a_contact_known_by_its_tailnet_address_is_dialled_there() {
+        let b = book_with_alice();
+        assert_eq!(b.dial_of(0), Some(Dial { host: "100.101.1.2".into(), port: 4810 }));
+        let mut nowhere = Book::default();
+        nowhere.accept(&seen(&BOB, "phone", None)).unwrap();
+        assert_eq!(nowhere.dial_of(0), None);
+    }
+
     #[test]
     fn the_file_keeps_contacts_flags_and_the_outbox() {
         let mut b = book_with_alice();
@@ -415,6 +724,8 @@ mod tests {
         b.rename(1, "Bob");
         b.flag(0, &MALLORY);
         b.contacts[1].accepted_by_them = Some(true);
+        b.contacts[1].unread = 3;
+        b.add(Dial { host: "127.0.0.1".into(), port: 5000 }, "away", [9; 32]).unwrap();
         let outbox: Outbox = vec![(BOB, vec![("ab".repeat(16), r#"{"type":"contact"}"#.to_string())]), (ALICE, vec![])];
         let text = to_file(&b, &outbox);
         let (b2, o2) = from_file(&text);

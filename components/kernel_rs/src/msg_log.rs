@@ -593,6 +593,97 @@ pub(crate) fn parse_chat_line(line: &str) -> Option<ChatLine> {
     })
 }
 
+/// A reaction, as it goes into the history: `dir` In for the peer's, Out
+/// for this device's; `emoji` "" removes one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ChatReact {
+    pub dir: Direction,
+    pub key: String,
+    pub name: String,
+    /// The reaction's own id.
+    pub id: String,
+    pub ts: u64,
+    /// The message reacted to.
+    pub to: String,
+    pub emoji: String,
+}
+
+/// A line of a Tailnet chat file. Messages are never rewritten: what
+/// happens to one later (delivered, read, a reaction) is a line of its own
+/// after it, and reading the file folds them together.
+///
+///   {"dir":"out","to":K,"name":N,"id":X,"ts":..,"time":..,"text":"..","state":"waiting"}
+///   {"dir":"out","to":K,"id":X,"state":"delivered","time":..}          a state change
+///   {"dir":"in","from":K,"name":N,"id":R,"ts":..,"react":X,"emoji":"👍","time":..}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ChatEntry {
+    Message(ChatLine),
+    /// Message `id` became `state`: "delivered" or "read" for one sent,
+    /// "read" for one received.
+    State { dir: Direction, key: String, id: String, state: String },
+    React(ChatReact),
+}
+
+fn dir_names(dir: Direction) -> (&'static str, &'static str) {
+    match dir {
+        Direction::In => ("in", "from"),
+        Direction::Out => ("out", "to"),
+    }
+}
+
+pub(crate) fn chat_entry_line(e: &ChatEntry, time: Option<u64>) -> String {
+    let mut obj = serde_json::Map::new();
+    match e {
+        ChatEntry::Message(l) => return chat_line(l, time),
+        ChatEntry::State { dir, key, id, state } => {
+            let (d, who) = dir_names(*dir);
+            obj.insert("dir".into(), d.into());
+            obj.insert(who.into(), key.as_str().into());
+            obj.insert("id".into(), id.as_str().into());
+            obj.insert("state".into(), state.as_str().into());
+        }
+        ChatEntry::React(r) => {
+            let (d, who) = dir_names(r.dir);
+            obj.insert("dir".into(), d.into());
+            obj.insert(who.into(), r.key.as_str().into());
+            obj.insert("name".into(), r.name.as_str().into());
+            obj.insert("id".into(), r.id.as_str().into());
+            obj.insert("ts".into(), r.ts.into());
+            obj.insert("react".into(), r.to.as_str().into());
+            obj.insert("emoji".into(), r.emoji.as_str().into());
+        }
+    }
+    obj.insert("time".into(), time.into());
+    let mut line = serde_json::Value::Object(obj).to_string();
+    line.push('\n');
+    line
+}
+
+pub(crate) fn parse_chat_entry(line: &str) -> Option<ChatEntry> {
+    if let Some(l) = parse_chat_line(line) {
+        return Some(ChatEntry::Message(l));
+    }
+    let v: serde_json::Value = serde_json::from_str(line).ok()?;
+    let (dir, who) = match v.get("dir")?.as_str()? {
+        "in" => (Direction::In, "from"),
+        "out" => (Direction::Out, "to"),
+        _ => return None,
+    };
+    let s = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
+    if let Some(to) = s("react") {
+        return Some(ChatEntry::React(ChatReact {
+            dir,
+            key: s(who)?,
+            name: s("name").unwrap_or_default(),
+            id: s("id")?,
+            ts: v.get("ts")?.as_u64()?,
+            to,
+            emoji: s("emoji")?,
+        }));
+    }
+    Some(ChatEntry::State { dir, key: s(who)?, id: s("id")?, state: s("state")? })
+}
+
 fn chat_path(root: &Path, request: bool, fp: &str) -> PathBuf {
     let mut dir = root.join(CHAT_DIR);
     if request {
@@ -605,6 +696,16 @@ fn chat_path(root: &Path, request: bool, fp: &str) -> PathBuf {
 /// its contact request's if `request`.
 pub(crate) fn chat_append(root: &Path, request: bool, fp: &str, line: &ChatLine, time: Option<u64>,
                           marks: &mut Marks) -> std::io::Result<()> {
+    chat_append_text(root, request, fp, &chat_line(line, time), marks)
+}
+
+/// Append a state change or a reaction, as chat_append() a message.
+pub(crate) fn chat_append_entry(root: &Path, request: bool, fp: &str, e: &ChatEntry, time: Option<u64>,
+                                marks: &mut Marks) -> std::io::Result<()> {
+    chat_append_text(root, request, fp, &chat_entry_line(e, time), marks)
+}
+
+fn chat_append_text(root: &Path, request: bool, fp: &str, text: &str, marks: &mut Marks) -> std::io::Result<()> {
     let path = chat_path(root, request, fp);
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
@@ -614,7 +715,7 @@ pub(crate) fn chat_append(root: &Path, request: bool, fp: &str, line: &ChatLine,
         let end = file.metadata()?.len();
         marks.insert(path, end);
     }
-    file.write_all(chat_line(line, time).as_bytes())
+    file.write_all(text.as_bytes())
 }
 
 /// A contact request accepted: its messages join the contact's file.
@@ -629,6 +730,20 @@ pub(crate) fn chat_accept(root: &Path, fp: &str) -> std::io::Result<()> {
     if let Some(dir) = to.parent() {
         std::fs::create_dir_all(dir)?;
     }
+    OpenOptions::new().create(true).append(true).open(&to)?.write_all(&held)?;
+    std::fs::remove_file(&from)
+}
+
+/// A contact's file under another fingerprint: a contact added by address
+/// whose key is pinned at last. Appended to whatever is there already.
+pub(crate) fn chat_join(root: &Path, from_fp: &str, to_fp: &str) -> std::io::Result<()> {
+    let from = chat_path(root, false, from_fp);
+    let held = match std::fs::read(&from) {
+        Ok(h) => h,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let to = chat_path(root, false, to_fp);
     OpenOptions::new().create(true).append(true).open(&to)?.write_all(&held)?;
     std::fs::remove_file(&from)
 }
@@ -648,6 +763,20 @@ pub(crate) fn chat_read(root: &Path, request: bool, fp: &str, count: usize) -> V
     };
     last_lines(&mut file, end, count)
         .map(|text| text.lines().filter_map(parse_chat_line).collect())
+        .unwrap_or_default()
+}
+
+/// The last `count` lines of a file, messages, state changes and
+/// reactions, oldest first.
+pub(crate) fn chat_entries(root: &Path, request: bool, fp: &str, count: usize) -> Vec<ChatEntry> {
+    let Ok(mut file) = File::open(chat_path(root, request, fp)) else {
+        return Vec::new();
+    };
+    let Ok(end) = file.metadata().map(|m| m.len()) else {
+        return Vec::new();
+    };
+    last_lines(&mut file, end, count)
+        .map(|text| text.lines().filter_map(parse_chat_entry).collect())
         .unwrap_or_default()
 }
 
@@ -689,6 +818,24 @@ pub(crate) fn chat_record(request: bool, fp: &str, line: &ChatLine) {
             }
         }
     }
+}
+
+/// Record a state change or a reaction, if history is kept.
+pub(crate) fn chat_note(request: bool, fp: &str, e: &ChatEntry) {
+    if cfg!(test) || !enabled() {
+        return;
+    }
+    let mut marks = WRITING.lock().unwrap_or_else(PoisonError::into_inner);
+    let _ = chat_append_entry(Path::new(ROOT), request, fp, e, now(), &mut marks);
+}
+
+/// A contact's file moved to its pinned key's fingerprint, on the card.
+pub(crate) fn chat_rekey(from_fp: &str, to_fp: &str) {
+    if cfg!(test) {
+        return;
+    }
+    let _guard = WRITING.lock().unwrap_or_else(PoisonError::into_inner);
+    let _ = chat_join(Path::new(ROOT), from_fp, to_fp);
 }
 
 /// A contact request accepted or declined, on the card.
@@ -981,6 +1128,33 @@ mod tests {
         assert_eq!(v["time"], 1_793_541_601u64);
         assert_eq!(parse_chat_line(&text), Some(l));
         assert_eq!(parse_chat_line("{\"dir\":\"in\""), None);
+    }
+
+    #[test]
+    fn state_changes_and_reactions_follow_their_messages_in_the_file() {
+        let root = temp_root("chat-entries");
+        let mut marks = Marks::new();
+        let fp = "630dcd2966c433669112";
+        let mut mine = chat(&"1".repeat(32), "I passed!", 10);
+        mine.dir = Direction::Out;
+        mine.state = "waiting".into();
+        let delivered = ChatEntry::State { dir: Direction::Out, key: "ab".repeat(32), id: "1".repeat(32),
+                                           state: "delivered".into() };
+        let thumbs = ChatEntry::React(ChatReact { dir: Direction::In, key: "ab".repeat(32), name: "laptop".into(),
+                                                  id: "9".repeat(32), ts: 20, to: "1".repeat(32),
+                                                  emoji: "👍".into() });
+        chat_append(&root, false, fp, &mine, None, &mut marks).unwrap();
+        for e in [&delivered, &thumbs] {
+            let line = chat_entry_line(e, Some(5));
+            assert_eq!(parse_chat_entry(&line).as_ref(), Some(e), "{line}");
+            assert_eq!(parse_chat_line(&line), None, "not read as a message: {line}");
+            chat_append_entry(&root, false, fp, e, None, &mut marks).unwrap();
+        }
+        let entries = chat_entries(&root, false, fp, 10);
+        assert_eq!(entries, vec![ChatEntry::Message(mine.clone()), delivered, thumbs]);
+        assert_eq!(chat_entries(&root, false, fp, 1).len(), 1, "the last lines only");
+        assert_eq!(chat_read(&root, false, fp, 20), vec![mine], "chat_read keeps to the messages");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

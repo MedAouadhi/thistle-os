@@ -137,20 +137,39 @@ static void clock_face(int hour, int minute, bool format_24h, char *buf, size_t 
 
 static void messages_row(const home_now_in_t *in, home_now_row_t *row)
 {
-    uint32_t total = in->sms_unread + in->mesh_unread;
+    uint32_t total = in->sms_unread + in->mesh_unread + in->chat_unread;
     row->kind = HOME_NOW_MESSAGES;
     if (total == 1) {
         snprintf(row->title, sizeof(row->title), "1 new message");
     } else {
         snprintf(row->title, sizeof(row->title), "%u new messages", (unsigned)total);
     }
-    if (in->sms_unread > 0 && in->mesh_unread > 0) {
-        snprintf(row->detail, sizeof(row->detail), "%u SMS" DOT "%u from the mesh",
-                 (unsigned)in->sms_unread, (unsigned)in->mesh_unread);
-    } else {
+    int kinds = (in->sms_unread > 0) + (in->mesh_unread > 0) + (in->chat_unread > 0);
+    if (kinds == 1) {
         snprintf(row->detail, sizeof(row->detail), "%s",
-                 in->sms_unread > 0 ? "SMS" : "From the mesh");
+                 in->sms_unread > 0 ? "SMS" : in->mesh_unread > 0 ? "From the mesh" : "Chat");
+        return;
     }
+    /* Each kind that has any, counted: "1 SMS · 4 from the mesh · 2 in Chat" */
+    size_t at = 0;
+    const char *sep = "";
+    if (in->sms_unread > 0) {
+        at += (size_t)snprintf(row->detail + at, sizeof(row->detail) - at, "%u SMS", (unsigned)in->sms_unread);
+        sep = DOT;
+    }
+    if (in->mesh_unread > 0 && at < sizeof(row->detail)) {
+        at += (size_t)snprintf(row->detail + at, sizeof(row->detail) - at, "%s%u from the mesh", sep,
+                               (unsigned)in->mesh_unread);
+        sep = DOT;
+    }
+    if (in->chat_unread > 0 && at < sizeof(row->detail)) {
+        snprintf(row->detail + at, sizeof(row->detail) - at, "%s%u in Chat", sep, (unsigned)in->chat_unread);
+    }
+}
+
+bool home_now_chat_only(const home_now_in_t *in)
+{
+    return in != NULL && in->chat_unread > 0 && in->sms_unread + in->mesh_unread == 0;
 }
 
 /* Who called last: the phonebook's name, else the number, else "Withheld";
@@ -250,7 +269,7 @@ int home_now_rows(const home_now_in_t *in, home_now_row_t *out, int max)
     }
     memset(out, 0, sizeof(*out) * (size_t)max);
     int n = 0;
-    if (n < max && in->sms_unread + in->mesh_unread > 0) {
+    if (n < max && in->sms_unread + in->mesh_unread + in->chat_unread > 0) {
         messages_row(in, &out[n++]);
     }
     if (n < max && in->missed_calls > 0) {

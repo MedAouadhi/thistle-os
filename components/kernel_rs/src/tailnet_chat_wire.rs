@@ -15,10 +15,10 @@ pub const VERSION: u64 = 1;
 pub const PORT: u16 = 4810;
 pub const PATH: &str = "/tailnet-chat/1";
 
-/// What this device announces in its hello. Only `text` and `receipts`
-/// are acted on so far; the rest come with tickets 04, 08 and 09, and a
-/// cap is announced only once it is done.
-pub const CAPS: &[&str] = &["text", "receipts"];
+/// What this device announces in its hello. `voice-message` and
+/// `call:ws-opus` come with tickets 08 and 09: a cap is announced only once
+/// it is done.
+pub const CAPS: &[&str] = &["text", "receipts", "typing", "reply", "react"];
 
 pub const LABEL: &[u8; 20] = b"tailnet-chat/1 auth\0";
 pub const TRANSCRIPT_LEN: usize = 149;
@@ -314,6 +314,34 @@ pub fn ack(id: &str) -> String {
     format!(r#"{{"type":"ack","id":"{id}"}}"#)
 }
 
+/// A text message; `reply_to` the id it answers.
+pub fn msg(id: &str, ts: u64, text: &str, reply_to: Option<&str>) -> String {
+    let mut m = Map::new();
+    m.insert("type".into(), "msg".into());
+    m.insert("id".into(), id.into());
+    m.insert("ts".into(), ts.into());
+    m.insert("text".into(), text.into());
+    if let Some(r) = reply_to {
+        m.insert("reply_to".into(), r.into());
+    }
+    Value::Object(m).to_string()
+}
+
+/// The read receipt for `ids`, at most 100 of them.
+pub fn read(ids: &[String]) -> String {
+    let ids: Vec<Value> = ids.iter().take(100).map(|i| Value::from(i.as_str())).collect();
+    serde_json::json!({"type": "read", "ids": ids}).to_string()
+}
+
+pub fn typing(on: bool) -> String {
+    format!(r#"{{"type":"typing","on":{on}}}"#)
+}
+
+/// A reaction `emoji` to message `to`; "" removes it.
+pub fn react(id: &str, ts: u64, to: &str, emoji: &str) -> String {
+    serde_json::json!({"type": "react", "id": id, "ts": ts, "to": to, "emoji": emoji}).to_string()
+}
+
 pub fn contact(id: &str, accepted: bool) -> String {
     format!(r#"{{"type":"contact","id":"{id}","state":"{}"}}"#,
             if accepted { "accepted" } else { "declined" })
@@ -399,6 +427,48 @@ pub fn upgrade(data: &[u8]) -> Upgrade {
         accept_key(key)
     );
     Upgrade::Accept { response, used: end + 4 }
+}
+
+/// The upgrade a dialler sends, `key` its Sec-WebSocket-Key (base64 of 16
+/// random bytes).
+pub fn upgrade_request(host: &str, port: u16, key: &str) -> String {
+    format!(
+        "GET {PATH} HTTP/1.1\r\nHost: {host}:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+         Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
+    )
+}
+
+/// A 16-byte nonce as a Sec-WebSocket-Key.
+pub fn ws_key(nonce: &[u8; 16]) -> String {
+    base64(nonce)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Upgraded {
+    /// Not all of the answer yet.
+    Incomplete,
+    /// 101 with the right accept key: the WebSocket follows `used` bytes in.
+    Accepted { used: usize },
+    /// Anything else.
+    Refused,
+}
+
+/// Read the listener's answer to `upgrade_request(.., key)`.
+pub fn upgraded(data: &[u8], key: &str) -> Upgraded {
+    let Some(end) = data.windows(4).position(|w| w == b"\r\n\r\n") else {
+        return if data.len() > MAX_UPGRADE { Upgraded::Refused } else { Upgraded::Incomplete };
+    };
+    let head = String::from_utf8_lossy(&data[..end]);
+    let mut lines = head.split("\r\n");
+    let status = lines.next().unwrap_or("");
+    if status.split(' ').nth(1) != Some("101") {
+        return Upgraded::Refused;
+    }
+    let expected = accept_key(key);
+    let accepted = lines.filter_map(|l| l.split_once(':')).any(|(name, value)| {
+        name.trim().eq_ignore_ascii_case("sec-websocket-accept") && value.trim() == expected
+    });
+    if accepted { Upgraded::Accepted { used: end + 4 } } else { Upgraded::Refused }
 }
 
 pub fn accept_key(key: &str) -> String {
@@ -696,6 +766,49 @@ mod tests {
 
     fn key(s: &Value) -> Key {
         unhex::<32>(s.as_str().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_dialled_upgrade_is_answered_and_its_answer_checked() {
+        let key = "dGhlIHNhbXBsZSBub25jZQ==";
+        let request = upgrade_request("100.101.1.2", 4810, key);
+        assert!(request.starts_with("GET /tailnet-chat/1 HTTP/1.1\r\nHost: 100.101.1.2:4810\r\n"), "{request}");
+        let Upgrade::Accept { response, .. } = upgrade(request.as_bytes()) else { panic!("refused: {request}") };
+        let mut answer = response.into_bytes();
+        assert_eq!(upgraded(&answer[..10], key), Upgraded::Incomplete);
+        answer.extend_from_slice(&[0x81, 0x00]);
+        assert_eq!(upgraded(&answer, key), Upgraded::Accepted { used: answer.len() - 2 });
+        assert_eq!(upgraded(NOT_FOUND.as_bytes(), key), Upgraded::Refused);
+        let wrong = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: xyz\r\n\r\n";
+        assert_eq!(upgraded(wrong.as_bytes(), key), Upgraded::Refused, "the wrong accept key");
+    }
+
+    #[test]
+    fn the_frames_this_device_sends_pass_the_schema() {
+        let id = "ab".repeat(16);
+        let to = "cd".repeat(16);
+        for (frame, kind) in [
+            (msg(&id, 1_793_541_600_000, "مرحبا \"quoted\"\n", None), "msg"),
+            (msg(&id, 1, "a reply", Some(&to)), "msg"),
+            (read(&[id.clone(), to.clone()]), "read"),
+            (typing(true), "typing"),
+            (typing(false), "typing"),
+            (react(&id, 5, &to, "👍"), "react"),
+            (react(&id, 5, &to, ""), "react"),
+        ] {
+            let f = check(frame.as_bytes()).unwrap_or_else(|e| panic!("{frame}: {}", e.to_json()));
+            assert_eq!(frame_type(&f), kind);
+        }
+        let m = check(msg(&id, 1, "a reply", Some(&to)).as_bytes()).unwrap();
+        assert_eq!(str_of(&m, "reply_to"), to);
+        assert_eq!(str_of(&check(msg(&id, 1, "x\"y", None).as_bytes()).unwrap(), "text"), "x\"y");
+    }
+
+    #[test]
+    fn the_hello_announces_what_this_device_does() {
+        let h = check(hello(&[1; 32], "t", &[2; 32]).as_bytes()).unwrap();
+        let caps: Vec<&str> = h["caps"].as_array().unwrap().iter().map(|c| c.as_str().unwrap()).collect();
+        assert_eq!(caps, ["text", "receipts", "typing", "reply", "react"]);
     }
 
     #[test]

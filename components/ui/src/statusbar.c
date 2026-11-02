@@ -8,6 +8,7 @@
 #include "thistle/sms.h"
 #include "thistle/msg_alert.h"
 #include "thistle/tailnet.h"
+#include "thistle/tailnet_chat.h"
 #include "ui/toast.h"
 #include "thistle/app_manager.h"
 #include "hal/board.h"
@@ -37,8 +38,10 @@ static const char *TAG = "statusbar";
  * overflowed. The network reading gives way while the chip shows. */
 #define STATUSBAR_ROOMY_W 300
 
-/* Where a tap on the unread-message count goes. */
+/* Where a tap on the unread-message count goes: the Messenger, or Chat
+ * when only Tailnet chat messages are unread. */
 #define MESSENGER_APP_ID "com.thistle.messenger"
+#define CHAT_APP_ID      "com.thistle.tailchat"
 
 /* The battery when the power driver cannot say. */
 #define BATTERY_UNKNOWN "--% " LV_SYMBOL_BATTERY_EMPTY
@@ -80,7 +83,8 @@ static void fit_time_label(const char *time_str)
 static void messages_tap_cb(lv_event_t *e)
 {
     (void)e;
-    app_manager_launch(MESSENGER_APP_ID);
+    bool chat_only = rs_mesh_unread_count() + rs_sms_unread_count() == 0 && tailnet_chat_unread_count() > 0;
+    app_manager_launch(chat_only ? CHAT_APP_ID : MESSENGER_APP_ID);
 }
 
 static void call_tap_cb(lv_event_t *e)
@@ -408,7 +412,7 @@ static void update_tailnet(void)
     }
 }
 
-/* Show how many mesh messages and SMS are unread, or nothing when none are,
+/* Show how many mesh messages, SMS and Tailnet chat messages are unread, or nothing when none are,
  * and pop up any message that has just arrived; and the call chip and the
  * tailnet, which each read a value or two from the kernel. */
 static void statusbar_messages_cb(lv_timer_t *timer)
@@ -422,7 +426,12 @@ static void statusbar_messages_cb(lv_timer_t *timer)
     update_call_chip();
     update_tailnet();
 
-    uint32_t unread = rs_mesh_unread_count() + rs_sms_unread_count();
+    uint32_t unread = rs_mesh_unread_count() + rs_sms_unread_count() + tailnet_chat_unread_count();
+    static uint32_t s_logged_unread;
+    if (unread != s_logged_unread) {
+        s_logged_unread = unread;
+        ESP_LOGI(TAG, "unread %u", (unsigned)unread);
+    }
     bool hidden = lv_obj_has_flag(s_messages_label, LV_OBJ_FLAG_HIDDEN);
     if (unread == 0) {
         if (!hidden) {

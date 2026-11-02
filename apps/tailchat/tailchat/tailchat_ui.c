@@ -12,13 +12,19 @@
  *   │ phone                        │
  *   └──────────────────────────────┘
  *
- * - Chats: each contact with messages, its latest; a row opens the
- *   conversation, its latest 20 messages, one lv_table.
+ * - Chats: each contact with messages, its latest, and how many are
+ *   unread; a row opens the conversation: its latest 20 messages, one
+ *   lv_table, each with what it replies to, its state and reactions; a
+ *   compose field and Send beneath. A message chosen offers Reply and the
+ *   reactions; while the conversation is on screen its messages are read
+ *   (read receipts go if allowed) and alert nothing, and typing in the
+ *   field tells the contact.
  * - Contacts: each contact, flagged if another key came under its name or
- *   address; this device's own fingerprint beneath. A row opens the
- *   contact: its fingerprint, Rename, Accept new key, Remove.
+ *   address; this device's own fingerprint and the read receipts switch
+ *   beneath. A row opens the contact: its fingerprint, Rename, Accept new
+ *   key, Remove.
  * - Requests: each contact request, its name, fingerprint and latest
- *   message; a row opens it: what it held, Accept and Decline.
+ *   message; a row opens it: everything it held, Accept and Decline.
  *
  * The app reads and asks the kernel (thistle/tailnet_chat.h) and keeps
  * nothing of its own. A timer looks at tailnet_chat_generation() twice a
@@ -49,7 +55,10 @@ static const char *TAG = "tailchat";
 #define EDGE       6
 #define ROWS_MAX   32   /* contacts and requests are capped below this by the kernel */
 #define DETAIL_MAX 40   /* characters of a message shown in a list row */
-#define LINE_MAX   200  /* characters of a message shown in a conversation */
+#define LINE_MAX   160  /* characters of a message shown in a conversation */
+#define SHOWN_MAX  20   /* messages in a conversation, as the kernel keeps them */
+#define TYPING_REPEAT_MS 4000  /* "typing" said again while it goes on */
+#define TYPING_STOP_MS   5000  /* and "stopped" this long after the last key */
 
 typedef enum {
     PAGE_CHATS,
@@ -63,8 +72,10 @@ typedef enum {
 /* What a page reads from the kernel, in PSRAM while the app is open. */
 typedef struct {
     char keys[ROWS_MAX][65];       /* the key behind each list row */
+    char ids[SHOWN_MAX][33];       /* the message behind each conversation row */
     char text[4097];               /* one message's text */
-    char row[640];
+    char quote[4097];              /* the text a reply quotes */
+    char row[900];
     tailnet_chat_contact_t contact;
     tailnet_chat_request_t request;
 } store_t;
@@ -76,8 +87,12 @@ static struct {
     lv_obj_t   *note;
     lv_obj_t   *body;
     lv_obj_t   *table;
-    lv_obj_t   *field;       /* the contact page's name */
+    lv_obj_t   *field;       /* the contact page's name; the conversation's compose field */
     lv_obj_t   *remove;      /* the contact page's Remove */
+    lv_obj_t   *title;       /* the conversation's name */
+    lv_obj_t   *conv_note;   /* typing, waiting, unreachable */
+    lv_obj_t   *actions;     /* what can be done with the message chosen */
+    lv_obj_t   *reply_bar;   /* what the message being written replies to */
     lv_timer_t *timer;
     store_t    *store;
     page_t      page;
@@ -86,6 +101,12 @@ static struct {
     char        next_key[65];
     int         rows;
     uint32_t    generation;
+    char        conv_key[65]; /* the conversation on screen's contact */
+    char        chosen[33];   /* the message chosen in the conversation */
+    char        reply_to[33]; /* the message the one being written answers */
+    bool        typing;       /* "typing" said to the contact */
+    uint32_t    typing_said;  /* when, lv_tick */
+    uint32_t    typed;        /* the last key in the compose field, lv_tick */
     bool        confirm_remove;
     bool        epaper;
 } s_ui;
@@ -309,6 +330,8 @@ static void tab_cb(lv_event_t *e)
     go(page, NULL);
 }
 
+static void choose_message(const char *id);
+
 /* The list row chosen: by a tap or Enter, not the selection moving. */
 static void table_cb(lv_event_t *e)
 {
@@ -320,6 +343,10 @@ static void table_cb(lv_event_t *e)
     uint32_t row = LV_TABLE_CELL_NONE, col = LV_TABLE_CELL_NONE;
     lv_table_get_selected_cell(s_ui.table, &row, &col);
     if (row >= (uint32_t)s_ui.rows) return;
+    if (s_ui.page == PAGE_CONVERSATION) {
+        choose_message(s_ui.store->ids[row]);
+        return;
+    }
     page_t to = s_ui.page == PAGE_CHATS ? PAGE_CONVERSATION
               : s_ui.page == PAGE_CONTACTS ? PAGE_CONTACT
                                            : PAGE_REQUEST;
@@ -380,12 +407,26 @@ static void show_chats(void)
         tailnet_chat_message_t m;
         tailnet_chat_get_message(c->key, count - 1, &m, s_ui.store->text, sizeof s_ui.store->text);
         if (!s_ui.table) s_ui.table = make_table(n, true);
-        tailchat_row(s_ui.store->row, sizeof s_ui.store->row, c->name, s_ui.store->text, DETAIL_MAX);
+        char title[96];
+        if (c->unread > 0) snprintf(title, sizeof title, "%s (%u new)", c->name, (unsigned)c->unread);
+        else if (c->typing) snprintf(title, sizeof title, "%s, typing...", c->name);
+        else snprintf(title, sizeof title, "%s", c->name);
+        tailchat_row(s_ui.store->row, sizeof s_ui.store->row, title, s_ui.store->text, DETAIL_MAX);
         lv_table_set_cell_value(s_ui.table, (uint32_t)s_ui.rows, 0, s_ui.store->row);
         memcpy(s_ui.store->keys[s_ui.rows++], c->key, 65);
     }
     if (s_ui.table) lv_table_set_row_count(s_ui.table, (uint32_t)s_ui.rows);
     else empty("No conversations yet.\nA chat peer's first message comes as a contact request.");
+}
+
+static void receipts_cb(lv_event_t *e)
+{
+    (void)e;
+    bool on = !tailnet_chat_read_receipts();
+    tailnet_chat_set_read_receipts(on);
+    ESP_LOGI(TAG, "read receipts %s", on ? "on" : "off");
+    toast_info(on ? "Contacts see when you read" : "Contacts no longer see when you read");
+    go(PAGE_CONTACTS, NULL);
 }
 
 static void show_contacts(void)
@@ -403,6 +444,8 @@ static void show_contacts(void)
     }
     if (!n) empty("No contacts yet.");
     own_fingerprint();
+    bool on = tailnet_chat_read_receipts();
+    button(button_row(s_ui.body), on ? "Read receipts: on" : "Read receipts: off", receipts_cb);
 }
 
 static void show_requests(void)
@@ -444,6 +487,183 @@ static bool find_request(const char *key, tailnet_chat_request_t *out)
     return false;
 }
 
+/* Tell the contact typing stopped, if it was told it had started. */
+static void typing_off(void)
+{
+    if (s_ui.typing && s_ui.conv_key[0]) tailnet_chat_set_typing(s_ui.conv_key, false);
+    s_ui.typing = false;
+}
+
+static void typed_cb(lv_event_t *e)
+{
+    (void)e;
+    uint32_t now = lv_tick_get();
+    s_ui.typed = now;
+    if (lv_textarea_get_text(s_ui.field)[0] == '\0') {
+        typing_off();
+        return;
+    }
+    if (!s_ui.typing || lv_tick_elaps(s_ui.typing_said) >= TYPING_REPEAT_MS) {
+        tailnet_chat_set_typing(s_ui.key, true);
+        s_ui.typing = true;
+        s_ui.typing_said = now;
+    }
+}
+
+static void show_reply_bar(void)
+{
+    if (!s_ui.reply_bar) return;
+    bool mine = false;
+    if (!s_ui.reply_to[0]) {
+        set_shown(s_ui.reply_bar, false);
+        return;
+    }
+    if (tailnet_chat_find_message(s_ui.key, s_ui.reply_to, &mine, s_ui.store->quote,
+                                  sizeof s_ui.store->quote) != ESP_OK) {
+        snprintf(s_ui.store->quote, sizeof s_ui.store->quote, "an earlier message");
+    }
+    char line[160];
+    tailchat_one_line(line, sizeof line, s_ui.store->quote, 30);
+    snprintf(s_ui.store->row, sizeof s_ui.store->row, "Replying to %s: %s",
+             mine ? "yourself" : lv_label_get_text(s_ui.title), line);
+    set_text(lv_obj_get_child(s_ui.reply_bar, 0), s_ui.store->row);
+    set_shown(s_ui.reply_bar, true);
+}
+
+static void send_cb(lv_event_t *e)
+{
+    (void)e;
+    const char *text = lv_textarea_get_text(s_ui.field);
+    if (!text[0]) return;
+    char id[33] = "";
+    esp_err_t err = tailnet_chat_send_text(s_ui.key, text, s_ui.reply_to[0] ? s_ui.reply_to : NULL, id);
+    if (err == ESP_ERR_INVALID_SIZE) {
+        toast_warn("Too long to send");
+        return;
+    }
+    if (err != ESP_OK) {
+        toast_warn("Could not send");
+        return;
+    }
+    ESP_LOGI(TAG, "sent %s%s", id, s_ui.reply_to[0] ? ", a reply" : "");
+    typing_off();
+    lv_textarea_set_text(s_ui.field, "");
+    s_ui.reply_to[0] = '\0';
+    show_reply_bar();
+}
+
+static void reply_cb(lv_event_t *e)
+{
+    (void)e;
+    memcpy(s_ui.reply_to, s_ui.chosen, sizeof s_ui.reply_to);
+    s_ui.chosen[0] = '\0';
+    set_shown(s_ui.actions, false);
+    show_reply_bar();
+    lv_group_t *group = lv_group_get_default();
+    if (group) lv_group_focus_obj(s_ui.field);
+}
+
+static void cancel_reply_cb(lv_event_t *e)
+{
+    (void)e;
+    s_ui.reply_to[0] = '\0';
+    show_reply_bar();
+}
+
+static void react_cb(lv_event_t *e)
+{
+    intptr_t which = (intptr_t)lv_event_get_user_data(e);
+    const char *emoji = which < 0 ? "" : tailchat_reactions[which];
+    if (tailnet_chat_react(s_ui.key, s_ui.chosen, emoji) == ESP_OK) {
+        ESP_LOGI(TAG, "reacted %s", which < 0 ? "(removed)" : tailchat_emoji_label(emoji));
+    }
+    s_ui.chosen[0] = '\0';
+    set_shown(s_ui.actions, false);
+}
+
+/* A message chosen: Reply, and a reaction to it or the removal of ours. */
+static void choose_message(const char *id)
+{
+    if (!s_ui.actions) return;
+    lv_obj_clean(s_ui.actions);
+    if (strcmp(s_ui.chosen, id) == 0) {
+        s_ui.chosen[0] = '\0';
+        set_shown(s_ui.actions, false);
+        return;
+    }
+    snprintf(s_ui.chosen, sizeof s_ui.chosen, "%s", id);
+    button(s_ui.actions, "Reply", reply_cb);
+    for (int i = 0; i < TAILCHAT_REACTIONS; i++) {
+        lv_obj_t *b = button(s_ui.actions, tailchat_emoji_label(tailchat_reactions[i]), react_cb);
+        lv_obj_remove_event_cb(b, react_cb);
+        lv_obj_add_event_cb(b, react_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+    }
+    /* Ours, if there is one, can be taken back. */
+    int n = tailnet_chat_message_count(s_ui.key);
+    for (int i = 0; i < n; i++) {
+        tailnet_chat_message_t m;
+        if (tailnet_chat_get_message(s_ui.key, i, &m, NULL, 0) == ESP_OK && strcmp(m.id, id) == 0 &&
+            m.react_me[0]) {
+            lv_obj_t *b = button(s_ui.actions, "Remove", react_cb);
+            lv_obj_remove_event_cb(b, react_cb);
+            lv_obj_add_event_cb(b, react_cb, LV_EVENT_CLICKED, (void *)(intptr_t)-1);
+        }
+    }
+    set_shown(s_ui.actions, true);
+    ESP_LOGI(TAG, "chose %s", id);
+}
+
+/* The conversation's messages and what the contact is doing: drawn again
+ * whenever anything shown changes, leaving the compose field as it is. */
+static void fill_conversation(void)
+{
+    tailnet_chat_contact_t *c = &s_ui.store->contact;
+    if (!find_contact(s_ui.key, c)) {
+        go(PAGE_CHATS, NULL);
+        return;
+    }
+    set_text(s_ui.title, c->name);
+    const char *note = c->typing    ? "typing..."
+                     : c->pending   ? "Not reached yet; what you send waits until it is."
+                     : c->waiting   ? (c->connected ? "Sending..." : "Waiting for it to be reachable.")
+                     : c->connected ? "Connected"
+                                    : "";
+    set_text(s_ui.conv_note, note);
+    set_shown(s_ui.conv_note, note[0] != '\0');
+
+    int n = tailnet_chat_message_count(c->key);
+    if (n > SHOWN_MAX) n = SHOWN_MAX;
+    s_ui.rows = n;
+    lv_table_set_row_count(s_ui.table, (uint32_t)(n > 0 ? n : 1));
+    if (n <= 0) lv_table_set_cell_value(s_ui.table, 0, 0, "No messages yet.");
+    for (int i = 0; i < n; i++) {
+        tailnet_chat_message_t m;
+        if (tailnet_chat_get_message(c->key, i, &m, s_ui.store->text, sizeof s_ui.store->text) != ESP_OK) {
+            lv_table_set_cell_value(s_ui.table, (uint32_t)i, 0, "");
+            continue;
+        }
+        memcpy(s_ui.store->ids[i], m.id, sizeof m.id);
+        tailchat_bubble_t b = {.mine = m.mine, .name = c->name, .text = s_ui.store->text, .state = m.state,
+                               .react_me = m.react_me, .react_them = m.react_them};
+        bool quote_mine = false;
+        if (m.reply_to[0]) {
+            b.quoted = true;
+            b.quote = tailnet_chat_find_message(c->key, m.reply_to, &quote_mine, s_ui.store->quote,
+                                                sizeof s_ui.store->quote) == ESP_OK ? s_ui.store->quote : "";
+            b.quote_mine = quote_mine;
+        }
+        tailchat_bubble(s_ui.store->row, sizeof s_ui.store->row, &b, LINE_MAX);
+        lv_table_set_cell_value(s_ui.table, (uint32_t)i, 0, s_ui.store->row);
+    }
+    lv_obj_update_layout(s_ui.body);
+    lv_obj_scroll_to_y(s_ui.body, LV_COORD_MAX, LV_ANIM_OFF);
+
+    lv_mem_monitor_t mon;
+    lv_mem_monitor(&mon);
+    ESP_LOGI(TAG, "conversation %s: %d messages; LVGL pool %u KB free, largest block %u KB", c->name, n,
+             (unsigned)(mon.free_size / 1024), (unsigned)(mon.free_biggest_size / 1024));
+}
+
 static void show_conversation(void)
 {
     tailnet_chat_contact_t *c = &s_ui.store->contact;
@@ -451,25 +671,39 @@ static void show_conversation(void)
         go(PAGE_CHATS, NULL);
         return;
     }
-    label(s_ui.body, c->name, &s_styles.title);
-    int n = tailnet_chat_message_count(c->key);
-    s_ui.rows = n;
-    if (n <= 0) {
-        empty("No messages yet.");
-        return;
-    }
-    s_ui.table = make_table(n, false);
-    for (int i = 0; i < n; i++) {
-        tailnet_chat_message_t m;
-        if (tailnet_chat_get_message(c->key, i, &m, s_ui.store->text, sizeof s_ui.store->text) != ESP_OK) {
-            continue;
-        }
-        tailchat_message_row(s_ui.store->row, sizeof s_ui.store->row, m.mine, c->name, s_ui.store->text, LINE_MAX);
-        lv_table_set_cell_value(s_ui.table, (uint32_t)i, 0, s_ui.store->row);
-    }
-    lv_obj_update_layout(s_ui.body);
-    lv_obj_scroll_to_y(s_ui.body, LV_COORD_MAX, LV_ANIM_OFF);
-    ESP_LOGI(TAG, "conversation %s: %d messages", c->name, n);
+    s_ui.chosen[0] = '\0';
+    s_ui.reply_to[0] = '\0';
+    memcpy(s_ui.conv_key, c->key, sizeof s_ui.conv_key);
+    s_ui.title = label(s_ui.body, c->name, &s_styles.title);
+    s_ui.conv_note = label(s_ui.body, "", &s_styles.note);
+    s_ui.table = make_table(1, true);
+
+    s_ui.actions = button_row(s_ui.body);
+    set_shown(s_ui.actions, false);
+
+    s_ui.reply_bar = button_row(s_ui.body);
+    lv_obj_t *quote = label(s_ui.reply_bar, "", &s_styles.warn);
+    lv_obj_set_width(quote, LV_PCT(70));
+    button(s_ui.reply_bar, "x", cancel_reply_cb);
+    set_shown(s_ui.reply_bar, false);
+
+    lv_obj_t *row = button_row(s_ui.body);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    s_ui.field = lv_textarea_create(row);
+    lv_textarea_set_one_line(s_ui.field, true);
+    lv_textarea_set_max_length(s_ui.field, 1024);
+    lv_textarea_set_placeholder_text(s_ui.field, "Message");
+    lv_obj_set_flex_grow(s_ui.field, 1);
+    lv_obj_add_event_cb(s_ui.field, send_cb, LV_EVENT_READY, NULL);
+    lv_obj_add_event_cb(s_ui.field, typed_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    join_group(s_ui.field);
+    button(row, "Send", send_cb);
+
+    tailnet_chat_set_viewing(c->key);
+    fill_conversation();
+    lv_group_t *group = lv_group_get_default();
+    if (group) lv_group_focus_obj(s_ui.field);
 }
 
 static void rename_cb(lv_event_t *e)
@@ -581,14 +815,20 @@ static void show_request(void)
                  "Fingerprint\n%s\nwants to be a contact. It sent:", r->fingerprint);
     } else {
         snprintf(s_ui.store->row, sizeof s_ui.store->row,
-                 "Fingerprint\n%s\nwants to be a contact. It sent %u messages; the latest:",
+                 "Fingerprint\n%s\nwants to be a contact. It sent %u messages:",
                  r->fingerprint, (unsigned)r->held);
     }
     label(s_ui.body, s_ui.store->row, &s_styles.note);
-    /* What it held: the kernel keeps the latest; the preview is the last. */
-    s_ui.table = make_table(1, false);
-    tailchat_one_line(s_ui.store->row, sizeof s_ui.store->row, r->preview, LINE_MAX);
-    lv_table_set_cell_value(s_ui.table, 0, 0, s_ui.store->row);
+    /* Everything it held, oldest first; the kernel keeps the latest 20. */
+    int held = r->held > 0 ? r->held : 1;
+    s_ui.table = make_table(held, false);
+    for (int i = 0; i < held; i++) {
+        if (tailnet_chat_get_held(r->key, i, s_ui.store->text, sizeof s_ui.store->text) != ESP_OK) {
+            snprintf(s_ui.store->text, sizeof s_ui.store->text, "%s", i == 0 ? r->preview : "");
+        }
+        tailchat_one_line(s_ui.store->row, sizeof s_ui.store->row, s_ui.store->text, LINE_MAX);
+        lv_table_set_cell_value(s_ui.table, (uint32_t)i, 0, s_ui.store->row);
+    }
 
     lv_obj_t *row = button_row(s_ui.body);
     lv_obj_t *accept = button(row, "Accept", accept_cb);
@@ -631,14 +871,26 @@ static void show_status(void)
     }
 }
 
+/* The conversation leaves the screen: its messages alert again. */
+static void leave_conversation(void)
+{
+    typing_off();
+    tailnet_chat_set_viewing(NULL);
+}
+
 static void show_page(void)
 {
     s_ui.generation = tailnet_chat_generation();
     show_status();
+    if (s_ui.title) leave_conversation();
     lv_obj_clean(s_ui.body);
     s_ui.table = NULL;
     s_ui.field = NULL;
     s_ui.remove = NULL;
+    s_ui.title = NULL;
+    s_ui.conv_note = NULL;
+    s_ui.actions = NULL;
+    s_ui.reply_bar = NULL;
     s_ui.rows = 0;
     switch (s_ui.page) {
     case PAGE_CHATS:        show_chats(); break;
@@ -658,7 +910,14 @@ static void show_page(void)
 static void timer_cb(lv_timer_t *t)
 {
     (void)t;
+    if (s_ui.typing && lv_tick_elaps(s_ui.typed) >= TYPING_STOP_MS) typing_off();
     if (tailnet_chat_generation() == s_ui.generation) return;
+    if (s_ui.page == PAGE_CONVERSATION && s_ui.title) {
+        s_ui.generation = tailnet_chat_generation();
+        show_status();
+        fill_conversation();
+        return;
+    }
     if (s_ui.page == PAGE_CONTACT) {
         s_ui.generation = tailnet_chat_generation();
         show_status();
@@ -742,6 +1001,7 @@ esp_err_t tailchat_ui_create(lv_obj_t *parent)
 
 void tailchat_ui_destroy(void)
 {
+    if (s_ui.title) leave_conversation();
     if (s_ui.timer) lv_timer_delete(s_ui.timer);
     lv_async_call_cancel(go_async, NULL);
     if (s_ui.root) lv_obj_delete(s_ui.root);
