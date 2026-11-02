@@ -328,4 +328,69 @@ void main() {
     expect(find.textContaining('Notifications are not allowed'), findsNothing);
     await finish(tester);
   });
+
+  /// Open the conversation with the device.
+  Future<void> openDevice(WidgetTester tester) async {
+    await tester.tap(find.text('Conversations'));
+    await tester.pump();
+    await tester.tap(find.text('thistle-46cf20'));
+    await tester.pumpAndSettle();
+  }
+
+  testWidgets('a voice message shows its length and a play button; recording shows its time and can be thrown away', (
+    tester,
+  ) async {
+    await launch(tester);
+    await befriend(tester);
+    final data = File('../../docs/tailnet-chat/vectors/voice.opus').readAsBytesSync();
+    final id = device.sendVoice('laptop', data, 1500);
+    await until(tester, () => app.messages(device.identity.keyHex).any((m) => m.id == id));
+    await openDevice(tester);
+    expect(find.byKey(Key('play-$id')), findsOneWidget);
+    expect(find.text('Voice message, 0:01'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('record')));
+    await until(tester, () => find.byKey(const Key('recording')).evaluate().isNotEmpty);
+    expect(find.textContaining('Recording 0:0'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('recording-cancel')));
+    await until(tester, () => find.byKey(const Key('recording')).evaluate().isEmpty);
+    expect(find.byKey(const Key('compose')), findsOneWidget);
+    await finish(tester);
+  });
+
+  testWidgets('Call opens the call screen; answered, it shows its time; Hang up ends it', (tester) async {
+    await launch(tester);
+    await befriend(tester); // the device answers calls by itself
+    await openDevice(tester);
+    await tester.tap(find.byKey(const Key('call')));
+    await until(tester, () => app.talk.call?.state == 'connected');
+    await tester.pump();
+    expect(find.text('thistle-46cf20'), findsWidgets);
+    expect(find.text('0:00'), findsOneWidget);
+    expect(find.textContaining('Echo cancellation: none (test)'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('call-mute')));
+    await tester.pump();
+    expect(app.talk.muted, isTrue);
+    await tester.tap(find.byKey(const Key('call-hangup')));
+    await until(tester, () => find.text('Call ended').evaluate().isNotEmpty);
+    await until(tester, () => device.calls.values.single.state == 'ended:hangup');
+    await tester.tap(find.byKey(const Key('call-close')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('call-close')), findsNothing);
+    await finish(tester);
+  });
+
+  testWidgets('a call coming in shows the call screen over the app; Answer connects it', (tester) async {
+    await launch(tester);
+    await befriend(tester);
+    late String id;
+    await tester.runAsync(() async => id = await device.call('laptop'));
+    await until(tester, () => find.byKey(const Key('call-answer')).evaluate().isNotEmpty);
+    expect(find.text('Calling you'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('call-answer')));
+    await until(tester, () => device.calls[id]!.state == 'connected');
+    await tester.runAsync(() async => device.endCall(id));
+    await until(tester, () => find.text('Call ended').evaluate().isNotEmpty);
+    await finish(tester);
+  });
 }

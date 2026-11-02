@@ -12,6 +12,8 @@ class AppOptions {
     this.loopback = false,
     this.name,
     this.verbose = false,
+    this.mic,
+    this.speakerDir,
   });
 
   /// A second identity, database and Secret Service item on one machine.
@@ -33,9 +35,16 @@ class AppOptions {
   /// Log the core's events to stderr.
   final bool verbose;
 
+  /// A 16 kHz mono WAV file to use as the microphone, looped.
+  final String? mic;
+
+  /// A folder for what the speaker plays, a WAV file each.
+  final String? speakerDir;
+
   static const usage = '''
 thistle_chat [--profile NAME] [--port N] [--listen HOST] [--loopback]
-             [--discovery-port N] [--name NAME] [--verbose]''';
+             [--discovery-port N] [--name NAME] [--verbose]
+             [--mic FILE.wav] [--speaker DIR]''';
 
   static AppOptions parse(List<String> args) {
     var o = const AppOptions();
@@ -56,6 +65,8 @@ thistle_chat [--profile NAME] [--port N] [--listen HOST] [--loopback]
         '--loopback' => o._with(loopback: true),
         '--name' => o._with(name: value(++i)),
         '--verbose' => o._with(verbose: true),
+        '--mic' => o._with(mic: value(++i)),
+        '--speaker' => o._with(speakerDir: value(++i)),
         _ => throw FormatException('unknown option $a\n$usage'),
       };
     }
@@ -73,6 +84,8 @@ thistle_chat [--profile NAME] [--port N] [--listen HOST] [--loopback]
     bool? loopback,
     String? name,
     bool? verbose,
+    String? mic,
+    String? speakerDir,
   }) => AppOptions(
     profile: profile ?? this.profile,
     listenHost: listenHost ?? this.listenHost,
@@ -81,5 +94,7 @@ thistle_chat [--profile NAME] [--port N] [--listen HOST] [--loopback]
     loopback: loopback ?? this.loopback,
     name: name ?? this.name,
     verbose: verbose ?? this.verbose,
+    mic: mic ?? this.mic,
+    speakerDir: speakerDir ?? this.speakerDir,
   );
 }

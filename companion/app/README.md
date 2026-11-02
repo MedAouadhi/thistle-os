@@ -19,7 +19,16 @@ platform glue:
   screen (read when in front), typing, notifications in the background, and
   the settings.
 - `lib/src/notifier.dart`: notifications (`flutter_local_notifications`: the
-  freedesktop service over D-Bus, Android's notification manager).
+  freedesktop service over D-Bus, Android's notification manager); a call
+  coming in rings with Answer and Decline buttons.
+- `lib/src/talk.dart`: voice messages and calls: recording (two minutes at
+  most) and playing, the call in progress, its ring and notifications,
+  mute and volume. The codec, the Ogg/Opus files, the jitter buffer and a
+  call's frames are the core's (`VoiceRecorder`, `decodeVoice`,
+  `CallMedia`), Opus through the system's libopus by FFI.
+- `lib/src/audio/`: the microphone and the speaker: PulseAudio's simple API
+  by FFI (`pulse.dart`; PipeWire answers it through pipewire-pulse), each
+  stream in an isolate of its own; or WAV files (`--mic`, `--speaker`).
 - Android only: `lib/src/android.dart` over the app's own method channel
   (`android/app/src/main/kotlin/org/thistleos/thistle_chat/`): the identity's
   seed sealed by an AES-GCM key in the Android Keystore (`KeystoreVault.kt`;
@@ -28,15 +37,19 @@ platform glue:
   (`Platform.kt`, `permissions.dart`). The tailnet is read from the network
   interfaces (`readAndroidTailnet` in `tailnet.dart`): the Tailscale app
   connected is a `tun` interface with a 100.64.0.0/10 address.
-- `lib/src/ui/`: Conversations, Contacts (discovery, add by name, a contact's
-  fingerprint, a changed key to accept, rename, remove), Requests, Settings
-  (read receipts, background listening).
+- `lib/src/ui/`: Conversations (with a voice message's player, the record
+  button and the call button), the call screen (`call_page.dart`), Contacts
+  (discovery, add by name, a contact's fingerprint, a changed key to
+  accept, rename, remove), Requests, Settings (read receipts, background
+  listening).
 
 ## Building and running
 
 Flutter 3.47.9 (Dart 3.13.7). The Linux build needs
 `clang cmake ninja-build pkg-config libgtk-3-dev`; nothing else, no
-libsecret.
+libsecret. Voice and calls load `libopus.so.0` and `libpulse-simple.so.0`
+when first used (`sudo apt install libopus0 libpulse0`; both come with any
+desktop); without them the app works and says why it has no audio.
 
 ```sh
 export PATH=$HOME/flutter/bin:$PATH
@@ -58,7 +71,35 @@ Its options, for a second instance on one machine or a peer on loopback:
 thistle_chat --profile second --port 4811        # its own key, database and port
 thistle_chat --listen 127.0.0.1 --loopback       # chat with the simulator on this machine
 thistle_chat --discovery-port 4811 --verbose     # probe another port; log the core's events
+thistle_chat --mic tone.wav --speaker heard/     # audio files instead of a sound card
 ```
+
+`--mic` is a 16 kHz mono 16-bit WAV file, played over and over as the
+microphone (silence with `--speaker` alone); `--speaker DIR` writes each
+thing played, a voice message, the ring or a call, to a numbered WAV file
+there when it stops. Two instances on one machine can then call each other
+without feedback, and what each heard can be checked.
+
+### Echo cancellation
+
+A call asks the platform to keep the speaker out of the microphone; the
+call screen says which way it got:
+
+1. **PipeWire** (Ubuntu 22.10 and later, Fedora): for the length of a call
+   the app runs `pipewire -c echo-cancel.conf`, a client of the running
+   PipeWire that loads `libpipewire-module-echo-cancel` with WebRTC's echo
+   canceller (`aec/libspa-aec-webrtc`, in the `pipewire` package) and makes
+   two nodes, `thistle-chat-ec-source` and `thistle-chat-ec-sink`. The call
+   records from the one and plays to the other, and the canceller is
+   stopped when the call ends. The file is written to the profile's data
+   folder from `echoCancelConf` in `lib/src/audio/devices.dart`; nothing in
+   the user's PipeWire configuration changes.
+2. **PulseAudio**: the call's streams carry `filter.want=echo-cancel` and
+   `media.role=phone`, which PulseAudio's `module-filter-apply` (loaded by
+   default) answers with `module-echo-cancel`.
+
+Neither can be told from here to have worked on PulseAudio; with neither,
+a headset avoids the echo.
 
 `--profile` keeps a separate Secret Service item (attributes `application
 org.thistleos.thistle_chat`, `profile NAME`) and database
@@ -137,4 +178,11 @@ one it builds as the artifact `thistle-chat-apk`.
   started, switched off and on, with notifications asked for first.
 - `test/ui_test.dart`: the same flows through the screens, by taps and
   typing; Android's banner for the Tailscale app, no discovery there, and a
-  refused permission's banner.
+  refused permission's banner; a voice message's player and the recording
+  bar; the call screen placing, answering, muting and hanging up.
+- `test/voice_calls_test.dart`: voice messages recorded from a (fake)
+  microphone reach a core peer as Ogg/Opus of their length, decoding to the
+  tone recorded, and received ones play whole only when asked; calls placed
+  and answered carry the microphone both ways, mute sends silence, a call
+  in the background rings with a notification, decline, a missed call,
+  unreachable; a refused microphone on Android.

@@ -27,6 +27,13 @@ void main() {
     expect(o.discoveryPort, 4820);
   });
 
+  test('--mic and --speaker: audio files instead of a sound card', () {
+    final o = AppOptions.parse(const ['--mic', 'tone.wav', '--speaker', '/tmp/heard']);
+    expect(o.mic, 'tone.wav');
+    expect(o.speakerDir, '/tmp/heard');
+    expect(AppOptions.parse(const []).mic, isNull);
+  });
+
   test('a bad option says so', () {
     expect(() => AppOptions.parse(const ['--port', 'x']), throwsFormatException);
     expect(() => AppOptions.parse(const ['--what']), throwsFormatException);

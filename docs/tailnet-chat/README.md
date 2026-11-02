@@ -45,8 +45,14 @@ of `Target`s: a target for the simulator implements `Target`'s methods
 (`add_contact`, `contacts`, `requests`, `accept`, `decline`,
 `accept_new_key`, `messages`, `send_text`, `waiting`, `stop`, and for the
 message scenarios `react`, `mark_read`, `set_typing`, `is_typing`,
-`set_read_receipts`, `flush`) with the
+`set_read_receipts`, `flush`; for the voice and call scenarios
+`send_voice`, `set_call_policy`, `place_call`, `calls`, `answer_call`,
+`end_call`, `talk`, `cellular_call`) with the
 simulator's keys, screen and card, and gives its `address` and `key`.
+A target without cellular calls sets `can_cellular = False` (or answers
+`cellular_call` with `no command`), and `call_ended_by_cellular` is
+reported as skipped, not failed. The call scenarios take about 15 s more,
+`call_far_end_silent` waiting out the 10 s without a frame.
 
 ## The control protocol
 
@@ -82,8 +88,11 @@ name, or an address as `[host, port]`.
 | `is_typing` | `key` | boolean |
 | `flush` | `to`? | `true` |
 | `call` | `to` | the call id |
-| `calls` | | `{call id: {"peer", "state", "frames"}}` |
+| `calls` | | `{call id: {"peer", "state", "frames", "mine"}}` (the core adds `missed`) |
+| `answer_call` | `call`, `decline`? (a reason) | `true` |
 | `end_call` | `call`, `reason`? | `true` |
+| `talk` | `call`, `seconds`? | `true`: the target sends audio on the call (the reference peer the vector's packets, 1 s by default; one whose microphone always streams does nothing more) |
+| `cellular_call` | | `true`: a cellular call takes over, every call ends as `cellular` (the reference peer; the simulator's modem) |
 | `stop` | | `true`, then the program exits |
 
 A message is `{"id", "mine", "ts", "state", "text"?, "reply_to"?,
@@ -105,7 +114,11 @@ python3 tools/tailnet_chat/conformance.py \
 Its options: `--identity FILE` (the seed in hex, made on first start;
 without it a key for this run only), `--db PATH` (SQLite; `:memory:` by
 default), `--address HOST`, `--port N` (or `--listen HOST:PORT`), `--name`,
-`--loopback`, `--no-read-receipts`, `--call-policy`, `--verbose`.
+`--loopback`, `--no-read-receipts`, `--call-policy`, `--verbose`,
+`--mic FILE.wav` (what a connected call sends, a 16 kHz mono WAV file
+looped; silence without it) and `--speaker FILE.wav` (what it heard,
+written when the call ends). A connected call streams Opus through the
+system's libopus (`libopus0`); it has no `cellular_call`.
 
 ## The companion app
 

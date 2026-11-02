@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../chat_model.dart';
 import '../permissions.dart';
+import 'call_page.dart';
 import 'contacts_page.dart';
 import 'conversation_page.dart';
 import 'requests_page.dart';
@@ -45,16 +46,31 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   int _tab = 0;
 
+  String? _shownCall;
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    widget.model.addListener(_watchCalls);
   }
 
   @override
   void dispose() {
+    widget.model.removeListener(_watchCalls);
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
+  }
+
+  /// A call coming in shows the call screen over whatever is in front.
+  void _watchCalls() {
+    final talk = widget.model.talk;
+    final call = talk.call;
+    if (call == null || talk.callId == _shownCall || call.mine || call.state != 'ringing') return;
+    _shownCall = talk.callId;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) showCall(context, widget.model);
+    });
   }
 
   /// In front only while resumed: a message to a hidden window notifies.

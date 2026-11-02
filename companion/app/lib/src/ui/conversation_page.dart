@@ -4,6 +4,12 @@ import 'package:flutter/material.dart';
 import 'package:tailnet_chat_core/tailnet_chat_core.dart';
 
 import '../chat_model.dart';
+import 'call_page.dart';
+
+String clock(int ms) {
+  final s = ms ~/ 1000;
+  return '${s ~/ 60}:${(s % 60).toString().padLeft(2, '0')}';
+}
 
 const reactionChoices = ['👍', '❤', '😂', '😮', '😢', '🙏'];
 
@@ -70,6 +76,29 @@ class _ConversationPageState extends State<ConversationPage> {
     _compose.clear();
     setState(() => _replyingTo = null);
     _focus.requestFocus();
+  }
+
+  void _say(String why) => ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(why)));
+
+  Future<void> _record() async {
+    final why = await model.talk.startRecording(_box!);
+    if (why != null && mounted) _say(why);
+  }
+
+  Future<void> _call() async {
+    final id = await model.talk.startCall(_box!);
+    if (!mounted) return;
+    if (id == null) {
+      _say(model.talk.audioProblem ?? 'A call is already up.');
+      return;
+    }
+    showCall(context, model);
+  }
+
+  Future<void> _play(Message m) async {
+    if (model.talk.playingId == m.id) return model.talk.stopPlaying();
+    final why = await model.talk.play(m);
+    if (why != null && mounted) _say(why);
   }
 
   Future<void> _actions(Message m) async {
@@ -146,6 +175,14 @@ class _ConversationPageState extends State<ConversationPage> {
               if (status.isNotEmpty) Text(status, style: Theme.of(context).textTheme.bodySmall),
             ],
           ),
+          actions: [
+            IconButton(
+              key: const Key('call'),
+              tooltip: 'Call',
+              icon: const Icon(Icons.call),
+              onPressed: c.declinedByThem || (c.key == null && c.address == null) ? null : _call,
+            ),
+          ],
         ),
         body: Column(
           children: [
@@ -160,6 +197,9 @@ class _ConversationPageState extends State<ConversationPage> {
                     message: m,
                     quoted: m.replyTo == null ? null : model.quoted(box, m.replyTo!),
                     onLongPress: () => _actions(m),
+                    playing: model.talk.playingId == m.id,
+                    playedMs: model.talk.playingId == m.id ? model.talk.playedMs : 0,
+                    onPlay: () => _play(m),
                   );
                 },
               ),
@@ -188,25 +228,57 @@ class _ConversationPageState extends State<ConversationPage> {
               top: false,
               child: Padding(
                 padding: const EdgeInsets.fromLTRB(12, 4, 4, 8),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: TextField(
-                        key: const Key('compose'),
-                        controller: _compose,
-                        focusNode: _focus,
-                        enabled: !c.declinedByThem,
-                        minLines: 1,
-                        maxLines: 5,
-                        textInputAction: TextInputAction.send,
-                        decoration: const InputDecoration(hintText: 'Message', border: OutlineInputBorder()),
-                        onChanged: (t) => model.typed(box, t),
-                        onSubmitted: (_) => _send(),
+                child: model.talk.recordingBox == box
+                    ? Row(
+                        key: const Key('recording'),
+                        children: [
+                          const Icon(Icons.fiber_manual_record, color: Colors.red),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              'Recording ${clock(model.talk.recordingMs)} of 2:00',
+                              key: const Key('recording-time'),
+                            ),
+                          ),
+                          IconButton(
+                            key: const Key('recording-cancel'),
+                            tooltip: 'Throw it away',
+                            icon: const Icon(Icons.delete_outline),
+                            onPressed: () => model.talk.stopRecording(send: false),
+                          ),
+                          IconButton(
+                            key: const Key('recording-send'),
+                            tooltip: 'Send the voice message',
+                            icon: const Icon(Icons.send),
+                            onPressed: () => model.talk.stopRecording(),
+                          ),
+                        ],
+                      )
+                    : Row(
+                        children: [
+                          Expanded(
+                            child: TextField(
+                              key: const Key('compose'),
+                              controller: _compose,
+                              focusNode: _focus,
+                              enabled: !c.declinedByThem,
+                              minLines: 1,
+                              maxLines: 5,
+                              textInputAction: TextInputAction.send,
+                              decoration: const InputDecoration(hintText: 'Message', border: OutlineInputBorder()),
+                              onChanged: (t) => model.typed(box, t),
+                              onSubmitted: (_) => _send(),
+                            ),
+                          ),
+                          IconButton(
+                            key: const Key('record'),
+                            tooltip: 'Record a voice message',
+                            icon: const Icon(Icons.mic_none),
+                            onPressed: c.declinedByThem || model.talk.recordingBox != null ? null : _record,
+                          ),
+                          IconButton(tooltip: 'Send', icon: const Icon(Icons.send), onPressed: _send),
+                        ],
                       ),
-                    ),
-                    IconButton(tooltip: 'Send', icon: const Icon(Icons.send), onPressed: _send),
-                  ],
-                ),
               ),
             ),
           ],
@@ -217,10 +289,20 @@ class _ConversationPageState extends State<ConversationPage> {
 }
 
 class _Bubble extends StatelessWidget {
-  const _Bubble({required this.message, required this.quoted, required this.onLongPress});
+  const _Bubble({
+    required this.message,
+    required this.quoted,
+    required this.onLongPress,
+    this.playing = false,
+    this.playedMs = 0,
+    this.onPlay,
+  });
   final Message message;
   final Message? quoted;
   final VoidCallback onLongPress;
+  final bool playing;
+  final int playedMs;
+  final VoidCallback? onPlay;
 
   static String _state(String s) => switch (s) {
     'waiting' => 'Waiting',
@@ -270,7 +352,26 @@ class _Bubble extends StatelessWidget {
                   ),
                 ),
               if (m.kind == 'voice')
-                Text('Voice message, ${((m.ms ?? 0) / 1000).round()} s (playback comes with ticket 10)')
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      key: Key('play-${m.id}'),
+                      tooltip: playing ? 'Stop' : 'Play',
+                      icon: Icon(playing ? Icons.stop : Icons.play_arrow),
+                      onPressed: onPlay,
+                    ),
+                    SizedBox(
+                      width: 120,
+                      child: LinearProgressIndicator(value: playing && (m.ms ?? 0) > 0 ? playedMs / m.ms! : 0),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      playing ? '${clock(playedMs)} / ${clock(m.ms ?? 0)}' : 'Voice message, ${clock(m.ms ?? 0)}',
+                      key: Key('voice-${m.id}'),
+                    ),
+                  ],
+                )
               else
                 Text(m.text ?? ''),
               const SizedBox(height: 2),
