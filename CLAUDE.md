@@ -416,6 +416,16 @@ switch (`AUDIO_SEL`, XL9555 P12, HIGH = modem). ADR-0008 has the reasons,
 - The simulator's fake modem: `--call NUMBER` rings, `--call-hangup S`,
   `--call-preview STATE`, and `--tap dial:N` / `compose:N`;
   `simulator/tests/test_calls.py` and `test_phone_app.py`.
+- **Tailnet chat calls use the same screen and API** (ticket 09 of
+  `.scratch/tailnet-chat/`): while no cellular call is up, `call.h` shows
+  and controls a `ws-opus` call (`call_status_t.tailnet`), and the call log
+  has it as `tailnet:<fingerprint id>`, which `rs_call_dial()` calls back.
+  The rules are `tailnet_call_policy.rs` (one call, busy, a cellular call
+  ends it, SMS wait out one over LTE, 10 s without a frame ends it), the
+  jitter buffer and echo suppression `tailnet_call_media.rs`, the call's
+  own task (20 KB internal stack, Opus) `tailnet_call.rs`. The simulator's
+  `THISTLE_SIM_SPEAKER=FILE.wav` gets everything played;
+  `test_tailchat.py --only calls`.
 
 ### The clock
 

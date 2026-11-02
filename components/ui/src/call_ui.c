@@ -17,6 +17,10 @@
  * It lies over the app in front without touching it, below the status bar,
  * which keeps showing. Its own group takes the keyboard while it is open.
  *
+ * A Tailnet chat call comes through the same API (call.h's `tailnet`): the
+ * contact's name, "Tailnet call" under it, and no keypad, as it carries no
+ * DTMF.
+ *
  * Everything here runs on the LVGL task with the LVGL lock held: from its
  * timer, its buttons, or the UI manager's key timer.
  */
@@ -301,9 +305,14 @@ static void show_big(const char *text, bool is_name)
 }
 
 /* The name large, the number under it; without a name, the number large;
- * without a number, "Unknown". */
+ * without a number, "Unknown". A tailnet contact's name, and "Tailnet call". */
 static void show_who(const call_status_t *st)
 {
+    if (st->tailnet) {
+        show_big(st->name[0] ? st->name : "Unknown", true);
+        set_dotted_text(s_ui.number, s_ui.number_shown, sizeof(s_ui.number_shown), "Tailnet call");
+        return;
+    }
     bool is_name = st->name[0] != '\0';
     show_big(is_name ? st->name : st->number[0] ? st->number : "Unknown", is_name);
     set_dotted_text(s_ui.number, s_ui.number_shown, sizeof(s_ui.number_shown),
@@ -717,7 +726,9 @@ static lv_obj_t *build_call(lv_obj_t *box)
     lv_obj_t *toggles = add_box(box, LV_FLEX_FLOW_ROW);
     lv_obj_set_height(toggles, sz->toggle_h);
     s_ui.mute = add_toggle(toggles, LV_SYMBOL_MUTE, "Mute", mute_cb);
-    lv_obj_t *keypad = add_toggle(toggles, LV_SYMBOL_KEYBOARD, "Keypad", keypad_cb);
+    /* A tailnet call has no DTMF. */
+    lv_obj_t *keypad = s_ui.st.tailnet ? s_ui.mute
+                                        : add_toggle(toggles, LV_SYMBOL_KEYBOARD, "Keypad", keypad_cb);
     s_ui.speaker = add_toggle(toggles, LV_SYMBOL_VOLUME_MAX, "Speaker", speaker_cb);
     set_checked(s_ui.mute, s_ui.st.muted);
     set_checked(s_ui.speaker, s_ui.st.speaker);
@@ -893,6 +904,7 @@ static void open_screen(const call_status_t *st, const char *why)
     lv_obj_move_foreground(s_ui.root);
     s_open = true;
     ESP_LOGI(TAG, "%s", why);
+    if (st->tailnet) ESP_LOGI(TAG, "tailnet call: %s", st->name);
 }
 
 static void delete_group_cb(void *group)

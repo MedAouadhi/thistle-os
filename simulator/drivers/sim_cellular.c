@@ -99,6 +99,28 @@ void sim_cellular_set_incoming_call(const char *number)
     pthread_mutex_unlock(&s_call_lock);
 }
 
+static int64_t now_ms(void);
+
+/* A call that rings now, from `number`, on a modem that has registered and
+ * has no call: the Tailnet chat test's cellular call (tailnet_chat.rs'
+ * control port). False otherwise. */
+bool sim_cellular_ring_now(const char *number)
+{
+    pthread_mutex_lock(&s_call_lock);
+    bool ok = s_registered_ms != 0 && s_call.phase == CALL_NONE;
+    if (ok) {
+        s_call.phase = CALL_RINGING;
+        s_call.incoming = true;
+        s_call.busy = false;
+        snprintf(s_call.number, sizeof(s_call.number), "%s", number);
+        s_call.since_ms = now_ms();
+        atomic_store(&s_has_rung, true);
+        printf("[sim_cellular] call ringing from %s\n", s_call.number);
+    }
+    pthread_mutex_unlock(&s_call_lock);
+    return ok;
+}
+
 /* --call-hangup: the far end hangs up `seconds` after a call connects. */
 void sim_cellular_set_remote_hangup(int seconds)
 {
