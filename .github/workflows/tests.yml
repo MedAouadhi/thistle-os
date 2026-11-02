@@ -390,6 +390,13 @@ jobs:
           flutter --version
           flutter pub get --enforce-lockfile
 
+      # libopus.so is built for each ABI from components/opus
+      # (android/app/src/main/cpp): the NDK Flutter names (ndkVersion) and
+      # the CMake build.gradle.kts names.
+      - name: Install the NDK and CMake
+        run: |
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;28.2.13676358" "cmake;3.22.1" > /dev/null
+
       - name: Build the APK
         run: flutter build apk --release
 

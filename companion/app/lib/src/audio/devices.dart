@@ -39,8 +39,7 @@ abstract interface class AudioDevices {
   Future<CallDevices> call();
 }
 
-/// No audio on this platform (yet): Android until it bundles libopus and a
-/// device layer.
+/// No audio devices: a model made without any (tests).
 class NoAudioDevices implements AudioDevices {
   NoAudioDevices(this.why);
   final String why;

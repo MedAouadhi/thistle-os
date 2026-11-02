@@ -6,6 +6,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:tailnet_chat_core/tailnet_chat_core.dart';
 
 import 'src/android.dart';
+import 'src/audio/android_audio.dart';
 import 'src/audio/devices.dart';
 import 'src/chat_model.dart';
 import 'src/identity.dart';
@@ -71,11 +72,12 @@ Future<void> main(List<String> args) async {
     },
   );
   // The microphone and speaker: audio files when asked (no sound card, a
-  // second instance, a test run), else PulseAudio/PipeWire on Linux.
+  // second instance, a test run), else AudioRecord/AudioTrack on Android
+  // and PulseAudio/PipeWire on Linux.
   final AudioDevices audio = options.mic != null || options.speakerDir != null
       ? FileAudioDevices(mic: options.mic, speakerDir: options.speakerDir)
       : android != null
-      ? NoAudioDevices('voice and calls are not on Android yet')
+      ? AndroidAudioDevices()
       : PulseAudioDevices(configDir: dir.path, log: options.verbose ? stderr.writeln : null);
   await notifier.init();
   model = ChatModel(

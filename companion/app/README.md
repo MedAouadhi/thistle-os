@@ -25,10 +25,13 @@ platform glue:
   most) and playing, the call in progress, its ring and notifications,
   mute and volume. The codec, the Ogg/Opus files, the jitter buffer and a
   call's frames are the core's (`VoiceRecorder`, `decodeVoice`,
-  `CallMedia`), Opus through the system's libopus by FFI.
-- `lib/src/audio/`: the microphone and the speaker: PulseAudio's simple API
-  by FFI (`pulse.dart`; PipeWire answers it through pipewire-pulse), each
-  stream in an isolate of its own; or WAV files (`--mic`, `--speaker`).
+  `CallMedia`), Opus by FFI through the system's libopus on Linux and the
+  app's own `libopus.so` on Android.
+- `lib/src/audio/`: the microphone and the speaker: on Linux PulseAudio's
+  simple API by FFI (`pulse.dart`; PipeWire answers it through
+  pipewire-pulse), each stream in an isolate of its own; on Android
+  AudioRecord and AudioTrack over the app's audio channels
+  (`android_audio.dart`, `Audio.kt`); or WAV files (`--mic`, `--speaker`).
 - Android only: `lib/src/android.dart` over the app's own method channel
   (`android/app/src/main/kotlin/org/thistleos/thistle_chat/`): the identity's
   seed sealed by an AES-GCM key in the Android Keystore (`KeystoreVault.kt`;
@@ -56,7 +59,7 @@ export PATH=$HOME/flutter/bin:$PATH
 cd companion/app
 flutter pub get --enforce-lockfile
 flutter analyze
-flutter test                    # about 40 tests, 10 s
+flutter test                    # about 80 tests, 10 s
 flutter build linux --release   # build/linux/x64/release/bundle/thistle_chat
 flutter run -d linux            # or: run the bundle
 ```
@@ -140,12 +143,31 @@ tailnet comes up and whenever the app comes to the front.
   or a contact is added or accepted, the microphone when a recording or a
   call first needs it (`model.permissions?.need(AppPermission.microphone)`).
   A refusal shows a banner saying what it stops, with Open settings.
+- **Voice messages and calls**: Opus is the repository's own libopus
+  (`components/opus/`, 1.5.2), built for each ABI by the app's CMake
+  (`android/app/src/main/cpp/CMakeLists.txt`) as `libopus.so`, which the
+  core opens. A voice message records from the microphone and plays as
+  media. A call puts the phone in communication mode, records from the
+  voice-communication source with Android's AcousticEchoCanceler (and
+  NoiseSuppressor) where the phone has them, which the call screen says,
+  plays on the voice-call stream (the earpiece, unless a headset or the
+  phone's own routing says otherwise), and darkens the screen at the ear.
+  While a call is up the listening service is in the foreground as using
+  the microphone too (`remoteMessaging|microphone`), started from the call
+  screen, so the call keeps its audio with the app in the background;
+  Android 14 allows that type to start only with the app in front. With
+  listening switched off, the service runs for the call alone.
+- **A call coming in** in the background rings (the ringtone stream) and
+  notifies on the `calls` channel, full screen where Android allows it;
+  Answer and Decline both open the app, as the peer with the call lives in
+  its window's engine.
 - Nothing is backed up (`allowBackup="false"`, `data_extraction_rules.xml`):
   the sealed seed is useless without this phone's Keystore key.
 
 Building needs the Android SDK (platform 35 and 36, build tools, the NDK
-Flutter names, all installed by the Gradle build once the licences are
-accepted) and JDK 17 or newer:
+Flutter names and CMake 3.22.1 for libopus, all installed by the Gradle
+build once the licences are accepted; `sdkmanager --install
+"ndk;28.2.13676358" "cmake;3.22.1"` beforehand) and JDK 17 or newer:
 
 ```sh
 export PATH=$HOME/flutter/bin:$PATH
@@ -186,3 +208,8 @@ one it builds as the artifact `thistle-chat-apk`.
   and answered carry the microphone both ways, mute sends silence, a call
   in the background rings with a notification, decline, a missed call,
   unreachable; a refused microphone on Android.
+- `test/android_audio_test.dart`: the Android audio devices against a fake
+  of `Audio.kt`'s channels: a recording's frames, a refused microphone, a
+  voice message's PCM to the speaker and drained, the ring, a call's
+  begin, echo canceller and end (and a phone with none), a call whose
+  microphone or speaker will not open undone.

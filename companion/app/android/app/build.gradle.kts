@@ -28,6 +28,15 @@ android {
         versionName = flutter.versionName
     }
 
+    // libopus.so for each ABI, from the repository's vendored libopus
+    // (src/main/cpp/CMakeLists.txt): the core opens it for voice and calls.
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
+    }
+
     buildTypes {
         release {
             // Signed with the debug key: the APK is installed by hand (adb, or
