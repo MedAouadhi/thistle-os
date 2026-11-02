@@ -4,7 +4,7 @@
 
 **Blocked by:** 07, 08, 09, 10, 11
 
-**Status:** ready-for-agent
+**Status:** ready-for-human
 
 - [ ] A call from the phone to the T-Deck and back over WiFi, and over LTE through DERP: delay, frames lost, and how the echo sounds, written down.
 - [ ] Free internal RAM at boot with the tailnet and Tailnet chat on, and with a call up; the call does not starve another task.

@@ -1,6 +1,6 @@
 # Tailnet chat
 
-Status: ready-for-agent
+Status: in-review; tickets 01-11 on branch `tailnet-chat`, the hardware run (12) and the manual checks in 01, 06, 07, 10 and 11 remain
 
 ADR-0015 (peer to peer, the tailnet trusted once, the device's MeshCore key)
 has the reasons; ADR-0009 (the tailnet), ADR-0014 (background checks) and

@@ -4,7 +4,7 @@
 
 **Blocked by:** 05
 
-**Status:** done but for the manual run: a chat with the simulator (ticket 03's chat peer, not merged yet) and with a second instance on another tailnet machine (below).
+**Status:** done but for the manual run: a chat with the simulator (its chat peer is on `tailnet-chat` now) and with a second instance on another tailnet machine (below).
 
 - [x] Builds and runs on Linux from documented commands; the build is in CI.
 - [x] Discovery lists the chat peers among the online tailnet peers; a peer not discovered can be added by name or address.
