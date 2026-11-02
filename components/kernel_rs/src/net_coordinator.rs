@@ -733,8 +733,10 @@ fn evaluate(c: &mut Coordinator) -> Work {
         if !c.cell.blocked() {
             c.blocked_info = None;
         }
-        // SMS wait in the modem until the call is over.
-        if !calling && crate::sms_manager::due(drv) {
+        // SMS wait in the modem until the call is over, and while a
+        // tailnet call runs over LTE, which fetching would interrupt
+        // (tailnet_call_policy::sms_waits); the call's task pokes us after.
+        if !calling && !crate::tailnet_chat::sms_waits() && crate::sms_manager::due(drv) {
             return Work::FetchSms(drv);
         }
     }

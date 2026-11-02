@@ -654,6 +654,21 @@ static void voice_tick(void)
     }
 }
 
+/* A call to the contact on the page; the system call screen takes it. */
+static void call_cb(lv_event_t *e)
+{
+    (void)e;
+    esp_err_t err = tailnet_chat_call(s_ui.key);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "calling");
+        typing_off();
+    } else if (err == ESP_ERR_INVALID_STATE) {
+        toast_warn("A call is already up, or chat is off");
+    } else {
+        toast_warn("Could not call");
+    }
+}
+
 static void reply_cb(lv_event_t *e)
 {
     (void)e;
@@ -811,6 +826,7 @@ static void show_conversation(void)
     lv_obj_add_event_cb(voice, voice_press_cb, LV_EVENT_PRESSED, NULL);
     lv_obj_add_event_cb(voice, voice_release_cb, LV_EVENT_RELEASED, NULL);
     lv_obj_add_event_cb(voice, voice_release_cb, LV_EVENT_PRESS_LOST, NULL);
+    button(row, LV_SYMBOL_CALL, call_cb);
 
     tailnet_chat_set_viewing(c->key);
     fill_conversation();
@@ -887,6 +903,7 @@ static void show_contact(void)
     join_group(s_ui.field);
 
     lv_obj_t *row = button_row(s_ui.body);
+    button(row, LV_SYMBOL_CALL " Call", call_cb);
     button(row, "Rename", rename_cb);
     s_ui.remove = button(row, "Remove", remove_cb);
     ESP_LOGI(TAG, "contact %s %s%s", c->name, c->fingerprint, c->flagged ? ", flagged" : "");
