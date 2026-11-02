@@ -21,8 +21,15 @@ Future<T> eventually<T>(
   }
 }
 
-Future<ChatPeer> startPeer(String name, {Identity? identity, String db = ':memory:', int port = 0}) async {
+Future<ChatPeer> startPeer(
+  String name, {
+  Identity? identity,
+  String db = ':memory:',
+  int port = 0,
+  List<String> caps = capsV1,
+}) async {
   final p = ChatPeer(
+    caps: caps,
     identity: identity ?? Identity.generate(),
     store: Store.open(db),
     name: name,
@@ -162,6 +169,16 @@ void main() {
     await bob.stop();
     final lost = await alice.call('bob');
     expect(alice.calls[lost]!.state, 'ended:unreachable');
+  });
+
+  test('a call to a peer that does not announce call:ws-opus ends at once as unsupported', () async {
+    await bob.stop();
+    bob = await startPeer('bob', caps: capsV1.where((c) => c != 'call:ws-opus').toList());
+    await befriend(alice, bob);
+    final call = await alice.call('bob');
+    expect(alice.calls[call]!.state, 'ended:unsupported');
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+    expect(bob.calls, isEmpty);
   });
 
   test("call audio comes out on the other side, in order, under its call", () async {

@@ -408,6 +408,8 @@ class ChatPeer {
     final conn = await _connectionFor(c);
     if (conn == null) {
       calls[id]!.state = 'ended:unreachable';
+    } else if (!mayUse('call:ws-opus', caps, conn.peerCaps)) {
+      calls[id] = Call(peer: conn.key, stream: stream, mine: true, state: 'ended:unsupported');
     } else {
       calls[id] = Call(peer: conn.key, stream: stream, mine: true, state: 'offered');
       conn.send({
