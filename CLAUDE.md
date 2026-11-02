@@ -717,7 +717,7 @@ client.
 
 - **The client is MicroLink**, from `MedAouadhi/microlink` branch
   `thistle`, pinned by commit in `components/kernel/idf_component.yml`, S3
-  only. The fork is the one hermes_esp32 pins plus twelve commits; read them
+  only. The fork is the one hermes_esp32 pins plus thirteen commits; read them
   before moving the pin, and delete `dependencies.lock` when you do (which
   also lets other components move: put back what you did not mean to).
   Decisions are in `tailnet_policy.rs`, the running of them in
@@ -735,7 +735,12 @@ client.
   connect to a peer takes a TCP retransmit, about a second.
 - **Data goes through DERP until a direct path is proven**, by a DISCO pong
   or a packet that came straight from the peer; over mobile data, behind
-  the carrier's NAT, it always does. The WireGuard netif's link stays up
+  the carrier's NAT, it always does. A packet for a peer homed in another
+  DERP region goes through that region's relay, over a connection
+  MicroLink opens for it and closes after a minute unused (two at most
+  besides the home one), as Tailscale's client does: a relay delivers
+  only to clients connected to it. Before, the device could start a
+  session only with peers homed in its own region. The WireGuard netif's link stays up
   with no session: wireguard-lwip took it down, and lwIP then sent tailnet
   packets out of the modem or WiFi, unencrypted, where nothing started a
   session: over mobile data no peer could be reached unless it had

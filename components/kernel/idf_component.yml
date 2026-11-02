@@ -1,7 +1,7 @@
 dependencies:
   # The Tailscale client (tailnet_platform.c), only on the S3, which has the
   # PSRAM it allocates from. It is MicroLink as forked for hermes_esp32,
-  # with twelve commits on top for ThistleOS on branch `thistle`, pinned to
+  # with thirteen commits on top for ThistleOS on branch `thistle`, pinned to
   # an exact object so an upstream change cannot arrive without somebody
   # choosing it:
   #
@@ -30,7 +30,11 @@ dependencies:
   #   one is and every 5 minutes otherwise; endpoints sent only when new;
   # - a peer's online is the control plane's (its netmap, OnlineChange and
   #   PeersChangedPatch), not whether it is in the netmap, so the tailnet
-  #   chat dials a contact as it comes online.
+  #   chat dials a contact as it comes online;
+  # - a packet for a peer homed in another DERP region goes over a
+  #   connection to that region, opened as needed and closed after a
+  #   minute unused: a relay delivers only to clients connected to it, so
+  #   the device could reach only peers homed in its own region.
   #
   # wireguard_lwip is named too because MicroLink lists it under
   # PRIV_REQUIRES, which the component manager does not follow. Moving the
@@ -38,12 +42,12 @@ dependencies:
   microlink:
     git: https://github.com/MedAouadhi/microlink.git
     path: components/microlink
-    version: 1dd7a6ce451253812e16b4b160abda8460d9e071
+    version: 2a13717e4b2199c07998be0515effb26a039a8e2
     rules:
       - if: "target == esp32s3"
   wireguard_lwip:
     git: https://github.com/MedAouadhi/microlink.git
     path: components/microlink/components/wireguard_lwip
-    version: 1dd7a6ce451253812e16b4b160abda8460d9e071
+    version: 2a13717e4b2199c07998be0515effb26a039a8e2
     rules:
       - if: "target == esp32s3"
