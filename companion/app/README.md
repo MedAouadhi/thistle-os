@@ -45,7 +45,15 @@ platform glue:
   button and the call button), the call screen (`call_page.dart`), Contacts
   (discovery, add by name, a contact's fingerprint, a changed key to
   accept, rename, remove), Requests, Settings (read receipts, background
-  listening).
+  listening). The look is `theme.dart`'s, ink on paper as the T-Deck's
+  e-paper is: warm paper, ink, hairlines and one signal colour, Fraunces,
+  Instrument Sans and JetBrains Mono bundled in `assets/fonts/` (SIL OFL).
+  `widgets.dart` has the pieces the pages share: a contact's monogram on
+  its key's tint, the paper's grain, the voice waveform. What moves for its
+  own sake (an online dot breathing, a call's ripples) stops when the
+  platform asks for less motion, and under `flutter test`. A phone gets a
+  floating tab bar; a window 1100 px wide shows a conversation beside the
+  list.
 
 ## Building and running
 

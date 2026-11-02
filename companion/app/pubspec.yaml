@@ -24,3 +24,15 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  # SIL Open Font License 1.1 (assets/fonts/*-OFL.txt); variable fonts,
+  # their weight set with FontVariation (lib/src/ui/theme.dart).
+  fonts:
+    - family: Fraunces
+      fonts:
+        - asset: assets/fonts/Fraunces.ttf
+    - family: InstrumentSans
+      fonts:
+        - asset: assets/fonts/InstrumentSans.ttf
+    - family: JetBrainsMono
+      fonts:
+        - asset: assets/fonts/JetBrainsMono.ttf

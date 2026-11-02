@@ -734,6 +734,15 @@ transitive ones in `companion/app/pubspec.lock` and
 | `ed25519_edwards` (https://pub.dev/packages/ed25519_edwards) | 0.3.2 | Apache-2.0 | Ed25519 signatures for the handshake (`companion/core`) |
 | `sqlite3` (https://pub.dev/packages/sqlite3) | 3.8.0 | MIT | The message store (`companion/core`); the SQLite library it loads is public domain |
 
+The app bundles three fonts, each with its licence beside it in
+`companion/app/assets/fonts/`, from github.com/google/fonts (`ofl/`):
+
+| Font | License | Used for |
+|------|---------|----------|
+| Fraunces (variable) | SIL OFL 1.1 | Names and titles |
+| Instrument Sans (variable) | SIL OFL 1.1 | Text |
+| JetBrains Mono (variable) | SIL OFL 1.1 | Fingerprints, addresses, times |
+
 MPL-2.0 is a file-level copyleft: the `dbus` package's own files stay
 under MPL-2.0, and changes to them would have to be published under it;
 the app that uses them, unchanged, may stay BSD 3-Clause. The Android
@@ -757,5 +766,6 @@ All dependencies are compatible with the ThistleOS BSD 3-Clause license:
 | Bitstream Vera | Yes | DejaVu fonts (the Reader's font) |
 | MIT OR Apache-2.0 | Yes | argon2, serde_json, esp-idf-hal, esp-idf-svc, esp-idf-sys |
 | MPL-2.0 (file-level copyleft) | Yes, used unmodified | dbus (companion app only) |
+| SIL OFL 1.1 | Yes, bundled unmodified, not sold alone | Fraunces, Instrument Sans, JetBrains Mono (companion app only) |
 
 No GPL, LGPL or AGPL code is in the firmware's default build (the optional WhatsApp part, `components/whatsapp/`, is AGPL and built only on request; ADR-0013). The one copyleft dependency elsewhere is the companion app's `dbus`, MPL-2.0, above.
