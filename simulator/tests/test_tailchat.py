@@ -63,6 +63,10 @@ ACCEPT = "42,195"
 ADD_CONTACT = "60,163"
 CHECK_INTERVAL = "110,235"
 ADD = "30,219"
+# The first row of Contacts, which has no banner over it; on its page, the
+# first button.
+CONTACT_ROW = "120,72"
+MESSAGE = "48,206"
 
 
 def free_port() -> int:
@@ -521,7 +525,7 @@ def case_app(simulator: Path, root: Path) -> None:
 
 def case_app_add_contact(simulator: Path, root: Path) -> None:
     """Story 2 on the device: a contact added by its tailnet name from the
-    app, and the check's interval set there."""
+    app and written to from its page, and the check's interval set there."""
     dev = Device(simulator, root, "app-add")
     # The interval first, while there is no contact above its button.
     log = dev.run(["--launch-app", APP, "--tap", TAB_CONTACTS, "--tap", CHECK_INTERVAL, "--tap", "wait"], 6000)
@@ -534,6 +538,12 @@ def case_app_add_contact(simulator: Path, root: Path) -> None:
     saved = json.loads((dev.spiffs / "tailnet_chat.json").read_text())
     assert [(c["name"], c.get("dial"), c.get("pending")) for c in saved["contacts"]] == \
         [("homelab", ["homelab", 4810], True)], saved
+    # Written to from its page: Chats lists it only once it has messages.
+    log = dev.run(["--launch-app", APP, "--tap", TAB_CONTACTS, "--tap", CONTACT_ROW, "--tap", MESSAGE,
+                   "--tap", "type:are you there\n", "--tap", "wait"], 9000)
+    for line in ("(tailchat) conversation homelab: 0 messages", "(tailchat) sent ",
+                 "(tailchat) conversation homelab: 1 messages"):
+        assert line in log, f"no {line!r} in the log:\n{log[-3000:]}"
     system = json.loads((dev.card / "config" / "system.json").read_text())
     assert system.get("thistle_os", system)["tailnet_chat"]["check_minutes"] == 30, system
 

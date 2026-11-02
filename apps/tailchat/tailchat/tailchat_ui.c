@@ -22,8 +22,8 @@
  * - Contacts: each contact, flagged if another key came under its name or
  *   address; this device's own fingerprint, Add contact, the read
  *   receipts switch and how often to look for messages while asleep
- *   beneath. A row opens the contact: its fingerprint, Rename, Accept new
- *   key, Remove. Add contact asks for a tailnet name or address (and
+ *   beneath. A row opens the contact: its fingerprint, Message, Call,
+ *   Rename, Accept new key, Remove. Add contact asks for a tailnet name or address (and
  *   ":port" if not 4810) and a name; its key is pinned when first reached.
  * - Requests: each contact request, its name, fingerprint and latest
  *   message; a row opens it: everything it held, Accept and Decline.
@@ -906,6 +906,14 @@ static void show_conversation(void)
     if (group) lv_group_focus_obj(s_ui.field);
 }
 
+/* A contact's conversation, which Chats lists only once it has messages:
+ * a contact just added had no way to be written to. */
+static void message_cb(lv_event_t *e)
+{
+    (void)e;
+    go(PAGE_CONVERSATION, s_ui.key);
+}
+
 static void rename_cb(lv_event_t *e)
 {
     (void)e;
@@ -975,6 +983,7 @@ static void show_contact(void)
     join_group(s_ui.field);
 
     lv_obj_t *row = button_row(s_ui.body);
+    button(row, "Message", message_cb);
     button(row, LV_SYMBOL_CALL " Call", call_cb);
     button(row, "Rename", rename_cb);
     s_ui.remove = button(row, "Remove", remove_cb);
