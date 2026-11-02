@@ -786,6 +786,14 @@ client.
   `THISTLE_SIM_TAILNET_PEERS=host` takes the host's own peers from
   `tailscale status --json`); whether it has joined is a file in
   `THISTLE_SIM_SPIFFS`. `simulator/tests/test_tailscale.py`.
+- **Tailnet chat shares this peer list with a contact that asks**
+  (`peers_ask`, protocol.md section 4.10, ticket 14 of
+  `.scratch/tailnet-chat/`): the online peers the kernel keeps, by the
+  first label of their names, less the asker, IPv4 only, 64 at most
+  (`tailnet_chat_policy::shared_peers`); a stranger is told none. The
+  device never asks. The Android companion app, which has no peer list,
+  looks for chat peers among what its contacts share, probing only
+  addresses inside the tailnet's ranges and taking nothing else from it.
 
 ### Hermes
 

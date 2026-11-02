@@ -343,7 +343,9 @@ and call each other directly.
   storage (the Secret Service on Linux, the Keystore on Android).
 - **Discovery.** On Linux, from `tailscale status --json`: each online
   tailnet peer's port 4810 is tried with a hello. On Android, which has no
-  peer list, by adding a name or address, and from contacts already known.
+  peer list, by adding a name or address, from contacts already known, and
+  among the peer lists contacts share (`peers`, ticket 14): only their
+  addresses are taken, and probed the same way.
 - **Listening.** Bound to the tailnet address. On Android a foreground
   service, on by default and switchable, keeps the listener and the
   connections alive.

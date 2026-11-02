@@ -8,7 +8,8 @@ platform glue:
 
 - `lib/src/tailnet.dart`: `tailscale status --json` parsed (a pure function),
   whether Tailscale runs and why not, and discovery: each online tailnet
-  peer's port 4810 probed with a hello.
+  peer's port 4810 probed with a hello, or on Android each tailnet address
+  the contacts share (`discoverThroughContacts`).
 - `lib/src/identity.dart`: the identity key's seed, made on first start and
   kept in the Secret Service (GNOME Keyring, KWallet), spoken to over D-Bus,
   so the build needs no libsecret. Never in a plain file: without a Secret
@@ -132,6 +133,16 @@ app has no peer list there, so chat peers are added by tailnet name
 (MagicDNS) or 100.x address, and the contacts known are dialled when the
 tailnet comes up and whenever the app comes to the front.
 
+**Look for chat peers** asks each contact that announces `peers` (a
+laptop's app, the T-Deck) for the online peers its platform lists
+(protocol section 4.10), dialling it if need be, a few seconds each; probes
+each address they share on the discovery port with a hello; and lists the
+chat peers that answer, each "via" the contact that shared it. Contacts
+and this phone are left out. Only addresses inside the tailnet's ranges are
+taken from a shared list, never a name or a key: Add pins the key at the
+first handshake, as for an address typed in. On Linux the app answers a
+contact that asks with what `tailscale status --json` shows online.
+
 - **Listening in the background**: a foreground service with a persistent
   notification ("Thistle Chat is listening") keeps the process, and the
   Flutter engine whose chat peer listens, alive after the app is swiped
@@ -196,10 +207,12 @@ one it builds as the artifact `thistle-chat-apk`.
   loopback: requests, accept and decline, delivered and read, replies,
   reactions, typing, notifications, read receipts off, rename, remove, a
   changed key flagged and accepted, discovery, a peer by name; on Android,
-  the contacts dialled on coming to the front, and the listening service
+  discovery through a contact's shared list, the contacts dialled on coming
+  to the front, and the listening service
   started, switched off and on, with notifications asked for first.
 - `test/ui_test.dart`: the same flows through the screens, by taps and
-  typing; Android's banner for the Tailscale app, no discovery there, and a
+  typing; Android's banner for the Tailscale app, discovery through the
+  contacts there, and a
   refused permission's banner; a voice message's player and the recording
   bar; the call screen placing, answering, muting and hanging up.
 - `test/voice_calls_test.dart`: voice messages recorded from a (fake)

@@ -268,10 +268,44 @@ most 256 bytes); optional `id`, the message concerned; optional `detail`,
 for a person reading a log (at most 512 bytes). A peer MUST NOT answer an
 `error` with an `error`.
 
+### 4.10 `peers_ask` and `peers`: the tailnet's peer list
+
+```json
+{"type":"peers_ask"}
+{"type":"peers","peers":[{"name":"thistle-46cf20","addrs":["100.110.81.38","fd7a:115c:a1e0::2e38:5128"]},{"name":"laptop","addrs":["100.101.102.103"]}]}
+```
+
+Some platforms list the tailnet's peers (`tailscale status` on Linux, the
+device's own client) and some do not (Android, where the Tailscale app
+shares none with other apps). A chat peer on one that does not can look
+for chat peers among the lists its contacts share. Both frames need the
+`peers` capability on both sides (section 5); either from a peer whose
+hello did not announce it draws `error unsupported`.
+
+- `peers_ask` asks for the list. It is answered with one `peers` frame.
+- `peers` lists the tailnet peers the answering side's platform shows
+  online, less the asker: at most **64**, each with `name`, its tailnet
+  hostname (1 to 64 bytes), and `addrs`, 1 or 2 of its addresses inside the
+  tailnet's ranges (section 1). A peer whose platform has no list answers
+  an empty one.
+- A peer MUST answer only a **contact** (section 7) with the list, and a
+  stranger with an empty `peers`.
+- An unasked `peers` is ignored; a malformed one draws `error
+  bad_request`.
+- **The asker MUST NOT take a key, a name or any trust decision from the
+  list.** It is data from another machine. The asker only learns addresses
+  to probe with a hello on its discovery port (section 9), as it would
+  probe its own platform's peers, and MUST drop any address outside the
+  tailnet's ranges. A chat peer found that way is added by the address it
+  answered on, and its key pinned at the first handshake, as with any
+  address the user adds.
+
+Neither frame is queued or acked: both are sent on an open connection.
+
 ## 5. Capabilities
 
 v1 announces: `text`, `receipts`, `typing`, `reply`, `react`,
-`voice-message`, `call:ws-opus`.
+`voice-message`, `call:ws-opus`, `peers`.
 
 - A peer MUST use a feature only if both hellos announce it: no `read`
   unless both have `receipts`, no `typing` frame unless both have
@@ -279,7 +313,8 @@ v1 announces: `text`, `receipts`, `typing`, `reply`, `react`,
   what `msg` needs. A queued `react` or `voice` the other side did not
   announce stays queued for a connection whose hello does; a queued `msg`
   goes without its `reply_to`; a call to a peer without `call:ws-opus`
-  ends at once as `unsupported`, with nothing sent.
+  ends at once as `unsupported`, with nothing sent; a peer without
+  `peers` is not asked for its peer list (section 4.10).
 - A peer MUST ignore a capability it does not know.
 - **Room for later, with no new version.** Video: a `webrtc` capability and
   a `webrtc` transport in `call_offer`, its SDP and ICE exchanged as JSON
