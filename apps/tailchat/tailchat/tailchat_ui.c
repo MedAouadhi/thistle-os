@@ -20,9 +20,11 @@
  *   (read receipts go if allowed) and alert nothing, and typing in the
  *   field tells the contact.
  * - Contacts: each contact, flagged if another key came under its name or
- *   address; this device's own fingerprint and the read receipts switch
+ *   address; this device's own fingerprint, Add contact, the read
+ *   receipts switch and how often to look for messages while asleep
  *   beneath. A row opens the contact: its fingerprint, Rename, Accept new
- *   key, Remove.
+ *   key, Remove. Add contact asks for a tailnet name or address (and
+ *   ":port" if not 4810) and a name; its key is pinned when first reached.
  * - Requests: each contact request, its name, fingerprint and latest
  *   message; a row opens it: everything it held, Accept and Decline.
  *
@@ -68,6 +70,7 @@ typedef enum {
     PAGE_CONVERSATION,
     PAGE_CONTACT,
     PAGE_REQUEST,
+    PAGE_ADD,
 } page_t;
 
 /* What a page reads from the kernel, in PSRAM while the app is open. */
@@ -88,7 +91,9 @@ static struct {
     lv_obj_t   *note;
     lv_obj_t   *body;
     lv_obj_t   *table;
-    lv_obj_t   *field;       /* the contact page's name; the conversation's compose field */
+    lv_obj_t   *field;       /* the contact page's name; the conversation's compose field;
+                                the add page's address */
+    lv_obj_t   *field2;      /* the add page's name */
     lv_obj_t   *remove;      /* the contact page's Remove */
     lv_obj_t   *title;       /* the conversation's name */
     lv_obj_t   *conv_note;   /* typing, waiting, unreachable */
@@ -318,6 +323,7 @@ static page_t parent_of(page_t page)
     case PAGE_CONVERSATION: return PAGE_CHATS;
     case PAGE_CONTACT:      return PAGE_CONTACTS;
     case PAGE_REQUEST:      return PAGE_REQUESTS;
+    case PAGE_ADD:          return PAGE_CONTACTS;
     default:                return page;
     }
 }
@@ -435,6 +441,22 @@ static void receipts_cb(lv_event_t *e)
     go(PAGE_CONTACTS, NULL);
 }
 
+static void add_page_cb(lv_event_t *e)
+{
+    (void)e;
+    go(PAGE_ADD, NULL);
+}
+
+static void check_cb(lv_event_t *e)
+{
+    (void)e;
+    uint32_t minutes = tailchat_next_check_minutes(tailnet_chat_check_minutes());
+    tailnet_chat_set_check_minutes(minutes);
+    ESP_LOGI(TAG, "check every %u minutes", (unsigned)minutes);
+    toast_info(minutes ? "Messages are fetched while asleep" : "Messages wait until the device is awake");
+    go(PAGE_CONTACTS, NULL);
+}
+
 static void show_contacts(void)
 {
     int n = tailnet_chat_contact_count();
@@ -450,8 +472,58 @@ static void show_contacts(void)
     }
     if (!n) empty("No contacts yet.");
     own_fingerprint();
+    lv_obj_t *row = button_row(s_ui.body);
+    button(row, "Add contact", add_page_cb);
     bool on = tailnet_chat_read_receipts();
-    button(button_row(s_ui.body), on ? "Read receipts: on" : "Read receipts: off", receipts_cb);
+    button(row, on ? "Read receipts: on" : "Read receipts: off", receipts_cb);
+    char text[48];
+    button(row, tailchat_check_label(tailnet_chat_check_minutes(), text, sizeof text), check_cb);
+}
+
+static lv_obj_t *one_line_field(const char *placeholder, uint32_t max, lv_event_cb_t ready)
+{
+    lv_obj_t *f = lv_textarea_create(s_ui.body);
+    lv_textarea_set_one_line(f, true);
+    lv_textarea_set_max_length(f, max);
+    lv_textarea_set_placeholder_text(f, placeholder);
+    lv_obj_set_width(f, LV_PCT(100));
+    lv_obj_set_style_margin_hor(f, EDGE, 0);
+    if (ready) lv_obj_add_event_cb(f, ready, LV_EVENT_READY, NULL);
+    join_group(f);
+    return f;
+}
+
+static void add_cb(lv_event_t *e)
+{
+    (void)e;
+    char host[64];
+    uint16_t port = 0;
+    if (!tailchat_parse_address(lv_textarea_get_text(s_ui.field), host, sizeof host, &port)) {
+        toast_warn("Type a tailnet name or address, and :port if not 4810");
+        return;
+    }
+    char key[65];
+    esp_err_t err = tailnet_chat_add_contact(host, port, lv_textarea_get_text(s_ui.field2), key);
+    if (err != ESP_OK) {
+        ESP_LOGI(TAG, "could not add %s: error 0x%x", host, (unsigned)err);
+        toast_warn(err == ESP_ERR_NO_MEM ? "Too many contacts" : "Could not add the contact");
+        return;
+    }
+    ESP_LOGI(TAG, "added %s port %u", host, (unsigned)port);
+    toast_info("Added; its key is pinned when it is first reached");
+    go(PAGE_CONTACT, key);
+}
+
+static void show_add(void)
+{
+    label(s_ui.body, "Add a contact", &s_styles.title);
+    label(s_ui.body, "Its tailnet name or address, and :port if not 4810. Its key is pinned when "
+                     "it is first reached.", &s_styles.note);
+    s_ui.field = one_line_field("homelab or 100.64.0.2", 63 + 6, add_cb);
+    s_ui.field2 = one_line_field("Name (optional)", 64, add_cb);
+    button(button_row(s_ui.body), "Add", add_cb);
+    lv_group_t *group = lv_group_get_default();
+    if (group) lv_group_focus_obj(s_ui.field);
 }
 
 static void show_requests(void)
@@ -973,7 +1045,7 @@ static void show_request(void)
 
 static const char *page_name(page_t p)
 {
-    static const char *names[] = {"chats", "contacts", "requests", "conversation", "contact", "request"};
+    static const char *names[] = {"chats", "contacts", "requests", "conversation", "contact", "request", "add"};
     return names[p];
 }
 
@@ -1015,6 +1087,7 @@ static void show_page(void)
     lv_obj_clean(s_ui.body);
     s_ui.table = NULL;
     s_ui.field = NULL;
+    s_ui.field2 = NULL;
     s_ui.remove = NULL;
     s_ui.title = NULL;
     s_ui.conv_note = NULL;
@@ -1028,6 +1101,7 @@ static void show_page(void)
     case PAGE_CONVERSATION: show_conversation(); break;
     case PAGE_CONTACT:      show_contact(); break;
     case PAGE_REQUEST:      show_request(); break;
+    case PAGE_ADD:          show_add(); break;
     }
     if (s_ui.page <= PAGE_REQUESTS) {
         ESP_LOGI(TAG, "page %s: %d rows", page_name(s_ui.page), s_ui.rows);
@@ -1048,7 +1122,7 @@ static void timer_cb(lv_timer_t *t)
         fill_conversation();
         return;
     }
-    if (s_ui.page == PAGE_CONTACT) {
+    if (s_ui.page == PAGE_CONTACT || s_ui.page == PAGE_ADD) {
         s_ui.generation = tailnet_chat_generation();
         show_status();
         return;

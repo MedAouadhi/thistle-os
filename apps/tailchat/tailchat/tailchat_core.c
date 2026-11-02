@@ -187,3 +187,49 @@ void tailchat_bubble(char *out, size_t n, const tailchat_bubble_t *b, size_t max
 #undef PUT
     if (at >= n) out[n - 1] = '\0';
 }
+
+bool tailchat_parse_address(const char *text, char *host, size_t n, uint16_t *port)
+{
+    if (!text || !host || n == 0 || !port) return false;
+    while (*text == ' ') text++;
+    size_t len = strlen(text);
+    while (len > 0 && text[len - 1] == ' ') len--;
+    const char *colon = memchr(text, ':', len);
+    size_t host_len = colon ? (size_t)(colon - text) : len;
+    if (host_len == 0 || host_len >= n || memchr(text, ' ', host_len)) return false;
+    unsigned long p = 0;
+    if (colon) {
+        const char *d = colon + 1;
+        const char *end = text + len;
+        if (d == end) return false;
+        for (; d < end; d++) {
+            if (*d < '0' || *d > '9') return false;
+            p = p * 10 + (unsigned long)(*d - '0');
+            if (p > 65535) return false;
+        }
+        if (p == 0) return false;
+    }
+    memcpy(host, text, host_len);
+    host[host_len] = '\0';
+    *port = (uint16_t)p;
+    return true;
+}
+
+static const uint32_t CHECK_CHOICES[] = {5, 15, 30, 60};
+
+const char *tailchat_check_label(uint32_t minutes, char *out, size_t n)
+{
+    if (minutes == 0) snprintf(out, n, "Check while asleep: off");
+    else if (minutes % 60 == 0) snprintf(out, n, "Check while asleep: %u h", (unsigned)(minutes / 60));
+    else snprintf(out, n, "Check while asleep: %u min", (unsigned)minutes);
+    return out;
+}
+
+uint32_t tailchat_next_check_minutes(uint32_t minutes)
+{
+    if (minutes == 0) return CHECK_CHOICES[0];
+    for (size_t i = 0; i < sizeof CHECK_CHOICES / sizeof CHECK_CHOICES[0]; i++) {
+        if (CHECK_CHOICES[i] > minutes) return CHECK_CHOICES[i];
+    }
+    return 0;
+}

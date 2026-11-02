@@ -141,8 +141,57 @@ static void an_emoji_is_written_with_what_the_font_has(void)
     }
 }
 
+#define EXPECT(cond)                                                    \
+    do {                                                                \
+        if (!(cond)) {                                                  \
+            fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #cond);  \
+            s_failed++;                                                 \
+        }                                                               \
+    } while (0)
+
+static void an_address_is_a_tailnet_name_or_address_and_a_port(void)
+{
+    char host[64];
+    uint16_t port = 1;
+    EXPECT(tailchat_parse_address("homelab", host, sizeof host, &port));
+    EXPECT_STR(host, "homelab");
+    EXPECT(port == 0);
+    EXPECT(tailchat_parse_address("  100.101.1.2:4811 ", host, sizeof host, &port));
+    EXPECT_STR(host, "100.101.1.2");
+    EXPECT(port == 4811);
+    EXPECT(tailchat_parse_address("laptop.tail1234.ts.net", host, sizeof host, &port));
+    EXPECT_STR(host, "laptop.tail1234.ts.net");
+    EXPECT(port == 0);
+    EXPECT(!tailchat_parse_address("", host, sizeof host, &port));
+    EXPECT(!tailchat_parse_address("   ", host, sizeof host, &port));
+    EXPECT(!tailchat_parse_address("homelab:", host, sizeof host, &port));
+    EXPECT(!tailchat_parse_address("homelab:0", host, sizeof host, &port));
+    EXPECT(!tailchat_parse_address("homelab:70000", host, sizeof host, &port));
+    EXPECT(!tailchat_parse_address("home lab", host, sizeof host, &port));
+    EXPECT(!tailchat_parse_address(NULL, host, sizeof host, &port));
+    char tiny[4];
+    EXPECT(!tailchat_parse_address("homelab", tiny, sizeof tiny, &port));
+}
+
+static void the_check_interval_goes_round_its_choices(void)
+{
+    char out[48];
+    EXPECT_STR(tailchat_check_label(15, out, sizeof out), "Check while asleep: 15 min");
+    EXPECT_STR(tailchat_check_label(60, out, sizeof out), "Check while asleep: 1 h");
+    EXPECT_STR(tailchat_check_label(0, out, sizeof out), "Check while asleep: off");
+    EXPECT(tailchat_next_check_minutes(5) == 15);
+    EXPECT(tailchat_next_check_minutes(15) == 30);
+    EXPECT(tailchat_next_check_minutes(30) == 60);
+    EXPECT(tailchat_next_check_minutes(60) == 0);
+    EXPECT(tailchat_next_check_minutes(0) == 5);
+    EXPECT(tailchat_next_check_minutes(20) == 30);  /* set elsewhere: the next choice above */
+    EXPECT(tailchat_next_check_minutes(500) == 0);
+}
+
 int main(void)
 {
+    an_address_is_a_tailnet_name_or_address_and_a_port();
+    the_check_interval_goes_round_its_choices();
     a_bubble_shows_what_it_quotes_its_state_and_reactions();
     a_voice_message_shows_its_length_and_whether_it_plays();
     an_emoji_is_written_with_what_the_font_has();

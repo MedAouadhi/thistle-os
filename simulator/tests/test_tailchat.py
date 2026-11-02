@@ -59,6 +59,10 @@ TAB_CONTACTS = "120,40"
 FIRST_ROW = "120,95"
 # On the request's page, below a message of one line.
 ACCEPT = "42,195"
+# On the contacts page with no contacts, and then the add page.
+ADD_CONTACT = "60,163"
+CHECK_INTERVAL = "110,235"
+ADD = "30,219"
 
 
 def free_port() -> int:
@@ -416,6 +420,65 @@ def case_messages(simulator: Path, root: Path) -> None:
         dev.stop()
 
 
+def case_sleep_check(simulator: Path, root: Path) -> None:
+    """Ticket 07: the background check "tailnet chat", every 12 s here,
+    dials a contact the peer list shows online with nothing waiting for it,
+    and collects what waited on the other side: a laptop that cannot dial
+    the device (it knows no address for it) still gets its message
+    through. A contact added while online is reached at once and pinned."""
+    dev = Device(simulator, root, "sleep")
+    dev.start(THISTLE_SIM_TAILNET_LOOPBACK_PEER="laptop", THISTLE_SIM_CHAT_CHECK_S=12)
+    laptop = ChatPeer(name="laptop").start()
+    try:
+        target = SimTarget(dev)
+        eventually(lambda: target.logged("check tailnet chat registered: every 12 s"), what="the check registered")
+
+        # Added while its peer is online: dialled at once, its key pinned.
+        target.add_contact(laptop.address, name="laptop")
+        eventually(lambda: any(c["key"] == laptop.key_hex for c in target.contacts()), what="the key pinned")
+        assert "added: dialling laptop" in dev.log_text()
+        # The sweep's connection closes once nothing more comes.
+        eventually(lambda: not any(c["connected"] for c in target.contacts()), what="the sweep to close",
+                   timeout=10)
+
+        # Become each other's contact, then part.
+        target.send_text(laptop.key_hex, "hello")
+        laptop.wait_for(lambda: laptop.requests.get(target.key), timeout=10)
+        laptop.accept(target.key)
+        eventually(lambda: [c for c in target.contacts() if c["accepted_by_them"]], what="the answer")
+        eventually(lambda: target.waiting(laptop.key_hex) == [], what="the device's outbox to clear")
+        for conn in list(laptop.connections):
+            conn.close()
+        eventually(lambda: not any(c["connected"] for c in target.contacts()), what="the connection to close")
+
+        # The laptop writes while the device is "asleep": it has no address
+        # to dial, so the message waits there until the device's check.
+        checks_before = dev.log_text().count("the background check: dialling laptop")
+        mid = laptop.send_text(target.key, "while you slept")
+        time.sleep(0.5)
+        assert laptop.waiting(target.key) == [mid], laptop.waiting(target.key)
+        eventually(lambda: laptop.delivered(mid), what="the check to collect it", timeout=30)
+        assert dev.log_text().count("the background check: dialling laptop") > checks_before, \
+            "delivered, but not by the check"
+        eventually(lambda: [x for x in target.messages(laptop.key_hex) if x["id"] == mid],
+                   what="the message shown")
+        eventually(lambda: target.logged("check tailnet chat: done (dialled 1, 1 received"),
+                   what="the check's log line", timeout=10)
+        log = dev.log_text()
+        for line in ("holding the device awake: delivering", "deliveries over",
+                     "closed laptop (", "nothing more waits"):
+            assert line in log, f"no {line!r} in the log"
+
+        # The interval is a setting.
+        target.call({"cmd": "set", "check_minutes": 30})
+        system = json.loads((dev.card / "config" / "system.json").read_text())
+        assert system.get("thistle_os", system)["tailnet_chat"]["check_minutes"] == 30, system
+        target.close()
+    finally:
+        laptop.stop()
+        dev.stop()
+
+
 def ppm_has_text(path: Path) -> bool:
     data = path.read_bytes()
     # P6 header: three lines, then the pixels; a screen of one colour is blank.
@@ -452,6 +515,25 @@ def case_app(simulator: Path, root: Path) -> None:
     off = Device(simulator, root, "app-off", tailnet=False)
     log = off.run(["--launch-app", APP], 5000)
     assert "(tailchat) unavailable: Tailscale is off" in log, log[-1500:]
+
+
+def case_app_add_contact(simulator: Path, root: Path) -> None:
+    """Story 2 on the device: a contact added by its tailnet name from the
+    app, and the check's interval set there."""
+    dev = Device(simulator, root, "app-add")
+    # The interval first, while there is no contact above its button.
+    log = dev.run(["--launch-app", APP, "--tap", TAB_CONTACTS, "--tap", CHECK_INTERVAL, "--tap", "wait"], 6000)
+    assert "(tailchat) check every 30 minutes" in log, log[-3000:]
+    log = dev.run(["--launch-app", APP, "--tap", TAB_CONTACTS, "--tap", ADD_CONTACT,
+                   "--tap", "type:homelab", "--tap", ADD, "--tap", "wait"], 9000)
+    for line in ("(tailchat) added homelab port 0",
+                 "[tailnet_chat] added homelab at homelab:4810", "(tailchat) contact homelab"):
+        assert line in log, f"no {line!r} in the log:\n{log[-3000:]}"
+    saved = json.loads((dev.spiffs / "tailnet_chat.json").read_text())
+    assert [(c["name"], c.get("dial"), c.get("pending")) for c in saved["contacts"]] == \
+        [("homelab", ["homelab", 4810], True)], saved
+    system = json.loads((dev.card / "config" / "system.json").read_text())
+    assert system.get("thistle_os", system)["tailnet_chat"]["check_minutes"] == 30, system
 
 
 def case_app_conversation(simulator: Path, root: Path) -> None:
@@ -683,9 +765,11 @@ CASES: list[tuple[str, Callable[[Path, Path], None]]] = [
     ("conformance", case_conformance),
     ("card-and-restart", case_card_and_restart),
     ("messages", case_messages),
+    ("sleep-check", case_sleep_check),
     ("app", case_app),
     ("app-conversation", case_app_conversation),
     ("voice", case_voice),
+    ("app-add-contact", case_app_add_contact),
     ("calls", case_calls),
 ]
 
