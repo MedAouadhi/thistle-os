@@ -605,7 +605,9 @@ app, Hermes or the tailnet. `.scratch/dictation/spec.md` has the rules.
   Listening only once audio arrives.
 - `simulator/tests/test_dictation.py` runs it against a fake Cohere;
   `THISTLE_SIM_MIC=FILE.wav` is what the simulator's microphone hears, and
-  `--tap mic:MS` holds the key.
+  `--tap mic:MS` holds the key. `THISTLE_SIM_SPEAKER=FILE.wav` is what its
+  speaker played since the format was last set, kept up to date as it
+  plays; `--tap X,Y:MS` holds a touch.
 
 ### Arabic text
 

@@ -70,6 +70,7 @@ extern void test_opus_a_clip_costs_about_the_bitrate_asked_for(void);
 extern void test_opus_silence_stays_silent(void);
 extern void test_opus_a_lost_frame_is_concealed_with_a_whole_frame(void);
 extern void test_opus_the_pseudostack_is_measured(void);
+extern void test_opus_is_one_takers_at_a_time(void);
 
 /* test_dictation_core.c */
 extern void test_dictation_wav_header_says_16k_mono_16_bit_pcm(void);
@@ -388,6 +389,7 @@ int main(void)
     RUN_TEST(opus_silence_stays_silent);
     RUN_TEST(opus_a_lost_frame_is_concealed_with_a_whole_frame);
     RUN_TEST(opus_the_pseudostack_is_measured);
+    RUN_TEST(opus_is_one_takers_at_a_time);
 
     TEST_SUMMARY();
     return _tests_failed > 0 ? 1 : 0;

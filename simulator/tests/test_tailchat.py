@@ -50,8 +50,8 @@ from tailnet_chat.conformance import RawConn, eventually  # noqa: E402
 from tailnet_chat.peer import ChatPeer  # noqa: E402
 
 APP = "com.thistle.tailchat"
-# Every scenario but the voice message's (ticket 08).
-SCENARIOS = [s for s in conformance.SCENARIOS if s is not conformance.voice_message_whole_and_broken]
+# Every scenario but the calls (ticket 09 adds them).
+SCENARIOS = [s for s in conformance.SCENARIOS if s not in conformance.CALL_SCENARIOS]
 
 # The app's tabs and first row, on the T-Deck Max.
 TAB_REQUESTS = "195,40"
@@ -204,6 +204,12 @@ def case_conformance(simulator: Path, root: Path) -> None:
                      "refused 127.0.0.1: a signature that does not verify",
                      "not the key pinned for laptop-"):
             assert line in log, f"no {line!r} in the log"
+        # The voice message received whole is kept beside the history, and
+        # nothing of the broken transfer is.
+        voice = (VECTORS / "voice.opus").read_bytes()
+        kept = list((dev.card / "messages" / "tailnet" / "voice").iterdir())
+        assert any(p.suffix == ".opus" and p.read_bytes() == voice for p in kept), kept
+        assert not [p for p in kept if p.suffix != ".opus"], kept
         target.close()
     finally:
         dev.stop()
@@ -484,12 +490,131 @@ def case_app_conversation(simulator: Path, root: Path) -> None:
     assert saved["contacts"][0].get("unread", 0) == 0
 
 
+VECTORS = REPO / "docs" / "tailnet-chat" / "vectors"
+
+
+def tone_wav(path: Path, seconds: float) -> None:
+    """A 16 kHz mono WAV of a voice-like tone: what the microphone hears."""
+    import math
+    import struct
+    import wave
+    rate = 16000
+    frames = bytearray()
+    for i in range(int(rate * seconds)):
+        t = i / rate
+        level = 0.5 + 0.5 * math.sin(2 * math.pi * 3 * t)   # syllables
+        s = level * (math.sin(2 * math.pi * 220 * t) + 0.5 * math.sin(2 * math.pi * 660 * t))
+        frames += struct.pack("<h", int(8000 * s))
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(bytes(frames))
+
+
+def voice_device(simulator: Path, root: Path, name: str, history: list) -> tuple[Device, str, str]:
+    """A device whose one contact, Lena, has `history` lines in her
+    conversation: (device, her key, her fingerprint id)."""
+    dev = Device(simulator, root, name)
+    key_hex = ed25519.public_key(os.urandom(32)).hex()
+    fp = protocol.fingerprint_id(bytes.fromhex(key_hex))
+    (dev.spiffs / "tailnet_chat.json").write_text(json.dumps({
+        "version": 1, "outbox": [],
+        "contacts": [{"name": "Lena", "key": key_hex, "seen_name": "lena-laptop"}]}))
+    folder = dev.card / "messages" / "tailnet"
+    folder.mkdir(parents=True)
+    lines = [dict(line, **{"from" if line["dir"] == "in" else "to": key_hex}) for line in history]
+    (folder / f"{fp}.jsonl").write_text("".join(json.dumps(x) + "\n" for x in lines))
+    return dev, key_hex, fp
+
+
+# The conversation page on the T-Deck Max with one message: its row, the
+# first button of the actions the row's tap shows (Play, for a voice
+# message), and the voice button right of Send.
+CONV_ROW = "120,101"
+FIRST_ACTION = "32,135"
+VOICE_BUTTON = "216,135"
+
+
+def case_voice(simulator: Path, root: Path) -> None:
+    """A voice message recorded by holding the voice button, from
+    THISTLE_SIM_MIC, kept on the card as Ogg/Opus and queued; a tap is not
+    one; a received one plays only when chosen, to THISTLE_SIM_SPEAKER."""
+    sys.path.insert(0, str(REPO / "tools"))
+    from tailnet_chat import ogg
+
+    # Recorded and sent.
+    dev, key_hex, fp = voice_device(simulator, root, "voice-record", [
+        {"dir": "in", "name": "Lena", "id": "1" * 32, "ts": 1_793_541_600_000, "time": None, "text": "say it",
+         "state": "received"}])
+    mic = root / "mic.wav"
+    tone_wav(mic, 6.0)
+    os.environ["THISTLE_SIM_MIC"] = str(mic)
+    try:
+        shot = root / "voice-record.ppm"
+        log = dev.run(["--launch-app", APP, "--tap", FIRST_ROW, "--tap", f"{VOICE_BUTTON}:120",
+                       "--tap", f"{VOICE_BUTTON}:3000", "--tap", "wait", "--tap", "wait"], 14000, shot)
+    finally:
+        os.environ.pop("THISTLE_SIM_MIC")
+    assert "(tailchat) no voice message: Hold to record a voice message" in log, log[-3000:]
+    sent = [x for x in log.splitlines() if "(tailchat) sent voice " in x]
+    assert len(sent) == 1, log[-3000:]
+    print(f"      {sent[0].split('(tailchat) ')[1].split(chr(27))[0]}")
+    mid = sent[0].split("sent voice ")[1].split(":")[0]
+    saved = json.loads((dev.spiffs / "tailnet_chat.json").read_text())
+    frames = [json.loads(f["frame"]) for b in saved["outbox"] for f in b["frames"]]
+    assert len(frames) == 1 and frames[0]["type"] == "voice" and frames[0]["id"] == mid, frames
+    voice = frames[0]
+    assert voice["codec"] == "ogg-opus" and 1500 <= voice["ms"] <= 3200, voice
+    path = dev.card / "messages" / "tailnet" / "voice" / f"{mid}.opus"
+    data = path.read_bytes()
+    assert len(data) == voice["bytes"], (len(data), voice)
+    opus = ogg.read_opus(data)
+    assert opus.channels == 1 and opus.input_rate == 16000, opus
+    assert abs(opus.duration_ms - voice["ms"]) <= 20, (opus.duration_ms, voice["ms"])
+    assert len(opus.frames) == voice["ms"] // 20
+    last = json.loads(dev.chat_file(key_hex).read_text().splitlines()[-1])
+    assert last["voice"] == f"voice/{mid}.opus" and last["ms"] == voice["ms"] and last["state"] == "waiting", last
+    assert not list(path.parent.glob("*.tmp")), "a half-written file was left"
+
+    # Received, and played when chosen.
+    rid = "2" * 32
+    dev, key_hex, fp = voice_device(simulator, root, "voice-play", [
+        {"dir": "in", "name": "Lena", "id": rid, "ts": 1_793_541_600_000, "time": None, "text": "",
+         "voice": f"voice/{rid}.opus", "ms": 1500, "bytes": 6129, "state": "received"}])
+    (dev.card / "messages" / "tailnet" / "voice").mkdir()
+    shutil.copy(VECTORS / "voice.opus", dev.card / "messages" / "tailnet" / "voice" / f"{rid}.opus")
+    speaker = root / "speaker.wav"
+    os.environ["THISTLE_SIM_SPEAKER"] = str(speaker)
+    try:
+        shot = root / "voice-play.ppm"
+        log = dev.run(["--launch-app", APP, "--tap", FIRST_ROW, "--tap", "wait", "--tap", CONV_ROW,
+                       "--tap", FIRST_ACTION, "--tap", "wait", "--tap", "wait"], 13000, shot)
+    finally:
+        os.environ.pop("THISTLE_SIM_SPEAKER")
+    assert "(tailchat) chose " + rid in log, log[-3000:]
+    assert f"(tailchat_voice) playing {rid}: 1500 ms" in log, log[-3000:]
+    assert "(tailchat) playing: nothing" in log, "it did not finish"
+    import wave
+    with wave.open(str(speaker)) as w:
+        assert (w.getframerate(), w.getnchannels(), w.getsampwidth()) == (16000, 1, 2)
+        pcm = w.readframes(w.getnframes())
+    ms = len(pcm) // 32
+    assert 1400 <= ms <= 1600, f"{ms} ms played"
+    import array
+    samples = array.array("h", pcm)
+    rms = (sum(s * s for s in samples) / len(samples)) ** 0.5
+    assert rms > 300, f"the speaker heard near silence: RMS {rms:.0f}"
+    print(f"      played {ms} ms of {rid[:8]}..., RMS {rms:.0f}")
+
+
 CASES: list[tuple[str, Callable[[Path, Path], None]]] = [
     ("conformance", case_conformance),
     ("card-and-restart", case_card_and_restart),
     ("messages", case_messages),
     ("app", case_app),
     ("app-conversation", case_app_conversation),
+    ("voice", case_voice),
 ]
 
 

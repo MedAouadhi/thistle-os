@@ -230,7 +230,7 @@ pub(crate) fn record(entry: &Entry) {
         return;
     }
     let mut marks = WRITING.lock().unwrap_or_else(PoisonError::into_inner);
-    match append(Path::new(ROOT), entry, now(), &mut marks) {
+    match append(root(), entry, now(), &mut marks) {
         Ok(()) => WARNED.store(false, Ordering::Relaxed),
         Err(_) => {
             if !WARNED.swap(true, Ordering::Relaxed) {
@@ -452,7 +452,7 @@ pub extern "C" fn rs_msg_log_set_enabled(on: bool) -> i32 {
 /// Whether the history's directory can be written: false without an SD card.
 #[no_mangle]
 pub extern "C" fn rs_msg_log_writable() -> bool {
-    std::fs::create_dir_all(ROOT).is_ok()
+    std::fs::create_dir_all(root()).is_ok()
 }
 
 /// Where the history goes, for apps to show.
@@ -497,7 +497,7 @@ pub unsafe extern "C" fn rs_msg_log_read_back(
     let Some(visit) = visit else { return 0 };
     let found = {
         let marks = WRITING.lock().unwrap_or_else(PoisonError::into_inner);
-        conversations(Path::new(ROOT), &marks)
+        conversations(root(), &marks)
     };
     let mut count = 0;
     read_back(found, max_convs as usize, max_msgs as usize, |m| {
@@ -549,6 +549,41 @@ pub(crate) struct ChatLine {
     pub reply_to: Option<String>,
     /// "received"; for one sent, "waiting", "delivered" or "read".
     pub state: String,
+    /// A voice message: its file is `voice/<id>.opus` beside the history,
+    /// and `text` is empty.
+    pub voice: Option<ChatVoice>,
+}
+
+/// A voice message's length and size, as its line keeps them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ChatVoice {
+    pub ms: u32,
+    pub bytes: u32,
+}
+
+const CHAT_VOICE: &str = "voice";
+
+/// Where voice message `id`'s Ogg/Opus file is: beside the history, in
+/// `tailnet/voice/`, named by its id alone, so a contact's key changing
+/// moves nothing.
+pub(crate) fn chat_voice_file(root: &Path, id: &str) -> PathBuf {
+    root.join(CHAT_DIR).join(CHAT_VOICE).join(format!("{id}.opus"))
+}
+
+/// Keep voice message `id`'s file: written beside as `.tmp` and renamed,
+/// so a file that is there is whole.
+pub(crate) fn chat_keep_voice(root: &Path, id: &str, data: &[u8]) -> std::io::Result<PathBuf> {
+    if id.is_empty() || !id.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a message id"));
+    }
+    let path = chat_voice_file(root, id);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, data)?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(path)
 }
 
 pub(crate) fn chat_line(l: &ChatLine, time: Option<u64>) -> String {
@@ -568,6 +603,11 @@ pub(crate) fn chat_line(l: &ChatLine, time: Option<u64>) -> String {
         obj.insert("reply_to".into(), r.as_str().into());
     }
     obj.insert("state".into(), l.state.as_str().into());
+    if let Some(v) = &l.voice {
+        obj.insert("voice".into(), format!("{CHAT_VOICE}/{}.opus", l.id).into());
+        obj.insert("ms".into(), v.ms.into());
+        obj.insert("bytes".into(), v.bytes.into());
+    }
     let mut line = serde_json::Value::Object(obj).to_string();
     line.push('\n');
     line
@@ -590,6 +630,10 @@ pub(crate) fn parse_chat_line(line: &str) -> Option<ChatLine> {
         text: s("text")?,
         reply_to: s("reply_to"),
         state: s("state").unwrap_or_default(),
+        voice: s("voice").map(|_| {
+            let n = |k: &str| v.get(k).and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+            ChatVoice { ms: n("ms"), bytes: n("bytes") }
+        }),
     })
 }
 
@@ -801,6 +845,18 @@ pub(crate) fn chat_requests(root: &Path) -> Vec<String> {
 
 /// Where the history is, on the card.
 pub(crate) fn root() -> &'static Path {
+    // The simulator's card is THISTLE_SIM_SDCARD when it names one, not the
+    // /tmp/thistle_sdcard symlink, which every simulator on the machine
+    // shares: tests run side by side would write each other's history.
+    #[cfg(not(any(target_os = "espidf", test)))]
+    {
+        static SIM: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+        if let Some(p) = SIM
+            .get_or_init(|| std::env::var_os("THISTLE_SIM_SDCARD").map(|c| PathBuf::from(c).join("messages")))
+        {
+            return p.as_path();
+        }
+    }
     Path::new(ROOT)
 }
 
@@ -810,7 +866,7 @@ pub(crate) fn chat_record(request: bool, fp: &str, line: &ChatLine) {
         return;
     }
     let mut marks = WRITING.lock().unwrap_or_else(PoisonError::into_inner);
-    match chat_append(Path::new(ROOT), request, fp, line, now(), &mut marks) {
+    match chat_append(root(), request, fp, line, now(), &mut marks) {
         Ok(()) => WARNED.store(false, Ordering::Relaxed),
         Err(_) => {
             if !WARNED.swap(true, Ordering::Relaxed) {
@@ -826,7 +882,7 @@ pub(crate) fn chat_note(request: bool, fp: &str, e: &ChatEntry) {
         return;
     }
     let mut marks = WRITING.lock().unwrap_or_else(PoisonError::into_inner);
-    let _ = chat_append_entry(Path::new(ROOT), request, fp, e, now(), &mut marks);
+    let _ = chat_append_entry(root(), request, fp, e, now(), &mut marks);
 }
 
 /// A contact's file moved to its pinned key's fingerprint, on the card.
@@ -835,7 +891,7 @@ pub(crate) fn chat_rekey(from_fp: &str, to_fp: &str) {
         return;
     }
     let _guard = WRITING.lock().unwrap_or_else(PoisonError::into_inner);
-    let _ = chat_join(Path::new(ROOT), from_fp, to_fp);
+    let _ = chat_join(root(), from_fp, to_fp);
 }
 
 /// A contact request accepted or declined, on the card.
@@ -845,11 +901,11 @@ pub(crate) fn chat_settle_request(fp: &str, accepted: bool) {
     }
     let _guard = WRITING.lock().unwrap_or_else(PoisonError::into_inner);
     if accepted {
-        if chat_accept(Path::new(ROOT), fp).is_err() {
+        if chat_accept(root(), fp).is_err() {
             warn!(b"could not move a contact request's messages into its conversation\0");
         }
     } else {
-        chat_drop_request(Path::new(ROOT), fp);
+        chat_drop_request(root(), fp);
     }
 }
 
@@ -1114,7 +1170,31 @@ mod tests {
             text: text.into(),
             reply_to: None,
             state: "received".into(),
+            voice: None,
         }
+    }
+
+    #[test]
+    fn a_voice_message_is_a_line_that_points_to_its_file_beside_the_history() {
+        let id = "3".repeat(32);
+        let mut l = chat(&id, "", 1_793_541_600_000);
+        l.voice = Some(ChatVoice { ms: 1500, bytes: 6129 });
+        let text = chat_line(&l, Some(1));
+        let v: serde_json::Value = serde_json::from_str(text.trim_end()).unwrap();
+        assert_eq!(v["voice"], format!("voice/{id}.opus"));
+        assert_eq!(v["ms"], 1500);
+        assert_eq!(v["bytes"], 6129);
+        assert_eq!(parse_chat_line(&text), Some(l));
+
+        let root = temp_root("chat-voice");
+        let path = chat_voice_file(&root, &id);
+        assert_eq!(path, root.join("tailnet").join("voice").join(format!("{id}.opus")));
+        chat_keep_voice(&root, &id, b"OggS whole").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"OggS whole");
+        // Nothing half-written is left beside it.
+        let names: Vec<_> = std::fs::read_dir(path.parent().unwrap()).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(names.len(), 1, "{names:?}");
+        assert!(chat_keep_voice(&root, "../escape", b"x").is_err());
     }
 
     #[test]

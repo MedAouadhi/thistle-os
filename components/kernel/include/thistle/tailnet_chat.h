@@ -96,6 +96,8 @@ typedef struct {
     char     reply_to[33];   /* the id it answers, or "" */
     char     react_me[33];   /* this device's reaction, an emoji, or "" */
     char     react_them[33]; /* the contact's */
+    uint32_t voice_ms;       /* a voice message's length, or 0 for a text */
+    uint32_t voice_bytes;    /* its file's size */
 } tailnet_chat_message_t;
 
 uint32_t  tailnet_chat_generation(void);
@@ -108,7 +110,8 @@ int       tailnet_chat_request_count(void);
 esp_err_t tailnet_chat_get_request(int index, tailnet_chat_request_t *out);
 
 /* A contact's latest messages (at most 20), oldest first; none for a
- * stranger. The text is copied into text, cut to text_len - 1 bytes. */
+ * stranger. The text is copied into text, cut to text_len - 1 bytes; a
+ * voice message's text says what it is ("Voice message, 0:02"). */
 int       tailnet_chat_message_count(const char *key);
 esp_err_t tailnet_chat_get_message(const char *key, int index, tailnet_chat_message_t *out,
                                    char *text, size_t text_len);
@@ -125,6 +128,18 @@ esp_err_t tailnet_chat_get_held(const char *key, int index, char *text, size_t t
  * is not NULL or "": shown at once as waiting, delivered through the
  * outbox. Its id into id_out (33 bytes) if not NULL. */
 esp_err_t tailnet_chat_send_text(const char *key, const char *text, const char *reply_to, char *id_out);
+
+/* Send a voice message to contact key: `data` is its Ogg/Opus file (at most
+ * 512 KB), `ms` long (at most 120000). The module keeps the file beside the
+ * history, so the caller may free data once this returns; it goes through
+ * the outbox like a text. Its id into id_out (33 bytes) if not NULL. */
+esp_err_t tailnet_chat_send_voice(const char *key, const uint8_t *data, size_t len, uint32_t ms,
+                                  const char *reply_to, char *id_out);
+
+/* Where voice message `id`'s Ogg/Opus file is, sent or received, into
+ * `path` (path_len bytes). ESP_ERR_NOT_FOUND if there is no such file: a
+ * voice message is shown only once its file is whole. */
+esp_err_t tailnet_chat_voice_path(const char *id, char *path, size_t path_len);
 
 /* React to message `message` of contact key with emoji (at most 32 bytes),
  * "" to remove this device's reaction; delivered like a message. */

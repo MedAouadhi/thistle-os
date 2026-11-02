@@ -40,7 +40,8 @@ use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use crate::msg_alert::{self, Transport};
-use crate::msg_log::{self, ChatEntry, ChatLine, ChatReact, Direction};
+use crate::msg_log::{self, ChatEntry, ChatLine, ChatReact, ChatVoice, Direction};
+use crate::power_manager::HoldGuard;
 use crate::tailnet_chat_policy::{self as policy, Book, Dial, DialCandidate, Outbox, Retry, Seen, Trust};
 use crate::tailnet_chat_wire::{self as wire, ErrorFrame, Key, Role, Upgrade, Upgraded, WsEvent, WsReader};
 
@@ -236,6 +237,9 @@ pub(crate) struct Message {
     pub reply_to: Option<String>,
     pub react_me: Reaction,
     pub react_them: Reaction,
+    /// A voice message: its length and size; its file is
+    /// msg_log::chat_voice_file(id), and `text` is empty.
+    pub voice: Option<ChatVoice>,
 }
 
 impl Message {
@@ -249,6 +253,15 @@ impl Message {
             reply_to: l.reply_to,
             react_me: None,
             react_them: None,
+            voice: l.voice,
+        }
+    }
+
+    /// What a pop-up or a request's preview says of it.
+    fn preview(&self) -> String {
+        match &self.voice {
+            Some(v) => format!("Voice message, {}:{:02}", v.ms / 60_000, (v.ms / 1000) % 60),
+            None => self.text.clone(),
         }
     }
 
@@ -399,9 +412,89 @@ struct Conn {
     closing: bool,
     /// Outbox ids sent on this connection.
     sent: Vec<String>,
+    /// The voice message being received, until whole.
+    voice_in: Option<wire::VoiceIn>,
+    /// Voice messages to send, one after another: each one's frame, then
+    /// its file in chunks as tx empties (`pump_voice`).
+    voice_out: VecDeque<VoiceOut>,
+    /// Voice messages sent whole and not yet acked.
+    voice_unacked: Vec<String>,
+    /// Held while a voice transfer is under way on this connection.
+    awake: Option<HoldGuard>,
+}
+
+/// A voice message going out on a connection.
+struct VoiceOut {
+    id: String,
+    frame: String,
+    stream: u32,
+    /// The file, read from the card; in PSRAM on the device.
+    data: Vec<u8>,
+    /// The next chunk; None until the frame is sent.
+    seq: Option<u32>,
+}
+
+/// tx is topped up with voice chunks while it holds less than this.
+const VOICE_TX_LOW: usize = 16 * 1024;
+
+/// An outbox frame to send: None if it is not a voice message; else the
+/// voice message with its file read from the card, whole, or why not.
+fn voice_out(id: &str, frame: &str) -> Option<Result<VoiceOut, String>> {
+    let f: serde_json::Value = serde_json::from_str(frame).ok()?;
+    if f.get("type").and_then(|t| t.as_str()) != Some("voice") {
+        return None;
+    }
+    let stream = f.get("stream").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
+    let bytes = f.get("bytes").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    Some(match std::fs::read(msg_log::chat_voice_file(msg_log::root(), id)) {
+        Ok(data) if data.len() == bytes => {
+            Ok(VoiceOut { id: id.to_string(), frame: frame.to_string(), stream, data, seq: None })
+        }
+        Ok(data) => Err(format!("{} bytes, not {bytes}", data.len())),
+        Err(e) => Err(e.to_string()),
+    })
 }
 
 impl Conn {
+    /// Hold the device awake while a voice transfer is under way, and let
+    /// it sleep once none is.
+    fn keep_awake(&mut self) {
+        let busy = self.voice_in.is_some() || !self.voice_out.is_empty() || !self.voice_unacked.is_empty();
+        if busy && self.awake.is_none() {
+            self.awake = Some(HoldGuard::new(b"a voice message\0"));
+        } else if !busy {
+            self.awake = None;
+        }
+    }
+
+    /// Put the next voice chunks into tx, while it is low: the frame first,
+    /// then the file. A voice message's chunks are never interleaved with
+    /// another's.
+    fn pump_voice(&mut self) {
+        while self.tx.len() < VOICE_TX_LOW {
+            let Some(v) = self.voice_out.front_mut() else { return };
+            let Some(seq) = v.seq else {
+                v.seq = Some(0);
+                let frame = std::mem::take(&mut v.frame);
+                self.send_text(&frame);
+                continue;
+            };
+            match wire::voice_chunk(v.stream, &v.data, seq) {
+                Some(chunk) => {
+                    v.seq = Some(seq + 1);
+                    self.send_op(wire::OP_BINARY, &chunk);
+                }
+                None => {
+                    let v = self.voice_out.pop_front().map(|v| (v.id, v.data.len()));
+                    if let Some((id, bytes)) = v {
+                        info(&format!("sent voice {id}: {bytes} bytes"));
+                        self.voice_unacked.push(id);
+                    }
+                }
+            }
+        }
+    }
+
     fn key(&self) -> Option<&Key> {
         match &self.phase {
             Phase::Open { key, .. } => Some(key),
@@ -465,6 +558,10 @@ impl Conn {
             pinged_ms: now,
             closing: false,
             sent: Vec::new(),
+            voice_in: None,
+            voice_out: VecDeque::new(),
+            voice_unacked: Vec::new(),
+            awake: None,
         }
     }
 }
@@ -628,13 +725,34 @@ impl State {
             .find(|(k, _)| k == key)
             .map(|(_, f)| f.clone())
             .unwrap_or_default();
+        let mut lost = Vec::new();
         if let Some(c) = self.open_conn(key) {
             for (id, frame) in frames {
-                if !c.sent.contains(&id) {
-                    c.send_text(&frame);
-                    c.sent.push(id);
+                if c.sent.contains(&id) {
+                    continue;
                 }
+                match voice_out(&id, &frame) {
+                    // A voice message: its frame and file go out by turns.
+                    Some(Ok(v)) => {
+                        c.voice_out.push_back(v);
+                        c.keep_awake();
+                        c.pump_voice();
+                    }
+                    Some(Err(e)) => {
+                        warn(&format!("dropped voice {id} from the outbox: its file: {e}"));
+                        lost.push(id.clone());
+                    }
+                    None => c.send_text(&frame),
+                }
+                c.sent.push(id);
             }
+        }
+        if !lost.is_empty() {
+            if let Some((_, frames)) = self.outbox.iter_mut().find(|(k, _)| k == key) {
+                frames.retain(|(id, _)| !lost.contains(id));
+            }
+            self.outbox.retain(|(_, f)| !f.is_empty());
+            save(self);
         }
     }
 
@@ -1009,6 +1127,9 @@ fn poll(s: &mut State, now: u64) {
     let mut gone: Vec<(Option<Key>, Option<Key>)> = Vec::new();
     s.conns.retain_mut(|c| {
         let keep = (|| {
+            if !c.closing {
+                c.pump_voice();
+            }
             if !c.tx.is_empty() {
                 match c.sock.write(&c.tx) {
                     Ok(n) => {
@@ -1328,12 +1449,74 @@ fn on_binary(s: &mut State, i: usize, data: &[u8]) {
     let c = &mut s.conns[i];
     let e = match wire::unpack_binary(data) {
         None => ErrorFrame::new("bad_request").what("binary"),
+        Some(b) if b.kind == wire::KIND_VOICE && c.voice_in.is_some() => {
+            let Some(v) = c.voice_in.as_mut() else { return };
+            match v.take(&b) {
+                Ok(false) => return,
+                Ok(true) => {
+                    let v = c.voice_in.take();
+                    c.keep_awake();
+                    if let Some(v) = v {
+                        voice_received(s, i, v);
+                    }
+                    return;
+                }
+                Err(e) => {
+                    c.voice_in = None;
+                    c.keep_awake();
+                    e
+                }
+            }
+        }
         Some(b) if b.kind == wire::KIND_VOICE || b.kind == wire::KIND_CALL_AUDIO => {
             ErrorFrame::new("bad_request").what("binary").detail("no such stream")
         }
         Some(b) => ErrorFrame::new("unsupported").what(&format!("binary kind {}", b.kind)),
     };
     c.send_error(&e);
+}
+
+/// A voice message whole: its file kept beside the history, then shown or
+/// held like a message, and acked. Not acked if it could not be kept: the
+/// sender sends it again.
+fn voice_received(s: &mut State, i: usize, v: wire::VoiceIn) {
+    let Phase::Open { key, name, .. } = &s.conns[i].phase else { return };
+    let (key, name) = (*key, name.clone());
+    let seen = s.book.find(&key).is_some() && {
+        let conv = s.conv(&key);
+        conv.has_seen(&v.id) || conv.find(&v.id).is_some()
+    };
+    if !seen {
+        if let Err(e) = msg_log::chat_keep_voice(msg_log::root(), &v.id, &v.data) {
+            warn(&format!("cannot keep voice {} from {name}: {e}", v.id));
+            return;
+        }
+    }
+    let m = Message {
+        id: v.id,
+        mine: false,
+        ts: v.ts,
+        text: String::new(),
+        state: "received".into(),
+        reply_to: v.reply_to,
+        react_me: None,
+        react_them: None,
+        voice: Some(ChatVoice { ms: v.ms, bytes: v.bytes as u32 }),
+    };
+    arrived(s, i, &key, &name, m);
+}
+
+/// A message from connection `i`'s peer: kept, then acked (and marked read
+/// if its conversation is on screen).
+fn arrived(s: &mut State, i: usize, key: &Key, name: &str, m: Message) {
+    let id = m.id.clone();
+    let contact = s.book.find(key).is_some();
+    if received(s, key, name, m) {
+        s.conns[i].send_text(&wire::ack(&id));
+        if contact && s.viewing == Some(*key) {
+            s.mark_read(key, Some(&[id]));
+        }
+    }
 }
 
 fn on_frame(s: &mut State, i: usize, text: &[u8]) {
@@ -1359,13 +1542,17 @@ fn on_frame(s: &mut State, i: usize, text: &[u8]) {
                 reply_to: frame.get("reply_to").and_then(|v| v.as_str()).map(str::to_string),
                 react_me: None,
                 react_them: None,
+                voice: None,
             };
-            if received(s, &key, &name, m) {
-                s.conns[i].send_text(&wire::ack(&id));
-                if contact && s.viewing == Some(key) {
-                    s.mark_read(&key, Some(&[id]));
-                }
-            }
+            arrived(s, i, &key, &name, m);
+        }
+        "voice" => {
+            // The file follows; anything half-received before is dropped.
+            let v = wire::VoiceIn::new(&frame);
+            info(&format!("receiving voice {id} from {name}: {} bytes", v.bytes));
+            let c = &mut s.conns[i];
+            c.voice_in = Some(v);
+            c.keep_awake();
         }
         "react" => {
             if contact {
@@ -1385,6 +1572,9 @@ fn on_frame(s: &mut State, i: usize, text: &[u8]) {
             s.conns[i].send_text(&wire::ack(&id));
         }
         "ack" => {
+            let c = &mut s.conns[i];
+            c.voice_unacked.retain(|v| v != &id);
+            c.keep_awake();
             let before = s.outbox.iter().map(|(_, f)| f.len()).sum::<usize>();
             if let Some((_, frames)) = s.outbox.iter_mut().find(|(k, _)| k == &key) {
                 frames.retain(|(fid, _)| fid != &id);
@@ -1434,9 +1624,9 @@ fn on_frame(s: &mut State, i: usize, text: &[u8]) {
             info(&format!("{name} {} this device's contact request", if accepted { "accepted" } else { "declined" }));
             s.conns[i].send_text(&wire::ack(&id));
         }
-        // Not announced yet (tickets 08, 09): a peer that read our hello
-        // sends none of these.
-        "voice" | "call_answer" | "call_end" => {}
+        // Not announced yet (ticket 09): a peer that read our hello sends
+        // none of these.
+        "call_answer" | "call_end" => {}
         "call_offer" => {
             let call = wire::str_of(&frame, "call");
             s.conns[i].send_text(&format!(r#"{{"type":"call_answer","call":"{call}","decline":"unsupported"}}"#));
@@ -1501,6 +1691,7 @@ fn received(s: &mut State, key: &Key, name: &str, m: Message) -> bool {
         text: m.text.clone(),
         reply_to: m.reply_to.clone(),
         state: m.state.clone(),
+        voice: m.voice,
     };
     if let Some(ci) = s.book.find(key) {
         let contact = s.book.contacts[ci].name.clone();
@@ -1510,7 +1701,7 @@ fn received(s: &mut State, key: &Key, name: &str, m: Message) -> bool {
             return true;
         }
         conv.saw(&m.id);
-        let text = m.text.clone();
+        let text = m.preview();
         insert_by_ts(&mut conv.messages, m, SHOWN_MAX);
         msg_log::chat_record(false, &fp, &line);
         info(&format!("received {} from {name}", line.id));
@@ -1540,7 +1731,7 @@ fn received(s: &mut State, key: &Key, name: &str, m: Message) -> bool {
         return true;
     }
     req.name = name.to_string();
-    let text = m.text.clone();
+    let text = m.preview();
     insert_by_ts(&mut req.held, m, HELD_MAX);
     msg_log::chat_record(true, &fp, &line);
     info(&format!("held {} from {name}", line.id));
@@ -1689,12 +1880,41 @@ pub(crate) fn send_text(key: &Key, text: &str, reply_to: Option<&str>) -> Result
     if text.trim().is_empty() || text.len() > wire::MAX_TEXT_BYTES {
         return Err(ESP_ERR_INVALID_SIZE);
     }
+    send(key, text, reply_to, None)
+}
+
+/// Send a voice message to contact `key`: `data` is its Ogg/Opus file,
+/// `ms` long. The file is kept beside the history (in PSRAM meanwhile: it
+/// is read again from the card for each sending), and the message goes
+/// through the outbox like a text. The message's id.
+pub(crate) fn send_voice(key: &Key, data: &[u8], ms: u32, reply_to: Option<&str>) -> Result<String, i32> {
+    if data.is_empty() || data.len() as u64 > wire::MAX_VOICE_BYTES || !data.starts_with(b"OggS") {
+        return Err(ESP_ERR_INVALID_SIZE);
+    }
+    if ms == 0 || ms as u64 > wire::MAX_VOICE_MS {
+        return Err(ESP_ERR_INVALID_ARG);
+    }
+    send(key, "", reply_to, Some((data, ms)))
+}
+
+fn send(key: &Key, text: &str, reply_to: Option<&str>, voice: Option<(&[u8], u32)>) -> Result<String, i32> {
     let reply_to = reply_to.filter(|r| wire::is_hex(r, 32));
     with(|s| {
         let ci = s.book.find(key).ok_or(ESP_ERR_NOT_FOUND)?;
         let id = new_id();
         let ts = wall_ms();
         let name = s.book.contacts[ci].name.clone();
+        let frame = match voice {
+            Some((data, ms)) => {
+                if let Err(e) = msg_log::chat_keep_voice(msg_log::root(), &id, data) {
+                    warn(&format!("cannot keep the voice message for {name}: {e}"));
+                    return Err(ESP_ERR_INVALID_STATE);
+                }
+                let stream = u32::from_be_bytes(random::<4>()) | 1;
+                wire::voice(&id, ts, ms, data.len(), stream, reply_to)
+            }
+            None => wire::msg(&id, ts, text, reply_to),
+        };
         let m = Message {
             id: id.clone(),
             mine: true,
@@ -1704,6 +1924,7 @@ pub(crate) fn send_text(key: &Key, text: &str, reply_to: Option<&str>) -> Result
             reply_to: reply_to.map(str::to_string),
             react_me: None,
             react_them: None,
+            voice: voice.map(|(data, ms)| ChatVoice { ms, bytes: data.len() as u32 }),
         };
         let line = ChatLine {
             dir: Direction::Out,
@@ -1714,14 +1935,15 @@ pub(crate) fn send_text(key: &Key, text: &str, reply_to: Option<&str>) -> Result
             text: text.to_string(),
             reply_to: m.reply_to.clone(),
             state: m.state.clone(),
+            voice: m.voice,
         };
         let conv = s.conv(key);
         conv.saw(&id);
         insert_by_ts(&mut conv.messages, m, SHOWN_MAX);
         msg_log::chat_record(false, &fp_id(key), &line);
         s.retry(key).seen_online();
-        s.queue(key, id.clone(), wire::msg(&id, ts, text, reply_to));
-        info(&format!("sending {id} to {name}"));
+        s.queue(key, id.clone(), frame);
+        info(&format!("sending {}{id} to {name}", if voice.is_some() { "voice " } else { "" }));
         changed();
         Ok(id)
     })
@@ -1966,6 +2188,8 @@ pub struct CMessage {
     pub reply_to: [u8; 33],
     pub react_me: [u8; 33],
     pub react_them: [u8; 33],
+    pub voice_ms: u32,
+    pub voice_bytes: u32,
 }
 
 fn copy_str(dst: &mut [u8], src: &str) {
@@ -2059,7 +2283,7 @@ pub unsafe extern "C" fn tailnet_chat_get_request(index: i32, out: *mut CRequest
     copy_str(&mut out.fingerprint, &wire::fingerprint(&key));
     copy_str(&mut out.name, &name);
     out.held = held.len() as u16;
-    let preview = held.last().map(|m| m.text.replace('\n', " ")).unwrap_or_default();
+    let preview = held.last().map(|m| m.preview().replace('\n', " ")).unwrap_or_default();
     copy_str(&mut out.preview, &preview);
     ESP_OK
 }
@@ -2079,7 +2303,7 @@ pub unsafe extern "C" fn tailnet_chat_get_held(key: *const c_char, index: i32, t
         return ESP_ERR_INVALID_ARG;
     };
     if !text.is_null() && text_len > 0 {
-        copy_str(unsafe { std::slice::from_raw_parts_mut(text as *mut u8, text_len) }, &m.text);
+        copy_str(unsafe { std::slice::from_raw_parts_mut(text as *mut u8, text_len) }, &m.preview());
     }
     ESP_OK
 }
@@ -2109,9 +2333,11 @@ pub unsafe extern "C" fn tailnet_chat_get_message(key: *const c_char, index: i32
     copy_str(&mut out.reply_to, m.reply_to.as_deref().unwrap_or(""));
     copy_str(&mut out.react_me, Message::shown(&m.react_me).unwrap_or(""));
     copy_str(&mut out.react_them, Message::shown(&m.react_them).unwrap_or(""));
+    out.voice_ms = m.voice.map_or(0, |v| v.ms);
+    out.voice_bytes = m.voice.map_or(0, |v| v.bytes);
     if !text.is_null() && text_len > 0 {
         let dst = unsafe { std::slice::from_raw_parts_mut(text as *mut u8, text_len) };
-        copy_str(dst, &m.text);
+        copy_str(dst, &m.preview());
     }
     ESP_OK
 }
@@ -2133,7 +2359,7 @@ pub unsafe extern "C" fn tailnet_chat_find_message(key: *const c_char, id: *cons
         *mine = m.mine;
     }
     if !text.is_null() && text_len > 0 {
-        copy_str(unsafe { std::slice::from_raw_parts_mut(text as *mut u8, text_len) }, &m.text);
+        copy_str(unsafe { std::slice::from_raw_parts_mut(text as *mut u8, text_len) }, &m.preview());
     }
     ESP_OK
 }
@@ -2187,6 +2413,52 @@ pub unsafe extern "C" fn tailnet_chat_send_text(key: *const c_char, text: *const
         }
         Err(e) => e,
     }
+}
+
+/// # Safety
+/// `key` and `reply_to` must be null or NUL-terminated strings; `data` null
+/// or `len` readable bytes; `id_out` null or 33 writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn tailnet_chat_send_voice(key: *const c_char, data: *const u8, len: usize, ms: u32,
+                                                 reply_to: *const c_char, id_out: *mut c_char) -> i32 {
+    let Some(k) = (unsafe { key_arg(key) }) else { return ESP_ERR_INVALID_ARG };
+    if data.is_null() || len == 0 {
+        return ESP_ERR_INVALID_ARG;
+    }
+    let data = unsafe { std::slice::from_raw_parts(data, len) };
+    let reply_to = unsafe { str_arg(reply_to) }.filter(|r| !r.is_empty());
+    match send_voice(&k, data, ms, reply_to) {
+        Ok(id) => {
+            if !id_out.is_null() {
+                copy_str(unsafe { std::slice::from_raw_parts_mut(id_out as *mut u8, 33) }, &id);
+            }
+            ESP_OK
+        }
+        Err(e) => e,
+    }
+}
+
+/// # Safety
+/// `id` must be null or a NUL-terminated string, `path` null or `path_len`
+/// writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn tailnet_chat_voice_path(id: *const c_char, path: *mut c_char, path_len: usize) -> i32 {
+    let Some(id) = (unsafe { str_arg(id) }).filter(|id| wire::is_hex(id, 32)) else {
+        return ESP_ERR_INVALID_ARG;
+    };
+    if path.is_null() || path_len == 0 {
+        return ESP_ERR_INVALID_ARG;
+    }
+    let file = msg_log::chat_voice_file(msg_log::root(), id);
+    if !file.is_file() {
+        return ESP_ERR_NOT_FOUND;
+    }
+    let file = file.to_string_lossy();
+    if file.len() >= path_len {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    copy_str(unsafe { std::slice::from_raw_parts_mut(path as *mut u8, path_len) }, &file);
+    ESP_OK
 }
 
 /// # Safety
@@ -2365,6 +2637,11 @@ mod sim_control {
         if let Some(r) = &m.reply_to {
             v["reply_to"] = r.as_str().into();
         }
+        if let Some(voice) = &m.voice {
+            v["voice_ms"] = voice.ms.into();
+            v["voice_bytes"] = voice.bytes.into();
+            v["voice"] = msg_log::chat_voice_file(msg_log::root(), &m.id).to_string_lossy().into();
+        }
         let mut reactions = serde_json::Map::new();
         if let Some(e) = Message::shown(&m.react_me) {
             reactions.insert("me".into(), e.into());
@@ -2440,6 +2717,15 @@ mod sim_control {
             "send_text" => {
                 let k = contact_key(cmd.get("to"))?;
                 send_text(&k, text("text").unwrap_or(""), text("reply_to")).map(Value::from).map_err(|e| format!("0x{e:x}"))
+            }
+            "send_voice" => {
+                // The conformance suite's send_voice: a file already made,
+                // as the app's recording makes one (ticket 08).
+                let k = contact_key(cmd.get("to"))?;
+                let file = text("file").ok_or("no file")?;
+                let data = std::fs::read(file).map_err(|e| format!("{file}: {e}"))?;
+                let ms = cmd.get("ms").and_then(Value::as_u64).unwrap_or(0) as u32;
+                send_voice(&k, &data, ms, text("reply_to")).map(Value::from).map_err(|e| format!("0x{e:x}"))
             }
             "react" => {
                 let k = contact_key(cmd.get("to"))?;
@@ -2517,7 +2803,7 @@ mod tests {
 
     fn m(id: &str, ts: u64) -> Message {
         Message { id: id.into(), mine: false, ts, text: id.into(), state: "received".into(), reply_to: None,
-                  react_me: None, react_them: None }
+                  react_me: None, react_them: None, voice: None }
     }
 
     #[test]
@@ -2533,7 +2819,8 @@ mod tests {
 
     fn line(dir: Direction, id: &str, ts: u64, state: &str) -> ChatEntry {
         ChatEntry::Message(ChatLine { dir, key: "ab".repeat(32), name: "laptop".into(), id: id.into(), ts,
-                                      text: format!("text {id}"), reply_to: None, state: state.into() })
+                                      text: format!("text {id}"), reply_to: None, state: state.into(),
+                                      voice: None })
     }
 
     fn state(dir: Direction, id: &str, s: &str) -> ChatEntry {
@@ -2570,6 +2857,15 @@ mod tests {
             assert!(conv.has_seen(id), "{id}");
         }
         assert!(!conv.has_seen("never"));
+    }
+
+    #[test]
+    fn a_voice_message_read_back_from_the_file_shows_its_length() {
+        let ChatEntry::Message(mut l) = line(Direction::In, "talk", 10, "received") else { unreachable!() };
+        l.text = String::new();
+        l.voice = Some(ChatVoice { ms: 61_000, bytes: 120_000 });
+        let conv = fold([1; 32], vec![ChatEntry::Message(l)], SHOWN_MAX);
+        assert_eq!(conv.messages[0].voice, Some(ChatVoice { ms: 61_000, bytes: 120_000 }));
     }
 
     #[test]

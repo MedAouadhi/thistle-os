@@ -132,6 +132,14 @@ static const char *state_text(const char *state)
     return "";
 }
 
+const char *tailchat_duration(char *out, size_t n, uint32_t ms)
+{
+    /* Whole seconds, but never 0:00 for a short one. */
+    uint32_t s = ms >= 1000 ? ms / 1000 : ms > 0;
+    snprintf(out, n, "%u:%02u", (unsigned)(s / 60), (unsigned)(s % 60));
+    return out;
+}
+
 void tailchat_bubble(char *out, size_t n, const tailchat_bubble_t *b, size_t max_chars)
 {
     if (!out || n == 0) return;
@@ -154,8 +162,14 @@ void tailchat_bubble(char *out, size_t n, const tailchat_bubble_t *b, size_t max
     } else if (b->quoted) {
         PUT("> an earlier message\n");
     }
-    tailchat_one_line(line, sizeof line, b->text, max_chars);
-    PUT("%s: %s", b->mine ? "You" : name, line);
+    if (b->voice_ms) {
+        char length[16];
+        PUT("%s: Voice message %s%s", b->mine ? "You" : name, tailchat_duration(length, sizeof length, b->voice_ms),
+            b->playing ? ", playing" : "");
+    } else {
+        tailchat_one_line(line, sizeof line, b->text, max_chars);
+        PUT("%s: %s", b->mine ? "You" : name, line);
+    }
 
     const char *sep = "\n";
     const char *st = b->mine ? state_text(b->state) : "";

@@ -6,5 +6,5 @@ idf_component_register(
         "tailchat/tailchat_ui.c"
         ${THISTLE_TAILCHAT_SRCS}
     INCLUDE_DIRS "."
-    REQUIRES kernel ui thistle_hal
+    REQUIRES kernel ui thistle_hal opus
 )

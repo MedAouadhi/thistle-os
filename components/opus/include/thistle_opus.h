@@ -59,6 +59,13 @@ void thistle_opus_place(bool internal);
 size_t thistle_opus_scratch_size(void);
 size_t thistle_opus_scratch_used(void);
 
+/* Opus is one task's at a time (the pseudostack is shared): whoever encodes
+ * or decodes takes it first, and gives it back after. False if it is taken,
+ * with *holder (if not NULL) the taker's `who`, a static string. A voice
+ * message being recorded or played takes it; so does a call. */
+bool thistle_opus_take(const char *who, const char **holder);
+void thistle_opus_give(void);
+
 #ifdef __cplusplus
 }
 #endif

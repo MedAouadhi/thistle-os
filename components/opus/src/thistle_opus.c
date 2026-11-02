@@ -4,6 +4,7 @@
  */
 #include "thistle_opus.h"
 
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -125,4 +126,20 @@ OpusDecoder *thistle_opus_decoder_new(void)
 void thistle_opus_decoder_free(OpusDecoder *dec)
 {
     opus_decoder_destroy(dec);
+}
+
+/* Who has Opus now; NULL while nobody does. */
+static _Atomic(const char *) s_holder;
+
+bool thistle_opus_take(const char *who, const char **holder)
+{
+    const char *none = NULL;
+    if (atomic_compare_exchange_strong(&s_holder, &none, who)) return true;
+    if (holder) *holder = none;
+    return false;
+}
+
+void thistle_opus_give(void)
+{
+    atomic_store(&s_holder, NULL);
 }

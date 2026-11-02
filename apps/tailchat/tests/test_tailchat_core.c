@@ -106,6 +106,24 @@ static void a_bubble_shows_what_it_quotes_its_state_and_reactions(void)
     EXPECT_STR(out, "> an earlier message\nBen: milk?");
 }
 
+static void a_voice_message_shows_its_length_and_whether_it_plays(void)
+{
+    char out[256];
+    tailchat_bubble_t b = {.mine = false, .name = "Ben", .text = "", .state = "received", .voice_ms = 61500};
+    tailchat_bubble(out, sizeof out, &b, 40);
+    EXPECT_STR(out, "Ben: Voice message 1:01");
+    b.playing = true;
+    tailchat_bubble(out, sizeof out, &b, 40);
+    EXPECT_STR(out, "Ben: Voice message 1:01, playing");
+    tailchat_bubble_t mine = {.mine = true, .name = "Ben", .text = "", .state = "waiting", .voice_ms = 900};
+    tailchat_bubble(out, sizeof out, &mine, 40);
+    EXPECT_STR(out, "You: Voice message 0:01\nWaiting");
+
+    EXPECT_STR(tailchat_duration(out, sizeof out, 0), "0:00");
+    EXPECT_STR(tailchat_duration(out, sizeof out, 59999), "0:59");
+    EXPECT_STR(tailchat_duration(out, sizeof out, 120000), "2:00");
+}
+
 static void an_emoji_is_written_with_what_the_font_has(void)
 {
     EXPECT_STR(tailchat_emoji_label("\xf0\x9f\x91\x8d"), "+1");
@@ -126,6 +144,7 @@ static void an_emoji_is_written_with_what_the_font_has(void)
 int main(void)
 {
     a_bubble_shows_what_it_quotes_its_state_and_reactions();
+    a_voice_message_shows_its_length_and_whether_it_plays();
     an_emoji_is_written_with_what_the_font_has();
     one_line_joins_lines_and_cuts_at_a_character();
     a_row_is_a_title_over_a_detail();

@@ -34,15 +34,67 @@ static void sim_audio_deinit(void)
     printf("[sim_audio] deinit\n");
 }
 
-/* No host audio is opened: the samples are thrown away. As on the device,
- * where play() blocks until the DMA has taken them, it returns after as long
- * as they would take to play, so a player paces itself as it would there. */
+/* The speaker, for tests: THISTLE_SIM_SPEAKER names a WAV file that holds
+ * what was played since the format was last set (or since the last stop),
+ * in that format, its header kept up to date after every write so a test
+ * may read it at any time. A new format starts it again. */
+static FILE *s_speaker;
+
+static void speaker_put_le(uint8_t *p, uint32_t v, int n)
+{
+    for (int i = 0; i < n; i++) p[i] = (uint8_t)(v >> (8 * i));
+}
+
+static void speaker_header(uint32_t data_len)
+{
+    uint8_t h[44];
+    uint32_t block = (uint32_t)s_channels * (s_bits / 8);
+    memcpy(h, "RIFF", 4);
+    speaker_put_le(h + 4, 36 + data_len, 4);
+    memcpy(h + 8, "WAVEfmt ", 8);
+    speaker_put_le(h + 16, 16, 4);
+    speaker_put_le(h + 20, 1, 2);
+    speaker_put_le(h + 22, s_channels, 2);
+    speaker_put_le(h + 24, s_rate, 4);
+    speaker_put_le(h + 28, s_rate * block, 4);
+    speaker_put_le(h + 32, block, 2);
+    speaker_put_le(h + 34, s_bits, 2);
+    memcpy(h + 36, "data", 4);
+    speaker_put_le(h + 40, data_len, 4);
+    fseek(s_speaker, 0, SEEK_SET);
+    fwrite(h, 1, sizeof h, s_speaker);
+}
+
+static void speaker_write(const uint8_t *data, size_t len, bool start)
+{
+    const char *path = getenv("THISTLE_SIM_SPEAKER");
+    if (!path || !*path) return;
+    if (start || !s_speaker) {
+        if (s_speaker) fclose(s_speaker);
+        s_speaker = fopen(path, "wb");
+        if (!s_speaker) {
+            printf("[sim_audio] cannot write THISTLE_SIM_SPEAKER %s\n", path);
+            return;
+        }
+        speaker_header(0);
+    }
+    fseek(s_speaker, 0, SEEK_END);
+    fwrite(data, 1, len, s_speaker);
+    long end = ftell(s_speaker);
+    speaker_header(end > 44 ? (uint32_t)(end - 44) : 0);
+    fflush(s_speaker);
+}
+
+/* No host audio is opened: the samples are thrown away, or written to
+ * THISTLE_SIM_SPEAKER. As on the device, where play() blocks until the DMA
+ * has taken them, it returns after as long as they would take to play, so
+ * a player paces itself as it would there. */
 static esp_err_t sim_audio_play(const uint8_t *data, size_t len)
 {
-    (void)data;
     if (!len) return ESP_ERR_INVALID_ARG;
     if (atomic_load(&s_route) == HAL_AUDIO_ROUTE_VOICE) return ESP_ERR_INVALID_STATE;
-    if (s_played == 0) printf("[sim_audio] playing\n");
+    if (s_played == 0) printf("[sim_audio] playing %u Hz %u-channel\n", (unsigned)s_rate, (unsigned)s_channels);
+    speaker_write(data, len, s_played == 0);
     s_played += len;
     size_t frame = (size_t)s_channels * (s_bits / 8);
     if (frame && s_rate) {

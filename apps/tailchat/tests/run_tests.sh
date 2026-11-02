@@ -17,3 +17,7 @@ flags="-std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Werror -fsanitize=address,undef
 # shellcheck disable=SC2086
 $cc $flags "$app/tailchat/tailchat_core.c" "$here/test_tailchat_core.c" -o "$work/test_tailchat_core"
 "$work/test_tailchat_core"
+
+# shellcheck disable=SC2086
+$cc $flags "$app/tailchat/tailchat_ogg.c" "$here/test_tailchat_ogg.c" -o "$work/test_tailchat_ogg"
+"$work/test_tailchat_ogg" "$app/../../docs/tailnet-chat/vectors/voice.opus"

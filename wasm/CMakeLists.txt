@@ -258,7 +258,16 @@ target_link_options(thistle_wasm PRIVATE
 set_property(TARGET thistle_wasm APPEND PROPERTY
     LINK_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/shell.html)
 
-target_link_libraries(thistle_wasm PRIVATE ${RUST_WASM_LIB})
+# libopus, as the firmware and the desktop simulator build it: the Chat
+# app's voice messages (components/opus/opus.cmake).
+include(${THISTLE_DIR}/components/opus/opus.cmake)
+add_library(thistle_opus STATIC ${THISTLE_OPUS_SRCS})
+target_include_directories(thistle_opus PUBLIC ${THISTLE_OPUS_PUBLIC_INCLUDES}
+                                        PRIVATE ${THISTLE_OPUS_PRIVATE_INCLUDES})
+target_compile_definitions(thistle_opus PRIVATE ${THISTLE_OPUS_DEFINITIONS})
+target_compile_options(thistle_opus PRIVATE -O2 ${THISTLE_OPUS_WARNINGS})
+
+target_link_libraries(thistle_wasm PRIVATE ${RUST_WASM_LIB} thistle_opus)
 
 # Arabic in every label and text field: arabic_text.c stands in for these
 # LVGL functions, as components/ui/CMakeLists.txt and the simulator's do.

@@ -15,10 +15,9 @@ pub const VERSION: u64 = 1;
 pub const PORT: u16 = 4810;
 pub const PATH: &str = "/tailnet-chat/1";
 
-/// What this device announces in its hello. `voice-message` and
-/// `call:ws-opus` come with tickets 08 and 09: a cap is announced only once
-/// it is done.
-pub const CAPS: &[&str] = &["text", "receipts", "typing", "reply", "react"];
+/// What this device announces in its hello. `call:ws-opus` comes with
+/// ticket 09: a cap is announced only once it is done.
+pub const CAPS: &[&str] = &["text", "receipts", "typing", "reply", "react", "voice-message"];
 
 pub const LABEL: &[u8; 20] = b"tailnet-chat/1 auth\0";
 pub const TRANSCRIPT_LEN: usize = 149;
@@ -345,6 +344,84 @@ pub fn react(id: &str, ts: u64, to: &str, emoji: &str) -> String {
 pub fn contact(id: &str, accepted: bool) -> String {
     format!(r#"{{"type":"contact","id":"{id}","state":"{}"}}"#,
             if accepted { "accepted" } else { "declined" })
+}
+
+/// A voice message's frame: the Ogg/Opus file of `bytes` bytes, `ms` long,
+/// follows on `stream` (protocol.md section 4.7).
+pub fn voice(id: &str, ts: u64, ms: u32, bytes: usize, stream: u32, reply_to: Option<&str>) -> String {
+    let mut m = Map::new();
+    m.insert("type".into(), "voice".into());
+    m.insert("id".into(), id.into());
+    m.insert("ts".into(), ts.into());
+    m.insert("ms".into(), ms.into());
+    m.insert("bytes".into(), bytes.into());
+    m.insert("codec".into(), "ogg-opus".into());
+    m.insert("stream".into(), stream.into());
+    if let Some(r) = reply_to {
+        m.insert("reply_to".into(), r.into());
+    }
+    Value::Object(m).to_string()
+}
+
+/// Chunk `seq` of a voice message's file `data` on `stream`, as its binary
+/// frame; None past the last.
+pub fn voice_chunk(stream: u32, data: &[u8], seq: u32) -> Option<Vec<u8>> {
+    let at = seq as usize * MAX_CHUNK;
+    if at >= data.len() {
+        return None;
+    }
+    let end = (at + MAX_CHUNK).min(data.len());
+    Some(pack_binary(KIND_VOICE, stream, seq, &data[at..end]))
+}
+
+/// A voice message being received: its frame's fields and the file so far.
+/// Acked, shown and kept only once whole.
+#[derive(Debug)]
+pub struct VoiceIn {
+    pub id: String,
+    pub ts: u64,
+    pub ms: u32,
+    pub reply_to: Option<String>,
+    pub stream: u32,
+    pub bytes: usize,
+    pub data: Vec<u8>,
+    next: u32,
+}
+
+impl VoiceIn {
+    /// From a checked `voice` frame. The file's room is taken at once: over
+    /// 4 KB, it is in PSRAM on the device.
+    pub fn new(frame: &Frame) -> VoiceIn {
+        let n = |k: &str| frame.get(k).and_then(Value::as_u64).unwrap_or(0);
+        let bytes = n("bytes") as usize;
+        VoiceIn {
+            id: str_of(frame, "id").to_string(),
+            ts: n("ts"),
+            ms: n("ms") as u32,
+            reply_to: frame.get("reply_to").and_then(Value::as_str).map(str::to_string),
+            stream: n("stream") as u32,
+            bytes,
+            data: Vec::with_capacity(bytes),
+            next: 0,
+        }
+    }
+
+    /// Take a voice chunk: whether the file is now whole, or the error that
+    /// drops the transfer (out of sequence, another stream, past `bytes`).
+    pub fn take(&mut self, b: &Binary) -> Result<bool, ErrorFrame> {
+        let why = if b.stream != self.stream {
+            "no such stream"
+        } else if b.seq != self.next {
+            "chunk out of sequence"
+        } else if self.data.len() + b.payload.len() > self.bytes {
+            "past the bytes announced"
+        } else {
+            self.data.extend_from_slice(b.payload);
+            self.next += 1;
+            return Ok(self.data.len() == self.bytes);
+        };
+        Err(ErrorFrame::new("bad_request").what("voice").id(&self.id).detail(why))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -808,7 +885,55 @@ mod tests {
     fn the_hello_announces_what_this_device_does() {
         let h = check(hello(&[1; 32], "t", &[2; 32]).as_bytes()).unwrap();
         let caps: Vec<&str> = h["caps"].as_array().unwrap().iter().map(|c| c.as_str().unwrap()).collect();
-        assert_eq!(caps, ["text", "receipts", "typing", "reply", "react"]);
+        assert_eq!(caps, ["text", "receipts", "typing", "reply", "react", "voice-message"]);
+    }
+
+    const VOICE: &str = include_str!("../../../docs/tailnet-chat/vectors/voice.json");
+    const VOICE_FILE: &[u8] = include_bytes!("../../../docs/tailnet-chat/vectors/voice.opus");
+
+    #[test]
+    fn a_voice_message_is_its_frame_then_the_file_in_chunks_as_the_vector() {
+        let vector = v(VOICE);
+        let message = v(vector["message"].as_str().unwrap());
+        let id = message["id"].as_str().unwrap();
+        let frame = voice(id, 1_793_541_600_000, 1500, VOICE_FILE.len(), 1, None);
+        assert_eq!(v(&frame), message);
+        assert_eq!(frame_type(&check(frame.as_bytes()).unwrap()), "voice");
+        let replying = check(voice(id, 1, 1500, 10, 7, Some(id)).as_bytes()).unwrap();
+        assert_eq!(str_of(&replying, "reply_to"), id);
+
+        let chunks: Vec<Vec<u8>> = (0..).map_while(|seq| voice_chunk(1, VOICE_FILE, seq)).collect();
+        let want: Vec<Vec<u8>> =
+            vector["chunks"].as_array().unwrap().iter().map(|c| bytes(c["frame"].as_str().unwrap())).collect();
+        assert_eq!(chunks, want);
+    }
+
+    fn voice_in_of(bytes: usize) -> VoiceIn {
+        let id = "ab".repeat(16);
+        VoiceIn::new(&check(voice(&id, 1, 1500, bytes, 1, None).as_bytes()).unwrap())
+    }
+
+    #[test]
+    fn a_voice_message_received_is_whole_only_after_its_last_chunk() {
+        let mut got = voice_in_of(VOICE_FILE.len());
+        let chunks: Vec<Vec<u8>> = (0..).map_while(|seq| voice_chunk(1, VOICE_FILE, seq)).collect();
+        assert_eq!(got.take(&unpack_binary(&chunks[0]).unwrap()), Ok(false));
+        assert_eq!(got.take(&unpack_binary(&chunks[1]).unwrap()), Ok(true));
+        assert_eq!(got.data, VOICE_FILE);
+        assert_eq!(got.id, "ab".repeat(16));
+        assert_eq!(got.ms, 1500);
+    }
+
+    #[test]
+    fn a_voice_chunk_out_of_order_on_another_stream_or_too_long_drops_the_transfer() {
+        let chunks: Vec<Vec<u8>> = (0..).map_while(|seq| voice_chunk(1, VOICE_FILE, seq)).collect();
+        let mut skipped = voice_in_of(VOICE_FILE.len());
+        assert_eq!(skipped.take(&unpack_binary(&chunks[1]).unwrap()).unwrap_err().code, "bad_request");
+        let mut elsewhere = voice_in_of(VOICE_FILE.len());
+        let other = voice_chunk(2, VOICE_FILE, 0).unwrap();
+        assert_eq!(elsewhere.take(&unpack_binary(&other).unwrap()).unwrap_err().code, "bad_request");
+        let mut short = voice_in_of(100);
+        assert_eq!(short.take(&unpack_binary(&chunks[0]).unwrap()).unwrap_err().code, "bad_request");
     }
 
     #[test]

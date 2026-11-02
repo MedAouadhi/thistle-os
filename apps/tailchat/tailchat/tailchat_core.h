@@ -38,7 +38,12 @@ typedef struct {
     bool        quote_mine;
     const char *react_me;    /* emoji or "" */
     const char *react_them;
+    uint32_t voice_ms;       /* a voice message's length; 0 for a text */
+    bool playing;            /* the voice message is playing now */
 } tailchat_bubble_t;
+
+/* A length as minutes and seconds, "1:05". */
+const char *tailchat_duration(char *out, size_t n, uint32_t ms);
 
 /* A conversation's row, on up to three lines: what a reply quotes
  * ("> Ben: tea or coffee?"), who wrote it and what ("You: tea"), and its

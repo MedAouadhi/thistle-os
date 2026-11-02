@@ -60,7 +60,7 @@ static const char *s_wm_override = NULL;
  * place of a tap, at its turn: "wait" (nothing), "dial:NUMBER",
  * "compose:NUMBER[:NAME]" or "type:TEXT". */
 /* hold_ms, when not -1, is how long this one is held, in place of
- * s_tap_hold_ms: "mic:MS", "backspace:MS". */
+ * s_tap_hold_ms: "mic:MS", "backspace:MS", "X,Y:MS" (a touch held). */
 static struct { int x, y, x2, y2; uint16_t keycode; bool drag; const char *step; int hold_ms; } s_taps[SIM_MAX_TAPS];
 static int s_tap_count = 0;
 static int s_tap_hold_ms = 100;
@@ -146,6 +146,15 @@ static bool add_tap(const char *spec)
             s_tap_count++;
             return true;
         }
+        int x, y;
+        if (sscanf(spec, "%d,%d:%d%c", &x, &y, &hold, &end) == 3 && hold >= 0) {
+            s_taps[s_tap_count].keycode = 0;
+            s_taps[s_tap_count].x = x;
+            s_taps[s_tap_count].y = y;
+            s_taps[s_tap_count].hold_ms = hold;
+            s_tap_count++;
+            return true;
+        }
         if (sscanf(spec, "backspace:%d%c", &hold, &end) == 1 && hold >= 0) {
             s_taps[s_tap_count].keycode = '\b';
             s_taps[s_tap_count].hold_ms = hold;
@@ -160,7 +169,7 @@ static bool add_tap(const char *spec)
     if (s_tap_count >= SIM_MAX_TAPS ||
         (s_taps[s_tap_count].keycode == 0 &&
          sscanf(spec, "%d,%d", &s_taps[s_tap_count].x, &s_taps[s_tap_count].y) != 2)) {
-        fprintf(stderr, "Invalid --tap value; expected X,Y, home, back, quick, mic, "
+        fprintf(stderr, "Invalid --tap value; expected X,Y, X,Y:MS, home, back, quick, mic, "
                         "backspace:MS, wait, dial:NUMBER, compose:NUMBER[:NAME] or "
                         "type:TEXT (at most %d taps)\n",
                 SIM_MAX_TAPS);

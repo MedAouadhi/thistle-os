@@ -141,3 +141,14 @@ TEST(opus_the_pseudostack_is_measured)
     ASSERT_TRUE(used > 0);
     ASSERT_TRUE(used <= thistle_opus_scratch_size());
 }
+
+TEST(opus_is_one_takers_at_a_time)
+{
+    const char *holder = NULL;
+    ASSERT_TRUE(thistle_opus_take("a call", NULL));
+    ASSERT_TRUE(!thistle_opus_take("a voice message", &holder));
+    ASSERT_STR_EQ(holder, "a call");
+    thistle_opus_give();
+    ASSERT_TRUE(thistle_opus_take("a voice message", &holder));
+    thistle_opus_give();
+}

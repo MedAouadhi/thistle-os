@@ -34,6 +34,7 @@
  */
 #include "tailchat/tailchat_app.h"
 #include "tailchat/tailchat_core.h"
+#include "tailchat/tailchat_voice.h"
 
 #include "thistle/tailnet_chat.h"
 #include "hal/board.h"
@@ -109,6 +110,10 @@ static struct {
     uint32_t    typed;        /* the last key in the compose field, lv_tick */
     bool        confirm_remove;
     bool        epaper;
+    char        rec_key[65];  /* whom the recording under way goes to */
+    char        rec_reply[33];/* and what it answers */
+    char        playing[33];  /* the voice message playing, as last shown */
+    uint32_t    rec_shown_s;  /* the recording's seconds, as last shown */
 } s_ui;
 
 static struct {
@@ -331,6 +336,7 @@ static void tab_cb(lv_event_t *e)
 }
 
 static void choose_message(const char *id);
+static void fill_conversation(void);
 
 /* The list row chosen: by a tap or Enter, not the selection moving. */
 static void table_cb(lv_event_t *e)
@@ -552,6 +558,102 @@ static void send_cb(lv_event_t *e)
     show_reply_bar();
 }
 
+/* The voice button: held, it records; let go, the recording is sent (a
+ * tap is not a message). */
+static void voice_press_cb(lv_event_t *e)
+{
+    (void)e;
+    const char *why = tailchat_voice_record();
+    if (why) {
+        toast_warn(why);
+        ESP_LOGI(TAG, "no recording: %s", why);
+        return;
+    }
+    snprintf(s_ui.rec_key, sizeof s_ui.rec_key, "%s", s_ui.key);
+    snprintf(s_ui.rec_reply, sizeof s_ui.rec_reply, "%s", s_ui.reply_to);
+    s_ui.rec_shown_s = UINT32_MAX;
+    typing_off();
+}
+
+static void voice_release_cb(lv_event_t *e)
+{
+    (void)e;
+    uint32_t ms;
+    if (tailchat_voice_poll(&ms, NULL) == TAILCHAT_VOICE_RECORDING) tailchat_voice_stop();
+}
+
+/* Play the voice message chosen, or stop the one playing. */
+static void play_cb(lv_event_t *e)
+{
+    (void)e;
+    uint32_t ms;
+    const char *playing = "";
+    char path[160];
+    const char *why = NULL;
+    if (tailchat_voice_poll(&ms, &playing) == TAILCHAT_VOICE_PLAYING) {
+        /* Stop is the button while one plays. */
+        tailchat_voice_stop();
+    } else if (tailnet_chat_voice_path(s_ui.chosen, path, sizeof path) != ESP_OK) {
+        why = "The recording is not on the card";
+    } else {
+        why = tailchat_voice_play(path, s_ui.chosen);
+    }
+    if (why) {
+        toast_warn(why);
+        ESP_LOGI(TAG, "not playing %s: %s", s_ui.chosen, why);
+    }
+    s_ui.chosen[0] = '\0';
+    set_shown(s_ui.actions, false);
+}
+
+/* What the recording or the player is doing, twice a second. */
+static void voice_tick(void)
+{
+    uint32_t ms = 0;
+    const char *playing = "";
+    tailchat_voice_state_t st = tailchat_voice_poll(&ms, &playing);
+    if (st == TAILCHAT_VOICE_RECORDED) {
+        size_t len;
+        uint32_t length;
+        const char *why;
+        const uint8_t *file = tailchat_voice_take(&len, &length, &why);
+        if (file && s_ui.rec_key[0]) {
+            char id[33] = "";
+            esp_err_t err = tailnet_chat_send_voice(s_ui.rec_key, file, len, length,
+                                                    s_ui.rec_reply[0] ? s_ui.rec_reply : NULL, id);
+            if (err == ESP_OK) {
+                ESP_LOGI(TAG, "sent voice %s: %u ms, %u bytes", id, (unsigned)length, (unsigned)len);
+                if (strcmp(s_ui.rec_reply, s_ui.reply_to) == 0) {
+                    s_ui.reply_to[0] = '\0';
+                    show_reply_bar();
+                }
+            } else {
+                toast_warn("Could not send the voice message");
+            }
+        } else if (why) {
+            toast_warn(why);
+            ESP_LOGI(TAG, "no voice message: %s", why);
+        }
+        tailchat_voice_release();
+        s_ui.rec_key[0] = '\0';
+        if (s_ui.page == PAGE_CONVERSATION && s_ui.title) fill_conversation();
+    } else if (st == TAILCHAT_VOICE_RECORDING && s_ui.page == PAGE_CONVERSATION && s_ui.conv_note) {
+        if (ms / 1000 != s_ui.rec_shown_s) {
+            s_ui.rec_shown_s = ms / 1000;
+            char length[16];
+            snprintf(s_ui.store->row, sizeof s_ui.store->row, "Recording %s of 2:00; let go to send",
+                     tailchat_duration(length, sizeof length, ms));
+            set_text(s_ui.conv_note, s_ui.store->row);
+            set_shown(s_ui.conv_note, true);
+        }
+    }
+    if (strcmp(playing, s_ui.playing) != 0) {
+        snprintf(s_ui.playing, sizeof s_ui.playing, "%s", playing);
+        ESP_LOGI(TAG, "playing: %s", playing[0] ? playing : "nothing");
+        if (s_ui.page == PAGE_CONVERSATION && s_ui.title) fill_conversation();
+    }
+}
+
 static void reply_cb(lv_event_t *e)
 {
     (void)e;
@@ -592,6 +694,14 @@ static void choose_message(const char *id)
         return;
     }
     snprintf(s_ui.chosen, sizeof s_ui.chosen, "%s", id);
+    tailnet_chat_message_t m = {0};
+    bool found = false;
+    int n = tailnet_chat_message_count(s_ui.key);
+    for (int i = 0; i < n && !found; i++) {
+        found = tailnet_chat_get_message(s_ui.key, i, &m, NULL, 0) == ESP_OK && strcmp(m.id, id) == 0;
+    }
+    /* A voice message plays only when chosen to. */
+    if (found && m.voice_ms) button(s_ui.actions, strcmp(s_ui.playing, id) == 0 ? "Stop" : "Play", play_cb);
     button(s_ui.actions, "Reply", reply_cb);
     for (int i = 0; i < TAILCHAT_REACTIONS; i++) {
         lv_obj_t *b = button(s_ui.actions, tailchat_emoji_label(tailchat_reactions[i]), react_cb);
@@ -599,15 +709,10 @@ static void choose_message(const char *id)
         lv_obj_add_event_cb(b, react_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
     }
     /* Ours, if there is one, can be taken back. */
-    int n = tailnet_chat_message_count(s_ui.key);
-    for (int i = 0; i < n; i++) {
-        tailnet_chat_message_t m;
-        if (tailnet_chat_get_message(s_ui.key, i, &m, NULL, 0) == ESP_OK && strcmp(m.id, id) == 0 &&
-            m.react_me[0]) {
-            lv_obj_t *b = button(s_ui.actions, "Remove", react_cb);
-            lv_obj_remove_event_cb(b, react_cb);
-            lv_obj_add_event_cb(b, react_cb, LV_EVENT_CLICKED, (void *)(intptr_t)-1);
-        }
+    if (found && m.react_me[0]) {
+        lv_obj_t *b = button(s_ui.actions, "Remove", react_cb);
+        lv_obj_remove_event_cb(b, react_cb);
+        lv_obj_add_event_cb(b, react_cb, LV_EVENT_CLICKED, (void *)(intptr_t)-1);
     }
     set_shown(s_ui.actions, true);
     ESP_LOGI(TAG, "chose %s", id);
@@ -644,7 +749,8 @@ static void fill_conversation(void)
         }
         memcpy(s_ui.store->ids[i], m.id, sizeof m.id);
         tailchat_bubble_t b = {.mine = m.mine, .name = c->name, .text = s_ui.store->text, .state = m.state,
-                               .react_me = m.react_me, .react_them = m.react_them};
+                               .react_me = m.react_me, .react_them = m.react_them, .voice_ms = m.voice_ms,
+                               .playing = m.voice_ms && strcmp(s_ui.playing, m.id) == 0};
         bool quote_mine = false;
         if (m.reply_to[0]) {
             b.quoted = true;
@@ -699,6 +805,12 @@ static void show_conversation(void)
     lv_obj_add_event_cb(s_ui.field, typed_cb, LV_EVENT_VALUE_CHANGED, NULL);
     join_group(s_ui.field);
     button(row, "Send", send_cb);
+    /* Held, it records a voice message; let go, it is sent. */
+    lv_obj_t *voice = button(row, LV_SYMBOL_AUDIO, voice_press_cb);
+    lv_obj_remove_event_cb(voice, voice_press_cb);
+    lv_obj_add_event_cb(voice, voice_press_cb, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(voice, voice_release_cb, LV_EVENT_RELEASED, NULL);
+    lv_obj_add_event_cb(voice, voice_release_cb, LV_EVENT_PRESS_LOST, NULL);
 
     tailnet_chat_set_viewing(c->key);
     fill_conversation();
@@ -911,6 +1023,7 @@ static void timer_cb(lv_timer_t *t)
 {
     (void)t;
     if (s_ui.typing && lv_tick_elaps(s_ui.typed) >= TYPING_STOP_MS) typing_off();
+    voice_tick();
     if (tailnet_chat_generation() == s_ui.generation) return;
     if (s_ui.page == PAGE_CONVERSATION && s_ui.title) {
         s_ui.generation = tailnet_chat_generation();
@@ -961,6 +1074,7 @@ esp_err_t tailchat_ui_create(lv_obj_t *parent)
 {
     if (!parent) parent = lv_screen_active();
     memset(&s_ui, 0, sizeof s_ui);
+    tailchat_voice_release();   /* a recording finished after the app was left */
     s_ui.store = heap_caps_malloc(sizeof *s_ui.store, MALLOC_CAP_SPIRAM);
     if (!s_ui.store) s_ui.store = malloc(sizeof *s_ui.store);
     if (!s_ui.store) return ESP_ERR_NO_MEM;
@@ -1001,6 +1115,10 @@ esp_err_t tailchat_ui_create(lv_obj_t *parent)
 
 void tailchat_ui_destroy(void)
 {
+    /* Leaving the app stops a voice message playing, and drops one being
+     * recorded: nothing would send it. */
+    tailchat_voice_stop();
+    tailchat_voice_release();
     if (s_ui.title) leave_conversation();
     if (s_ui.timer) lv_timer_delete(s_ui.timer);
     lv_async_call_cancel(go_async, NULL);
