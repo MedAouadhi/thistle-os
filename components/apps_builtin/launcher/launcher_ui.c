@@ -11,6 +11,7 @@
 #include "thistle/phonebook.h"
 #include "thistle/sms.h"
 #include "thistle/tailnet.h"
+#include "thistle/tailnet_chat.h"
 #include "thistle/time_manager.h"
 #include "thistle/update.h"
 #include "thistle/wifi_manager.h"
@@ -816,6 +817,9 @@ static const char *read_os_update(void)
     return version;
 }
 
+/* The unread messages are all Chat's: the messages row opens Chat. */
+static bool s_chat_only;
+
 static void read_now(home_now_in_t *in)
 {
     memset(in, 0, sizeof(*in));
@@ -823,6 +827,8 @@ static void read_now(home_now_in_t *in)
     in->format_24h = true;
     in->sms_unread = rs_sms_unread_count();
     in->mesh_unread = rs_mesh_unread_count();
+    in->chat_unread = tailnet_chat_unread_count();
+    s_chat_only = home_now_chat_only(in);
     in->missed_calls = rs_call_missed_count();
     if (in->missed_calls > 0) {
         read_missed_call(in);
@@ -857,7 +863,7 @@ static const char SETTINGS_AT_UPDATE[] = "com.thistle.settings";
 static const char *now_app(home_now_kind_t kind)
 {
     switch (kind) {
-    case HOME_NOW_MESSAGES:
+    case HOME_NOW_MESSAGES:    return s_chat_only ? "com.thistle.tailchat" : "com.thistle.messenger";
     case HOME_NOW_MESH:        return "com.thistle.messenger";
     case HOME_NOW_MISSED_CALL: return "com.thistle.phone";
     case HOME_NOW_TAILNET:     return "com.thistle.tailscale";
@@ -1024,9 +1030,10 @@ static void show_now(const home_now_row_t *rows, int n)
             if (app_id == NULL) {
                 leave_focus(slot->main);
             }
-            lv_obj_set_user_data(slot->main, (void *)app_id);
             lv_obj_set_state(slot->main, LV_STATE_DISABLED, app_id == NULL);
         }
+        /* The messages row's app changes with whose messages are unread. */
+        lv_obj_set_user_data(slot->main, (void *)now_app(row->kind));
         set_text_if_changed(slot->title, row->title);
         set_text_if_changed(slot->detail, row->detail);
         bool back = row->call_back[0] != '\0';

@@ -239,6 +239,24 @@ TEST(home_now_messages_from_both_are_counted_apart) {
     ASSERT_STR_EQ(s_rows[0].detail, "SMS");
 }
 
+TEST(home_now_tailnet_chat_messages_count_with_the_rest) {
+    home_now_in_t in = quiet();
+    in.chat_unread = 2;
+    ASSERT_EQ(home_now_rows(&in, s_rows, HOME_NOW_ROWS), 1);
+    ASSERT_EQ(s_rows[0].kind, HOME_NOW_MESSAGES);
+    ASSERT_STR_EQ(s_rows[0].title, "2 new messages");
+    ASSERT_STR_EQ(s_rows[0].detail, "Chat");
+    ASSERT_TRUE(home_now_chat_only(&in));
+    in.sms_unread = 1;
+    home_now_rows(&in, s_rows, HOME_NOW_ROWS);
+    ASSERT_STR_EQ(s_rows[0].title, "3 new messages");
+    ASSERT_STR_EQ(s_rows[0].detail, "1 SMS" DOT "2 in Chat");
+    ASSERT_TRUE(!home_now_chat_only(&in));
+    in.mesh_unread = 4;
+    home_now_rows(&in, s_rows, HOME_NOW_ROWS);
+    ASSERT_STR_EQ(s_rows[0].detail, "1 SMS" DOT "4 from the mesh" DOT "2 in Chat");
+}
+
 TEST(home_now_a_missed_call_is_named_and_timed) {
     home_now_in_t in = quiet();
     in.missed_calls = 1;

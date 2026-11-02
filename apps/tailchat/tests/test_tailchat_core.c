@@ -27,10 +27,10 @@ static void one_line_joins_lines_and_cuts_at_a_character(void)
     tailchat_one_line(out, sizeof out, "Are you\nhome?\r\n", 40);
     EXPECT_STR(out, "Are you home?");
     tailchat_one_line(out, sizeof out, "abcdefghij", 6);
-    EXPECT_STR(out, "abcde\xe2\x80\xa6");
+    EXPECT_STR(out, "abcde...");
     /* Five characters of two bytes each, cut to four and an ellipsis */
     tailchat_one_line(out, sizeof out, "\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9", 5);
-    EXPECT_STR(out, "\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xe2\x80\xa6");
+    EXPECT_STR(out, "\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9...");
     /* The buffer is the limit too, never cutting a character in two */
     char small[6];
     tailchat_one_line(small, sizeof small, "\xc3\xa9\xc3\xa9\xc3\xa9", 40);
@@ -75,8 +75,58 @@ static void a_message_says_who(void)
     EXPECT_STR(out, "Ben: Hi there");
 }
 
+static void a_bubble_shows_what_it_quotes_its_state_and_reactions(void)
+{
+    char out[256];
+    tailchat_bubble_t b = {.mine = true, .name = "Ben", .text = "tea", .state = "waiting"};
+    tailchat_bubble(out, sizeof out, &b, 40);
+    EXPECT_STR(out, "You: tea\nWaiting");
+    b.state = "delivered";
+    b.quote = "tea or\ncoffee?";
+    b.quote_mine = false;
+    tailchat_bubble(out, sizeof out, &b, 40);
+    EXPECT_STR(out, "> Ben: tea or coffee?\nYou: tea\nDelivered");
+    b.state = "read";
+    b.react_them = "\xf0\x9f\x91\x8d";
+    tailchat_bubble(out, sizeof out, &b, 40);
+    EXPECT_STR(out, "> Ben: tea or coffee?\nYou: tea\nRead, Ben +1");
+
+    tailchat_bubble_t in = {.mine = false, .name = "Ben", .text = "milk?", .state = "received",
+                            .quote = "tea", .quote_mine = true, .react_me = "\xe2\x9d\xa4\xef\xb8\x8f"};
+    tailchat_bubble(out, sizeof out, &in, 40);
+    EXPECT_STR(out, "> You: tea\nBen: milk?\nYou <3");
+    in.react_me = "";
+    in.quote = NULL;
+    tailchat_bubble(out, sizeof out, &in, 40);
+    EXPECT_STR(out, "Ben: milk?");
+    /* A reply to a message no longer kept */
+    in.quote = "";
+    in.quoted = true;
+    tailchat_bubble(out, sizeof out, &in, 40);
+    EXPECT_STR(out, "> an earlier message\nBen: milk?");
+}
+
+static void an_emoji_is_written_with_what_the_font_has(void)
+{
+    EXPECT_STR(tailchat_emoji_label("\xf0\x9f\x91\x8d"), "+1");
+    EXPECT_STR(tailchat_emoji_label("\xe2\x9d\xa4\xef\xb8\x8f"), "<3");
+    EXPECT_STR(tailchat_emoji_label("\xe2\x9d\xa4"), "<3");
+    EXPECT_STR(tailchat_emoji_label("\xf0\x9f\x98\x82"), "haha");
+    EXPECT_STR(tailchat_emoji_label("\xf0\x9f\x8e\x89"), "yay");
+    EXPECT_STR(tailchat_emoji_label("\xf0\x9f\xa6\x84"), "*");
+    EXPECT_STR(tailchat_emoji_label(""), "");
+    for (int i = 0; i < TAILCHAT_REACTIONS; i++) {
+        if (strcmp(tailchat_emoji_label(tailchat_reactions[i]), "*") == 0) {
+            fprintf(stderr, "reaction %d has no label\n", i);
+            s_failed++;
+        }
+    }
+}
+
 int main(void)
 {
+    a_bubble_shows_what_it_quotes_its_state_and_reactions();
+    an_emoji_is_written_with_what_the_font_has();
     one_line_joins_lines_and_cuts_at_a_character();
     a_row_is_a_title_over_a_detail();
     tabs_count_what_waits();

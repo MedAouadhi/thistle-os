@@ -581,9 +581,9 @@ jobs:
         working-directory: simulator
         run: python3 tests/test_todo.py --sim build/thistle_sim
 
-      - name: Run Tailnet chat conformance, card, restart and app tests
+      - name: Run Tailnet chat conformance, messages, card, restart and app tests
         working-directory: simulator
-        run: python3 tests/test_tailnet_chat.py --sim build/thistle_sim
+        run: python3 tests/test_tailchat.py --sim build/thistle_sim
 
       - name: Run App Store list, refresh, install and remove tests
         working-directory: simulator

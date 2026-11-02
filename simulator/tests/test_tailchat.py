@@ -47,11 +47,11 @@ REPO = SIM_DIR.parent
 sys.path.insert(0, str(REPO / "tools"))
 from tailnet_chat import conformance, ed25519, protocol  # noqa: E402
 from tailnet_chat.conformance import RawConn, eventually  # noqa: E402
+from tailnet_chat.peer import ChatPeer  # noqa: E402
 
 APP = "com.thistle.tailchat"
-SCENARIOS = [conformance.handshake, conformance.bad_signature_refused, conformance.unknown_type_answered,
-             conformance.invalid_frames_answered, conformance.contact_request_accepted,
-             conformance.contact_request_declined, conformance.key_changed_refused]
+# Every scenario but the voice message's (ticket 08).
+SCENARIOS = [s for s in conformance.SCENARIOS if s is not conformance.voice_message_whole_and_broken]
 
 # The app's tabs and first row, on the T-Deck Max.
 TAB_REQUESTS = "195,40"
@@ -169,6 +169,12 @@ class SimTarget(conformance.Target):
             raise RuntimeError(f"{command['cmd']}: {reply['error']}")
         return reply["ok"]
 
+    def logged(self, text: str) -> bool:
+        """Whether the log says `text` yet: a command first, which flushes
+        what the UI has printed."""
+        self.call({"cmd": "unread"})
+        return text in self.device.log_text()
+
     def close(self) -> None:
         self.sock.close()
 
@@ -284,6 +290,112 @@ def case_card_and_restart(simulator: Path, root: Path) -> None:
         dev.stop()
 
 
+def case_messages(simulator: Path, root: Path) -> None:
+    """Alerts, the status bar's count and Home's row; receipts, a reply and
+    reactions on the card; the conversation on screen; then a restart: the
+    outbox, the history and the ids seen are kept."""
+    dev = Device(simulator, root, "messages").start()
+    try:
+        target = SimTarget(dev)
+        pal = RawConn(target.address, name="pal").handshake()
+        conformance._become_contact(target, pal)
+        m = msg("are you there?")
+        pal.send(m)
+        pal.expect("ack", id=m["id"])
+        eventually(lambda: target.logged("(statusbar) unread 1"), what="the status bar's count")
+        eventually(lambda: target.logged("now: 1 new message (Chat)"), what="Home's row", timeout=8)
+        eventually(lambda: target.logged("pal: are you there?"), what="the pop-up")
+        assert "[sim_haptic] message buzz" in dev.log_text(), "no buzz"
+        assert [c["unread"] for c in target.contacts() if c["key"] == pal.key_hex] == [1]
+
+        # A reply, read by pal; a reaction each way.
+        mid = target.send_text(pal.key_hex, "yes, here", reply_to=m["id"])
+        got = pal.expect("msg", id=mid)
+        assert got["reply_to"] == m["id"], got
+        pal.send({"type": "ack", "id": mid})
+        pal.send({"type": "read", "ids": [mid]})
+        rid = target.react(pal.key_hex, m["id"], "👍")
+        pal.expect("react", id=rid)
+        pal.send({"type": "ack", "id": rid})
+        theirs = {"type": "react", "id": os.urandom(16).hex(), "ts": int(time.time() * 1000), "to": mid,
+                  "emoji": "🎉"}
+        pal.send(theirs)
+        pal.expect("ack", id=theirs["id"])
+        eventually(lambda: [x for x in target.messages(pal.key_hex) if x["id"] == mid and x["state"] == "read"
+                            and x.get("reactions", {}).get("them") == "🎉"], what="our reply read and reacted to")
+
+        # The conversation on screen: what was unread is read, and a new
+        # message is read at once, with no alert.
+        target.call({"cmd": "viewing", "to": pal.key_hex})
+        assert m["id"] in pal.expect("read")["ids"]
+        eventually(lambda: target.logged("(statusbar) unread 0"), what="the count to clear")
+        seen = msg("seen at once")
+        pal.send(seen)
+        pal.expect("ack", id=seen["id"])
+        assert pal.expect("read")["ids"] == [seen["id"]]
+        time.sleep(0.6)
+        assert not target.logged("pal: seen at once"), "alerted for the conversation on screen"
+        assert target.call({"cmd": "unread"}) == 0
+        target.call({"cmd": "viewing", "to": None})
+
+        # Everything on the card, in the order it happened.
+        lines = [json.loads(x) for x in dev.chat_file(pal.key_hex).read_text().splitlines()]
+        events = [(x["dir"], x.get("text"), x.get("state"), x.get("emoji")) for x in lines]
+        for e in [("in", m["text"], "received", None), ("out", "yes, here", "waiting", None),
+                  ("out", None, "delivered", None), ("out", None, "read", None), ("out", None, None, "👍"),
+                  ("in", None, None, "🎉"), ("in", None, "read", None)]:
+            assert e in events, f"no {e} in {events}"
+        assert [x for x in lines if x.get("id") == mid and "text" in x][0]["reply_to"] == m["id"]
+
+        # Someone away: what is written to it waits, across a restart.
+        away = ChatPeer(name="away").start()
+        address, seed = away.address, away.seed
+        away.stop()
+        target.add_contact(address, name="away")
+        wid = target.send_text(address, "kept across a restart")
+        eventually(lambda: "could not reach away" in dev.log_text(), what="the dial to fail")
+        pal.close()
+        target.close()
+        dev.stop()
+        saved = json.loads((dev.spiffs / "tailnet_chat.json").read_text())
+        assert [f["id"] for b in saved["outbox"] for f in b["frames"]] == [wid], saved["outbox"]
+
+        dev.start()
+        target = SimTarget(dev)
+        assert target.waiting(list(address)) == [wid]
+        shown = {x["id"]: x for x in target.messages(pal.key_hex)}
+        assert shown[mid]["state"] == "read" and shown[mid]["reply_to"] == m["id"], shown[mid]
+        assert shown[mid]["reactions"] == {"them": "🎉"}, shown[mid]
+        assert shown[m["id"]]["reactions"] == {"me": "👍"} and shown[m["id"]]["state"] == "read"
+        # The same message again after the restart: acked, never shown twice.
+        again = RawConn(target.address, name="pal", seed=pal.seed).handshake()
+        again.send(m)
+        again.expect("ack", id=m["id"])
+        again.send(theirs)
+        again.expect("ack", id=theirs["id"])
+        time.sleep(0.3)
+        assert [x["id"] for x in target.messages(pal.key_hex)].count(m["id"]) == 1, "shown twice"
+        assert target.call({"cmd": "unread"}) == 0
+        again.close()
+        # The one away comes back and is seen online: what waits goes.
+        back = ChatPeer(name="away", seed=seed, port=address[1]).start()
+        try:
+            target.flush(list(address))
+            req = back.wait_for(lambda: back.requests.get(target.key), timeout=10)
+            assert [x.id for x in req.held] == [wid], req.held
+            eventually(lambda: target.waiting(list(address)) == [], what="the outbox to clear")
+            assert any(c["key"] == back.key_hex for c in target.contacts()), "not pinned"
+        finally:
+            back.stop()
+        log = dev.log_text()
+        for line in ("dialling away at 127.0.0.1:", f"pinned away as {protocol.fingerprint(bytes.fromhex(back.key_hex))}",
+                     f"delivered {wid} to away", "received " + m["id"] + " from pal again"):
+            assert line in log, f"no {line!r} in the log"
+        target.close()
+    finally:
+        dev.stop()
+
+
 def ppm_has_text(path: Path) -> bool:
     data = path.read_bytes()
     # P6 header: three lines, then the pixels; a screen of one colour is blank.
@@ -322,10 +434,62 @@ def case_app(simulator: Path, root: Path) -> None:
     assert "(tailchat) unavailable: Tailscale is off" in log, log[-1500:]
 
 
+def case_app_conversation(simulator: Path, root: Path) -> None:
+    """A full conversation on screen, with replies, reactions and Arabic:
+    LVGL's pool measured; read on opening; a message typed and sent."""
+    dev = Device(simulator, root, "conversation")
+    key_hex = ed25519.public_key(os.urandom(32)).hex()
+    fp = protocol.fingerprint_id(bytes.fromhex(key_hex))
+    (dev.spiffs / "tailnet_chat.json").write_text(json.dumps({
+        "version": 1, "outbox": [],
+        "contacts": [{"name": "Lena", "key": key_hex, "seen_name": "lena-laptop", "unread": 2}]}))
+    history = dev.card / "messages" / "tailnet"
+    history.mkdir(parents=True)
+    lines, ids = [], []
+    t0 = 1_793_541_600_000
+    for i in range(24):
+        mine = i % 3 == 0
+        mid = f"{i:032x}"
+        ids.append(mid)
+        text = ("مرحبا، كيف حالك اليوم؟ " if i % 4 == 1 else f"Message {i} ") * (40 if i % 5 == 0 else 3)
+        line = {"dir": "out" if mine else "in", ("to" if mine else "from"): key_hex, "name": "Lena", "id": mid,
+                "ts": t0 + i * 60_000, "time": None, "text": text, "state": "waiting" if mine else "received"}
+        if i % 6 == 5:
+            line["reply_to"] = ids[i - 2]
+        lines.append(line)
+        if mine:
+            lines.append({"dir": "out", "to": key_hex, "id": mid, "state": "read", "time": None})
+        if i % 4 == 2:
+            lines.append({"dir": "in", "from": key_hex, "name": "Lena", "id": f"{i + 100:032x}", "ts": t0 + i,
+                          "react": ids[i - 1], "emoji": "👍", "time": None})
+    (history / f"{fp}.jsonl").write_text("".join(json.dumps(x, ensure_ascii=False) + "\n" for x in lines))
+
+    shot = root / "conversation.ppm"
+    log = dev.run(["--launch-app", APP, "--tap", FIRST_ROW, "--tap", "type:hello there\n", "--tap", "wait"],
+                  9000, shot)
+    pool = [x for x in log.splitlines() if "(tailchat) conversation Lena: 20 messages; LVGL pool" in x]
+    assert pool, log[-2000:]
+    free_kb = int(pool[0].split("LVGL pool ")[1].split(" KB")[0])
+    print(f"      {pool[0].split('(tailchat) ')[1].split(chr(27))[0]}")
+    assert free_kb >= 8, f"LVGL's pool is nearly dry with a full conversation open: {free_kb} KB free"
+    assert ppm_has_text(shot), "the conversation is blank"
+    assert "(statusbar) unread 2" in log and "(statusbar) unread 0" in log, "not read on opening"
+    sent = [x for x in log.splitlines() if "(tailchat) sent " in x]
+    assert sent, log[-2000:]
+    saved = json.loads((dev.spiffs / "tailnet_chat.json").read_text())
+    waiting = [json.loads(f["frame"]) for b in saved["outbox"] for f in b["frames"]]
+    assert [w["text"] for w in waiting] == ["hello there"], waiting
+    last = json.loads((history / f"{fp}.jsonl").read_text().splitlines()[-1])
+    assert last["dir"] == "out" and last["text"] == "hello there" and last["state"] == "waiting", last
+    assert saved["contacts"][0].get("unread", 0) == 0
+
+
 CASES: list[tuple[str, Callable[[Path, Path], None]]] = [
     ("conformance", case_conformance),
     ("card-and-restart", case_card_and_restart),
+    ("messages", case_messages),
     ("app", case_app),
+    ("app-conversation", case_app_conversation),
 ]
 
 

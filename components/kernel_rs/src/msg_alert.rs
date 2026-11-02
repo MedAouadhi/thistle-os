@@ -2,7 +2,7 @@
 //! Alerts for messages as they arrive: the motor buzzes, and the message
 //! waits here for the status bar to show as a pop-up.
 //!
-//! Every SMS and MeshCore message the kernel receives comes through
+//! Every SMS, MeshCore and Tailnet chat message the kernel receives comes through
 //! `arrived()`, Messenger open or not. There is no alert when alerts are
 //! switched off (`thistle_os.messenger.alerts`, on unless switched off, in
 //! the Messenger's settings), nor for a message in the conversation the
@@ -31,12 +31,14 @@ const BUZZ_GAP: Duration = Duration::from_secs(5);
 /// The longest message text a pop-up shows, in bytes, before "...".
 const PREVIEW_MAX: usize = 72;
 
-/// msg_alert.h: MSG_ALERT_SMS, MSG_ALERT_MESH.
+/// msg_alert.h: MSG_ALERT_SMS, MSG_ALERT_MESH, MSG_ALERT_TAILNET.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(u8)]
 pub(crate) enum Transport {
     Sms = 0,
     Mesh = 1,
+    /// Tailnet chat; a conversation is its peer's key's fingerprint.
+    Tailnet = 2,
 }
 
 impl Transport {
@@ -44,6 +46,7 @@ impl Transport {
         match value {
             0 => Some(Transport::Sms),
             1 => Some(Transport::Mesh),
+            2 => Some(Transport::Tailnet),
             _ => None,
         }
     }
@@ -315,6 +318,20 @@ mod tests {
         assert!(arrived_at(Transport::Mesh, "+491701", "?", "hi", t0));
         unsafe { rs_msg_alert_set_viewing(-1, std::ptr::null()) };
         assert!(arrived_at(Transport::Sms, "+491701", "Anna", "hi", t0));
+        fresh();
+    }
+
+    #[test]
+    fn a_tailnet_chat_message_is_the_third_kind() {
+        fresh();
+        let t0 = Instant::now();
+        let fp = std::ffi::CString::new("630dcd2966c433669112").unwrap();
+        unsafe { rs_msg_alert_set_viewing(2, fp.as_ptr()) };
+        assert!(!arrived_at(Transport::Tailnet, "630dcd2966c433669112", "laptop", "hi", t0),
+                "its conversation is on screen");
+        assert!(arrived_at(Transport::Tailnet, "0000dcd2966c43366911", "phone", "hello", t0));
+        assert_eq!(take(), Some((1, 2, "phone".into(), "hello".into())));
+        unsafe { rs_msg_alert_set_viewing(-1, std::ptr::null()) };
         fresh();
     }
 

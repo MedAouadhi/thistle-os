@@ -93,7 +93,7 @@ CASES = (
     # claimed both IDs, and the listing still showed the LVGL manifests. And
     # again when Podcasts joined, after the Reader, and Phone after Podcasts,
     # and File Transfer after Files, Tailscale after File Transfer,
-    # Hermes after Tailscale, and To-do after Notes; and once more when
+    # Hermes after Tailscale, To-do after Notes, and Chat after Hermes; and once more when
     # Notes, Weather, WiFi Scanner and Flashlight moved to the App Store.
     Case(
         "lcd-apps",
@@ -102,7 +102,7 @@ CASES = (
         "160,222",
         320,
         240,
-        "ab2a8a9b400ebbff920355945299c673c145d733b96e31e336be534d3f86a078",
+        "135e81813cc7b51b03ca9178b4e57ec58bfa2d68f6fc4b47c9240d307255477f",
     ),
     # What an e-paper board boots by default: the LVGL grid, three columns
     # wide on a 240 px screen. Its first hash had the tile under the tap
@@ -119,7 +119,7 @@ CASES = (
         "120,302",
         240,
         320,
-        "fe9059687742eadd252f259398d26727ba84f14cc19d18c5933d19c62f5223b4",
+        "45691a0ed58fe01004b4e74413a75b34ff73870779469e4dcf550b631e5d9f08",
     ),
 )
 

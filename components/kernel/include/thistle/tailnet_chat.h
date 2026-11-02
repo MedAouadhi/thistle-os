@@ -15,6 +15,14 @@
  * address with another key is refused and the contact flagged, until the
  * user accepts the new key in its place.
  *
+ * A contact's messages are sent through an outbox: delivered at once if it
+ * is connected, else dialled for, again on a backoff of 30 s doubling to 30
+ * minutes, until acked. Delivered and read receipts, typing, replies and
+ * reactions go both ways. A message received buzzes, pops up and counts as
+ * unread (tailnet_chat_unread_count(), the status bar's envelope and Home's
+ * row) until read, unless its conversation is on screen
+ * (tailnet_chat_set_viewing()).
+ *
  * Keys are passed as 64 lowercase hex digits. Every call returns at once;
  * tailnet_chat_generation() changes whenever anything shown here does, so a
  * screen redraws only then. Implemented in
@@ -53,6 +61,8 @@ typedef struct {
     uint16_t requests;
     uint16_t connections;      /* chat peers connected now */
     uint32_t generation;
+    bool     read_receipts;    /* reading sends read receipts */
+    uint32_t unread;           /* messages from contacts not yet read */
 } tailnet_chat_status_t;
 
 typedef struct {
@@ -64,6 +74,10 @@ typedef struct {
     char   flagged_fingerprint[25];  /* that key's */
     bool   connected;
     int8_t accepted_by_them;         /* -1 not known, 0 declined, 1 accepted */
+    bool   pending;                  /* added by address, never reached: key is a placeholder */
+    uint16_t unread;                 /* its messages not yet read */
+    uint16_t waiting;                /* in the outbox for it */
+    bool   typing;                   /* it says it is typing */
 } tailnet_chat_contact_t;
 
 typedef struct {
@@ -78,7 +92,10 @@ typedef struct {
     char     id[33];
     bool     mine;
     uint64_t ts;             /* when written, ms since 1970, the writer's clock */
-    char     state[12];      /* "received"; for one sent, "waiting", "delivered", "read" */
+    char     state[12];      /* "received" or "read"; for one sent, "waiting", "delivered", "read" */
+    char     reply_to[33];   /* the id it answers, or "" */
+    char     react_me[33];   /* this device's reaction, an emoji, or "" */
+    char     react_them[33]; /* the contact's */
 } tailnet_chat_message_t;
 
 uint32_t  tailnet_chat_generation(void);
@@ -95,6 +112,48 @@ esp_err_t tailnet_chat_get_request(int index, tailnet_chat_request_t *out);
 int       tailnet_chat_message_count(const char *key);
 esp_err_t tailnet_chat_get_message(const char *key, int index, tailnet_chat_message_t *out,
                                    char *text, size_t text_len);
+
+/* The text of message id of contact key, if it is among the 20 kept:
+ * what a reply quotes. ESP_ERR_NOT_FOUND otherwise. */
+esp_err_t tailnet_chat_find_message(const char *key, const char *id, bool *mine,
+                                    char *text, size_t text_len);
+
+/* Message `index` held by the contact request from key, oldest first. */
+esp_err_t tailnet_chat_get_held(const char *key, int index, char *text, size_t text_len);
+
+/* Send text (1 to 4096 bytes) to contact key, as a reply to reply_to if it
+ * is not NULL or "": shown at once as waiting, delivered through the
+ * outbox. Its id into id_out (33 bytes) if not NULL. */
+esp_err_t tailnet_chat_send_text(const char *key, const char *text, const char *reply_to, char *id_out);
+
+/* React to message `message` of contact key with emoji (at most 32 bytes),
+ * "" to remove this device's reaction; delivered like a message. */
+esp_err_t tailnet_chat_react(const char *key, const char *message, const char *emoji);
+
+/* The user read what contact key sent: a read receipt goes, if allowed. */
+esp_err_t tailnet_chat_mark_read(const char *key);
+
+/* The user is typing to contact key, or stopped: sent if it is connected,
+ * never queued. Repeat true every 4 s while typing goes on; it lapses
+ * after 6 s at the other end. */
+esp_err_t tailnet_chat_set_typing(const char *key, bool on);
+bool      tailnet_chat_is_typing(const char *key);
+
+/* The conversation on screen, NULL for none: its messages are read as they
+ * arrive and alert nothing. */
+void      tailnet_chat_set_viewing(const char *key);
+
+/* Whether reading sends read receipts (thistle_os.tailnet_chat.read_receipts). */
+bool      tailnet_chat_read_receipts(void);
+esp_err_t tailnet_chat_set_read_receipts(bool on);
+
+/* Messages received from contacts and not yet read. */
+uint32_t  tailnet_chat_unread_count(void);
+
+/* Add a contact by its tailnet name or address and port (0: 4810); its key
+ * is pinned when it is first reached. The key it goes by until then into
+ * key_out (65 bytes) if not NULL. */
+esp_err_t tailnet_chat_add_contact(const char *host, uint16_t port, const char *name, char *key_out);
 
 /* A contact request: ESP_ERR_NOT_FOUND if there is none from key. */
 esp_err_t tailnet_chat_accept(const char *key);

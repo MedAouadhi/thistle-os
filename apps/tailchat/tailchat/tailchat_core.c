@@ -7,7 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#define ELLIPSIS "\xe2\x80\xa6"
+#define ELLIPSIS "..."  /* Montserrat has no U+2026 */
 
 /* The bytes of the UTF-8 character starting with `c`. */
 static size_t char_len(unsigned char c)
@@ -93,4 +93,83 @@ const char *tailchat_answer_text(int8_t accepted_by_them)
     if (accepted_by_them > 0) return "Accepted this device";
     if (accepted_by_them == 0) return "Declined this device";
     return "";
+}
+
+#define SEP ", "
+
+const char *const tailchat_reactions[TAILCHAT_REACTIONS] = {
+    "\xf0\x9f\x91\x8d",          /* thumbs up */
+    "\xe2\x9d\xa4\xef\xb8\x8f",  /* red heart */
+    "\xf0\x9f\x98\x82",          /* tears of joy */
+    "\xf0\x9f\x8e\x89",          /* party popper */
+};
+
+const char *tailchat_emoji_label(const char *emoji)
+{
+    static const struct {
+        const char *emoji;
+        const char *label;
+    } known[] = {
+        {"\xf0\x9f\x91\x8d", "+1"},     {"\xe2\x9d\xa4", "<3"},
+        {"\xf0\x9f\x98\x82", "haha"},   {"\xf0\x9f\x8e\x89", "yay"},
+        {"\xf0\x9f\x98\xae", "wow"},    {"\xf0\x9f\x98\xa2", "sad"},
+        {"\xf0\x9f\x99\x8f", "thanks"}, {"\xf0\x9f\x91\x8e", "-1"},
+    };
+    if (!emoji || !emoji[0]) return "";
+    for (size_t i = 0; i < sizeof known / sizeof known[0]; i++) {
+        /* A heart with or without its variation selector */
+        if (strncmp(emoji, known[i].emoji, strlen(known[i].emoji)) == 0) return known[i].label;
+    }
+    return "*";
+}
+
+static const char *state_text(const char *state)
+{
+    if (!state) return "";
+    if (strcmp(state, "waiting") == 0) return "Waiting";
+    if (strcmp(state, "delivered") == 0) return "Delivered";
+    if (strcmp(state, "read") == 0) return "Read";
+    return "";
+}
+
+void tailchat_bubble(char *out, size_t n, const tailchat_bubble_t *b, size_t max_chars)
+{
+    if (!out || n == 0) return;
+    out[0] = '\0';
+    if (!b) return;
+    const char *name = b->name ? b->name : "";
+    size_t at = 0;
+#define PUT(...)                                                  \
+    do {                                                          \
+        if (at < n) {                                             \
+            int w_ = snprintf(out + at, n - at, __VA_ARGS__);     \
+            at += w_ > 0 ? (size_t)w_ : 0;                        \
+        }                                                         \
+    } while (0)
+
+    char line[512];
+    if (b->quote && b->quote[0]) {
+        tailchat_one_line(line, sizeof line, b->quote, 30);
+        PUT("> %s: %s\n", b->quote_mine ? "You" : name, line);
+    } else if (b->quoted) {
+        PUT("> an earlier message\n");
+    }
+    tailchat_one_line(line, sizeof line, b->text, max_chars);
+    PUT("%s: %s", b->mine ? "You" : name, line);
+
+    const char *sep = "\n";
+    const char *st = b->mine ? state_text(b->state) : "";
+    if (st[0]) {
+        PUT("%s%s", sep, st);
+        sep = SEP;
+    }
+    if (b->react_them && b->react_them[0]) {
+        PUT("%s%s %s", sep, name, tailchat_emoji_label(b->react_them));
+        sep = SEP;
+    }
+    if (b->react_me && b->react_me[0]) {
+        PUT("%sYou %s", sep, tailchat_emoji_label(b->react_me));
+    }
+#undef PUT
+    if (at >= n) out[n - 1] = '\0';
 }

@@ -594,6 +594,15 @@ fn peers() -> Vec<Peer> {
     .unwrap_or_default()
 }
 
+/// The address of the tailnet peer called `name`, from the tailnet's map,
+/// never DNS; None while not connected or for no such peer.
+pub(crate) fn resolve_peer(name: &str) -> Option<std::net::Ipv4Addr> {
+    match platform::resolve(name) {
+        0 => None,
+        ip => Some(std::net::Ipv4Addr::from(ip)),
+    }
+}
+
 /// The tailnet hostname of the peer at `ip`, its first label ("homelab"),
 /// while connected and the peer is in the list last seen.
 pub(crate) fn peer_name(ip: std::net::Ipv4Addr) -> Option<String> {
