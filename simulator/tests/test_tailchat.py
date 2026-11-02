@@ -20,7 +20,10 @@ functions the app's C API does.
   the module's own file, and a request waiting on the card is read back;
 - the app: the Requests screen shows a request read back from the card,
   Accept from it makes the sender a contact, and the app says why chat is
-  unavailable when Tailscale is off.
+  unavailable when Tailscale is off;
+- discovery: Look for chat peers among the pretend tailnet's peers
+  (THISTLE_SIM_TAILNET_PEERS=NAME=IP,...), two reference chat peers on
+  127.0.0.2 and 127.0.0.3, and Add from its list.
 
 Coordinates are the T-Deck Max's (240 x 320); taps start 2.25 s after
 startup and come 1.5 s apart.
@@ -67,6 +70,10 @@ ADD = "30,219"
 # first button.
 CONTACT_ROW = "120,72"
 MESSAGE = "48,206"
+# On the contacts page with no contacts or one, Look for chat peers; on the
+# page it opens, the first chat peer found.
+LOOK = "88,271"
+FIRST_FOUND = "120,138"
 
 
 def free_port() -> int:
@@ -124,13 +131,13 @@ class Device:
     def log_text(self) -> str:
         return self.log_path.read_text(errors="replace")
 
-    def run(self, args: list[str], timeout_ms: int, screenshot: Optional[Path] = None) -> str:
+    def run(self, args: list[str], timeout_ms: int, screenshot: Optional[Path] = None, **env) -> str:
         """A run of its own with taps, to its end: its log."""
         command = [str(self.simulator), "--headless", "--device", "tdeck-max",
                    "--timeout", str(timeout_ms), *args]
         if screenshot:
             command += ["--screenshot", str(screenshot)]
-        result = subprocess.run(command, env=self.env(THISTLE_SIM_CHAT_PORT=free_port()), text=True,
+        result = subprocess.run(command, env=self.env(**{"THISTLE_SIM_CHAT_PORT": free_port(), **env}), text=True,
                                 capture_output=True, check=False, timeout=90)
         log = result.stdout + result.stderr
         if result.returncode != 0:
@@ -853,6 +860,81 @@ def case_no_history(simulator: Path, root: Path) -> None:
         dev.stop()
 
 
+def case_app_discovery(simulator: Path, root: Path) -> None:
+    """Ticket 13: Look for chat peers probes the simulator's tailnet peers,
+    two reference chat peers, a port that answers HTTP and the simulator
+    itself, lists the two, and adds the first by the address it answered
+    on, its key pinned at the first handshake. A probe leaves nothing on
+    the side probed."""
+    port = free_port()
+    dev = Device(simulator, root, "discovery")
+    system_path = dev.card / "config" / "system.json"
+    system = json.loads(system_path.read_text())
+    system.get("thistle_os", system)["tailnet_chat"] = {"port": port}
+    system_path.write_text(json.dumps(system, indent=2))
+    alice = ChatPeer(name="alice-laptop", host="127.0.0.2", port=port).start()
+    bob = ChatPeer(name="bob-desktop", host="127.0.0.3", port=port).start()
+    stop = threading.Event()
+
+    def not_chat() -> None:
+        with socket.socket() as srv:
+            srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            srv.bind(("127.0.0.4", port))
+            srv.listen()
+            srv.settimeout(0.2)
+            while not stop.is_set():
+                try:
+                    c, _ = srv.accept()
+                except OSError:
+                    continue
+                with c:
+                    c.sendall(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+
+    printer = threading.Thread(target=not_chat, daemon=True)
+    printer.start()
+    peers = "alice=127.0.0.2,bob=127.0.0.3,printer=127.0.0.4,thistle-sim=127.0.0.1"
+    try:
+        shot = root / "discovery.ppm"
+        log = dev.run(["--launch-app", APP, "--tap", TAB_CONTACTS, "--tap", LOOK, "--tap", "wait",
+                       "--tap", "wait"], 9000, shot, THISTLE_SIM_TAILNET_PEERS=peers, THISTLE_SIM_CHAT_PORT=port)
+        for line in ("[tailnet_chat] looking for chat peers: 3 of 4 tailnet peers to ask",
+                     f"alice.tail-sim.ts.net at 127.0.0.2:{port} is a chat peer: alice-laptop {alice.fingerprint}",
+                     f"bob.tail-sim.ts.net at 127.0.0.3:{port} is a chat peer: bob-desktop {bob.fingerprint}",
+                     f"printer.tail-sim.ts.net at 127.0.0.4:{port}: no chat peer answered",
+                     "found 2 chat peers among 3 tailnet peers",
+                     f"(tailchat) found alice-laptop (alice) {alice.fingerprint}",
+                     f"(tailchat) found bob-desktop (bob) {bob.fingerprint}",
+                     "(tailchat) page find: done, 3 of 3 asked, 2 rows"):
+            assert line in log, f"no {line!r} in the log:\n{log[-3000:]}"
+        assert ppm_has_text(shot), "the chat peers found are not shown"
+        # Probed only: no handshake, nothing held.
+        assert not [e for e in alice.events + bob.events if e[0] in ("connected", "contact request")], \
+            alice.events + bob.events
+        assert not alice.requests and not bob.requests
+
+        # Add the first: by the address it answered on, pinned when reached.
+        log = dev.run(["--launch-app", APP, "--tap", TAB_CONTACTS, "--tap", LOOK, "--tap", "wait",
+                       "--tap", "wait", "--tap", FIRST_FOUND, "--tap", "wait", "--tap", "wait"], 12000,
+                      THISTLE_SIM_TAILNET_PEERS=peers, THISTLE_SIM_CHAT_PORT=port)
+        for line in (f"[tailnet_chat] added alice-laptop at 127.0.0.2:{port}",
+                     "(tailchat) added alice-laptop, found on the tailnet",
+                     f"pinned alice-laptop as {alice.fingerprint}"):
+            assert line in log, f"no {line!r} in the log:\n{log[-3000:]}"
+        saved = json.loads((dev.spiffs / "tailnet_chat.json").read_text())
+        assert [(c["name"], c["key"]) for c in saved["contacts"]] == [("alice-laptop", alice.key_hex)], saved
+        # Looking again, the contact is left out.
+        shot2 = root / "discovery-again.ppm"
+        log = dev.run(["--launch-app", APP, "--tap", TAB_CONTACTS, "--tap", LOOK, "--tap", "wait",
+                       "--tap", "wait"], 9000, shot2, THISTLE_SIM_TAILNET_PEERS=peers, THISTLE_SIM_CHAT_PORT=port)
+        assert "(tailchat) page find: done, 3 of 3 asked, 1 rows" in log, log[-3000:]
+        assert "(tailchat) found bob-desktop" in log and "(tailchat) found alice-laptop" not in log, log[-3000:]
+        assert not bob.requests
+    finally:
+        stop.set()
+        alice.stop()
+        bob.stop()
+
+
 CASES: list[tuple[str, Callable[[Path, Path], None]]] = [
     ("conformance", case_conformance),
     ("card-and-restart", case_card_and_restart),
@@ -862,6 +944,7 @@ CASES: list[tuple[str, Callable[[Path, Path], None]]] = [
     ("app-conversation", case_app_conversation),
     ("voice", case_voice),
     ("app-add-contact", case_app_add_contact),
+    ("app-discovery", case_app_discovery),
     ("calls", case_calls),
     ("caps", case_caps),
     ("no-history", case_no_history),

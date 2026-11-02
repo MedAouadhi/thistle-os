@@ -61,6 +61,10 @@ use crate::tailnet_call_policy::{self as call_policy, Answer, Call, LogKind, Pha
 use crate::tailnet_chat_policy::{self as policy, Book, ConnClock, ConnDue, Dial, DialCandidate, Outbox, Outgoing, RecentIds, Retry, Seen, Trust};
 use crate::tailnet_chat_wire::{self as wire, ErrorFrame, Key, Role, Upgrade, Upgraded, WsEvent, WsReader};
 
+// Looking for chat peers on the tailnet when the app asks.
+#[path = "tailnet_chat_discovery.rs"]
+mod discovery;
+
 const SECTION: &str = "tailnet_chat";
 
 const ESP_OK: i32 = 0;

@@ -949,8 +949,9 @@ mod platform {
 /// - `approval`: as `login`, then waiting as long again for an admin;
 /// - `refuse`: the registration is refused.
 ///
-/// The peers are two made up, or the host's own with
-/// THISTLE_SIM_TAILNET_PEERS=host, from `tailscale status --json`. Whether
+/// The peers are two made up, the host's own with
+/// THISTLE_SIM_TAILNET_PEERS=host, from `tailscale status --json`, or a
+/// list, THISTLE_SIM_TAILNET_PEERS=NAME=IP[:offline],... (peers_in_list). Whether
 /// the device has joined is a file in the simulator's SPIFFS, so that it
 /// survives a restart.
 #[cfg(not(target_os = "espidf"))]
@@ -1090,8 +1091,12 @@ mod platform {
     }
 
     fn peers() -> Vec<super::Peer> {
-        if env("THISTLE_SIM_TAILNET_PEERS") == "host" {
+        let list = env("THISTLE_SIM_TAILNET_PEERS");
+        if list == "host" {
             return host_peers().map(|(_, p)| p).unwrap_or_default();
+        }
+        if list.contains('=') {
+            return peers_in_list(&list);
         }
         let peer = |ip, name: &str, direct| super::Peer { ip, name: name.to_string(), direct, online: true };
         let mut list = vec![
@@ -1111,6 +1116,24 @@ mod platform {
             list.push(p);
         }
         list
+    }
+
+    /// THISTLE_SIM_TAILNET_PEERS=NAME=IP[:offline],...: these peers in
+    /// place of the two made up, such as test chat peers on loopback
+    /// addresses (127.0.0.2, 127.0.0.3). An entry it cannot read is left out.
+    pub(super) fn peers_in_list(list: &str) -> Vec<super::Peer> {
+        list.split(',')
+            .filter_map(|entry| {
+                let (name, at) = entry.trim().split_once('=')?;
+                let (at, online) = match at.strip_suffix(":offline") {
+                    Some(a) => (a, false),
+                    None => (at, true),
+                };
+                let name = name.trim();
+                (!name.is_empty()).then_some(())?;
+                Some(super::Peer { ip: parse_ip(at.trim())?, name: format!("{name}.tail-sim.ts.net"), direct: true, online })
+            })
+            .collect()
     }
 
     fn parse_ip(s: &str) -> Option<u32> {
@@ -1204,6 +1227,19 @@ mod tests {
             vec![
                 Peer { ip: 0x647d_cc2b, name: "homelab.tail1234.ts.net".into(), direct: true, online: true },
                 Peer { ip: 0x645c_0965, name: "pixel-8.tail1234.ts.net".into(), direct: false, online: false },
+            ]
+        );
+    }
+
+    #[test]
+    fn the_simulator_takes_its_peers_from_a_list() {
+        let peers = platform::peers_in_list("alice=127.0.0.2, bob=127.0.0.3:offline,printer=127.0.0.4,bad=1.2.3,=127.0.0.5");
+        assert_eq!(
+            peers,
+            vec![
+                Peer { ip: 0x7f00_0002, name: "alice.tail-sim.ts.net".into(), direct: true, online: true },
+                Peer { ip: 0x7f00_0003, name: "bob.tail-sim.ts.net".into(), direct: true, online: false },
+                Peer { ip: 0x7f00_0004, name: "printer.tail-sim.ts.net".into(), direct: true, online: true },
             ]
         );
     }

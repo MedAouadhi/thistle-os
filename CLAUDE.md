@@ -426,6 +426,21 @@ switch (`AUDIO_SEL`, XL9555 P12, HIGH = modem). ADR-0008 has the reasons,
   own task (20 KB internal stack, Opus) `tailnet_call.rs`. The simulator's
   `THISTLE_SIM_SPEAKER=FILE.wav` gets everything played;
   `test_tailchat.py --only calls`.
+- **The Chat app looks for chat peers only when asked** (ticket 13 of
+  `.scratch/tailnet-chat/`): Contacts → Look for chat peers probes each
+  online peer of the tailnet's list the kernel keeps
+  (`tailnet_manager::peers()`), less this device, at most 24, on the chat
+  port with a hello, and lists those that answer, less this device and
+  the contacts (`tailnet_chat_policy::to_probe`, `to_show`). A probe is a
+  dial, a hello each way and a close, with no `auth`, so the side probed
+  holds nothing. The probes go one after another, 3 s at most for each
+  connect and each hello, on a task of their own (`chat_look`, 8 KB
+  internal stack, `tailnet_chat_discovery.rs`), the device held awake
+  meanwhile. Add adds one as Add contact does, by the address it answered
+  on, its key pinned at the first handshake. The simulator's
+  `THISTLE_SIM_TAILNET_PEERS=NAME=IP,...` lists its pretend peers, such as
+  reference chat peers on 127.0.0.2 and 127.0.0.3;
+  `test_tailchat.py --only app-discovery`.
 
 ### The clock
 
@@ -784,8 +799,9 @@ client.
 - The simulator's client is pretend (`THISTLE_SIM_TAILNET` = `login`,
   `approval` or `refuse`; `THISTLE_SIM_TAILNET_LOGIN_S`;
   `THISTLE_SIM_TAILNET_PEERS=host` takes the host's own peers from
-  `tailscale status --json`); whether it has joined is a file in
-  `THISTLE_SIM_SPIFFS`. `simulator/tests/test_tailscale.py`.
+  `tailscale status --json`, `NAME=IP[:offline],...` lists them); whether
+  it has joined is a file in `THISTLE_SIM_SPIFFS`.
+  `simulator/tests/test_tailscale.py`.
 
 ### Hermes
 

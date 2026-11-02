@@ -71,6 +71,7 @@ typedef enum {
     PAGE_CONTACT,
     PAGE_REQUEST,
     PAGE_ADD,
+    PAGE_FIND,
 } page_t;
 
 /* What a page reads from the kernel, in PSRAM while the app is open. */
@@ -324,6 +325,7 @@ static page_t parent_of(page_t page)
     case PAGE_CONTACT:      return PAGE_CONTACTS;
     case PAGE_REQUEST:      return PAGE_REQUESTS;
     case PAGE_ADD:          return PAGE_CONTACTS;
+    case PAGE_FIND:         return PAGE_CONTACTS;
     default:                return page;
     }
 }
@@ -343,6 +345,8 @@ static void tab_cb(lv_event_t *e)
 
 static void choose_message(const char *id);
 static void fill_conversation(void);
+static void add_found(const char *key);
+static bool find_contact(const char *key, tailnet_chat_contact_t *out);
 
 /* The list row chosen: by a tap or Enter, not the selection moving. */
 static void table_cb(lv_event_t *e)
@@ -357,6 +361,10 @@ static void table_cb(lv_event_t *e)
     if (row >= (uint32_t)s_ui.rows) return;
     if (s_ui.page == PAGE_CONVERSATION) {
         choose_message(s_ui.store->ids[row]);
+        return;
+    }
+    if (s_ui.page == PAGE_FIND) {
+        add_found(s_ui.store->keys[row]);
         return;
     }
     page_t to = s_ui.page == PAGE_CHATS ? PAGE_CONVERSATION
@@ -457,6 +465,14 @@ static void check_cb(lv_event_t *e)
     go(PAGE_CONTACTS, NULL);
 }
 
+static void look_cb(lv_event_t *e);
+
+static void find_page_cb(lv_event_t *e)
+{
+    look_cb(e);
+    go(PAGE_FIND, NULL);
+}
+
 static void show_contacts(void)
 {
     int n = tailnet_chat_contact_count();
@@ -478,6 +494,7 @@ static void show_contacts(void)
     button(row, on ? "Read receipts: on" : "Read receipts: off", receipts_cb);
     char text[48];
     button(row, tailchat_check_label(tailnet_chat_check_minutes(), text, sizeof text), check_cb);
+    button(row, "Look for chat peers", find_page_cb);
 }
 
 static lv_obj_t *one_line_field(const char *placeholder, uint32_t max, lv_event_cb_t ready)
@@ -524,6 +541,77 @@ static void show_add(void)
     button(button_row(s_ui.body), "Add", add_cb);
     lv_group_t *group = lv_group_get_default();
     if (group) lv_group_focus_obj(s_ui.field);
+}
+
+/* ------------------------------------------------------------------ */
+/* Looking for chat peers on the tailnet                               */
+/* ------------------------------------------------------------------ */
+
+static void look_cb(lv_event_t *e)
+{
+    (void)e;
+    esp_err_t err = tailnet_chat_discover();
+    if (err != ESP_OK) {
+        ESP_LOGI(TAG, "could not look for chat peers: error 0x%x", (unsigned)err);
+        toast_warn("Chat is not on the tailnet yet");
+    }
+}
+
+static void look_again_cb(lv_event_t *e)
+{
+    look_cb(e);
+    go(PAGE_FIND, NULL);
+}
+
+static void add_found(const char *key)
+{
+    char added[65];
+    esp_err_t err = tailnet_chat_add_found(key, added);
+    if (err != ESP_OK) {
+        ESP_LOGI(TAG, "could not add the chat peer found: error 0x%x", (unsigned)err);
+        toast_warn(err == ESP_ERR_NO_MEM ? "Too many contacts" : "Could not add the contact");
+        return;
+    }
+    tailnet_chat_contact_t *c = &s_ui.store->contact;
+    if (find_contact(added, c)) ESP_LOGI(TAG, "added %s, found on the tailnet", c->name);
+    toast_info("Added; its key is pinned when it is first reached");
+    go(PAGE_CONTACT, added);
+}
+
+static void show_find(void)
+{
+    label(s_ui.body, "Chat peers on the tailnet", &s_styles.title);
+    tailnet_chat_discovery_t d = {0};
+    tailnet_chat_get_discovery(&d);
+    int n = tailnet_chat_found_count();
+    if (d.looking) {
+        snprintf(s_ui.store->row, sizeof s_ui.store->row, "Looking: %u of %u tailnet peers asked.",
+                 (unsigned)d.probed, (unsigned)d.peers);
+    } else if (!d.looked) {
+        snprintf(s_ui.store->row, sizeof s_ui.store->row, "Not looked yet.");
+    } else if (n == 0) {
+        snprintf(s_ui.store->row, sizeof s_ui.store->row,
+                 "No new chat peer answered among %u tailnet peers online. A peer whose tailnet "
+                 "policy keeps port 4810 closed does not answer.", (unsigned)d.peers);
+    } else {
+        snprintf(s_ui.store->row, sizeof s_ui.store->row, "Tap one to add it as a contact.");
+    }
+    label(s_ui.body, s_ui.store->row, &s_styles.note);
+    if (n > 0) s_ui.table = make_table(n < ROWS_MAX ? n : ROWS_MAX, true);
+    tailnet_chat_found_t f;
+    char detail[96];
+    for (int i = 0; i < n && s_ui.rows < ROWS_MAX; i++) {
+        if (tailnet_chat_get_found(i, &f) != ESP_OK) continue;
+        snprintf(detail, sizeof detail, "%s, %s", f.tailnet_name, f.fingerprint);
+        tailchat_row(s_ui.store->row, sizeof s_ui.store->row, f.name, detail, DETAIL_MAX);
+        lv_table_set_cell_value(s_ui.table, (uint32_t)s_ui.rows, 0, s_ui.store->row);
+        memcpy(s_ui.store->keys[s_ui.rows++], f.key, 65);
+        ESP_LOGI(TAG, "found %s (%s) %s", f.name, f.tailnet_name, f.fingerprint);
+    }
+    if (s_ui.table) lv_table_set_row_count(s_ui.table, (uint32_t)s_ui.rows);
+    if (!d.looking) button(button_row(s_ui.body), "Look again", look_again_cb);
+    ESP_LOGI(TAG, "page find: %s, %u of %u asked, %d rows", d.looking ? "looking" : "done",
+             (unsigned)d.probed, (unsigned)d.peers, s_ui.rows);
 }
 
 static void show_requests(void)
@@ -1054,7 +1142,8 @@ static void show_request(void)
 
 static const char *page_name(page_t p)
 {
-    static const char *names[] = {"chats", "contacts", "requests", "conversation", "contact", "request", "add"};
+    static const char *names[] = {"chats", "contacts", "requests", "conversation", "contact", "request", "add",
+                                  "find"};
     return names[p];
 }
 
@@ -1111,6 +1200,7 @@ static void show_page(void)
     case PAGE_CONTACT:      show_contact(); break;
     case PAGE_REQUEST:      show_request(); break;
     case PAGE_ADD:          show_add(); break;
+    case PAGE_FIND:         show_find(); break;
     }
     if (s_ui.page <= PAGE_REQUESTS) {
         ESP_LOGI(TAG, "page %s: %d rows", page_name(s_ui.page), s_ui.rows);
