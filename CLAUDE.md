@@ -717,7 +717,7 @@ client.
 
 - **The client is MicroLink**, from `MedAouadhi/microlink` branch
   `thistle`, pinned by commit in `components/kernel/idf_component.yml`, S3
-  only. The fork is the one hermes_esp32 pins plus eleven commits; read them
+  only. The fork is the one hermes_esp32 pins plus twelve commits; read them
   before moving the pin, and delete `dependencies.lock` when you do (which
   also lets other components move: put back what you did not mean to).
   Decisions are in `tailnet_policy.rs`, the running of them in
