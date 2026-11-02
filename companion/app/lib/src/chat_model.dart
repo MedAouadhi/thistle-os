@@ -14,8 +14,10 @@ import 'package:flutter/foundation.dart';
 import 'package:tailnet_chat_core/tailnet_chat_core.dart';
 
 import 'background.dart';
+import 'audio/devices.dart';
 import 'notifier.dart';
 import 'permissions.dart';
+import 'talk.dart';
 import 'tailnet.dart';
 
 /// `host`, `host:port`, `[v6]:port` or a bare IPv6 address.
@@ -50,7 +52,9 @@ class ChatModel extends ChangeNotifier {
     this.log,
     this.background,
     this.permissions,
-  }) : notifier = notifier ?? _Silent();
+    AudioDevices? audio,
+  }) : notifier = notifier ?? _Silent(),
+       audio = audio ?? NoAudioDevices('no audio devices given');
 
   final Identity identity;
   final Store Function() openStore;
@@ -74,6 +78,24 @@ class ChatModel extends ChangeNotifier {
 
   /// Android's runtime permissions; null on Linux, which asks for none.
   final Permissions? permissions;
+
+  /// The microphone and speaker: PulseAudio/PipeWire on Linux, or files.
+  final AudioDevices audio;
+
+  /// Voice messages and calls.
+  late final Talk talk = Talk(
+    peer: () => _peer,
+    audio: audio,
+    notifier: notifier,
+    foreground: () => _foreground,
+    changed: () {
+      if (!_closed) notifyListeners();
+    },
+    sendVoice: sendVoice,
+    callee: (box) => _who(_contact(box)),
+    permissions: permissions,
+    log: log,
+  );
 
   TailscaleStatus status = const TailscaleStatus(TailnetState.starting);
   late ChatPeer _peer = _newPeer('127.0.0.1');
@@ -111,6 +133,7 @@ class ChatModel extends ChangeNotifier {
       host: host,
       port: port,
       loopback: loopback,
+      callPolicy: CallPolicy.ignore, // calls ring for the user
       log: log,
     );
     _events = p.events.listen(_onEvent);
@@ -170,6 +193,7 @@ class ChatModel extends ChangeNotifier {
   Future<void> _background = Future.value();
 
   Future<void> close() async {
+    await talk.close();
     _closed = true;
     _refresh?.cancel();
     _tick?.cancel();
@@ -229,10 +253,7 @@ class ChatModel extends ChangeNotifier {
           }
         }
       case 'call':
-        final call = e.id == null ? null : _peer.calls[e.id!];
-        if (call != null && !call.mine && call.state == 'ringing' && !_foreground) {
-          unawaited(notifier.show('Call from ${_peer.contact(call.peer)?.name ?? 'a contact'}', 'Ringing'));
-        }
+        talk.onCallEvent(e);
       case 'unreachable':
         if (e.key != null) unreachable[e.key!] = e.detail ?? 'unreachable';
       case 'connected':
@@ -381,6 +402,13 @@ class ChatModel extends ChangeNotifier {
     return id;
   }
 
+  /// Send a recorded Ogg/Opus voice message of `ms` milliseconds.
+  String sendVoice(String box, Uint8List oggOpus, int ms) {
+    final id = _peer.sendVoice(_who(_contact(box)), oggOpus, ms);
+    notifyListeners();
+    return id;
+  }
+
   /// React to a message; '' removes our reaction.
   void react(String box, String messageId, String emoji) {
     _peer.react(_who(_contact(box)), messageId, emoji);
@@ -438,4 +466,8 @@ class ChatModel extends ChangeNotifier {
 class _Silent implements Notifier {
   @override
   Future<void> show(String title, String body, {String? conversation}) async {}
+  @override
+  Future<void> ringing(String caller, String callId) async {}
+  @override
+  Future<void> stopRinging(String callId) async {}
 }

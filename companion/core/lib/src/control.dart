@@ -106,8 +106,19 @@ Future<Object?> control(ChatPeer peer, Map<String, dynamic> command) async {
     case 'calls':
       return {
         for (final MapEntry(:key, :value) in peer.calls.entries)
-          key: {'peer': value.peer, 'state': value.state, 'frames': value.frames},
+          key: {
+            'peer': value.peer,
+            'state': value.state,
+            'frames': value.frames,
+            'mine': value.mine,
+            'missed': value.missed,
+          },
       };
+    case 'talk':
+      return true; // a connected call streams its microphone (the headless core's --mic) by itself
+    case 'answer_call':
+      peer.answerCall(command['call'] as String, decline: command['decline'] as String?);
+      return true;
     case 'end_call':
       peer.endCall(command['call'] as String, reason: (command['reason'] as String?) ?? 'hangup');
       return true;

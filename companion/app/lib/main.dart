@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -5,6 +6,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:tailnet_chat_core/tailnet_chat_core.dart';
 
 import 'src/android.dart';
+import 'src/audio/devices.dart';
 import 'src/chat_model.dart';
 import 'src/identity.dart';
 import 'src/notifier.dart';
@@ -12,6 +14,7 @@ import 'src/options.dart';
 import 'src/permissions.dart';
 import 'src/tailnet.dart';
 import 'src/ui/app.dart';
+import 'src/ui/call_page.dart';
 
 Future<void> main(List<String> args) async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -60,7 +63,20 @@ Future<void> main(List<String> args) async {
       final nav = navigator.currentState;
       if (box != null && nav != null) openConversation(nav, model, box);
     },
+    onCall: (id, answer) {
+      if (answer == true) unawaited(model.talk.answer(id));
+      if (answer == false) model.talk.decline(id);
+      final ctx = navigator.currentContext;
+      if (answer != false && ctx != null) showCall(ctx, model);
+    },
   );
+  // The microphone and speaker: audio files when asked (no sound card, a
+  // second instance, a test run), else PulseAudio/PipeWire on Linux.
+  final AudioDevices audio = options.mic != null || options.speakerDir != null
+      ? FileAudioDevices(mic: options.mic, speakerDir: options.speakerDir)
+      : android != null
+      ? NoAudioDevices('voice and calls are not on Android yet')
+      : PulseAudioDevices(configDir: dir.path, log: options.verbose ? stderr.writeln : null);
   await notifier.init();
   model = ChatModel(
     identity: identity,
@@ -69,6 +85,7 @@ Future<void> main(List<String> args) async {
     readStatus: readStatus,
     background: android,
     permissions: android == null ? null : Permissions(android),
+    audio: audio,
     notifier: notifier,
     listenHost: options.listenHost,
     port: options.port,

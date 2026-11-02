@@ -1,7 +1,10 @@
 import 'dart:async';
+import 'dart:math';
+import 'dart:typed_data';
 
 import 'package:tailnet_chat_core/tailnet_chat_core.dart';
 import 'package:thistle_chat/src/chat_model.dart';
+import 'package:thistle_chat/src/audio/devices.dart';
 import 'package:thistle_chat/src/background.dart';
 import 'package:thistle_chat/src/notifier.dart';
 import 'package:thistle_chat/src/permissions.dart';
@@ -23,8 +26,53 @@ class Shown {
 
 class RecordingNotifier implements Notifier {
   final List<Shown> shown = [];
+  final List<String> rang = [];
+  final List<String> stoppedRinging = [];
   @override
   Future<void> show(String title, String body, {String? conversation}) async => shown.add(Shown(title, body));
+  @override
+  Future<void> ringing(String caller, String callId) async => rang.add(caller);
+  @override
+  Future<void> stopRinging(String callId) async => stoppedRinging.add(callId);
+}
+
+Int16List _tone(int i) => Int16List.fromList([
+  for (var k = 0; k < samplesPerFrame; k++) (8000 * sin(2 * pi * 440 * (i * samplesPerFrame + k) / sampleRate)).round(),
+]);
+
+/// Audio devices for tests: a microphone that hears a 440 Hz tone, and
+/// speakers that keep what they play.
+class FakeAudio implements AudioDevices {
+  final List<Int16List> played = [];
+  final List<int> callOut = [];
+  int rings = 0;
+  bool callClosed = false;
+
+  @override
+  Future<Stream<Int16List>> recorder() async => pacedAudio(_tone);
+
+  @override
+  Future<AudioOut> player({bool ring = false}) async {
+    if (ring) {
+      rings++;
+      return NoAudioOut();
+    }
+    return _Kept((pcm) => played.add(pcm));
+  }
+
+  @override
+  Future<CallDevices> call() async =>
+      CallDevices(pacedAudio(_tone), _Kept(null, into: callOut), 'none (test)', () async => callClosed = true);
+}
+
+class _Kept implements AudioOut {
+  _Kept(this.onClose, {List<int>? into}) : _into = into ?? [];
+  final void Function(Int16List)? onClose;
+  final List<int> _into;
+  @override
+  void write(Int16List pcm) => _into.addAll(pcm);
+  @override
+  Future<void> close() async => onClose?.call(Int16List.fromList(_into));
 }
 
 class FakeService implements BackgroundService {
@@ -63,7 +111,9 @@ ChatModel testModel(
   BackgroundService? service,
   FakePermissions? permissions,
   String store = ':memory:',
+  AudioDevices? audio,
 }) => ChatModel(
+  audio: audio ?? FakeAudio(),
   identity: Identity.generate(),
   openStore: () => Store.open(store),
   background: service,

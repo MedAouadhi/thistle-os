@@ -146,5 +146,43 @@ void main() {
       expect(answer(policy: CallPolicy.decline).decline, 'declined');
       expect(answer(policy: CallPolicy.ignore).ringing, isTrue);
     });
+
+    group('when a call ends by itself', () {
+      final t0 = DateTime(2026, 11, 2, 12);
+      String? due(String state, {int sinceS = 0, int frameS = 0, int nowS = 0}) => callEndDue(
+        state: state,
+        since: t0.add(Duration(seconds: sinceS)),
+        lastFrame: t0.add(Duration(seconds: frameS)),
+        now: t0.add(Duration(seconds: nowS)),
+      );
+
+      test('a connected call ends after 10 s without a frame from the other side, not before', () {
+        expect(due('connected', frameS: 0, nowS: 10), isNull);
+        expect(due('connected', frameS: 0, nowS: 11), 'timeout');
+        expect(due('connected', sinceS: 0, frameS: 50, nowS: 59), isNull);
+      });
+
+      test('a call that rings unanswered for 45 s ends, on either side', () {
+        for (final state in ['offered', 'ringing']) {
+          expect(due(state, nowS: 45), isNull);
+          expect(due(state, nowS: 46), 'timeout', reason: state);
+        }
+      });
+
+      test('an ended or declined call has nothing more to end', () {
+        expect(due('ended:hangup', nowS: 1000), isNull);
+        expect(due('declined:busy', nowS: 1000), isNull);
+      });
+    });
+
+    test('an incoming call never answered is missed; one answered, declined by us, or ours is not', () {
+      expect(isMissedCall(mine: false, answered: false, state: 'ended:hangup'), isTrue);
+      expect(isMissedCall(mine: false, answered: false, state: 'ended:timeout'), isTrue);
+      expect(isMissedCall(mine: false, answered: false, state: 'declined:busy'), isTrue);
+      expect(isMissedCall(mine: false, answered: false, state: 'ringing'), isFalse);
+      expect(isMissedCall(mine: false, answered: false, state: 'declined:declined'), isFalse);
+      expect(isMissedCall(mine: false, answered: true, state: 'ended:hangup'), isFalse);
+      expect(isMissedCall(mine: true, answered: false, state: 'ended:timeout'), isFalse);
+    });
   });
 }

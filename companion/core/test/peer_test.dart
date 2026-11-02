@@ -3,6 +3,8 @@ import 'dart:io';
 import 'package:tailnet_chat_core/tailnet_chat_core.dart';
 import 'package:test/test.dart';
 
+import 'vectors.dart';
+
 /// Two companion cores on loopback, driven through ChatPeer's public API.
 
 Future<T> eventually<T>(
@@ -160,6 +162,55 @@ void main() {
     await bob.stop();
     final lost = await alice.call('bob');
     expect(alice.calls[lost]!.state, 'ended:unreachable');
+  });
+
+  test("call audio comes out on the other side, in order, under its call", () async {
+    await befriend(alice, bob);
+    final heard = <CallAudio>[];
+    final sub = bob.callAudio.listen(heard.add);
+    final heardByAlice = <CallAudio>[];
+    final sub2 = alice.callAudio.listen(heardByAlice.add);
+    final call = await alice.call('bob');
+    await eventually(() => alice.calls[call]!.state == 'connected', what: 'the answer');
+    final frames = [for (final f in vector('voice.json')['frames'] as List) fromHex(f['hex'] as String)];
+    for (var seq = 0; seq < 3; seq++) {
+      alice.sendCallAudio(call, seq, frames[seq]);
+    }
+    bob.sendCallAudio(call, 0, frames[3]);
+    await eventually(() => heard.length == 3 && heardByAlice.length == 1, what: 'the audio');
+    expect([for (final a in heard) a.seq], [0, 1, 2]);
+    expect(heard.every((a) => a.call == call), isTrue);
+    expect(heard[2].packet, frames[2]);
+    expect(heardByAlice.single.packet, frames[3]);
+    expect(bob.calls[call]!.frames, 3);
+    await sub.cancel();
+    await sub2.cancel();
+  });
+
+  test('a call whose connection drops ends at once, as an error', () async {
+    await befriend(alice, bob);
+    final call = await alice.call('bob');
+    await eventually(() => alice.calls[call]!.state == 'connected', what: 'the answer');
+    await bob.stop();
+    await eventually(() => alice.calls[call]!.state == 'ended:error', what: 'the call to end');
+  });
+
+  test('an incoming call nobody answered is missed; an answered one is not', () async {
+    await befriend(alice, bob);
+    bob.callPolicy = CallPolicy.ignore;
+    final rang = await alice.call('bob');
+    await eventually(() => bob.calls[rang]?.state == 'ringing', what: 'the ring');
+    alice.endCall(rang);
+    await eventually(() => bob.calls[rang]!.state == 'ended:hangup', what: 'the end');
+    expect(bob.calls[rang]!.missed, isTrue);
+    final answered = await alice.call('bob');
+    await eventually(() => bob.calls[answered]?.state == 'ringing', what: 'the second ring');
+    bob.answerCall(answered);
+    await eventually(() => alice.calls[answered]!.state == 'connected', what: 'the answer');
+    bob.endCall(answered);
+    await eventually(() => alice.calls[answered]!.state == 'ended:hangup', what: 'the end');
+    expect(bob.calls[answered]!.missed, isFalse);
+    expect(alice.calls[answered]!.missed, isFalse);
   });
 
   test("a probe reads a chat peer's hello and leaves no request behind; nothing listening is null", () async {

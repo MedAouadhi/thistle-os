@@ -406,6 +406,22 @@ class TwoPeers(unittest.TestCase):
         second = self.alice.call("Bob")
         self.alice.wait_for(lambda: self.alice.calls[second]["state"] == "declined:busy")
 
+    def test_a_silent_call_is_ended_with_call_end_timeout_which_the_other_side_hears(self):
+        self.befriend()
+        self.bob.call_silence_s = 0.5
+        self.alice.call_silence_s = 60
+        call = self.alice.call("Bob")
+        self.alice.wait_for(lambda: self.alice.calls[call]["state"] == "connected")
+        self.alice.wait_for(lambda: self.alice.calls[call]["state"] == "ended:timeout", timeout=5)
+        self.assertEqual(self.bob.calls[call]["state"], "ended:timeout")
+
+    def test_a_cellular_call_ends_a_tailnet_call(self):
+        self.befriend()
+        call = self.alice.call("Bob")
+        self.alice.wait_for(lambda: self.alice.calls[call]["state"] == "connected")
+        self.bob.cellular_call()
+        self.alice.wait_for(lambda: self.alice.calls[call]["state"] == "ended:cellular")
+
     def test_a_call_to_an_unreachable_peer_fails_at_once(self):
         self.befriend()
         self.bob.stop()
