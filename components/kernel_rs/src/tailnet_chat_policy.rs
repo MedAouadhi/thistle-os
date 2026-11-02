@@ -96,6 +96,187 @@ pub fn shared_peers(online: &[SharedPeer], asker: Option<IpAddr>, contact: bool)
 }
 
 // ---------------------------------------------------------------------------
+// Discovery: which tailnet peers a look probes, which answers it shows
+// ---------------------------------------------------------------------------
+
+/// The most tailnet peers one look probes.
+pub const PROBE_MAX: usize = 24;
+/// How long a probe waits for its connect, and then for the hello.
+pub const PROBE_TIMEOUT_MS: u64 = 3_000;
+
+/// A tailnet peer as the platform lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProbePeer {
+    /// Its IPv4 tailnet address, in host byte order.
+    pub ip: u32,
+    /// Its tailnet hostname.
+    pub name: String,
+    pub online: bool,
+}
+
+/// A chat peer that answered a probe.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Found {
+    /// The key its hello announced, not proven.
+    pub key: Key,
+    /// Its hello's name.
+    pub name: String,
+    /// Its tailnet hostname.
+    pub tailnet_name: String,
+    /// Where it answered.
+    pub ip: IpAddr,
+    pub port: u16,
+}
+
+/// Which of `peers` a look probes: those online, less this device
+/// (`own_ip`), inside the tailnet's ranges (loopback too where `loopback`
+/// allows it), each address once, at most PROBE_MAX of them.
+pub fn to_probe(peers: &[ProbePeer], own_ip: u32, loopback: bool) -> Vec<usize> {
+    let mut chosen: Vec<usize> = Vec::new();
+    for (i, p) in peers.iter().enumerate() {
+        if chosen.len() >= PROBE_MAX {
+            break;
+        }
+        let ip = IpAddr::V4(std::net::Ipv4Addr::from(p.ip));
+        if p.online && p.ip != own_ip && admitted(ip, loopback) && !chosen.iter().any(|&j| peers[j].ip == p.ip) {
+            chosen.push(i);
+        }
+    }
+    chosen
+}
+
+/// What a probe heard in its first frame: a version 1 hello's key and
+/// name. Anything else is not a chat peer.
+pub fn heard(text: &[u8]) -> Option<(Key, String)> {
+    let frame = wire::check(text).ok()?;
+    if wire::frame_type(&frame) != "hello" || frame.get("version").and_then(|v| v.as_u64()) != Some(wire::VERSION) {
+        return None;
+    }
+    let key = wire::unhex::<32>(wire::str_of(&frame, "key"))?;
+    Some((key, wire::str_of(&frame, "name").to_string()))
+}
+
+/// Which of `found` the app shows: not this device (`own`), not a contact
+/// (by key, or one added at that address or tailnet name and not reached
+/// yet, whose key is a placeholder), each key once.
+pub fn to_show(found: &[Found], book: &Book, own: &Key) -> Vec<usize> {
+    let added_there = |f: &Found| {
+        let short = f.tailnet_name.split('.').next().unwrap_or("");
+        book.contacts.iter().any(|c| {
+            c.pending
+                && c.dial.as_ref().is_some_and(|d| {
+                    d.port == f.port
+                        && (d.host.parse::<IpAddr>().ok() == Some(f.ip)
+                            || same_name(&d.host, &f.tailnet_name)
+                            || same_name(&d.host, short))
+                })
+        })
+    };
+    let mut shown: Vec<usize> = Vec::new();
+    for (i, f) in found.iter().enumerate() {
+        if &f.key != own && book.find(&f.key).is_none() && !added_there(f) && !shown.iter().any(|&j| found[j].key == f.key) {
+            shown.push(i);
+        }
+    }
+    shown
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::*;
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    fn peer(ip: &str, online: bool) -> ProbePeer {
+        let v4: std::net::Ipv4Addr = ip.parse().unwrap();
+        ProbePeer { ip: u32::from(v4), name: format!("{ip}-name"), online }
+    }
+
+    fn found(key: Key, at: &str, tailnet_name: &str) -> Found {
+        Found { key, name: "hello name".into(), tailnet_name: tailnet_name.into(), ip: ip(at), port: wire::PORT }
+    }
+
+    const ME: Key = [9; 32];
+    const LAPTOP: Key = [1; 32];
+    const PHONE: Key = [2; 32];
+
+    #[test]
+    fn the_online_tailnet_peers_are_probed_less_this_device() {
+        let own = u32::from("100.64.0.1".parse::<std::net::Ipv4Addr>().unwrap());
+        let peers = [
+            peer("100.64.0.2", true),
+            peer("100.64.0.1", true),
+            peer("100.64.0.3", false),
+            peer("100.64.0.4", true),
+        ];
+        assert_eq!(to_probe(&peers, own, false), vec![0, 3]);
+    }
+
+    #[test]
+    fn nothing_outside_the_tailnet_is_probed_and_loopback_only_where_allowed() {
+        let peers = [peer("192.168.1.10", true), peer("127.0.0.2", true), peer("100.64.0.9", true)];
+        assert_eq!(to_probe(&peers, 0, false), vec![2]);
+        assert_eq!(to_probe(&peers, 0, true), vec![1, 2]);
+    }
+
+    #[test]
+    fn each_address_is_probed_once_and_at_most_probe_max_peers() {
+        let twice = [peer("100.64.0.2", true), peer("100.64.0.2", true)];
+        assert_eq!(to_probe(&twice, 0, false), vec![0]);
+        let many: Vec<ProbePeer> = (0..PROBE_MAX + 10).map(|i| peer(&format!("100.64.1.{i}"), true)).collect();
+        assert_eq!(to_probe(&many, 0, false), (0..PROBE_MAX).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn a_chat_peers_hello_is_heard_and_anything_else_is_not() {
+        let hello = wire::hello(&LAPTOP, "laptop", &[7; 32]);
+        assert_eq!(heard(hello.as_bytes()), Some((LAPTOP, "laptop".to_string())));
+        assert_eq!(heard(br#"{"type":"auth","sig":"00"}"#), None);
+        assert_eq!(heard(b"HTTP/1.1 404 Not Found"), None);
+        let other_version = hello.replace(r#""version":1"#, r#""version":2"#);
+        assert_eq!(heard(other_version.as_bytes()), None);
+    }
+
+    #[test]
+    fn results_leave_out_this_device_and_contacts_by_key() {
+        let mut book = Book::default();
+        book.accept(&Seen { key: &PHONE, name: "phone", address: None }).unwrap();
+        let list = [
+            found(ME, "127.0.0.1", "me"),
+            found(LAPTOP, "100.64.0.2", "laptop.tail-sim.ts.net"),
+            found(PHONE, "100.64.0.3", "phone.tail-sim.ts.net"),
+        ];
+        assert_eq!(to_show(&list, &book, &ME), vec![1]);
+    }
+
+    #[test]
+    fn a_contact_added_by_that_address_or_name_and_not_yet_reached_is_left_out_too() {
+        let list = [
+            found(LAPTOP, "100.64.0.2", "laptop.tail-sim.ts.net"),
+            found(PHONE, "100.64.0.3", "phone.tail-sim.ts.net"),
+        ];
+        let mut by_address = Book::default();
+        by_address.add(Dial { host: "100.64.0.2".into(), port: wire::PORT }, "", [5; 32]).unwrap();
+        assert_eq!(to_show(&list, &by_address, &ME), vec![1]);
+        let mut by_name = Book::default();
+        by_name.add(Dial { host: "Phone".into(), port: wire::PORT }, "", [5; 32]).unwrap();
+        assert_eq!(to_show(&list, &by_name, &ME), vec![0]);
+        // On another port it is another chat peer.
+        let mut elsewhere = Book::default();
+        elsewhere.add(Dial { host: "100.64.0.2".into(), port: 4811 }, "", [5; 32]).unwrap();
+        assert_eq!(to_show(&list, &elsewhere, &ME), vec![0, 1]);
+    }
+
+    #[test]
+    fn one_key_answering_at_two_addresses_is_shown_once() {
+        let list = [found(LAPTOP, "100.64.0.2", "laptop"), found(LAPTOP, "100.64.0.7", "laptop-wifi")];
+        assert_eq!(to_show(&list, &Book::default(), &ME), vec![0]);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Contacts
 // ---------------------------------------------------------------------------
 

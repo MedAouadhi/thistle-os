@@ -426,6 +426,21 @@ switch (`AUDIO_SEL`, XL9555 P12, HIGH = modem). ADR-0008 has the reasons,
   own task (20 KB internal stack, Opus) `tailnet_call.rs`. The simulator's
   `THISTLE_SIM_SPEAKER=FILE.wav` gets everything played;
   `test_tailchat.py --only calls`.
+- **The Chat app looks for chat peers only when asked** (ticket 13 of
+  `.scratch/tailnet-chat/`): Contacts → Look for chat peers probes each
+  online peer of the tailnet's list the kernel keeps
+  (`tailnet_manager::peers()`), less this device, at most 24, on the chat
+  port with a hello, and lists those that answer, less this device and
+  the contacts (`tailnet_chat_policy::to_probe`, `to_show`). A probe is a
+  dial, a hello each way and a close, with no `auth`, so the side probed
+  holds nothing. The probes go one after another, 3 s at most for each
+  connect and each hello, on a task of their own (`chat_look`, 8 KB
+  internal stack, `tailnet_chat_discovery.rs`), the device held awake
+  meanwhile. Add adds one as Add contact does, by the address it answered
+  on, its key pinned at the first handshake. The simulator's
+  `THISTLE_SIM_TAILNET_PEERS=NAME=IP,...` lists its pretend peers, such as
+  reference chat peers on 127.0.0.2 and 127.0.0.3;
+  `test_tailchat.py --only app-discovery`.
 
 ### The clock
 
@@ -784,8 +799,9 @@ client.
 - The simulator's client is pretend (`THISTLE_SIM_TAILNET` = `login`,
   `approval` or `refuse`; `THISTLE_SIM_TAILNET_LOGIN_S`;
   `THISTLE_SIM_TAILNET_PEERS=host` takes the host's own peers from
-  `tailscale status --json`); whether it has joined is a file in
-  `THISTLE_SIM_SPIFFS`. `simulator/tests/test_tailscale.py`.
+  `tailscale status --json`, `NAME=IP[:offline],...` lists them); whether
+  it has joined is a file in `THISTLE_SIM_SPIFFS`.
+  `simulator/tests/test_tailscale.py`.
 - **Tailnet chat shares this peer list with a contact that asks**
   (`peers_ask`, protocol.md section 4.10, ticket 14 of
   `.scratch/tailnet-chat/`): the online peers the kernel keeps, by the
@@ -860,6 +876,31 @@ ticks a task off, Backspace removes it, and typing goes back to the field.
 - `simulator/tests/test_todo.py`. `--type` fills a 32-event key queue, so a
   run types one short task, and a case that needs a list writes `todo.md`
   first.
+
+### WhatsApp
+
+An AGPL part, `components/whatsapp/` (its own `LICENSE`, ADR-0013), built
+only when the repository's `.env` sets `THISTLE_WHATSAPP=1`
+(`cmake/thistle_whatsapp.cmake`); otherwise the component is excluded and
+nothing of it is compiled. `.scratch/whatsapp/spec.md` has the plan.
+
+- **The kernel's own `Cargo.toml` and `Cargo.lock` never name it**: Cargo
+  would fetch and lock even an optional dependency, and CI would carry it.
+  A WhatsApp build compiles the kernel from a manifest
+  `components/whatsapp/kernel.cmake` generates (`kernel/Cargo.toml`,
+  git-ignored; `kernel/Cargo.lock` committed) into `kernel/target/`, with
+  the kernel feature `whatsapp`, which calls `thistle_whatsapp::start()`
+  from `kernel_init`. A change to kernel_rs's `Cargo.toml` that the
+  generator's edits no longer find stops the configure.
+- **Upstream whatsapp-rust's core only**, pinned by commit in
+  `components/whatsapp/rust/Cargo.toml`; nothing of the ESP32 port. Ours:
+  the runtime (`executor.rs`), the WebSocket (`ws.rs`, `transport.rs`, over
+  esp-tls in `wa_net_shim.c`), the HTTP client (`http.rs`).
+- **It does not fit a kernel slot yet**: 8.13 MiB against 4.5 MiB (ticket
+  01), so a WhatsApp build stops at `app_check_size`.
+- Its host tests are not CI's, which builds nothing of it: `cd
+  components/whatsapp/rust && cargo test --target <host-triple>`.
+  `tools/test_whatsapp_part.py` (CI) checks the gate and the licence.
 
 ### App Store
 
