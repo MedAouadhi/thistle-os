@@ -100,7 +100,10 @@ class SystemNotifier implements Notifier {
           fullScreenIntent: true,
           actions: [
             AndroidNotificationAction('answer', 'Answer', showsUserInterface: true),
-            AndroidNotificationAction('decline', 'Decline'),
+            // Through the window too: an action with none would run in a
+            // background isolate of the plugin's, not the one whose peer
+            // has the call.
+            AndroidNotificationAction('decline', 'Decline', showsUserInterface: true, cancelNotification: true),
           ],
         ),
       ),

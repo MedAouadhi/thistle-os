@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.util.Log
 
 /**
  * Keeps the app reachable in the background (spec, The companion app:
@@ -29,15 +30,42 @@ class ListenService : Service() {
         private const val CHANNEL = "listening"
         private const val NOTIFICATION = 4810
 
+        /** Listening in the background, as Settings has it. */
+        @Volatile
+        private var listening = false
+
+        /** A call is up: the service is in the foreground as using the microphone too. */
+        @Volatile
+        private var inCall = false
+
         fun start(context: Context) {
-            val intent = Intent(context, ListenService::class.java)
-            if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent) else context.startService(intent)
+            listening = true
+            launch(context)
         }
 
         fun stop(context: Context) {
-            context.stopService(Intent(context, ListenService::class.java))
+            listening = false
+            if (!inCall) context.stopService(Intent(context, ListenService::class.java))
+        }
+
+        /**
+         * A call began or ended (Audio.kt). Begun from the foreground (the
+         * call screen, or a notification's Answer that opened it), as
+         * Android 14 starts a microphone service from nowhere else; the
+         * call then keeps its microphone with the app in the background.
+         */
+        fun call(context: Context, on: Boolean) {
+            inCall = on
+            if (on || listening) launch(context) else context.stopService(Intent(context, ListenService::class.java))
+        }
+
+        private fun launch(context: Context) {
+            val intent = Intent(context, ListenService::class.java)
+            if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent) else context.startService(intent)
         }
     }
+
+    private lateinit var notification: Notification
 
     override fun onCreate() {
         super.onCreate()
@@ -56,7 +84,7 @@ class ListenService : Service() {
         )
         @Suppress("DEPRECATION")
         val builder = if (Build.VERSION.SDK_INT >= 26) Notification.Builder(this, CHANNEL) else Notification.Builder(this)
-        val notification = builder
+        notification = builder
             .setSmallIcon(R.drawable.ic_stat_chat)
             .setContentTitle("Thistle Chat is listening")
             .setContentText("Messages and calls reach this phone over your tailnet. Switch it off in Settings.")
@@ -64,14 +92,32 @@ class ListenService : Service() {
             .setOngoing(true)
             .setShowWhen(false)
             .build()
-        if (Build.VERSION.SDK_INT >= 34) {
-            startForeground(NOTIFICATION, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING)
-        } else {
+        foreground()
+    }
+
+    /** In the foreground as listening, and as using the microphone while a call is up. */
+    private fun foreground() {
+        if (Build.VERSION.SDK_INT < 29) {
             startForeground(NOTIFICATION, notification)
+            return
+        }
+        val listen = if (Build.VERSION.SDK_INT >= 34) ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING else 0
+        val microphone = if (inCall && Build.VERSION.SDK_INT >= 30) ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE else 0
+        try {
+            startForeground(NOTIFICATION, notification, listen or microphone)
+        } catch (e: SecurityException) {
+            // Not allowed the microphone type (no permission, or not begun
+            // from the foreground): the call keeps its audio only while
+            // the app is on screen.
+            Log.w("ThistleChat", "no microphone service type: $e")
+            startForeground(NOTIFICATION, notification, listen)
         }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Restarted by Android after it stopped the process: it was listening.
+        if (intent == null) listening = true
+        foreground()
         Engines.get(this) // the engine already runs, unless Android restarted us
         return START_STICKY
     }

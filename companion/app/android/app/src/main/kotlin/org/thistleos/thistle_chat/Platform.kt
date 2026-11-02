@@ -17,7 +17,8 @@ import java.util.WeakHashMap
 /**
  * The Dart side's `org.thistleos.thistle_chat/platform` channel
  * (lib/src/android.dart): the Keystore vault, the listening service, the
- * runtime permissions, the device's name. Permissions are prompted for
+ * runtime permissions, the device's name ([Audio] has the audio's own
+ * channels). Permissions are prompted for
  * only while a window is there to show the prompt.
  */
 class Platform private constructor(private val context: Context, engine: FlutterEngine) :
@@ -32,7 +33,7 @@ class Platform private constructor(private val context: Context, engine: Flutter
 
         @Synchronized
         fun forget(engine: FlutterEngine) {
-            all.remove(engine)
+            all.remove(engine)?.audio?.release()
         }
     }
 
@@ -40,6 +41,9 @@ class Platform private constructor(private val context: Context, engine: Flutter
     private val channel = MethodChannel(engine.dartExecutor.binaryMessenger, "org.thistleos.thistle_chat/platform")
     private val pending = mutableMapOf<Int, Pair<String, MethodChannel.Result>>()
     private var nextRequest = 4810
+
+    /** The microphone and speakers, on channels of their own. */
+    val audio = Audio(context, engine)
 
     init {
         channel.setMethodCallHandler(this)
