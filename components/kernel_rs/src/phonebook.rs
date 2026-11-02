@@ -1222,6 +1222,10 @@ fn look_for_changes() {
 
 /// The phonebook's name for `number`, for the call screen and the call log.
 pub(crate) fn name_for(number: &str) -> Option<String> {
+    // A Tailnet chat contact, as the call log has its calls.
+    if number.starts_with(crate::tailnet_chat::CALL_PREFIX) {
+        return if cfg!(test) { None } else { crate::tailnet_chat::name_for_number(number) };
+    }
     ensure_started();
     let pb = lock();
     pb.book.find_number(number).map(|i| pb.book.name(i).to_string())

@@ -7,6 +7,12 @@
 
 /* Voice calls, as the kernel runs them (call_manager.rs, call_log.rs).
  *
+ * The same API shows and controls a Tailnet chat call (tailnet_chat.rs),
+ * while no cellular call is up: `tailnet` is set in its status, answer,
+ * hang up, silence, mute and volume work on it, and rs_call_dial() with a
+ * call log's "tailnet:<fingerprint id>" number calls the contact back. A
+ * cellular call that rings or is placed ends a tailnet call.
+ *
  * The kernel notices a call ringing by the modem's RI line, which the modem
  * holds low until the call is answered or given up, and follows every call
  * by asking the modem for its calls. While a call is up it has the device's
@@ -58,6 +64,10 @@ typedef struct {
     uint8_t      volume;                    /* the call's volume, percent */
     uint32_t     seq;                       /* changes whenever anything above
                                                but duration_s does */
+    bool         tailnet;                   /* a Tailnet chat call: `name` is
+                                               the contact's, `number`
+                                               "tailnet:" and its fingerprint
+                                               id; no keypad or speaker */
 } call_status_t;
 
 /* Whether this device can place a call now: it has a modem that makes them,

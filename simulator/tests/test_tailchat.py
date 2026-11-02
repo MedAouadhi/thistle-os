@@ -50,8 +50,11 @@ from tailnet_chat.conformance import RawConn, eventually  # noqa: E402
 from tailnet_chat.peer import ChatPeer  # noqa: E402
 
 APP = "com.thistle.tailchat"
-# Every scenario but the voice message's (ticket 08).
-SCENARIOS = [s for s in conformance.SCENARIOS if s is not conformance.voice_message_whole_and_broken]
+# Every scenario but the voice messages' (ticket 08) and the calls', which
+# have a case of their own.
+SCENARIOS = [s for s in conformance.SCENARIOS
+             if s not in conformance.VOICE_SCENARIOS and s not in conformance.CALL_SCENARIOS
+             and s is not conformance.voice_message_whole_and_broken]
 
 # The app's tabs and first row, on the T-Deck Max.
 TAB_REQUESTS = "195,40"
@@ -91,12 +94,12 @@ class Device:
         env.update({k: str(v) for k, v in extra.items()})
         return env
 
-    def start(self) -> "Device":
+    def start(self, **env) -> "Device":
         self.port, self.control_port = free_port(), free_port()
         self.log = open(self.log_path, "a")
         self.proc = subprocess.Popen(
             [str(self.simulator), "--headless", "--device", "tdeck-max", "--timeout", "600000"],
-            env=self.env(THISTLE_SIM_CHAT_PORT=self.port, THISTLE_SIM_CHAT_CONTROL=self.control_port),
+            env=self.env(THISTLE_SIM_CHAT_PORT=self.port, THISTLE_SIM_CHAT_CONTROL=self.control_port, **env),
             stdout=self.log, stderr=subprocess.STDOUT)
         return self
 
@@ -177,6 +180,20 @@ class SimTarget(conformance.Target):
 
     def close(self) -> None:
         self.sock.close()
+
+    # The calls: what only the device's user does goes through the call
+    # screen's own functions (rs_call_answer, rs_call_hangup); the cellular
+    # call is the fake modem's --call, rung at once.
+
+    def set_call_policy(self, policy: str):
+        assert policy == "ignore", "the simulator's calls ring for its user"
+        return True
+
+    def talk(self, call: str):
+        return True   # its microphone (THISTLE_SIM_MIC) streams by itself
+
+    def screenshot(self, path: Path) -> None:
+        self.call({"cmd": "screenshot", "file": str(path)})
 
 
 def msg(text: str) -> dict:
@@ -484,12 +501,72 @@ def case_app_conversation(simulator: Path, root: Path) -> None:
     assert saved["contacts"][0].get("unread", 0) == 0
 
 
+def wav_samples(path: Path) -> list[int]:
+    """The 16-bit samples of a WAV file the simulator's speaker wrote."""
+    import struct
+    data = path.read_bytes()
+    body = data[44:]
+    return list(struct.unpack(f"<{len(body) // 2}h", body[: len(body) // 2 * 2]))
+
+
+def case_calls(simulator: Path, root: Path) -> None:
+    """The conformance suite's call scenarios against the simulator, the
+    cellular one through the fake modem's --call; the call screen by
+    screenshot; and the speaker playing what the reference peer sent."""
+    dev = Device(simulator, root, "calls")
+    speaker = root / "speaker.wav"
+    dev.start(THISTLE_SIM_SPEAKER=speaker)
+    try:
+        target = SimTarget(dev)
+        out = []
+
+        class Out:
+            def write(self, s):
+                out.append(s)
+
+        skipped: list = []
+        failed = conformance.run(lambda: target, conformance.CALL_SCENARIOS, out=Out(), skipped=skipped)
+        print("      " + "".join(out).strip().replace("\n", "\n      "))
+        assert failed == 0 and not skipped, f"{failed} call scenarios failed, {len(skipped)} skipped"
+        log = dev.log_text()
+        for line in ("[tailnet_call] call ", " over ws-opus", "ended: hangup", "ended: cellular",
+                     "ended: timeout", "ended: unreachable", "frames lost"):
+            assert line in log, f"no {line!r} in the log"
+
+        # A call on screen: the contact's name and the call's state; the
+        # speaker plays what the peer sends. The last call's screen first
+        # says how it ended, and closes.
+        time.sleep(3.5)
+        conn, call, stream = conformance._connected_call(target, "Lena")
+        played_from = speaker.stat().st_size if speaker.exists() else 44
+        conformance._speak(conn, stream, 60)
+        shot = root / "call.ppm"
+        target.screenshot(shot)
+        assert ppm_has_text(shot), "the call screen is blank"
+        if os.environ.get("TAILCHAT_SHOTS"):   # to look at it
+            shutil.copy(shot, Path(os.environ["TAILCHAT_SHOTS"]) / "call.ppm")
+        assert target.logged("(call_ui) open incoming"), "the call screen did not open"
+        assert target.logged("(call_ui) tailnet call: Lena"), "the call screen did not show the contact"
+        assert target.calls()[call]["frames"] >= 50
+        conn.send({"type": "call_end", "call": call, "reason": "hangup"})
+        eventually(lambda: conformance._call_state(target, call) == "ended:hangup", what="the call to end")
+        eventually(lambda: target.logged("[tailnet_call] played "), what="the call task's summary")
+        heard = wav_samples(speaker)[max(0, (played_from - 44) // 2):]
+        loud = [x for x in heard if abs(x) > 300]
+        assert len(loud) > 16_000 // 4, f"the speaker played {len(loud)} loud samples of the peer's voice"
+        conn.close()
+        target.close()
+    finally:
+        dev.stop()
+
+
 CASES: list[tuple[str, Callable[[Path, Path], None]]] = [
     ("conformance", case_conformance),
     ("card-and-restart", case_card_and_restart),
     ("messages", case_messages),
     ("app", case_app),
     ("app-conversation", case_app_conversation),
+    ("calls", case_calls),
 ]
 
 

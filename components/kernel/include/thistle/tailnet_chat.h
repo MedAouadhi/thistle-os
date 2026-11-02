@@ -150,6 +150,13 @@ esp_err_t tailnet_chat_set_read_receipts(bool on);
 /* Messages received from contacts and not yet read. */
 uint32_t  tailnet_chat_unread_count(void);
 
+/* Call a contact over `ws-opus`; the system call screen follows the call
+ * through thistle/call.h, as it does a phone call. One call at a time:
+ * ESP_ERR_INVALID_STATE with a call up (tailnet or cellular) or chat not
+ * listening; ESP_ERR_NOT_FOUND for a key that is not a contact. A contact
+ * that cannot be reached ends the call at once as unreachable. */
+esp_err_t tailnet_chat_call(const char *key);
+
 /* Add a contact by its tailnet name or address and port (0: 4810); its key
  * is pinned when it is first reached. The key it goes by until then into
  * key_out (65 bytes) if not NULL. */

@@ -34,6 +34,12 @@
 //! While a call is up the network coordinator leaves the modem alone (it
 //! asks `busy()`), the device is held awake, and anything that plays sound
 //! pauses (`rs_call_in_progress`).
+//!
+//! The same C API shows and controls a Tailnet chat call (tailnet_chat.rs,
+//! tailnet_call.rs) while no cellular call is up, so the call screen is one:
+//! `call_status_t.tailnet` says which. A cellular call that rings or is
+//! placed ends a tailnet call (`cellular`), and a `tailnet:` number in the
+//! call log calls the contact back.
 
 use std::ffi::{c_char, c_void, CString};
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
@@ -48,6 +54,7 @@ use crate::hal_registry::{
 use crate::net_manager::{CHalCall, HalNetDriver};
 use crate::power_manager::HoldGuard;
 use crate::sms_manager::copy_c;
+use crate::tailnet_call_policy::Phase as TailPhase;
 
 const ESP_OK: i32 = 0;
 const ESP_ERR_NO_MEM: i32 = 0x101;
@@ -558,6 +565,7 @@ impl Machine {
             speaker: self.speaker,
             volume: self.volume,
             seq: self.seq,
+            tailnet: false,
         };
         if self.state != State::Idle {
             copy_c(&mut s.number, &self.number);
@@ -656,6 +664,51 @@ pub(crate) fn busy() -> bool {
     s.thread || s.m.in_progress()
 }
 
+/// Whether a cellular call is up or ringing, or its thread still runs: a
+/// tailnet call offered meanwhile gets busy.
+pub(crate) fn cellular_in_progress() -> bool {
+    busy()
+}
+
+/// Whether the call screen's buttons are a tailnet call's: no cellular
+/// call is up, and a tailnet call is.
+fn tailnet_up() -> bool {
+    // Never with the call lock held: the chat module asks for it under its own.
+    let cellular = lock().m.in_progress();
+    !cellular && !cfg!(test) && crate::tailnet_chat::call_view().is_some_and(|v| !matches!(v.phase, TailPhase::Over(_)))
+}
+
+/// A tailnet call as the call screen shows it.
+fn tailnet_status(v: &crate::tailnet_chat::CallView) -> CCallStatus {
+    let (state, end) = match &v.phase {
+        TailPhase::Reaching => (State::Dialing, End::None),
+        TailPhase::Offered => (State::Alerting, End::None),
+        TailPhase::Ringing => (State::Incoming, End::None),
+        TailPhase::Connected => (State::Active, End::None),
+        TailPhase::Over(_) if v.declined_here => (State::Ended, End::Rejected),
+        TailPhase::Over(how) if !v.connected && !v.mine && !how.starts_with("declined") => (State::Ended, End::Missed),
+        TailPhase::Over(how) if v.connected && how == "ended:hangup" => (State::Ended, End::Remote),
+        TailPhase::Over(_) if v.connected => (State::Ended, End::Remote),
+        TailPhase::Over(_) => (State::Ended, End::Failed),
+    };
+    let mut s = CCallStatus {
+        state: state as u32,
+        end: end as u32,
+        incoming: !v.mine,
+        number: [0; CALL_NUMBER_MAX],
+        name: [0; CALL_NAME_MAX],
+        duration_s: v.duration_s,
+        muted: crate::tailnet_call::muted(),
+        speaker: true,
+        volume: crate::tailnet_call::volume(),
+        seq: v.seq,
+        tailnet: true,
+    };
+    copy_c(&mut s.number, &v.number);
+    copy_c(&mut s.name, &v.name);
+    s
+}
+
 /// The saved call volume, read once.
 fn load_volume() {
     if lock().volume_loaded {
@@ -670,7 +723,13 @@ fn load_volume() {
     if !s.volume_loaded {
         s.volume_loaded = true;
         s.m.volume = volume;
+        crate::tailnet_call::set_volume(volume);
     }
+}
+
+/// The call volume, for a tailnet call's task.
+pub(crate) fn load_call_volume() {
+    load_volume();
 }
 
 // ---------------------------------------------------------------------------
@@ -690,7 +749,7 @@ const RING_LEVEL: f32 = 0.22;
 
 /// 440 Hz and 480 Hz together, the ring of North American phones, with 10 ms
 /// to fade in and out so it does not click: 16 kHz mono 16-bit samples.
-fn ring_tone(ms: u64) -> Vec<u8> {
+pub(crate) fn ring_tone(ms: u64) -> Vec<u8> {
     let n = (RING_RATE as u64 * ms / 1000) as usize;
     let fade = (RING_RATE / 100) as usize;
     let mut out = Vec::with_capacity(n * 2);
@@ -1143,6 +1202,10 @@ fn start_thread(drv: &'static HalNetDriver) -> bool {
     // From here the coordinator leaves the modem alone; an attempt it has
     // under way would hold the modem for up to two minutes.
     crate::net_coordinator::cancel_attempt();
+    // A phone call is never missed: a tailnet call ends for it.
+    if !cfg!(test) {
+        crate::tailnet_chat::cellular_took_over();
+    }
     #[cfg(target_os = "espidf")]
     unsafe {
         thistle_pthread_name_next(b"call\0".as_ptr())
@@ -1231,6 +1294,9 @@ pub struct CCallStatus {
     pub speaker: bool,
     pub volume: u8,
     pub seq: u32,
+    /// A Tailnet chat call: `name` the contact's, `number` "tailnet:" and
+    /// its fingerprint id. Appended last.
+    pub tailnet: bool,
 }
 
 /// Whether a call can be placed now: a modem that makes calls, on with a
@@ -1238,7 +1304,7 @@ pub struct CCallStatus {
 #[no_mangle]
 pub extern "C" fn rs_call_available() -> bool {
     match calls_driver() {
-        Some(drv) => crate::net_coordinator::modem_ready(drv) && !busy(),
+        Some(drv) => crate::net_coordinator::modem_ready(drv) && !busy() && !crate::tailnet_chat::call_in_progress(),
         None => false,
     }
 }
@@ -1257,6 +1323,12 @@ pub unsafe extern "C" fn rs_call_dial(number: *const c_char) -> i32 {
     if number.is_null() {
         return ESP_ERR_INVALID_ARG;
     }
+    if let Some(n) = std::ffi::CStr::from_ptr(number).to_str().ok().filter(|n| n.starts_with(crate::tailnet_chat::CALL_PREFIX)) {
+        if busy() {
+            return ESP_ERR_INVALID_STATE;
+        }
+        return crate::tailnet_chat::place_call_to_number(n).map_or_else(|e| e, |_| ESP_OK);
+    }
     let Some(number) = std::ffi::CStr::from_ptr(number).to_str().ok().and_then(normalize) else {
         return ESP_ERR_INVALID_ARG;
     };
@@ -1268,6 +1340,9 @@ pub unsafe extern "C" fn rs_call_dial(number: *const c_char) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn rs_call_answer() -> i32 {
+    if tailnet_up() {
+        return crate::tailnet_chat::answer_call(None, None);
+    }
     let mut s = lock();
     if let Err(e) = s.m.answer(Instant::now()) {
         return e;
@@ -1279,6 +1354,9 @@ pub extern "C" fn rs_call_answer() -> i32 {
 
 #[no_mangle]
 pub extern "C" fn rs_call_hangup() -> i32 {
+    if tailnet_up() {
+        return crate::tailnet_chat::hangup(None, "hangup");
+    }
     let mut s = lock();
     if let Err(e) = s.m.hangup(Instant::now()) {
         return e;
@@ -1290,6 +1368,11 @@ pub extern "C" fn rs_call_hangup() -> i32 {
 
 #[no_mangle]
 pub extern "C" fn rs_call_silence() {
+    if tailnet_up() {
+        crate::tailnet_call::silence();
+        log!(ESP_LOG_INFO, b"ringing silenced\0");
+        return;
+    }
     let mut s = lock();
     if s.m.silence() {
         wake_thread(s);
@@ -1299,6 +1382,9 @@ pub extern "C" fn rs_call_silence() {
 
 #[no_mangle]
 pub extern "C" fn rs_call_dtmf(digit: c_char) -> i32 {
+    if tailnet_up() {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
     let digit = (digit as u8).to_ascii_uppercase();
     if !matches!(digit, b'0'..=b'9' | b'*' | b'#' | b'A'..=b'D') {
         return ESP_ERR_INVALID_ARG;
@@ -1315,6 +1401,11 @@ pub extern "C" fn rs_call_dtmf(digit: c_char) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn rs_call_set_mute(mute: bool) -> i32 {
+    if tailnet_up() {
+        crate::tailnet_call::set_muted(mute);
+        crate::tailnet_chat::changed_now();
+        return ESP_OK;
+    }
     let mut s = lock();
     if let Err(e) = s.m.set_mute(mute, Instant::now()) {
         return e;
@@ -1325,6 +1416,10 @@ pub extern "C" fn rs_call_set_mute(mute: bool) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn rs_call_set_speaker(on: bool) -> i32 {
+    if tailnet_up() {
+        // A tailnet call plays through the codec, on the speaker always.
+        return if on { ESP_OK } else { ESP_ERR_NOT_SUPPORTED };
+    }
     let mut s = lock();
     if let Err(e) = s.m.set_speaker(on, Instant::now()) {
         return e;
@@ -1341,6 +1436,10 @@ pub extern "C" fn rs_call_set_volume(percent: u8) -> i32 {
         return ESP_ERR_INVALID_ARG;
     }
     load_volume();
+    crate::tailnet_call::set_volume(percent);
+    if !cfg!(test) {
+        crate::tailnet_chat::changed_now();
+    }
     let mut s = lock();
     s.m.set_volume(percent);
     wake_thread(s);
@@ -1358,12 +1457,21 @@ pub unsafe extern "C" fn rs_call_get_status(out: *mut CCallStatus) {
         return;
     }
     load_volume();
-    *out = lock().m.status(Instant::now());
+    let st = lock().m.status(Instant::now());
+    if st.state == State::Idle as u32 && !cfg!(test) {
+        if let Some(v) = crate::tailnet_chat::call_view() {
+            *out = tailnet_status(&v);
+            return;
+        }
+    }
+    *out = st;
 }
 
+/// Whether a call has the audio, cellular or tailnet.
 #[no_mangle]
 pub extern "C" fn rs_call_in_progress() -> bool {
-    lock().m.in_progress()
+    let cellular = lock().m.in_progress();
+    cellular || (!cfg!(test) && crate::tailnet_chat::call_in_progress())
 }
 
 // ---------------------------------------------------------------------------
@@ -1666,7 +1774,7 @@ mod tests {
     #[test]
     fn the_status_struct_matches_the_c_layout() {
         // Two enums, bool, char[33], char[64], pad to 108, uint32_t, bool,
-        // bool, uint8_t, pad to 116, uint32_t.
+        // bool, uint8_t, pad to 116, uint32_t, bool, pad to 124.
         assert_eq!(std::mem::offset_of!(CCallStatus, incoming), 8);
         assert_eq!(std::mem::offset_of!(CCallStatus, number), 9);
         assert_eq!(std::mem::offset_of!(CCallStatus, name), 42);
@@ -1675,7 +1783,8 @@ mod tests {
         assert_eq!(std::mem::offset_of!(CCallStatus, speaker), 113);
         assert_eq!(std::mem::offset_of!(CCallStatus, volume), 114);
         assert_eq!(std::mem::offset_of!(CCallStatus, seq), 116);
-        assert_eq!(std::mem::size_of::<CCallStatus>(), 120);
+        assert_eq!(std::mem::offset_of!(CCallStatus, tailnet), 120);
+        assert_eq!(std::mem::size_of::<CCallStatus>(), 124);
     }
 
     // ── The thread, against a fake modem ────────────────────────────────

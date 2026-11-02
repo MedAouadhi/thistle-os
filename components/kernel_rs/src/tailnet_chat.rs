@@ -27,6 +27,12 @@
 //! - A message received buzzes and pops up (msg_alert.rs, its third kind)
 //!   and counts as unread until read, unless its conversation is on screen.
 //!
+//! - Calls (`call:ws-opus`): the offers, answers and ends are handled here
+//!   by tailnet_call_policy.rs' rules, one call at a time, kept in `calls`;
+//!   the call's own task (tailnet_call.rs) rings, then carries the audio,
+//!   handing its frames to `pump_call` every 20 ms. The system call screen
+//!   shows a tailnet call through thistle/call.h (call_manager.rs).
+//!
 //! The app (apps/tailchat) only reads and asks, through thistle/tailnet_chat.h.
 
 use std::collections::VecDeque;
@@ -41,6 +47,7 @@ use std::time::{Duration, Instant};
 
 use crate::msg_alert::{self, Transport};
 use crate::msg_log::{self, ChatEntry, ChatLine, ChatReact, Direction};
+use crate::tailnet_call_policy::{self as call_policy, Answer, Call, LogKind, Phase as CallPhase};
 use crate::tailnet_chat_policy::{self as policy, Book, Dial, DialCandidate, Outbox, Retry, Seen, Trust};
 use crate::tailnet_chat_wire::{self as wire, ErrorFrame, Key, Role, Upgrade, Upgraded, WsEvent, WsReader};
 
@@ -503,7 +510,15 @@ struct State {
     next_look_ms: u64,
     /// Read into, once allocated; in PSRAM on the device.
     buf: Vec<u8>,
+    /// The calls of this boot, the latest last (at most CALLS_KEPT): at
+    /// most one is live.
+    calls: Vec<Call<Key>>,
 }
+
+/// Calls kept for the control port and the call screen's last word.
+const CALLS_KEPT: usize = 8;
+/// An ended call stays on the call screen this long (call.h's CALL_ENDED_SHOW_MS).
+const ENDED_SHOW_MS: u64 = 2_500;
 
 static STATE: Mutex<Option<State>> = Mutex::new(None);
 /// Bumped at every change the app shows.
@@ -555,6 +570,7 @@ impl State {
             why: String::new(),
             next_look_ms: 0,
             buf: Vec::new(),
+            calls: Vec::new(),
         };
         s.read_requests();
         s
@@ -652,6 +668,14 @@ impl State {
             || self.conns.iter().any(|c| !c.closing && (c.key() == Some(key) || c.dialled_for.as_ref() == Some(key)))
     }
 
+    fn live_call(&mut self) -> Option<&mut Call<Key>> {
+        self.calls.iter_mut().rev().find(|c| c.live())
+    }
+
+    fn call_by_id(&mut self, id: &str) -> Option<&mut Call<Key>> {
+        self.calls.iter_mut().rev().find(|c| c.id == id)
+    }
+
     fn contact_name(&self, key: &Key) -> String {
         self.book.find(key).map_or_else(|| wire::fingerprint(key), |i| self.book.contacts[i].name.clone())
     }
@@ -710,6 +734,9 @@ impl State {
         }
         for (k, _) in self.retries.iter_mut().filter(|(k, _)| k == &placeholder) {
             *k = *key;
+        }
+        for c in self.calls.iter_mut().filter(|c| c.key == placeholder) {
+            c.key = *key;
         }
         self.convs.retain(|c| c.key != placeholder && &c.key != key);
         msg_log::chat_rekey(&fp_id(&placeholder), &fp_id(key));
@@ -988,7 +1015,8 @@ fn poll(s: &mut State, now: u64) {
     for i in 0..s.conns.len() {
         read_conn(s, i, now);
     }
-    for c in &mut s.conns {
+    let in_calls: Vec<Key> = s.calls.iter().filter(|k| k.live()).map(|k| k.key).collect();
+    for c in s.conns.iter_mut() {
         if c.closing {
             continue;
         }
@@ -998,7 +1026,8 @@ fn poll(s: &mut State, now: u64) {
             }
             c.close(wire::CLOSE_HANDSHAKE, "no handshake within 10 s");
         } else if matches!(c.phase, Phase::Open { .. }) {
-            if now - c.last_ms > IDLE_MS {
+            let in_call = c.key().is_some_and(|k| in_calls.contains(k));
+            if now - c.last_ms > IDLE_MS && !in_call {
                 c.close(wire::CLOSE_NORMAL, "idle");
             } else if now - c.pinged_ms > PING_MS {
                 c.pinged_ms = now;
@@ -1045,6 +1074,7 @@ fn poll(s: &mut State, now: u64) {
     if !gone.is_empty() {
         changed();
     }
+    calls_due(s, now);
 }
 
 fn accept_new(s: &mut State, now: u64) {
@@ -1325,6 +1355,25 @@ fn authenticated(s: &mut State, i: usize, key: Key, hello_name: String, caps: Ve
 }
 
 fn on_binary(s: &mut State, i: usize, data: &[u8]) {
+    if let (Some(b), Some(key)) = (wire::unpack_binary(data), s.conns[i].key().copied()) {
+        if b.kind == wire::KIND_CALL_AUDIO {
+            let now = now_ms();
+            if let Some(call) = s
+                .calls
+                .iter_mut()
+                .rev()
+                .find(|c| c.live() && c.key == key && c.stream == b.stream && c.phase == CallPhase::Connected)
+            {
+                call.heard(now);
+                crate::tailnet_call::audio_in(&call.id, b.seq, b.payload);
+                return;
+            }
+            // Frames still in flight after a call ended are dropped quietly.
+            if s.calls.iter().any(|c| c.key == key && c.stream == b.stream) {
+                return;
+            }
+        }
+    }
     let c = &mut s.conns[i];
     let e = match wire::unpack_binary(data) {
         None => ErrorFrame::new("bad_request").what("binary"),
@@ -1434,12 +1483,36 @@ fn on_frame(s: &mut State, i: usize, text: &[u8]) {
             info(&format!("{name} {} this device's contact request", if accepted { "accepted" } else { "declined" }));
             s.conns[i].send_text(&wire::ack(&id));
         }
-        // Not announced yet (tickets 08, 09): a peer that read our hello
-        // sends none of these.
-        "voice" | "call_answer" | "call_end" => {}
-        "call_offer" => {
-            let call = wire::str_of(&frame, "call");
-            s.conns[i].send_text(&format!(r#"{{"type":"call_answer","call":"{call}","decline":"unsupported"}}"#));
+        // Not announced yet (ticket 08): a peer that read our hello sends none.
+        "voice" => {}
+        "call_offer" => on_offer(s, i, &key, &name, contact, &frame),
+        "call_answer" => {
+            let call = wire::str_of(&frame, "call").to_string();
+            let now = now_ms();
+            let Some(c) = s.call_by_id(&call).filter(|c| c.mine && c.key == key && c.phase == CallPhase::Offered) else {
+                return;
+            };
+            match frame.get("decline").and_then(|v| v.as_str()) {
+                Some(reason) => {
+                    let how = format!("declined:{reason}");
+                    c.end(&how, now);
+                    finish(s, &call, now);
+                }
+                None => {
+                    c.connect(now);
+                    crate::tailnet_call::info(&format!("call {} with {name} connected over {}", short(&call), call_policy::WS_OPUS));
+                    changed();
+                }
+            }
+        }
+        "call_end" => {
+            let call = wire::str_of(&frame, "call").to_string();
+            let reason = wire::str_of(&frame, "reason").to_string();
+            let now = now_ms();
+            if let Some(c) = s.call_by_id(&call).filter(|c| c.key == key && c.live()) {
+                c.end(&format!("ended:{reason}"), now);
+                finish(s, &call, now);
+            }
         }
         "error" => info(&format!("{name} answered: error {}", wire::str_of(&frame, "code"))),
         other => {
@@ -1447,6 +1520,353 @@ fn on_frame(s: &mut State, i: usize, text: &[u8]) {
             s.conns[i].send_error(&e);
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Calls (tailnet_call_policy.rs has the rules, tailnet_call.rs the audio)
+// ---------------------------------------------------------------------------
+
+fn short(id: &str) -> &str {
+    &id[..id.len().min(8)]
+}
+
+fn call_frame(kind: &str, call: &str, field: &str, value: &str) -> String {
+    serde_json::json!({"type": kind, "call": call, field: value}).to_string()
+}
+
+/// Whether the cellular modem has a call up or ringing.
+fn cellular_busy() -> bool {
+    crate::call_manager::cellular_in_progress()
+}
+
+fn on_offer(s: &mut State, i: usize, key: &Key, name: &str, contact: bool, frame: &serde_json::Map<String, serde_json::Value>) {
+    let call = wire::str_of(frame, "call").to_string();
+    let stream = frame.get("stream").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    let transports: Vec<&str> =
+        frame.get("transports").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|t| t.as_str()).collect()).unwrap_or_default();
+    let in_call = s.live_call().is_some();
+    match call_policy::answer_offer(in_call, cellular_busy(), contact, &transports) {
+        Answer::Decline(reason) => {
+            crate::tailnet_call::info(&format!("call {} from {name} declined: {reason}", short(&call)));
+            s.conns[i].send_text(&call_frame("call_answer", &call, "decline", reason));
+        }
+        Answer::Ring => {
+            let now = now_ms();
+            keep_call(s, Call::new(call.clone(), *key, false, stream, CallPhase::Ringing, now));
+            crate::tailnet_call::info(&format!("call {} from {name} ringing, over {}", short(&call), call_policy::WS_OPUS));
+            if !crate::tailnet_call::start(&call) {
+                if let Some(c) = s.call_by_id(&call) {
+                    c.end("ended:error", now);
+                }
+                s.conns[i].send_text(&call_frame("call_end", &call, "reason", "error"));
+                finish(s, &call, now);
+            }
+            changed();
+        }
+    }
+}
+
+fn keep_call(s: &mut State, call: Call<Key>) {
+    s.calls.push(call);
+    while s.calls.len() > CALLS_KEPT {
+        if let Some(i) = s.calls.iter().position(|c| !c.live()) {
+            s.calls.remove(i);
+        } else {
+            break;
+        }
+    }
+}
+
+/// A call just ended: the log, and the call log for the Phone app.
+fn finish(s: &mut State, call: &str, now: u64) {
+    let Some(c) = s.calls.iter().rev().find(|c| c.id == call).cloned() else { return };
+    let name = s.contact_name(&c.key);
+    let reason = c.state().replace(':', ": ");
+    crate::tailnet_call::info(&format!(
+        "call {} with {name} {reason} after {} s connected; {} frames received",
+        short(call),
+        c.duration_s(now),
+        c.frames
+    ));
+    let kind = match c.log_kind() {
+        LogKind::Outgoing => crate::call_log::Kind::Outgoing,
+        LogKind::Incoming => crate::call_log::Kind::Incoming,
+        LogKind::Missed => crate::call_log::Kind::Missed,
+        LogKind::Rejected => crate::call_log::Kind::Rejected,
+    };
+    let began = wall_ms().checked_sub(now.saturating_sub(c.began_ms)).map(|ms| ms / 1000).filter(|&t| t > 1_700_000_000);
+    if !cfg!(test) {
+        crate::call_log::add(kind, &call_number(&c.key), began, c.duration_s(now));
+    }
+    changed();
+}
+
+/// How a tailnet contact goes in the call log, the Phone app and Home's
+/// missed call: `tailnet:` and its key's fingerprint id, which
+/// `rs_call_dial` calls back.
+pub(crate) fn call_number(key: &Key) -> String {
+    format!("{}{}", CALL_PREFIX, fp_id(key))
+}
+
+pub(crate) const CALL_PREFIX: &str = "tailnet:";
+
+/// The contact a call log number names, if it is a tailnet one.
+fn contact_of_number(s: &State, number: &str) -> Option<Key> {
+    let fp = number.strip_prefix(CALL_PREFIX)?;
+    s.book.contacts.iter().find(|c| !c.pending && fp_id(&c.key) == fp).map(|c| c.key)
+}
+
+/// End the live call `call` with `reason`, telling the other side if it
+/// knows of it.
+fn end_call(s: &mut State, call: &str, reason: &str, now: u64) {
+    let Some(c) = s.call_by_id(call).filter(|c| c.live()) else { return };
+    let (key, tell) = (c.key, c.phase != CallPhase::Reaching);
+    c.end(&format!("ended:{reason}"), now);
+    if tell {
+        let frame = call_frame("call_end", call, "reason", reason);
+        if let Some(conn) = s.open_conn(&key) {
+            conn.send_text(&frame);
+        }
+    }
+    finish(s, call, now);
+}
+
+/// Time's decisions, every poll: a contact reached sends the offer; one
+/// not reached in time, or whose dial failed, is unreachable; an offer
+/// unanswered, a call gone silent; a connection gone under a call.
+fn calls_due(s: &mut State, now: u64) {
+    let Some((id, key, phase)) = s.live_call().map(|c| (c.id.clone(), c.key, c.phase.clone())) else { return };
+    if phase == CallPhase::Reaching {
+        if s.connected(&key) {
+            let stream = s.live_call().map_or(2, |c| c.stream);
+            let frame = serde_json::json!({"type": "call_offer", "call": id, "transports": [call_policy::WS_OPUS],
+                                           "stream": stream})
+            .to_string();
+            if let Some(conn) = s.open_conn(&key) {
+                conn.send_text(&frame);
+            }
+            if let Some(c) = s.live_call() {
+                c.phase = CallPhase::Offered;
+                c.began_ms = now;
+            }
+            changed();
+            return;
+        }
+        if !s.reaching(&key) {
+            return end_call(s, &id, "unreachable", now);
+        }
+    } else if !s.connected(&key) {
+        return end_call(s, &id, "error", now);
+    }
+    if let Some(reason) = s.live_call().and_then(|c| c.due(now)) {
+        end_call(s, &id, reason, now);
+    }
+}
+
+/// Place a call to contact `key`. Its id; it fails at once, as
+/// `unreachable`, if the contact cannot be dialled.
+pub(crate) fn place_call(key: &Key) -> Result<String, i32> {
+    let mut guard = lock();
+    let s = guard.as_mut().ok_or(ESP_ERR_INVALID_STATE)?;
+    let contact = s.book.find(key).is_some();
+    let in_call = s.live_call().is_some();
+    match call_policy::may_place(in_call, cellular_busy(), contact) {
+        Err(call_policy::Refusal::Busy) => return Err(ESP_ERR_INVALID_STATE),
+        Err(call_policy::Refusal::NotAContact) => return Err(ESP_ERR_NOT_FOUND),
+        Ok(()) => {}
+    }
+    if !crate::tailnet_call::supported() || s.listener.is_none() {
+        return Err(ESP_ERR_INVALID_STATE);
+    }
+    let now = now_ms();
+    let id = new_id();
+    let stream = u32::from_be_bytes(random::<4>()) | 1;
+    let name = s.contact_name(key);
+    keep_call(s, Call::new(id.clone(), *key, true, stream, CallPhase::Reaching, now));
+    crate::tailnet_call::info(&format!("call {} to {name}, over {}", short(&id), call_policy::WS_OPUS));
+    if !s.reaching(key) {
+        let i = s.book.find(key).unwrap_or(0);
+        match s.book.dial_of(i) {
+            Some(at) => dial(s, *key, at, now),
+            None => crate::tailnet_call::info(&format!("{name} has no address to dial")),
+        }
+    }
+    if !crate::tailnet_call::start(&id) {
+        end_call(s, &id, "error", now);
+        return Err(ESP_ERR_NO_MEM);
+    }
+    calls_due(s, now);
+    changed();
+    Ok(id)
+}
+
+/// Place a call to the contact a call log number names (`tailnet:<fp>`).
+pub(crate) fn place_call_to_number(number: &str) -> Result<String, i32> {
+    let key = with(|s| contact_of_number(s, number)).flatten().ok_or(ESP_ERR_NOT_FOUND)?;
+    place_call(&key)
+}
+
+/// The contact's name for a call log number, if it names a tailnet contact.
+pub(crate) fn name_for_number(number: &str) -> Option<String> {
+    with(|s| contact_of_number(s, number).map(|k| s.contact_name(&k))).flatten()
+}
+
+/// Answer the call ringing here, or decline it with `decline`.
+pub(crate) fn answer_call(call: Option<&str>, decline: Option<&str>) -> i32 {
+    let mut guard = lock();
+    let Some(s) = guard.as_mut() else { return ESP_ERR_INVALID_STATE };
+    let now = now_ms();
+    let Some(c) = s.calls.iter_mut().rev().find(|c| c.phase == CallPhase::Ringing && call.is_none_or(|id| c.id == id))
+    else {
+        return ESP_ERR_INVALID_STATE;
+    };
+    let (id, key) = (c.id.clone(), c.key);
+    let frame = match decline {
+        Some(reason) => {
+            c.declined_here = true;
+            c.end(&format!("declined:{reason}"), now);
+            call_frame("call_answer", &id, "decline", reason)
+        }
+        None => {
+            c.connect(now);
+            call_frame("call_answer", &id, "transport", call_policy::WS_OPUS)
+        }
+    };
+    if let Some(conn) = s.open_conn(&key) {
+        conn.send_text(&frame);
+    }
+    let name = s.contact_name(&key);
+    match decline {
+        Some(_) => finish(s, &id, now),
+        None => {
+            crate::tailnet_call::info(&format!("call {} with {name} connected over {}", short(&id), call_policy::WS_OPUS));
+            changed();
+        }
+    }
+    ESP_OK
+}
+
+/// Hang up, cancel or decline: whatever ends the live call (or `call`).
+pub(crate) fn hangup(call: Option<&str>, reason: &str) -> i32 {
+    let ringing = with(|s| s.live_call().filter(|c| call.is_none_or(|id| c.id == id)).map(|c| c.phase == CallPhase::Ringing))
+        .flatten();
+    match ringing {
+        None => ESP_ERR_INVALID_STATE,
+        Some(true) if reason == "hangup" => answer_call(call, Some("declined")),
+        Some(_) => {
+            let mut guard = lock();
+            let Some(s) = guard.as_mut() else { return ESP_ERR_INVALID_STATE };
+            let Some(id) = s.live_call().map(|c| c.id.clone()) else { return ESP_ERR_INVALID_STATE };
+            end_call(s, &id, reason, now_ms());
+            ESP_OK
+        }
+    }
+}
+
+/// A cellular call rang or was placed: it takes the device over, and a
+/// tailnet call ends as `cellular` (tailnet_call_policy::cellular_ends).
+pub(crate) fn cellular_took_over() {
+    let mut guard = lock();
+    let Some(s) = guard.as_mut() else { return };
+    let ends = call_policy::cellular_ends(s.calls.iter().rev().find(|c| c.live()));
+    if let (true, Some(id)) = (ends, s.live_call().map(|c| c.id.clone())) {
+        end_call(s, &id, "cellular", now_ms());
+    }
+}
+
+/// The phase of call `id`, for its task; None once forgotten.
+pub(crate) fn call_phase(id: &str) -> Option<CallPhase> {
+    with(|s| s.call_by_id(id).map(|c| c.phase.clone())).flatten()
+}
+
+/// Every 20 ms of a connected call, from its task: send `frames` (sequence,
+/// Opus packet) on the call's connection and read what has come.
+pub(crate) fn pump_call(id: &str, frames: Vec<(u32, Vec<u8>)>) {
+    let mut guard = lock();
+    let Some(s) = guard.as_mut() else { return };
+    let Some((key, stream)) = s.call_by_id(id).filter(|c| c.phase == CallPhase::Connected).map(|c| (c.key, c.stream))
+    else {
+        return;
+    };
+    let Some(i) = s.conns.iter().position(|c| !c.closing && c.key() == Some(&key)) else { return };
+    let now = now_ms();
+    {
+        let c = &mut s.conns[i];
+        for (seq, packet) in &frames {
+            c.send_op(wire::OP_BINARY, &wire::pack_binary(wire::KIND_CALL_AUDIO, stream, *seq, packet));
+        }
+        if !c.tx.is_empty() {
+            match c.sock.write(&c.tx) {
+                Ok(n) => {
+                    c.tx.drain(..n);
+                }
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {}
+                Err(_) => c.closing = true,
+            }
+        }
+    }
+    read_conn(s, i, now);
+}
+
+/// Whether a tailnet call has the device (ringing, being placed or
+/// connected) or its task still runs.
+pub(crate) fn call_in_progress() -> bool {
+    crate::tailnet_call::running() || with(|s| s.live_call().is_some()).unwrap_or(false)
+}
+
+/// Whether SMS the modem announces wait: a tailnet call is up over LTE.
+pub(crate) fn sms_waits() -> bool {
+    call_policy::sms_waits(false, call_in_progress() && over_cellular())
+}
+
+/// Whether traffic goes over the modem: esp_netif routes over WiFi
+/// whenever it is up (ADR-0003), so over LTE whenever WiFi is not.
+fn over_cellular() -> bool {
+    const WIFI_STATE_CONNECTED: u32 = 2;
+    crate::wifi_manager::wifi_manager_get_state() != WIFI_STATE_CONNECTED
+}
+
+/// The call the call screen shows: the live one, or one ended within
+/// ENDED_SHOW_MS.
+pub(crate) struct CallView {
+    pub id: String,
+    pub name: String,
+    pub number: String,
+    pub phase: CallPhase,
+    pub mine: bool,
+    pub declined_here: bool,
+    pub connected: bool,
+    pub duration_s: u32,
+    pub frames: u32,
+    pub seq: u32,
+}
+
+pub(crate) fn call_view() -> Option<CallView> {
+    let now = now_ms();
+    with(|s| {
+        let c = s.calls.last()?;
+        if !c.live() && now.saturating_sub(c.ended_ms.unwrap_or(0)) > ENDED_SHOW_MS {
+            return None;
+        }
+        Some(CallView {
+            id: c.id.clone(),
+            name: s.contact_name(&c.key),
+            number: call_number(&c.key),
+            phase: c.phase.clone(),
+            mine: c.mine,
+            declined_here: c.declined_here,
+            connected: c.connected_ms.is_some(),
+            duration_s: c.duration_s(now),
+            frames: c.frames,
+            seq: GENERATION.load(Ordering::Relaxed),
+        })
+    })
+    .flatten()
+}
+
+/// Bump the generation, for a change made outside the lock.
+pub(crate) fn changed_now() {
+    changed();
 }
 
 /// Messages of ours to `key` became `state` (delivered, read).
@@ -2222,6 +2642,18 @@ pub unsafe extern "C" fn tailnet_chat_set_typing(key: *const c_char, on: bool) -
     }
 }
 
+/// Call contact `key`; the call screen follows it (thistle/call.h).
+///
+/// # Safety
+/// `key` must be null or a NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn tailnet_chat_call(key: *const c_char) -> i32 {
+    match unsafe { key_arg(key) } {
+        Some(k) => place_call(&k).map_or_else(|e| e, |_| ESP_OK),
+        None => ESP_ERR_INVALID_ARG,
+    }
+}
+
 /// # Safety
 /// `key` must be null or a NUL-terminated string.
 #[no_mangle]
@@ -2338,6 +2770,37 @@ mod sim_control {
 
     extern "C" {
         fn fflush(stream: *mut c_void) -> i32;
+        fn sim_display_save_ppm(path: *const c_char) -> bool;
+        fn sim_cellular_ring_now(number: *const c_char) -> bool;
+        fn sim_cellular_has_registered() -> bool;
+    }
+
+    /// The fake modem rings with a call; the tailnet call ends as
+    /// `cellular`. The user then declines the cellular call, so the next
+    /// scenario finds the device free.
+    fn cellular_call() -> Result<Value, String> {
+        let wait = |what: &str, secs: u64, f: &dyn Fn() -> bool| -> Result<(), String> {
+            let until = Instant::now() + Duration::from_secs(secs);
+            while !f() {
+                if Instant::now() > until {
+                    return Err(format!("{what} in {secs} s"));
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Ok(())
+        };
+        wait("the modem did not register", 60, &|| unsafe { sim_cellular_has_registered() })?;
+        if !unsafe { sim_cellular_ring_now(c"+4915123456789".as_ptr()) } {
+            return Err("the modem would not ring".into());
+        }
+        wait("the cellular call did not ring", 10, &|| {
+            let mut st = unsafe { std::mem::zeroed::<crate::call_manager::CCallStatus>() };
+            unsafe { crate::call_manager::rs_call_get_status(&mut st) };
+            st.state == 3 && !st.tailnet
+        })?;
+        crate::call_manager::rs_call_hangup();
+        wait("the cellular call did not end", 30, &|| !crate::call_manager::cellular_in_progress())?;
+        Ok(Value::Bool(true))
     }
 
     fn key_of(v: Option<&Value>) -> Result<Key, String> {
@@ -2479,6 +2942,35 @@ mod sim_control {
                 Ok(Value::Bool(true))
             }
             "unread" => Ok(json!(unread())),
+            "call" => place_call(&contact_key(cmd.get("to"))?).map(Value::from).map_err(|e| format!("0x{e:x}")),
+            "calls" => Ok(Value::Object(
+                with(|s| {
+                    s.calls
+                        .iter()
+                        .map(|c| {
+                            (c.id.clone(), json!({"peer": wire::hex(&c.key), "state": c.state(), "frames": c.frames,
+                                                  "mine": c.mine}))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            )),
+            // As the call screen does: Answer and Decline through thistle/call.h.
+            "answer_call" => match text("decline") {
+                None => done(crate::call_manager::rs_call_answer()),
+                Some("declined") => done(crate::call_manager::rs_call_hangup()),
+                Some(reason) => done(answer_call(text("call"), Some(reason))),
+            },
+            "end_call" => match text("reason").unwrap_or("hangup") {
+                "hangup" => done(crate::call_manager::rs_call_hangup()),
+                reason => done(hangup(text("call"), reason)),
+            },
+            "talk" => Ok(Value::Bool(true)),
+            "cellular_call" => cellular_call(),
+            "screenshot" => {
+                let file = CString::new(text("file").ok_or("no file")?).map_err(|e| e.to_string())?;
+                if unsafe { sim_display_save_ppm(file.as_ptr()) } { Ok(Value::Bool(true)) } else { Err("not saved".into()) }
+            }
             "stop" => Ok(Value::Bool(true)),
             other => Err(format!("{other}: not on this device yet")),
         }

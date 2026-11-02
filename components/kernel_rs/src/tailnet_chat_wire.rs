@@ -18,7 +18,7 @@ pub const PATH: &str = "/tailnet-chat/1";
 /// What this device announces in its hello. `voice-message` and
 /// `call:ws-opus` come with tickets 08 and 09: a cap is announced only once
 /// it is done.
-pub const CAPS: &[&str] = &["text", "receipts", "typing", "reply", "react"];
+pub const CAPS: &[&str] = &["text", "receipts", "typing", "reply", "react", "call:ws-opus"];
 
 pub const LABEL: &[u8; 20] = b"tailnet-chat/1 auth\0";
 pub const TRANSCRIPT_LEN: usize = 149;
@@ -808,7 +808,7 @@ mod tests {
     fn the_hello_announces_what_this_device_does() {
         let h = check(hello(&[1; 32], "t", &[2; 32]).as_bytes()).unwrap();
         let caps: Vec<&str> = h["caps"].as_array().unwrap().iter().map(|c| c.as_str().unwrap()).collect();
-        assert_eq!(caps, ["text", "receipts", "typing", "reply", "react"]);
+        assert_eq!(caps, ["text", "receipts", "typing", "reply", "react", "call:ws-opus"]);
     }
 
     #[test]
