@@ -222,6 +222,49 @@ void main() {
     expect(app.discovered, isEmpty);
   });
 
+  test('on Android, looking for chat peers asks the contacts and probes what they share', () async {
+    tailnet.status = statusFromInterfaces({
+      'tun0': ['100.99.0.7'],
+    });
+    final probed = <PeerAddress>[];
+    app = testModel(
+      tailnet,
+      notifier,
+      probe: (a) async {
+        probed.add(a);
+        return a.host == '100.64.0.2' ? ProbeResult(a, 'cd' * 32, 'homelab', 'cdcd cdcd cdcd cdcd cdcd', capsV1) : null;
+      },
+    );
+    other.tailnetPeers = () async => const [
+      SharedPeer('homelab', ['100.64.0.2']),
+      SharedPeer('phone', ['100.99.0.7']),
+    ];
+    await app.start();
+    final c = app.addContact(other.address, name: 'Device');
+    app.send(c.box, 'hello');
+    await eventually(() => other.requests().isNotEmpty);
+    other.accept(app.identity.keyHex);
+    await eventually(() => app.contacts.single.key == other.identity.keyHex);
+
+    await app.discover();
+    expect(probed, [const PeerAddress('100.64.0.2', 4810)], reason: 'this phone is not probed');
+    expect(app.discovered.single.probe.name, 'homelab');
+    expect(app.discovered.single.via, 'Device');
+    app.addDiscovered(app.discovered.single);
+    expect(app.contacts.map((c) => c.address), contains(const PeerAddress('100.64.0.2', 4810)));
+    expect(app.discovered, isEmpty);
+  });
+
+  test("on Linux, a contact that asks is told the tailnet's online peers", () async {
+    await app.start();
+    other.addContact(app.listening!, name: 'laptop');
+    other.sendText('laptop', 'hi');
+    await eventually(() => app.requests.isNotEmpty);
+    app.accept(app.requests.single.key);
+    final shared = await other.askPeers('laptop');
+    expect(shared!.map((p) => p.name), ['thistle-46cf20', 'homelab', 'pixel-8']);
+  });
+
   test('a peer added by its tailnet name is dialled at its tailnet address', () async {
     await app.start();
     final c = await app.addByName('Thistle-46CF20');

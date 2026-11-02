@@ -5,9 +5,11 @@
 /// On Android there is no `tailscale` command and no peer list: the
 /// Tailscale app is a VPN, and its interface's address is all there is
 /// to read ([statusFromInterfaces]). Peers are added there by name or
-/// address, and dialled from the contacts already known.
+/// address, dialled from the contacts already known, and looked for among
+/// the peer lists contacts share ([discoverThroughContacts]).
 library;
 
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -66,6 +68,13 @@ class TailscaleStatus {
     if (state != TailnetState.running || selfIps.isEmpty) return null;
     return selfIps.firstWhere((ip) => !ip.contains(':'), orElse: () => selfIps.first);
   }
+
+  /// What a contact that asks is told of the tailnet (protocol section
+  /// 4.10): the online peers, by MagicDNS name; none without a peer list.
+  List<SharedPeer> get toShare => [
+    if (hasPeerList)
+      for (final p in peers) SharedPeer(p.dnsName.isNotEmpty ? p.dnsName : p.hostName, p.ips),
+  ];
 
   /// Every name an online peer may be known by, for `ChatPeer.seenOnline`.
   Set<String> get onlineNames => {
@@ -181,9 +190,13 @@ Future<TailscaleStatus> readAndroidTailnet({
 }
 
 class DiscoveredPeer {
-  const DiscoveredPeer(this.peer, this.probe);
+  const DiscoveredPeer(this.peer, this.probe, {this.via});
   final TailnetPeer peer;
   final ProbeResult probe;
+
+  /// The contact whose peer list it was found in (Android); null when it
+  /// came from our own.
+  final String? via;
 }
 
 /// Probe each online tailnet peer's chat port with a hello, all at once,
@@ -196,6 +209,45 @@ Future<List<DiscoveredPeer>> discoverChatPeers(
   final answers = await Future.wait([
     for (final p in status.peers)
       probe(PeerAddress(p.address, port)).then((r) => r == null ? null : DiscoveredPeer(p, r)),
+  ]);
+  return [for (final a in answers) ?a];
+}
+
+/// Android, which has no peer list of its own: ask each contact for its
+/// tailnet's peers (`ChatPeer.askPeers`), all at once, and probe each
+/// address they share, once, as [discoverChatPeers] does. Only addresses
+/// inside the tailnet's ranges are taken from what they share, never a name
+/// or a key; ours and the contacts' are not probed. Each chat peer found
+/// says which contact shared it.
+Future<List<DiscoveredPeer>> discoverThroughContacts(
+  List<Contact> contacts,
+  Future<List<SharedPeer>?> Function(Contact contact) ask,
+  Future<ProbeResult?> Function(PeerAddress address) probe, {
+  int port = defaultPort,
+  Set<String> ownAddresses = const {},
+}) async {
+  final lists = await Future.wait([
+    for (final c in contacts)
+      ask(c).then<List<SharedPeer>?>((l) => l, onError: (Object _) => null).then((l) => (c, l ?? const <SharedPeer>[])),
+  ]);
+  final known = {...ownAddresses, for (final c in contacts) ?c.address?.host};
+  final via = <String, String>{};
+  for (final (c, shared) in lists) {
+    for (final a in addressesToProbe(shared)) {
+      if (!known.contains(a)) via.putIfAbsent(a, () => c.name);
+    }
+  }
+  final answers = await Future.wait([
+    for (final MapEntry(key: a, value: name) in via.entries)
+      probe(PeerAddress(a, port)).then(
+        (r) => r == null
+            ? null
+            : DiscoveredPeer(
+                TailnetPeer(hostName: '', dnsName: '', ips: [a]),
+                r,
+                via: name,
+              ),
+      ),
   ]);
   return [for (final a in answers) ?a];
 }
