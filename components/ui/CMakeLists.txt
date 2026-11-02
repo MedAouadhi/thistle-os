@@ -28,6 +28,9 @@ idf_component_register(
         "src/widget_shims.c"
     INCLUDE_DIRS "include"
     REQUIRES thistle_hal kernel esp_timer lvgl__lvgl esp_http_client mbedtls
+    # home_core.h: the status bar's envelope follows Home's rule for which
+    # app the unread messages open (home_now_chat_only).
+    PRIV_REQUIRES apps_builtin
 )
 
 # Dictation's Cohere key from .env, into a header in the build directory:

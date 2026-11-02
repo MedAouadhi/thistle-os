@@ -375,4 +375,19 @@ mod tests {
         assert_eq!(std::mem::offset_of!(CMsgAlert, text), 38);
         assert_eq!(std::mem::size_of::<CMsgAlert>(), 112);
     }
+
+    #[test]
+    fn the_transports_are_msg_alert_h_s() {
+        let header = include_str!("../../kernel/include/thistle/msg_alert.h");
+        let defined = |name: &str| -> i32 {
+            let line = header.lines().find(|l| l.starts_with(&format!("#define {name} "))).unwrap_or_else(|| panic!("no {name}"));
+            line.split_whitespace().nth(2).unwrap().parse().unwrap()
+        };
+        for (name, t) in [("MSG_ALERT_SMS", Transport::Sms), ("MSG_ALERT_MESH", Transport::Mesh),
+                          ("MSG_ALERT_TAILNET", Transport::Tailnet)] {
+            assert_eq!(defined(name), t as i32, "{name}");
+            assert_eq!(Transport::from_c(defined(name)), Some(t), "{name}");
+        }
+        assert_eq!(Transport::from_c(3), None);
+    }
 }

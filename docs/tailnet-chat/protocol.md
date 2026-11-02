@@ -244,6 +244,9 @@ through the outbox, and acked.
   (no transport in common). Neither or both is `bad_request`.
 - `call_end` ends a call, offered or connected, with a reason: `hangup`,
   `cellular` (a cellular call took over the device), `timeout`, `error`.
+- An offer nobody answers SHOULD be ended by the caller after **45 s**,
+  with `call_end` `timeout`; the callee SHOULD stop ringing at the same
+  time and end it the same way.
 - A receiver SHOULD play from a jitter buffer of 60 to 200 ms and conceal a
   lost or late frame with Opus' own loss concealment. Either side MUST end
   a connected call after **10 s** without a frame from the other.
@@ -273,7 +276,10 @@ v1 announces: `text`, `receipts`, `typing`, `reply`, `react`,
 - A peer MUST use a feature only if both hellos announce it: no `read`
   unless both have `receipts`, no `typing` frame unless both have
   `typing`, no `reply_to` unless both have `reply`, and so on. `text` is
-  what `msg` needs.
+  what `msg` needs. A queued `react` or `voice` the other side did not
+  announce stays queued for a connection whose hello does; a queued `msg`
+  goes without its `reply_to`; a call to a peer without `call:ws-opus`
+  ends at once as `unsupported`, with nothing sent.
 - A peer MUST ignore a capability it does not know.
 - **Room for later, with no new version.** Video: a `webrtc` capability and
   a `webrtc` transport in `call_offer`, its SDP and ICE exchanged as JSON
@@ -359,7 +365,9 @@ still in its sender's outbox.
   dedupes by id.
 - A peer SHOULD send a WebSocket ping every **20 s** while a connection is
   open, and SHOULD close a connection with nothing to send, no transfer and
-  no call after **2 minutes** idle (1000).
+  no call after **2 minutes** idle (1000). Idle means no text or binary
+  frame sent or received: pings and pongs do not count, or the pings
+  would keep every connection open.
 - Every chat peer answers a hello whenever another probes it: a probe is a
   dial, a `hello`, and a close.
 

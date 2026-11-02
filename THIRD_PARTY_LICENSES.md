@@ -719,19 +719,43 @@ Full text: `apps/hermes/third_party/md4c/LICENSE.md`
 
 ---
 
+## The Tailnet chat companion app (`companion/`)
+
+The companion app is a separate program, built with Dart and Flutter for
+Linux and Android; nothing of it is in the firmware. Its own code is BSD
+3-Clause. Most of its pub.dev dependencies are BSD-3-Clause (Flutter,
+`ffi`, `crypto`, `path_provider`, `flutter_local_notifications`, and the
+transitive ones in `companion/app/pubspec.lock` and
+`companion/core/pubspec.lock`). These are not:
+
+| Package | Version | License | Used for |
+|---------|---------|---------|----------|
+| `dbus` (https://pub.dev/packages/dbus) | 0.8.0 | **MPL-2.0** | Linux: the identity key kept in the Secret Service (GNOME Keyring, KWallet), over D-Bus (`companion/app`) |
+| `ed25519_edwards` (https://pub.dev/packages/ed25519_edwards) | 0.3.2 | Apache-2.0 | Ed25519 signatures for the handshake (`companion/core`) |
+| `sqlite3` (https://pub.dev/packages/sqlite3) | 3.8.0 | MIT | The message store (`companion/core`); the SQLite library it loads is public domain |
+
+MPL-2.0 is a file-level copyleft: the `dbus` package's own files stay
+under MPL-2.0, and changes to them would have to be published under it;
+the app that uses them, unchanged, may stay BSD 3-Clause. The Android
+build also pulls AndroidX and Kotlin libraries through Gradle, under
+Apache-2.0. Re-check this table when a companion `pubspec.yaml` changes.
+
+---
+
 ## License Compatibility Summary
 
 All dependencies are compatible with the ThistleOS BSD 3-Clause license:
 
 | License | Compatible with BSD 3-Clause | Components |
 |---------|------------------------------|------------|
-| Apache-2.0 | Yes | ESP-IDF, esp_modem, esp_codec_dev, elf_loader, NimBLE, mbedTLS |
-| MIT | Yes | LVGL, FreeRTOS, RadioLib, libcurl, Unity, esp-rs crates, Expat, CrossPoint Reader, diy-esp32-epub-reader, MicroLink, cJSON, md4c |
+| Apache-2.0 | Yes | ESP-IDF, esp_modem, esp_codec_dev, elf_loader, NimBLE, mbedTLS, ed25519_edwards (companion app) |
+| MIT | Yes | LVGL, FreeRTOS, RadioLib, libcurl, Unity, esp-rs crates, Expat, CrossPoint Reader, diy-esp32-epub-reader, MicroLink, cJSON, md4c, sqlite3 (companion app) |
 | BSD-3-Clause | Yes | Bosch BHI260AP firmware and BHY2 SensorAPI, wireguard-lwip |
 | BSD-2-Clause | Yes | Monocypher |
 | zlib | Yes | SDL2, uzlib |
 | CC0-1.0 | Yes | minimp3 |
 | Bitstream Vera | Yes | DejaVu fonts (the Reader's font) |
 | MIT OR Apache-2.0 | Yes | argon2, serde_json, esp-idf-hal, esp-idf-svc, esp-idf-sys |
+| MPL-2.0 (file-level copyleft) | Yes, used unmodified | dbus (companion app only) |
 
-No GPL, LGPL, AGPL, or other copyleft licenses are present in this project.
+No GPL, LGPL or AGPL code is in the firmware's default build (the optional WhatsApp part, `components/whatsapp/`, is AGPL and built only on request; ADR-0013). The one copyleft dependency elsewhere is the companion app's `dbus`, MPL-2.0, above.

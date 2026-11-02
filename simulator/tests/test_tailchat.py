@@ -74,7 +74,7 @@ def free_port() -> int:
 class Device:
     """A simulator on a scratch card and SPIFFS, which a restart keeps."""
 
-    def __init__(self, simulator: Path, root: Path, name: str, tailnet: bool = True):
+    def __init__(self, simulator: Path, root: Path, name: str, tailnet: bool = True, history: bool = True):
         self.simulator = simulator
         self.card = root / name
         self.spiffs = root / f"{name}-spiffs"
@@ -84,6 +84,8 @@ class Device:
         system_path = self.card / "config" / "system.json"
         system = json.loads(system_path.read_text())
         system.get("thistle_os", system)["tailnet"] = {"enabled": tailnet}
+        if not history:
+            system.get("thistle_os", system).setdefault("messenger", {})["save_history"] = False
         system_path.write_text(json.dumps(system, indent=2))
         self.proc: Optional[subprocess.Popen] = None
         self.log_path = root / f"{name}.log"
@@ -761,6 +763,86 @@ def case_calls(simulator: Path, root: Path) -> None:
         dev.stop()
 
 
+def case_caps(simulator: Path, root: Path) -> None:
+    """Protocol section 5: a peer uses only what both hellos announce. To a
+    contact that announced `text` alone, a reply goes without its reply_to,
+    a reaction stays queued, and a call ends at once as unsupported, with
+    nothing sent."""
+    dev = Device(simulator, root, "caps").start()
+    try:
+        target = SimTarget(dev)
+        plain = RawConn(target.address, name="plain", caps=["text"]).handshake()
+        conformance._become_contact(target, plain)
+        m = msg("plain text only")
+        plain.send(m)
+        plain.expect("ack", id=m["id"])
+        mid = target.send_text(plain.key_hex, "a reply", reply_to=m["id"])
+        got = plain.expect("msg", id=mid)
+        assert "reply_to" not in got, got
+        plain.send({"type": "ack", "id": mid})
+        rid = target.react(plain.key_hex, m["id"], "👍")
+        call = target.place_call(plain.key_hex)
+        eventually(lambda: conformance._call_state(target, call) == "ended:unsupported", what="the call to end")
+        seen = plain.drain(1.0)
+        kinds = [f["type"] for f in seen if isinstance(f, dict)]
+        assert "react" not in kinds and "call_offer" not in kinds, kinds
+        assert target.waiting(plain.key_hex) == [rid], target.waiting(plain.key_hex)
+        plain.close()
+        target.close()
+    finally:
+        dev.stop()
+
+
+def case_no_history(simulator: Path, root: Path) -> None:
+    """With "save history" off nothing goes on the card, yet a message sent
+    again after a restart is still known, and a contact request still holds
+    what came with it (story 5): both are the module's own, on SPIFFS."""
+    dev = Device(simulator, root, "nohistory", history=False).start()
+    try:
+        target = SimTarget(dev)
+        pal = RawConn(target.address, name="pal").handshake()
+        conformance._become_contact(target, pal)
+        m = msg("said once")
+        pal.send(m)
+        pal.expect("ack", id=m["id"])
+        theirs = {"type": "react", "id": os.urandom(16).hex(), "ts": int(time.time() * 1000), "to": m["id"],
+                  "emoji": "🎉"}
+        pal.send(theirs)
+        pal.expect("ack", id=theirs["id"])
+        pal.close()
+        stranger = RawConn(target.address, name="stranger").handshake()
+        held = msg("held across a restart")
+        stranger.send(held)
+        stranger.expect("ack", id=held["id"])
+        stranger.close()
+        target.call({"cmd": "mark_read", "to": pal.key_hex})
+        target.close()
+        dev.stop()
+        assert not (dev.card / "messages" / "tailnet").exists() or \
+            not any((dev.card / "messages" / "tailnet").rglob("*.jsonl")), "history written with it off"
+
+        dev.start()
+        target = SimTarget(dev)
+        assert [x["text"] for r in target.requests() if r["key"] == stranger.key_hex for x in r["held"]] == \
+            [held["text"]], target.requests()
+        again = RawConn(target.address, name="pal", seed=pal.seed).handshake()
+        again.send(m)
+        again.expect("ack", id=m["id"])
+        again.send(theirs)
+        again.expect("ack", id=theirs["id"])
+        time.sleep(0.3)
+        assert m["id"] not in [x["id"] for x in target.messages(pal.key_hex)], "shown again after the restart"
+        assert target.call({"cmd": "unread"}) == 0
+        assert "received " + m["id"] + " from pal again" in dev.log_text()
+        again.close()
+        target.accept(stranger.key_hex)
+        shown = [x["text"] for x in target.messages(stranger.key_hex)]
+        assert shown == [held["text"]], shown
+        target.close()
+    finally:
+        dev.stop()
+
+
 CASES: list[tuple[str, Callable[[Path, Path], None]]] = [
     ("conformance", case_conformance),
     ("card-and-restart", case_card_and_restart),
@@ -771,6 +853,8 @@ CASES: list[tuple[str, Callable[[Path, Path], None]]] = [
     ("voice", case_voice),
     ("app-add-contact", case_app_add_contact),
     ("calls", case_calls),
+    ("caps", case_caps),
+    ("no-history", case_no_history),
 ]
 
 

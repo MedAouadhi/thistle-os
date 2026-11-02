@@ -10,6 +10,7 @@
 #include "thistle/tailnet.h"
 #include "thistle/tailnet_chat.h"
 #include "ui/toast.h"
+#include "launcher/home_core.h"
 #include "thistle/app_manager.h"
 #include "hal/board.h"
 #include "esp_log.h"
@@ -83,8 +84,14 @@ static void fit_time_label(const char *time_str)
 static void messages_tap_cb(lv_event_t *e)
 {
     (void)e;
-    bool chat_only = rs_mesh_unread_count() + rs_sms_unread_count() == 0 && tailnet_chat_unread_count() > 0;
-    app_manager_launch(chat_only ? CHAT_APP_ID : MESSENGER_APP_ID);
+    /* Home's rule, host-tested in test_home_core.c: only Chat has unread
+     * messages, so the envelope opens Chat. */
+    home_now_in_t in = {
+        .sms_unread = rs_sms_unread_count(),
+        .mesh_unread = rs_mesh_unread_count(),
+        .chat_unread = tailnet_chat_unread_count(),
+    };
+    app_manager_launch(home_now_chat_only(&in) ? CHAT_APP_ID : MESSENGER_APP_ID);
 }
 
 static void call_tap_cb(lv_event_t *e)

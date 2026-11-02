@@ -34,31 +34,20 @@ use crate::tailnet_call_policy::Phase;
 const STACK_SIZE: usize = 20 * 1024;
 const FRAME: Duration = Duration::from_millis(20);
 const RATE: u32 = 16_000;
+/// The largest Opus packet.
+const OPUS_PACKET_MAX: usize = 1275;
+/// An allocation this big goes to PSRAM (CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL
+/// is 4096).
+const PSRAM_ALLOC: usize = 4096 + 1;
 
-#[cfg(not(test))]
-extern "C" {
-    fn esp_log_write(level: i32, tag: *const u8, format: *const u8, ...);
-}
-
-const ESP_LOG_WARN: i32 = 2;
-const ESP_LOG_INFO: i32 = 3;
-
-fn log(level: i32, text: &str) {
-    #[cfg(not(test))]
-    {
-        let c = std::ffi::CString::new(text.replace('\0', "")).unwrap_or_default();
-        unsafe { esp_log_write(level, b"tailnet_call\0".as_ptr(), b"%s\n\0".as_ptr(), c.as_ptr()) };
-    }
-    #[cfg(test)]
-    let _ = (level, text);
-}
+use crate::tailnet_chat::{log, ESP_LOG_INFO, ESP_LOG_WARN};
 
 pub(crate) fn info(text: &str) {
-    log(ESP_LOG_INFO, text);
+    log(b"tailnet_call\0", ESP_LOG_INFO, text);
 }
 
 pub(crate) fn warn(text: &str) {
-    log(ESP_LOG_WARN, text);
+    log(b"tailnet_call\0", ESP_LOG_WARN, text);
 }
 
 // ---------------------------------------------------------------------------
@@ -462,7 +451,10 @@ fn run(first: String) {
         crate::audio_volume::rs_audio_capture_begin();
         // In PSRAM on the device (an allocation over 4 KB would be; this is
         // 1.3 KB, from the heap rather than the stack).
-        let mut packet = vec![0u8; 1275];
+        // Opus' largest packet. Allocated past CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL
+        // (4096) so that it lands in PSRAM, not internal RAM.
+        let mut packet = Vec::with_capacity(PSRAM_ALLOC);
+        packet.resize(OPUS_PACKET_MAX, 0u8);
         let mut mic = [0i16; FRAME_SAMPLES];
         let mut out = [0i16; FRAME_SAMPLES];
         let mut id = first;
@@ -483,7 +475,7 @@ fn run(first: String) {
         crate::audio_volume::rs_audio_capture_end();
         if let Some(unused) = crate::kernel_task::stack_unused() {
             let level = if unused < 2048 { ESP_LOG_WARN } else { ESP_LOG_INFO };
-            log(level, &format!("the call task left {unused} of {STACK_SIZE} bytes of stack unused"));
+            log(b"tailnet_call\0", level, &format!("the call task left {unused} of {STACK_SIZE} bytes of stack unused"));
         }
     }
     // SMS that waited for the call may be fetched now.

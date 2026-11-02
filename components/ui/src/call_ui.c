@@ -726,9 +726,11 @@ static lv_obj_t *build_call(lv_obj_t *box)
     lv_obj_t *toggles = add_box(box, LV_FLEX_FLOW_ROW);
     lv_obj_set_height(toggles, sz->toggle_h);
     s_ui.mute = add_toggle(toggles, LV_SYMBOL_MUTE, "Mute", mute_cb);
-    /* A tailnet call has no DTMF. */
-    lv_obj_t *keypad = s_ui.st.tailnet ? s_ui.mute
-                                        : add_toggle(toggles, LV_SYMBOL_KEYBOARD, "Keypad", keypad_cb);
+    /* A tailnet call has no DTMF, so no Keypad toggle. */
+    lv_obj_t *keypad = NULL;
+    if (!s_ui.st.tailnet) {
+        keypad = add_toggle(toggles, LV_SYMBOL_KEYBOARD, "Keypad", keypad_cb);
+    }
     s_ui.speaker = add_toggle(toggles, LV_SYMBOL_VOLUME_MAX, "Speaker", speaker_cb);
     set_checked(s_ui.mute, s_ui.st.muted);
     set_checked(s_ui.speaker, s_ui.st.speaker);
@@ -749,7 +751,8 @@ static lv_obj_t *build_call(lv_obj_t *box)
 
     lv_obj_t *end = add_end_button(box, LV_SYMBOL_CALL " End call");
     lv_obj_set_size(end, LV_PCT(100), sz->end_h);
-    return keypad;
+    /* The keyboard's focus starts on Keypad; on Mute where there is none. */
+    return keypad != NULL ? keypad : s_ui.mute;
 }
 
 static const char *const DTMF_MAP[] = {

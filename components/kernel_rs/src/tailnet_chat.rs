@@ -24,6 +24,15 @@
 //!   the message history as its third kind (msg_log.rs,
 //!   `messages/tailnet/`); a conversation is read back from it and folded.
 //!   A stranger's messages are acked and held as a contact request.
+//! - Whether or not history is kept, the ids last received from each
+//!   contact (`/spiffs/tailnet_chat_seen.json`, policy::RecentIds) and the
+//!   contact requests with what they hold (`/spiffs/tailnet_chat_held.jsonl`)
+//!   are this module's own, so that a message sent again after a restart
+//!   is never shown twice and a request accepted after one shows all it
+//!   held.
+//! - A peer is sent only what both hellos announce (policy::outgoing,
+//!   policy::may_call). A connection is pinged every 20 s and closed after
+//!   2 minutes without a data frame (policy::conn_due).
 //! - A message received buzzes and pops up (msg_alert.rs, its third kind)
 //!   and counts as unread until read, unless its conversation is on screen.
 //!
@@ -40,7 +49,7 @@ use std::ffi::{c_char, CStr, CString};
 use std::io::{ErrorKind, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::os::raw::c_void;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
@@ -49,7 +58,7 @@ use crate::msg_alert::{self, Transport};
 use crate::msg_log::{self, ChatEntry, ChatLine, ChatReact, ChatVoice, Direction};
 use crate::power_manager::HoldGuard;
 use crate::tailnet_call_policy::{self as call_policy, Answer, Call, LogKind, Phase as CallPhase};
-use crate::tailnet_chat_policy::{self as policy, Book, Dial, DialCandidate, Outbox, Retry, Seen, Trust};
+use crate::tailnet_chat_policy::{self as policy, Book, ConnClock, ConnDue, Dial, DialCandidate, Outbox, Outgoing, RecentIds, Retry, Seen, Trust};
 use crate::tailnet_chat_wire::{self as wire, ErrorFrame, Key, Role, Upgrade, Upgraded, WsEvent, WsReader};
 
 const SECTION: &str = "tailnet_chat";
@@ -66,9 +75,6 @@ const POLL_MS: u64 = 100;
 /// The most chat connections open at once, dials in flight included (the
 /// spec's budget of sockets).
 pub(crate) const CONNECTIONS_MAX: usize = 4;
-const HANDSHAKE_MS: u64 = 10_000;
-const PING_MS: u64 = 20_000;
-const IDLE_MS: u64 = 120_000;
 /// How long a dial's TCP connect may take: a first packet to a tailnet peer
 /// starts the WireGuard handshake and is dropped; the second SYN finds it.
 const CONNECT_S: u64 = 5;
@@ -98,25 +104,27 @@ extern "C" {
     fn esp_log_write(level: i32, tag: *const u8, format: *const u8, ...);
 }
 
-const ESP_LOG_WARN: i32 = 2;
-const ESP_LOG_INFO: i32 = 3;
+pub(crate) const ESP_LOG_WARN: i32 = 2;
+pub(crate) const ESP_LOG_INFO: i32 = 3;
 
-fn log(level: i32, text: &str) {
+/// One log line under `tag` (NUL-terminated), for tailnet_chat and
+/// tailnet_call alike. As every Rust module's on the device, no newline.
+pub(crate) fn log(tag: &'static [u8], level: i32, text: &str) {
     #[cfg(not(test))]
     {
         let c = CString::new(text.replace('\0', "")).unwrap_or_default();
-        unsafe { esp_log_write(level, b"tailnet_chat\0".as_ptr(), b"%s\n\0".as_ptr(), c.as_ptr()) };
+        unsafe { esp_log_write(level, tag.as_ptr(), b"%s\0".as_ptr(), c.as_ptr()) };
     }
     #[cfg(test)]
-    let _ = (level, text);
+    let _ = (tag, level, text);
 }
 
 fn info(text: &str) {
-    log(ESP_LOG_INFO, text);
+    log(b"tailnet_chat\0", ESP_LOG_INFO, text);
 }
 
 fn warn(text: &str) {
-    log(ESP_LOG_WARN, text);
+    log(b"tailnet_chat\0", ESP_LOG_WARN, text);
 }
 
 // ---------------------------------------------------------------------------
@@ -163,6 +171,80 @@ fn spiffs() -> PathBuf {
 
 fn book_path() -> PathBuf {
     spiffs().join("tailnet_chat.json")
+}
+
+/// The ids last received from each contact (policy::RecentIds), kept
+/// whether or not history is: SPIFFS names hold 31 bytes, `/` included.
+fn recent_path() -> PathBuf {
+    spiffs().join("tailnet_chat_seen.json")
+}
+
+/// The contact requests and what they hold (`held_file`), kept whether or
+/// not history is, so that accepting one after a restart shows them.
+fn held_path() -> PathBuf {
+    spiffs().join("tailnet_chat_held.jsonl")
+}
+
+/// The held file's largest size: 16 requests of 20 messages of 4 KB would
+/// be 1.3 MB of SPIFFS; the newest that fit are kept.
+const HELD_FILE_MAX: usize = 48 * 1024;
+
+/// The requests as the held file has them: one history line per held
+/// message, requests in order, each one's messages oldest first; the
+/// newest lines within HELD_FILE_MAX.
+fn held_file(requests: &[Request]) -> String {
+    let lines: Vec<String> = requests
+        .iter()
+        .flat_map(|r| {
+            r.held.iter().map(move |m| {
+                msg_log::chat_line(
+                    &ChatLine {
+                        dir: Direction::In,
+                        key: wire::hex(&r.key),
+                        name: r.name.clone(),
+                        id: m.id.clone(),
+                        ts: m.ts,
+                        text: m.text.clone(),
+                        reply_to: m.reply_to.clone(),
+                        state: m.state.clone(),
+                        voice: m.voice,
+                    },
+                    None,
+                )
+            })
+        })
+        .collect();
+    let sizes: Vec<usize> = lines.iter().map(String::len).collect();
+    let keep = policy::newest_within(&sizes, HELD_FILE_MAX);
+    lines[lines.len() - keep..].concat()
+}
+
+/// The requests a held file has, in its order.
+fn held_from_file(text: &str) -> Vec<Request> {
+    let mut out: Vec<Request> = Vec::new();
+    for l in text.lines().filter_map(msg_log::parse_chat_line) {
+        let Some(key) = wire::unhex::<32>(&l.key) else { continue };
+        let name = l.name.clone();
+        let i = match out.iter().position(|r| r.key == key) {
+            Some(i) => i,
+            None => {
+                out.push(Request { key, name, address: None, held: Vec::new() });
+                out.len() - 1
+            }
+        };
+        out[i].name = l.name.clone();
+        out[i].held.push(Message::from_line(l));
+    }
+    out
+}
+
+/// Write `text` to `path` whole: beside it first, then renamed.
+fn write_whole(path: &Path, text: &str, what: &str) {
+    let tmp = path.with_extension("tmp");
+    let ok = std::fs::write(&tmp, text).and_then(|_| std::fs::rename(&tmp, path));
+    if let Err(e) = ok {
+        warn(&format!("could not save {what} to {}: {e}", path.display()));
+    }
 }
 
 /// The simulator alone admits loopback and listens on it.
@@ -412,9 +494,11 @@ struct Conn {
     dialled_for: Option<Key>,
     /// The Sec-WebSocket-Key of a dialled connection's upgrade.
     ws_key: String,
-    opened_ms: u64,
-    last_ms: u64,
-    pinged_ms: u64,
+    /// Opened, last data frame, last ping: policy::conn_due's.
+    clock: ConnClock,
+    /// A data frame (text or binary, not a ping or pong) went or came since
+    /// the last poll: `clock.active_ms` becomes the poll's time.
+    data_moved: bool,
     /// Closed (or to close once tx is out): no more frames are read.
     closing: bool,
     /// Outbox ids sent on this connection.
@@ -441,6 +525,24 @@ struct VoiceOut {
     data: Vec<u8>,
     /// The next chunk; None until the frame is sent.
     seq: Option<u32>,
+}
+
+/// An outbox frame as the peer on `c` may take it (policy::outgoing):
+/// None to keep it queued; else the frame, without `reply_to` for a peer
+/// that did not announce `reply`.
+fn gate(c: &Conn, frame: &str) -> Option<String> {
+    let Ok(serde_json::Value::Object(mut f)) = serde_json::from_str::<serde_json::Value>(frame) else {
+        return Some(frame.to_string());
+    };
+    let kind = f.get("type").and_then(|t| t.as_str()).unwrap_or("");
+    match policy::outgoing(kind, f.contains_key("reply_to"), |cap| c.may(cap)) {
+        Outgoing::Hold => None,
+        Outgoing::Send { strip_reply: false } => Some(frame.to_string()),
+        Outgoing::Send { strip_reply: true } => {
+            f.remove("reply_to");
+            Some(serde_json::Value::Object(f).to_string())
+        }
+    }
 }
 
 /// tx is topped up with voice chunks while it holds less than this.
@@ -522,11 +624,15 @@ impl Conn {
     }
 
     fn send_text(&mut self, text: &str) {
+        self.data_moved = true;
         let mask = self.mask();
         self.tx.extend_from_slice(&wire::ws_frame(wire::OP_TEXT, text.as_bytes(), mask));
     }
 
     fn send_op(&mut self, op: u8, data: &[u8]) {
+        if op == wire::OP_TEXT || op == wire::OP_BINARY {
+            self.data_moved = true;
+        }
         let mask = self.mask();
         self.tx.extend_from_slice(&wire::ws_frame(op, data, mask));
     }
@@ -562,9 +668,8 @@ impl Conn {
             nonce: random::<32>(),
             dialled_for,
             ws_key: if dialled { wire::ws_key(&random::<16>()) } else { String::new() },
-            opened_ms: now,
-            last_ms: now,
-            pinged_ms: now,
+            clock: ConnClock { opened_ms: now, active_ms: now, pinged_ms: now },
+            data_moved: false,
             closing: false,
             sent: Vec::new(),
             voice_in: None,
@@ -593,6 +698,8 @@ struct State {
     conns: Vec<Conn>,
     book: Book,
     outbox: Outbox,
+    /// The ids last received from each contact, apart from the history.
+    recent: RecentIds,
     /// When each contact's outbox is dialled next.
     retries: Vec<(Key, Retry)>,
     /// Contacts whose dial's connect is on its task now.
@@ -648,13 +755,15 @@ fn changed() {
 }
 
 fn save(s: &State) {
-    let path = book_path();
-    let tmp = path.with_extension("tmp");
-    let text = policy::to_file(&s.book, &s.outbox);
-    let ok = std::fs::write(&tmp, text).and_then(|_| std::fs::rename(&tmp, &path));
-    if let Err(e) = ok {
-        warn(&format!("could not save the contacts to {}: {e}", path.display()));
-    }
+    write_whole(&book_path(), &policy::to_file(&s.book, &s.outbox), "the contacts");
+}
+
+fn save_recent(s: &State) {
+    write_whole(&recent_path(), &s.recent.to_file(), "the ids received");
+}
+
+fn save_held(s: &State) {
+    write_whole(&held_path(), &held_file(&s.requests), "the contact requests");
 }
 
 fn fp_id(key: &Key) -> String {
@@ -675,6 +784,7 @@ impl State {
             conns: Vec::new(),
             book,
             outbox,
+            recent: std::fs::read_to_string(recent_path()).map(|t| RecentIds::from_file(&t)).unwrap_or_default(),
             retries: Vec::new(),
             dialling: Vec::new(),
             sweep: Vec::new(),
@@ -699,8 +809,17 @@ impl State {
         s
     }
 
-    /// The contact requests on the card, from before this boot.
+    /// The contact requests from before this boot: the module's own file;
+    /// the card's, from a build before it.
     fn read_requests(&mut self) {
+        if let Ok(text) = std::fs::read_to_string(held_path()) {
+            for r in held_from_file(&text) {
+                if self.book.find(&r.key).is_none() && self.requests.len() < REQUESTS_MAX {
+                    self.requests.push(r);
+                }
+            }
+            return;
+        }
         let root = msg_log::root();
         for fp in msg_log::chat_requests(root) {
             let lines = msg_log::chat_read(root, true, &fp, HELD_MAX);
@@ -742,6 +861,12 @@ impl State {
         self.outbox.iter().any(|(k, f)| k == key && !f.is_empty())
     }
 
+    /// Whether something of ours went out on `c` and waits for its ack.
+    fn unacked(&self, c: &Conn) -> bool {
+        let Some(key) = c.key() else { return false };
+        self.outbox.iter().any(|(k, f)| k == key && f.iter().any(|(id, _)| c.sent.contains(id)))
+    }
+
     fn retry(&mut self, key: &Key) -> &mut Retry {
         let i = match self.retries.iter().position(|(k, _)| k == key) {
             Some(i) => i,
@@ -773,6 +898,11 @@ impl State {
                 if c.sent.contains(&id) {
                     continue;
                 }
+                let frame = match gate(c, &frame) {
+                    Some(f) => f,
+                    // The peer cannot take it: queued for one that can.
+                    None => continue,
+                };
                 match voice_out(&id, &frame) {
                     // A voice message: its frame and file go out by turns.
                     Some(Ok(v)) => {
@@ -1013,11 +1143,20 @@ pub(crate) fn set_check_minutes(minutes: u32) -> i32 {
     crate::system_json::save(SECTION, "check_minutes", serde_json::Value::from(minutes))
 }
 
+/// The tailnet as the module sees it: up or not, and why for the user;
+/// this device's tailnet address and hostname.
+struct TailnetSeen {
+    shown: Shown,
+    why: String,
+    ip: String,
+    host: String,
+}
+
 /// Whether the tailnet is up, and if not, why, for the user.
-fn tailnet_shown() -> (Shown, String, String, String) {
+fn tailnet_shown() -> TailnetSeen {
     let mut st: crate::tailnet_manager::CTailnetStatus = unsafe { std::mem::zeroed() };
     if unsafe { crate::tailnet_manager::tailnet_get_status(&mut st) } != ESP_OK {
-        return (Shown::Waiting, "Tailscale is starting".into(), String::new(), String::new());
+        return TailnetSeen { shown: Shown::Waiting, why: "Tailscale is starting".into(), ip: String::new(), host: String::new() };
     }
     let text = |b: &[u8]| CStr::from_bytes_until_nul(b).map(|c| c.to_string_lossy().into_owned()).unwrap_or_default();
     let (ip, host) = (text(&st.ip), text(&st.hostname));
@@ -1032,7 +1171,7 @@ fn tailnet_shown() -> (Shown, String, String, String) {
         7 => (Shown::TailnetOff, "Tailscale stopped. Open the Tailscale app to see why."),
         _ => (Shown::Unavailable, "This board has no Tailscale client."),
     };
-    (shown, why.to_string(), ip, host)
+    TailnetSeen { shown, why: why.to_string(), ip, host }
 }
 
 unsafe extern "C" fn tick(_arg: *mut c_void) {
@@ -1053,7 +1192,7 @@ unsafe extern "C" fn tick(_arg: *mut c_void) {
 
 /// Once a second: start or stop with the tailnet.
 fn look(s: &mut State) {
-    let (mut shown, mut why, ip, host) = tailnet_shown();
+    let TailnetSeen { mut shown, mut why, ip, host } = tailnet_shown();
     if shown == Shown::Listening && s.identity.is_none() {
         s.identity = load_identity();
         if let Some(id) = &s.identity {
@@ -1371,21 +1510,33 @@ fn poll(s: &mut State, now: u64) {
         read_conn(s, i, now);
     }
     let in_calls: Vec<Key> = s.calls.iter().filter(|k| k.live()).map(|k| k.key).collect();
-    for c in s.conns.iter_mut() {
+    let unacked: Vec<bool> = s.conns.iter().map(|c| s.unacked(c)).collect();
+    for (c, unacked) in s.conns.iter_mut().zip(unacked) {
         if c.closing {
             continue;
         }
-        if !matches!(c.phase, Phase::Open { .. }) && now - c.opened_ms > HANDSHAKE_MS {
-            if !matches!(c.phase, Phase::Upgrade | Phase::Upgrading) {
-                c.send_error(&ErrorFrame::new("bad_request").detail("handshake timeout"));
+        if std::mem::take(&mut c.data_moved) {
+            c.clock.active_ms = now;
+        }
+        let open = matches!(c.phase, Phase::Open { .. });
+        // Busy as the Dart core counts it: in a call, something of ours
+        // sent and waiting for its ack, or a voice transfer under way. What
+        // stays queued for a peer that cannot take it does not count.
+        let busy = unacked
+            || c.key().is_some_and(|k| in_calls.contains(k))
+            || c.voice_in.is_some()
+            || !c.voice_out.is_empty();
+        match policy::conn_due(open, &c.clock, busy, now) {
+            ConnDue::Nothing => {}
+            ConnDue::HandshakeTimeout => {
+                if !matches!(c.phase, Phase::Upgrade | Phase::Upgrading) {
+                    c.send_error(&ErrorFrame::new("bad_request").detail("handshake timeout"));
+                }
+                c.close(wire::CLOSE_HANDSHAKE, "no handshake within 10 s");
             }
-            c.close(wire::CLOSE_HANDSHAKE, "no handshake within 10 s");
-        } else if matches!(c.phase, Phase::Open { .. }) {
-            let in_call = c.key().is_some_and(|k| in_calls.contains(k));
-            if now - c.last_ms > IDLE_MS && !in_call {
-                c.close(wire::CLOSE_NORMAL, "idle");
-            } else if now - c.pinged_ms > PING_MS {
-                c.pinged_ms = now;
+            ConnDue::IdleClose => c.close(wire::CLOSE_NORMAL, "idle"),
+            ConnDue::Ping => {
+                c.clock.pinged_ms = now;
                 c.send_op(wire::OP_PING, b"");
             }
         }
@@ -1401,7 +1552,7 @@ fn poll(s: &mut State, now: u64) {
         }
         // Never in the middle of a voice message's transfer, either way.
         let voice = c.voice_in.is_some() || !c.voice_out.is_empty();
-        if !voice && policy::sweep_settled(c.last_ms, now, s.waiting(&key)) {
+        if !voice && policy::sweep_settled(c.clock.active_ms, now, s.unacked(c)) {
             s.conns[i].close(wire::CLOSE_NORMAL, "nothing more waits");
         }
     }
@@ -1465,6 +1616,12 @@ fn accept_new(s: &mut State, now: u64) {
             info(&format!("refused {}: not on the tailnet", peer.ip()));
             continue;
         }
+        let own = s.listening_on.map(|a| a.ip());
+        let local = sock.local_addr().ok().map(|a| a.ip());
+        if !matches!((local, own), (Some(l), Some(o)) if policy::arrived_on_tailnet(l, o, SIMULATOR)) {
+            info(&format!("refused {}: it did not come in on the tailnet address", peer.ip()));
+            continue;
+        }
         if s.conns.len() + s.dialling.len() >= CONNECTIONS_MAX {
             info(&format!("refused {}: {CONNECTIONS_MAX} connections open already", peer.ip()));
             continue;
@@ -1498,7 +1655,6 @@ fn read_conn(s: &mut State, i: usize, now: u64) {
                 return;
             }
         };
-        c.last_ms = now;
         match c.phase {
             Phase::Upgrade => {
                 c.rx.extend_from_slice(&s.buf[..n]);
@@ -1564,6 +1720,10 @@ fn events(s: &mut State, i: usize) {
                 return;
             }
         };
+        // Only data frames are activity: a ping or a pong keeps nothing open.
+        if matches!(event, WsEvent::Text(_) | WsEvent::Binary(_)) {
+            s.conns[i].data_moved = true;
+        }
         match event {
             WsEvent::Ping(data) => s.conns[i].send_op(wire::OP_PONG, &data),
             WsEvent::Pong => {}
@@ -2079,6 +2239,10 @@ fn calls_due(s: &mut State, now: u64) {
     let Some((id, key, phase)) = s.live_call().map(|c| (c.id.clone(), c.key, c.phase.clone())) else { return };
     if phase == CallPhase::Reaching {
         if s.connected(&key) {
+            if !s.open_conn(&key).is_some_and(|c| policy::may_call(|cap| c.may(cap))) {
+                info("the contact did not announce call:ws-opus: the call is unsupported");
+                return end_call(s, &id, "unsupported", now);
+            }
             let stream = s.live_call().map_or(2, |c| c.stream);
             let frame = serde_json::json!({"type": "call_offer", "call": id, "transports": [call_policy::WS_OPUS],
                                            "stream": stream})
@@ -2336,8 +2500,9 @@ fn state_of_mine(s: &mut State, key: &Key, ids: &[String], state: &str) {
 /// A contact's reaction: applied once, kept on the card.
 fn reacted(s: &mut State, key: &Key, r: ChatReact) {
     let fp = fp_id(key);
+    let again = s.recent.has(key, &r.id);
     let conv = s.conv(key);
-    if conv.has_seen(&r.id) {
+    if again || conv.has_seen(&r.id) {
         return;
     }
     conv.saw(&r.id);
@@ -2345,6 +2510,8 @@ fn reacted(s: &mut State, key: &Key, r: ChatReact) {
         react_on(m, false, &r.emoji, r.ts);
     }
     info(&format!("reaction {} from {} on {}", if r.emoji.is_empty() { "removed" } else { "received" }, r.name, r.to));
+    s.recent.saw(key, &r.id);
+    save_recent(s);
     msg_log::chat_note(false, &fp, &ChatEntry::React(r));
     changed();
 }
@@ -2366,8 +2533,9 @@ fn received(s: &mut State, key: &Key, name: &str, m: Message) -> bool {
     };
     if let Some(ci) = s.book.find(key) {
         let contact = s.book.contacts[ci].name.clone();
+        let again = s.recent.has(key, &m.id);
         let conv = s.conv(key);
-        if conv.has_seen(&m.id) || conv.find(&m.id).is_some() {
+        if again || conv.has_seen(&m.id) || conv.find(&m.id).is_some() {
             info(&format!("received {} from {name} again", line.id));
             return true;
         }
@@ -2375,6 +2543,8 @@ fn received(s: &mut State, key: &Key, name: &str, m: Message) -> bool {
         let text = m.preview();
         insert_by_ts(&mut conv.messages, m, SHOWN_MAX);
         msg_log::chat_record(false, &fp, &line);
+        s.recent.saw(key, &line.id);
+        save_recent(s);
         info(&format!("received {} from {name}", line.id));
         s.received_n += 1;
         // On screen, it is read once acked (on_frame); else it alerts.
@@ -2406,6 +2576,7 @@ fn received(s: &mut State, key: &Key, name: &str, m: Message) -> bool {
     let text = m.preview();
     insert_by_ts(&mut req.held, m, HELD_MAX);
     msg_log::chat_record(true, &fp, &line);
+    save_held(s);
     info(&format!("held {} from {name}", line.id));
     msg_alert::arrived(Transport::Tailnet, &fp, name, &text);
     changed();
@@ -2435,6 +2606,11 @@ pub(crate) fn accept(key: &Key) -> i32 {
         };
         let fp = fp_id(key);
         msg_log::chat_settle_request(&fp, true);
+        save_held(s);
+        for m in &req.held {
+            s.recent.saw(key, &m.id);
+        }
+        save_recent(s);
         let name = s.book.contacts[ci].name.clone();
         // Read back from the card, which has the held messages now.
         s.convs.retain(|c| &c.key != key);
@@ -2462,6 +2638,7 @@ pub(crate) fn decline(key: &Key) -> i32 {
         };
         let req = s.requests.remove(r);
         msg_log::chat_settle_request(&fp_id(key), false);
+        save_held(s);
         info(&format!("declined {} {}", req.name, wire::fingerprint(key)));
         let id = new_id();
         s.queue(key, id.clone(), wire::contact(&id, false));
@@ -2480,6 +2657,8 @@ pub(crate) fn accept_new_key(key: &Key) -> i32 {
         // The conversation and what waits carry on under the new key.
         s.convs.retain(|c| c.key != old && c.key != new);
         msg_log::chat_rekey(&fp_id(&old), &fp_id(&new));
+        s.recent.rekey(&old, &new);
+        save_recent(s);
         for (k, _) in s.outbox.iter_mut().filter(|(k, _)| k == &old) {
             *k = new;
         }
@@ -2513,6 +2692,8 @@ pub(crate) fn remove(key: &Key) -> i32 {
         s.convs.retain(|c| &c.key != key);
         s.outbox.retain(|(k, _)| k != key);
         s.retries.retain(|(k, _)| k != key);
+        s.recent.forget(key);
+        save_recent(s);
         for conn in s.conns.iter_mut().filter(|conn| conn.key() == Some(key)) {
             conn.close(wire::CLOSE_NORMAL, "contact removed");
         }
@@ -2799,12 +2980,28 @@ pub(crate) fn unread() -> u32 {
     with(|s| s.unread()).unwrap_or(0)
 }
 
-/// (shown, why, own key, port listened on, own name)
-fn status() -> Option<(Shown, String, Option<Key>, u16, String, usize)> {
-    with(|s| {
-        (s.shown, s.why.clone(), s.identity.as_ref().map(own_key),
-         s.listening_on.map_or(0, |a| a.port()), s.name.clone(),
-         s.conns.iter().filter(|c| matches!(c.phase, Phase::Open { .. }) && !c.closing).count())
+/// The module's state at a glance.
+struct Status {
+    shown: Shown,
+    why: String,
+    /// This device's identity key, once it has one.
+    key: Option<Key>,
+    /// The port listened on; 0 while not listening.
+    port: u16,
+    /// This device's name, its tailnet hostname.
+    name: String,
+    /// Connections open (authenticated and not closing).
+    open: usize,
+}
+
+fn status() -> Option<Status> {
+    with(|s| Status {
+        shown: s.shown,
+        why: s.why.clone(),
+        key: s.identity.as_ref().map(own_key),
+        port: s.listening_on.map_or(0, |a| a.port()),
+        name: s.name.clone(),
+        open: s.conns.iter().filter(|c| matches!(c.phase, Phase::Open { .. }) && !c.closing).count(),
     })
 }
 
@@ -2901,7 +3098,7 @@ pub extern "C" fn tailnet_chat_generation() -> u32 {
 #[no_mangle]
 pub unsafe extern "C" fn tailnet_chat_get_status(out: *mut CStatus) -> i32 {
     let Some(out) = (unsafe { out.as_mut() }) else { return ESP_ERR_INVALID_ARG };
-    let Some((shown, why, key, port, name, conns)) = status() else { return ESP_ERR_INVALID_STATE };
+    let Some(Status { shown, why, key, port, name, open: conns }) = status() else { return ESP_ERR_INVALID_STATE };
     out.state = if crate::tailnet_manager::tailnet_available() { shown as u32 } else { Shown::Unavailable as u32 };
     copy_str(&mut out.why, &why);
     out.port = port;
@@ -3284,7 +3481,7 @@ mod sim_control {
         let Ok(mut out) = sock.try_clone() else { return };
         // The first line once listening: who this device is, and where.
         loop {
-            if let Some((Shown::Listening, _, Some(key), port, name, _)) = status() {
+            if let Some(Status { shown: Shown::Listening, key: Some(key), port, name, .. }) = status() {
                 let ready = json!({"ready": {"key": wire::hex(&key), "fingerprint": wire::fingerprint(&key),
                                              "name": name, "address": ["127.0.0.1", port]}});
                 if writeln!(out, "{ready}").is_err() {
@@ -3398,7 +3595,7 @@ mod sim_control {
         let text = |k: &str| cmd.get(k).and_then(Value::as_str);
         match name {
             "identity" => {
-                let (_, _, key, port, name, _) = status().ok_or("not started")?;
+                let Status { key, port, name, .. } = status().ok_or("not started")?;
                 let key = key.ok_or("no identity")?;
                 Ok(json!({"key": wire::hex(&key), "fingerprint": wire::fingerprint(&key), "name": name,
                           "address": ["127.0.0.1", port]}))
@@ -3641,5 +3838,32 @@ mod tests {
         assert_eq!(conv.messages.len(), SHOWN_MAX);
         assert_eq!(conv.messages[0].id, "m30");
         assert!(conv.has_seen("m0"), "an id older than those shown is still known");
+    }
+
+    #[test]
+    fn held_requests_survive_their_file() {
+        let a = Request { key: [7; 32], name: "laptop".into(), address: None, held: vec![m("h1", 1), m("h2", 2)] };
+        let b = Request { key: [8; 32], name: "phone".into(), address: None, held: vec![m("p1", 3)] };
+        let back = held_from_file(&held_file(&[a, b]));
+        let got: Vec<(Key, String, Vec<String>)> =
+            back.iter().map(|r| (r.key, r.name.clone(), r.held.iter().map(|x| x.id.clone()).collect())).collect();
+        assert_eq!(got, vec![([7; 32], "laptop".into(), vec!["h1".into(), "h2".into()]),
+                             ([8; 32], "phone".into(), vec!["p1".into()])]);
+        assert_eq!(back[0].held[1].text, "h2");
+        assert!(held_from_file("").is_empty());
+    }
+
+    #[test]
+    fn the_held_file_keeps_the_newest_within_its_size() {
+        let big = |id: &str, ts| Message { text: "x".repeat(4000), ..m(id, ts) };
+        let held: Vec<Message> = (0..HELD_MAX as u64).map(|n| big(&format!("{n:032x}"), n)).collect();
+        let reqs: Vec<Request> =
+            (0..REQUESTS_MAX as u8).map(|k| Request { key: [k; 32], name: "n".into(), address: None, held: held.clone() }).collect();
+        let text = held_file(&reqs);
+        assert!(text.len() <= HELD_FILE_MAX, "{} bytes", text.len());
+        let back = held_from_file(&text);
+        let last = back.last().unwrap();
+        assert_eq!(last.key, [REQUESTS_MAX as u8 - 1; 32], "the newest request is kept");
+        assert_eq!(last.held.last().unwrap().id, format!("{:032x}", HELD_MAX - 1));
     }
 }
