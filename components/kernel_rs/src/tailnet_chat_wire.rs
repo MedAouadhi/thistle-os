@@ -17,7 +17,7 @@ pub const PATH: &str = "/tailnet-chat/1";
 
 /// What this device announces in its hello: a cap is announced only once
 /// it is done.
-pub const CAPS: &[&str] = &["text", "receipts", "typing", "reply", "react", "voice-message", "call:ws-opus"];
+pub const CAPS: &[&str] = &["text", "receipts", "typing", "reply", "react", "voice-message", "call:ws-opus", "peers"];
 
 pub const LABEL: &[u8; 20] = b"tailnet-chat/1 auth\0";
 pub const TRANSCRIPT_LEN: usize = 149;
@@ -27,6 +27,8 @@ pub const MAX_JSON_FRAME: usize = 16384;
 pub const MAX_VOICE_MS: u64 = 120_000;
 pub const MAX_VOICE_BYTES: u64 = 512 * 1024;
 pub const MAX_NAME_BYTES: usize = 64;
+pub const MAX_PEERS: usize = 64;
+pub const MAX_PEER_ADDRS: usize = 2;
 pub const MAX_CHUNK: usize = 4096;
 pub const HEADER_LEN: usize = 9;
 
@@ -184,6 +186,8 @@ enum Rule {
     Bool,
     OneOf(&'static [&'static str]),
     List(&'static Rule, usize, usize),
+    /// A peer of a `peers` list: a name and one or two addresses, as text
+    Peer,
 }
 
 const ID: Rule = Rule::Hex(32);
@@ -192,6 +196,7 @@ const TS: Rule = Rule::Int(0, 1 << 53);
 const U32: Rule = Rule::Int(1, 0xFFFF_FFFF);
 const CAP: Rule = Rule::Str(64, false);
 const TRANSPORT: Rule = Rule::Str(32, false);
+const ADDR: Rule = Rule::Str(64, false);
 
 impl Rule {
     fn ok(&self, v: &Value) -> bool {
@@ -205,6 +210,10 @@ impl Rule {
             Rule::List(item, lo, hi) => v
                 .as_array()
                 .is_some_and(|a| (*lo..=*hi).contains(&a.len()) && a.iter().all(|x| item.ok(x))),
+            Rule::Peer => {
+                v.get("name").is_some_and(|n| Rule::Str(MAX_NAME_BYTES, false).ok(n))
+                    && v.get("addrs").is_some_and(|a| Rule::List(&ADDR, 1, MAX_PEER_ADDRS).ok(a))
+            }
         }
     }
 }
@@ -229,6 +238,8 @@ fn schema(kind: &str) -> Option<(Fields, Fields)> {
         "call_offer" => (&[("call", ID), ("transports", Rule::List(&TRANSPORT, 1, 8)), ("stream", U32)], &[]),
         "call_answer" => (&[("call", ID)], &[("transport", TRANSPORT), ("decline", TRANSPORT)]),
         "call_end" => (&[("call", ID), ("reason", Rule::Str(32, false))], &[]),
+        "peers_ask" => (&[], &[]),
+        "peers" => (&[("peers", Rule::List(&Rule::Peer, 0, MAX_PEERS))], &[]),
         "error" => (&[("code", Rule::Str(32, false))],
                     &[("what", Rule::Str(256, true)), ("id", ID), ("detail", Rule::Str(512, true))]),
         _ => return None,
@@ -344,6 +355,26 @@ pub fn react(id: &str, ts: u64, to: &str, emoji: &str) -> String {
 pub fn contact(id: &str, accepted: bool) -> String {
     format!(r#"{{"type":"contact","id":"{id}","state":"{}"}}"#,
             if accepted { "accepted" } else { "declined" })
+}
+
+/// A tailnet peer as a `peers` answer lists it (protocol.md section 4.10).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SharedPeer {
+    /// Its tailnet hostname
+    pub name: String,
+    pub addrs: Vec<std::net::IpAddr>,
+}
+
+/// The answer to a contact's `peers_ask`.
+pub fn peers(list: &[SharedPeer]) -> String {
+    let list: Vec<Value> = list
+        .iter()
+        .map(|p| {
+            let addrs: Vec<Value> = p.addrs.iter().map(|a| Value::from(a.to_string())).collect();
+            serde_json::json!({"name": p.name, "addrs": addrs})
+        })
+        .collect();
+    serde_json::json!({"type": "peers", "peers": list}).to_string()
 }
 
 /// A voice message's frame: the Ogg/Opus file of `bytes` bytes, `ms` long,
@@ -885,7 +916,23 @@ mod tests {
     fn the_hello_announces_what_this_device_does() {
         let h = check(hello(&[1; 32], "t", &[2; 32]).as_bytes()).unwrap();
         let caps: Vec<&str> = h["caps"].as_array().unwrap().iter().map(|c| c.as_str().unwrap()).collect();
-        assert_eq!(caps, ["text", "receipts", "typing", "reply", "react", "voice-message", "call:ws-opus"]);
+        assert_eq!(caps, ["text", "receipts", "typing", "reply", "react", "voice-message", "call:ws-opus", "peers"]);
+    }
+
+    #[test]
+    fn a_peers_answer_is_written_as_the_vector() {
+        let want = v(MESSAGES)["valid"].as_array().unwrap().iter().find(|e| e["name"] == "peers").unwrap()["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let list = [
+            SharedPeer { name: "thistle-46cf20".into(), addrs: vec!["100.110.81.38".parse().unwrap(),
+                                                                   "fd7a:115c:a1e0::2e38:5128".parse().unwrap()] },
+            SharedPeer { name: "laptop".into(), addrs: vec!["100.101.102.103".parse().unwrap()] },
+        ];
+        assert_eq!(v(&peers(&list)), v(&want));
+        assert_eq!(frame_type(&check(peers(&[]).as_bytes()).unwrap()), "peers");
+        assert_eq!(frame_type(&check(br#"{"type":"peers_ask"}"#).unwrap()), "peers_ask");
     }
 
     const VOICE: &str = include_str!("../../../docs/tailnet-chat/vectors/voice.json");

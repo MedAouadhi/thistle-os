@@ -94,6 +94,11 @@ def messages() -> dict:
         ("call_answer busy", {"type": "call_answer", "call": call, "decline": "busy"}),
         ("call_end", {"type": "call_end", "call": call, "reason": "hangup"}),
         ("call_end cellular", {"type": "call_end", "call": call, "reason": "cellular"}),
+        ("peers_ask", {"type": "peers_ask"}),
+        ("peers", {"type": "peers", "peers": [
+            {"name": "thistle-46cf20", "addrs": ["100.110.81.38", "fd7a:115c:a1e0::2e38:5128"]},
+            {"name": "laptop", "addrs": ["100.101.102.103"]}]}),
+        ("peers none", {"type": "peers", "peers": []}),
         ("error unsupported", {"type": "error", "code": "unsupported", "what": "sticker"}),
         ("error too_large", {"type": "error", "code": "too_large", "what": "msg", "id": m1}),
         ("hello", None),
@@ -132,6 +137,19 @@ def messages() -> dict:
          protocol.error("bad_request", what="call_answer")),
         ("stream 0", protocol.encode({"type": "call_offer", "call": call, "transports": ["ws-opus"], "stream": 0}),
          protocol.error("bad_request", what="call_offer")),
+        ("peers not a list", '{"type":"peers","peers":{"name":"laptop"}}',
+         protocol.error("bad_request", what="peers")),
+        ("peers over 64", protocol.encode(protocol.peers(
+            [{"name": "p%d" % i, "addrs": ["100.64.0.%d" % i]} for i in range(65)])),
+         protocol.error("bad_request", what="peers")),
+        ("a peer with no address", '{"type":"peers","peers":[{"name":"laptop","addrs":[]}]}',
+         protocol.error("bad_request", what="peers")),
+        ("a peer with three addresses", protocol.encode(protocol.peers(
+            [{"name": "laptop", "addrs": ["100.64.0.1", "100.64.0.2", "100.64.0.3"]}])),
+         protocol.error("bad_request", what="peers")),
+        ("a peer name over 64 bytes", protocol.encode(protocol.peers(
+            [{"name": "x" * 65, "addrs": ["100.64.0.1"]}])),
+         protocol.error("bad_request", what="peers")),
     ]
     return {"description": "One of each JSON frame, as the reference chat peer writes it "
                            "(compact, UTF-8, not ASCII-escaped). A receiver MUST accept any valid "

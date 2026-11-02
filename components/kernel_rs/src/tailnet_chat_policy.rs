@@ -11,7 +11,7 @@ use std::net::IpAddr;
 
 use serde_json::{json, Map, Value};
 
-use crate::tailnet_chat_wire::{self as wire, Key};
+use crate::tailnet_chat_wire::{self as wire, Key, SharedPeer};
 
 // ---------------------------------------------------------------------------
 // Admission
@@ -22,10 +22,7 @@ use crate::tailnet_chat_wire::{self as wire, Key};
 /// counts as its IPv4 address), and loopback where `loopback` allows it
 /// (the simulator).
 pub fn admitted(ip: IpAddr, loopback: bool) -> bool {
-    let ip = match ip {
-        IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(IpAddr::V6(v6)),
-        v4 => v4,
-    };
+    let ip = unmapped(ip);
     if loopback && ip.is_loopback() {
         return true;
     }
@@ -61,6 +58,41 @@ pub fn on_tailnet(ip: IpAddr) -> bool {
             s[0] == 0xfd7a && s[1] == 0x115c && s[2] == 0xa1e0
         }
     }
+}
+
+/// `ip`, an IPv4-mapped IPv6 address as its IPv4 address.
+fn unmapped(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(IpAddr::V6(v6)),
+        v4 => v4,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sharing the tailnet's peer list
+// ---------------------------------------------------------------------------
+
+/// What a `peers_ask` is answered with (protocol.md section 4.10): for a
+/// contact, the tailnet peers `online` lists (the platform's online peers),
+/// less the one at the asker's address, each by the first label of its
+/// name cut to 64 bytes and with at most two of its addresses inside the
+/// tailnet's ranges, at most 64 of them; for a stranger, none.
+pub fn shared_peers(online: &[SharedPeer], asker: Option<IpAddr>, contact: bool) -> Vec<SharedPeer> {
+    if !contact {
+        return Vec::new();
+    }
+    let asker = asker.map(unmapped);
+    online
+        .iter()
+        .filter(|p| !p.addrs.iter().any(|a| Some(unmapped(*a)) == asker))
+        .filter_map(|p| {
+            let name = wire::cut(p.name.split('.').next().unwrap_or(""), wire::MAX_NAME_BYTES).to_string();
+            let addrs: Vec<IpAddr> =
+                p.addrs.iter().map(|a| unmapped(*a)).filter(|a| on_tailnet(*a)).take(wire::MAX_PEER_ADDRS).collect();
+            (!name.is_empty() && !addrs.is_empty()).then_some(SharedPeer { name, addrs })
+        })
+        .take(wire::MAX_PEERS)
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -1123,6 +1155,42 @@ mod tests {
         assert_eq!(newest_within(&[10, 10, 10], 30), 3);
         assert_eq!(newest_within(&[40, 10], 25), 1);
         assert_eq!(newest_within(&[], 25), 0);
+    }
+
+    fn tailnet_peer(name: &str, addrs: &[&str]) -> SharedPeer {
+        SharedPeer { name: name.into(), addrs: addrs.iter().map(|a| ip(a)).collect() }
+    }
+
+    #[test]
+    fn a_contact_is_told_the_online_peers_less_itself_by_their_first_label() {
+        let online = [
+            tailnet_peer("homelab.tail1234.ts.net", &["100.64.0.2"]),
+            tailnet_peer("laptop.tail1234.ts.net", &["100.64.0.3"]),
+            tailnet_peer("loopback.tail-sim.ts.net", &["127.0.0.1"]),
+        ];
+        let shared = shared_peers(&online, Some(ip("100.64.0.3")), true);
+        assert_eq!(shared, [tailnet_peer("homelab", &["100.64.0.2"])]);
+        let mapped = shared_peers(&online, Some(ip("::ffff:100.64.0.2")), true);
+        assert_eq!(mapped, [tailnet_peer("laptop", &["100.64.0.3"])], "an IPv4-mapped asker is its IPv4 address");
+    }
+
+    #[test]
+    fn a_stranger_is_told_no_peers() {
+        let online = [tailnet_peer("homelab.tail1234.ts.net", &["100.64.0.2"])];
+        assert_eq!(shared_peers(&online, Some(ip("100.64.0.9")), false), []);
+    }
+
+    #[test]
+    fn the_peers_shared_keep_to_the_protocols_limits() {
+        let mut online: Vec<SharedPeer> =
+            (0..70).map(|i| tailnet_peer(&format!("p{i}.ts.net"), &[&format!("100.64.1.{i}")])).collect();
+        online.insert(0, tailnet_peer(&"é".repeat(40), &["192.168.1.2", "100.64.2.1", "fd7a:115c:a1e0::21", "100.64.2.2"]));
+        online.insert(1, tailnet_peer("", &["100.64.2.3"]));
+        let shared = shared_peers(&online, None, true);
+        assert_eq!(shared.len(), 64);
+        assert_eq!(shared[0], tailnet_peer(&"é".repeat(32), &["100.64.2.1", "fd7a:115c:a1e0::21"]));
+        assert_eq!(shared[1].name, "p0", "a peer with no name is left out");
+        assert!(wire::check(wire::peers(&shared).as_bytes()).is_ok());
     }
 
     #[test]

@@ -16,7 +16,7 @@ VERSION = 1
 PORT = 4810
 PATH = "/tailnet-chat/1"
 
-CAPS_V1 = ("text", "receipts", "typing", "reply", "react", "voice-message", "call:ws-opus")
+CAPS_V1 = ("text", "receipts", "typing", "reply", "react", "voice-message", "call:ws-opus", "peers")
 
 LABEL = b"tailnet-chat/1 auth\x00"
 ROLES = {"dialler": 1, "listener": 2}
@@ -33,6 +33,8 @@ MAX_JSON_FRAME = 16384
 MAX_VOICE_MS = 120_000
 MAX_VOICE_BYTES = 512 * 1024
 MAX_NAME_BYTES = 64
+MAX_PEERS = 64
+MAX_PEER_ADDRS = 2
 
 # WebSocket close codes (RFC 6455 leaves 4000-4999 to applications).
 CLOSE_HANDSHAKE = 4000
@@ -91,15 +93,65 @@ def unpack_binary(frame: bytes) -> tuple[int, int, int, bytes]:
 
 def admitted(address: str, loopback: bool = False) -> bool:
     """Whether a connection from `address` may reach the handshake."""
-    try:
-        ip = ipaddress.ip_address(address.split("%", 1)[0])
-    except ValueError:
+    ip = _ip(address)
+    if ip is None:
         return False
-    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
-        ip = ip.ipv4_mapped
     if loopback and ip.is_loopback:
         return True
     return any(ip in net for net in TAILNET_RANGES)
+
+
+def _ip(address):
+    """`address` as an IP address, an IPv4-mapped IPv6 one as its IPv4; None if it is not one."""
+    try:
+        ip = ipaddress.ip_address(str(address).split("%", 1)[0])
+    except ValueError:
+        return None
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+        ip = ip.ipv4_mapped
+    return ip
+
+
+def in_tailnet(address) -> bool:
+    ip = _ip(address)
+    return ip is not None and any(ip in net for net in TAILNET_RANGES)
+
+
+def _cut(text: str, max_bytes: int) -> str:
+    data = text.encode("utf-8")[:max_bytes]
+    return data.decode("utf-8", "ignore")
+
+
+def shared_peers(online, asker) -> list:
+    """What a `peers` frame answers a contact (protocol section 4.10): the
+    tailnet peers the platform shows online, `{"name", "addrs"}` each, less
+    the one at the asker's address, each with at most two of its addresses
+    inside the tailnet ranges, a name of at most 64 bytes, and at most 64."""
+    mine = _ip(asker) if asker else None
+    out = []
+    for peer in online:
+        ips = [_ip(a) for a in peer.get("addrs", [])]
+        if mine is not None and mine in ips:
+            continue
+        addrs = [str(ip) for ip in ips if ip is not None and in_tailnet(ip)][:MAX_PEER_ADDRS]
+        name = _cut(peer.get("name") or "", MAX_NAME_BYTES)
+        if addrs and name:
+            out.append({"name": name, "addrs": addrs})
+        if len(out) == MAX_PEERS:
+            break
+    return out
+
+
+def addresses_to_probe(peers) -> list:
+    """The addresses an asker may probe from a `peers` frame's list: those
+    inside the tailnet ranges, each once. Nothing else of the list is taken."""
+    out = []
+    for peer in peers:
+        for a in peer.get("addrs", []):
+            ip = _ip(a)
+            if ip is not None and in_tailnet(ip) and str(ip) not in out:
+                out.append(str(ip))
+    return out
 
 
 def encode(frame: dict) -> str:
@@ -113,6 +165,14 @@ def encode(frame: dict) -> str:
 def hello(key: bytes, name: str, caps, nonce: bytes, version: int = VERSION) -> dict:
     return {"type": "hello", "version": version, "key": bytes(key).hex(), "name": name,
             "caps": list(caps), "nonce": bytes(nonce).hex()}
+
+
+def peers_ask() -> dict:
+    return {"type": "peers_ask"}
+
+
+def peers(shared) -> dict:
+    return {"type": "peers", "peers": list(shared)}
 
 
 def auth(signature: bytes) -> dict:
@@ -150,6 +210,11 @@ def _list(item, lo, hi):
     return lambda v: isinstance(v, list) and lo <= len(v) <= hi and all(item(x) for x in v)
 
 
+def _peer(v):
+    return (isinstance(v, dict) and _str(MAX_NAME_BYTES, empty=False)(v.get("name"))
+            and _list(_str(64, empty=False), 1, MAX_PEER_ADDRS)(v.get("addrs")))
+
+
 _BOOL = lambda v: isinstance(v, bool)  # noqa: E731
 _U32 = _int(1, 0xFFFFFFFF)
 _TS = _int(0, 2 ** 53)
@@ -174,6 +239,8 @@ SCHEMA = {
     "call_answer": ({"call": _ID}, {"transport": _str(32, empty=False),
                                     "decline": _str(32, empty=False)}),
     "call_end": ({"call": _ID, "reason": _str(32, empty=False)}, {}),
+    "peers_ask": ({}, {}),
+    "peers": ({"peers": _list(_peer, 0, MAX_PEERS)}, {}),
     "error": ({"code": _str(32, empty=False)},
               {"what": _str(256), "id": _ID, "detail": _str(512)}),
 }

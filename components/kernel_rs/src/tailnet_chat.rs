@@ -2115,12 +2115,33 @@ fn on_frame(s: &mut State, i: usize, text: &[u8]) {
                 finish(s, &call, now);
             }
         }
+        "peers_ask" | "peers" if !s.conns[i].may("peers") => {
+            let e = ErrorFrame::new("unsupported").what(wire::frame_type(&frame));
+            s.conns[i].send_error(&e);
+        }
+        "peers_ask" => {
+            let shared = policy::shared_peers(&online_peers(), Some(s.conns[i].peer.ip()), contact);
+            info(&format!("told {name} {} tailnet peers", shared.len()));
+            s.conns[i].send_text(&wire::peers(&shared));
+        }
+        // This device never asks, so a list is never awaited.
+        "peers" => {}
         "error" => info(&format!("{name} answered: error {}", wire::str_of(&frame, "code"))),
         other => {
             let e = ErrorFrame::new("bad_request").what(other).detail("after the handshake");
             s.conns[i].send_error(&e);
         }
     }
+}
+
+/// The tailnet peers the client shows online, as a `peers` answer is made
+/// from (tailnet_manager.rs keeps them; the client knows IPv4 addresses only).
+fn online_peers() -> Vec<wire::SharedPeer> {
+    crate::tailnet_manager::peers()
+        .into_iter()
+        .filter(|p| p.online)
+        .map(|p| wire::SharedPeer { name: p.name, addrs: vec![IpAddr::V4(std::net::Ipv4Addr::from(p.ip))] })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -3724,6 +3745,17 @@ mod sim_control {
             },
             "talk" => Ok(Value::Bool(true)),
             "cellular_call" => cellular_call(),
+            "set_peers" => {
+                // The peers are the pretend tailnet's: what a contact outside
+                // them is told.
+                let shared = policy::shared_peers(&online_peers(), None, true);
+                Ok(Value::Array(
+                    shared
+                        .iter()
+                        .map(|p| json!({"name": p.name, "addrs": p.addrs.iter().map(|a| a.to_string()).collect::<Vec<_>>()}))
+                        .collect(),
+                ))
+            }
             "screenshot" => {
                 let file = CString::new(text("file").ok_or("no file")?).map_err(|e| e.to_string())?;
                 if unsafe { sim_display_save_ppm(file.as_ptr()) } { Ok(Value::Bool(true)) } else { Err("not saved".into()) }

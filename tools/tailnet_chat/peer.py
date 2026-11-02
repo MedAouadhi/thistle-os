@@ -105,6 +105,8 @@ class Connection:
         self.peer_key: bytes | None = None
         self.peer_name: str | None = None
         self.peer_caps: list = []
+        self.peers_asked = False      # a `peers_ask` sent and not yet answered
+        self.peers_answer: list | None = None
         self.authenticated = False
         self.closed = False
         self.close_code: int | None = None
@@ -227,6 +229,9 @@ class ChatPeer:
         self.events: list = []           # (what, detail) for a test to read
         self.connections: list[Connection] = []
         self.declined_keys: set = set()
+        # The tailnet peers the platform shows online, {"name", "addrs"} each,
+        # shared with a contact that asks (protocol section 4.10).
+        self.tailnet_peers: list = []
         self._listener: socket.socket | None = None
         self._running = False
 
@@ -503,6 +508,21 @@ class ChatPeer:
         except ws.Closed:
             return False
 
+    def ask_peers(self, who, timeout: float = 5.0) -> list | None:
+        """Ask a contact for its tailnet's peer list: the list, or None if it
+        or this peer does not announce `peers`. Only addresses to probe are
+        to be taken from it (`protocol.addresses_to_probe`)."""
+        c = self._resolve(who)
+        conn = self._connection_for(c)
+        if conn is None or not ("peers" in self.caps and "peers" in conn.peer_caps):
+            return None
+        with self.cond:
+            conn.peers_asked, conn.peers_answer = True, None
+        conn.send(protocol.peers_ask())
+        answer = self.wait_for(lambda: (conn.peers_answer,) if conn.peers_answer is not None or conn.closed
+                               else None, timeout)
+        return answer[0] or []
+
     # -- reading state -----------------------------------------------------
 
     def connected(self, key_hex: str) -> Connection | None:
@@ -735,6 +755,9 @@ class ChatPeer:
             conn.received.append(frame)
             self.cond.notify_all()
         kind = frame["type"]
+        if kind in ("peers_ask", "peers") and not ("peers" in self.caps and "peers" in conn.peer_caps):
+            self._reply(conn, protocol.error("unsupported", what=kind))
+            return
         handler = getattr(self, "_on_" + kind, None)
         if kind in ("hello", "auth") or handler is None:
             self._reply(conn, protocol.error("bad_request", what=kind, detail="after the handshake"))
@@ -913,6 +936,18 @@ class ChatPeer:
                 call["state"] = "ended:" + frame["reason"]
             self.cond.notify_all()
 
+    def _on_peers_ask(self, conn, key, frame):
+        """A contact is told the tailnet's online peers, less itself; a stranger nothing."""
+        shared = protocol.shared_peers(self.tailnet_peers, conn.remote[0]) if self.contact(key) else []
+        self.log("peers asked", f"{conn.peer_name}: {len(shared)} shared")
+        self._reply(conn, protocol.peers(shared))
+
+    def _on_peers(self, conn, key, frame):
+        with self.cond:
+            if conn.peers_asked:  # an unasked list is ignored
+                conn.peers_asked, conn.peers_answer = False, frame["peers"]
+            self.cond.notify_all()
+
     def _on_error(self, conn, key, frame):
         with self.cond:
             self.errors.append((key, frame))
@@ -1036,6 +1071,11 @@ def control(peer: ChatPeer, command: dict):
     if cmd == "end_call":
         peer.end_call(command["call"], command.get("reason", "hangup"))
         return True
+    if cmd == "set_peers":
+        peer.tailnet_peers = list(command["peers"])
+        return protocol.shared_peers(peer.tailnet_peers, None)
+    if cmd == "ask_peers":
+        return peer.ask_peers(to)
     if cmd == "stop":
         peer.stop()
         return True
@@ -1050,6 +1090,8 @@ def main(argv=None) -> int:
     ap.add_argument("--loopback", action="store_true", help="admit loopback, as the simulator does")
     ap.add_argument("--call-policy", default="answer", choices=("answer", "decline", "busy", "ignore"))
     ap.add_argument("--no-read-receipts", action="store_true")
+    ap.add_argument("--peers", help="the tailnet's online peers to share, a JSON list of "
+                    '{"name": ..., "addrs": [...]}')
     ap.add_argument("--verbose", action="store_true", help="log to stderr")
     args = ap.parse_args(argv)
     host, _, port = args.listen.rpartition(":")
@@ -1057,6 +1099,8 @@ def main(argv=None) -> int:
                     host=host.strip("[]"), port=int(port), loopback=args.loopback,
                     read_receipts=not args.no_read_receipts, call_policy=args.call_policy,
                     log=(lambda line: print(line, file=sys.stderr, flush=True)) if args.verbose else None)
+    if args.peers:
+        peer.tailnet_peers = json.loads(args.peers)
     peer.start()
     print(json.dumps({"ready": control(peer, {"cmd": "identity"})}), flush=True)
     for line in sys.stdin:
