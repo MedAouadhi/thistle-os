@@ -194,6 +194,46 @@ esp_err_t tailnet_chat_accept_new_key(const char *key);
 esp_err_t tailnet_chat_rename(const char *key, const char *name);
 esp_err_t tailnet_chat_remove(const char *key);
 
+/* ---- Looking for chat peers on the tailnet ---------------------------
+ *
+ * Only when the app asks: each tailnet peer the device sees online, less
+ * this device, at most 24, is probed on the chat port with a hello, one
+ * after another, at most 3 s for each connect and each hello, on a task
+ * of its own, the device held awake meanwhile. The generation changes as
+ * each answer comes. Implemented in tailnet_chat_discovery.rs. */
+
+typedef struct {
+    bool     looking;       /* a look is under way */
+    bool     looked;        /* a look has ended since the boot */
+    uint16_t probed;        /* tailnet peers asked so far */
+    uint16_t peers;         /* to ask in this look */
+} tailnet_chat_discovery_t;
+
+typedef struct {
+    char     key[65];          /* announced in its hello, not proven */
+    char     fingerprint[25];
+    char     name[65];         /* its hello's name */
+    char     tailnet_name[65]; /* its tailnet hostname's first label */
+    char     address[46];      /* where it answered */
+    uint16_t port;
+} tailnet_chat_found_t;
+
+/* Start a look, unless one is under way (ESP_OK either way).
+ * ESP_ERR_INVALID_STATE while chat is not listening. */
+esp_err_t tailnet_chat_discover(void);
+esp_err_t tailnet_chat_get_discovery(tailnet_chat_discovery_t *out);
+
+/* The chat peers the last look found, less this device and the contacts. */
+int       tailnet_chat_found_count(void);
+esp_err_t tailnet_chat_get_found(int index, tailnet_chat_found_t *out);
+
+/* Add the chat peer found with key as a contact, as
+ * tailnet_chat_add_contact() does with the address it answered on: its key
+ * is pinned when it is first reached. The key it goes by until then into
+ * key_out (65 bytes) if not NULL. ESP_ERR_NOT_FOUND if no such peer is
+ * shown. */
+esp_err_t tailnet_chat_add_found(const char *key, char *key_out);
+
 #ifdef __cplusplus
 }
 #endif
