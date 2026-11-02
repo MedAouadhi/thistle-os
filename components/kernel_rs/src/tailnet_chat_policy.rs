@@ -340,18 +340,60 @@ pub struct DialCandidate {
     /// There is an address to dial it at.
     pub dialable: bool,
     pub retry: Retry,
+    /// The tailnet's peer list shows it online.
+    pub online: bool,
+    /// A sweep asked for it to be dialled, and it has not been yet.
+    pub swept: bool,
 }
 
-/// Which of `list` to dial now: those with something waiting, not
-/// connected, with an address, whose retry is due; at most `free` of them,
-/// the connections left.
+/// Which of `list` to dial now, at most `free` of them, the connections
+/// left: first those a sweep asked for, whatever waits and whatever the
+/// backoff; then those with something waiting whose retry is due. Never
+/// one connected or with no address.
 pub fn to_dial(list: &[DialCandidate], now_ms: u64, free: usize) -> Vec<usize> {
+    let can = |c: &DialCandidate| !c.connected && c.dialable;
+    let swept = list.iter().enumerate().filter(|(_, c)| can(c) && c.swept);
+    let due = list.iter().enumerate().filter(|(_, c)| can(c) && !c.swept && c.waiting && c.retry.due(now_ms));
+    swept.chain(due).map(|(i, _)| i).take(free).collect()
+}
+
+/// Which of `list` a sweep dials, so that both sides' outboxes flush: each
+/// with something waiting, and each the peer list shows online, not
+/// connected already and with an address. A sweep is the background check,
+/// the tailnet (re)joined after a sleep or a change of network, or a peer
+/// seen coming online (then `list` marks only that peer).
+pub fn to_sweep(list: &[DialCandidate]) -> Vec<usize> {
     list.iter()
         .enumerate()
-        .filter(|(_, c)| c.waiting && !c.connected && c.dialable && c.retry.due(now_ms))
+        .filter(|(_, c)| (c.waiting || c.online) && !c.connected && c.dialable)
         .map(|(i, _)| i)
-        .take(free)
         .collect()
+}
+
+/// The peers (tailnet addresses) online `now` that were not `before`.
+pub fn came_online(before: &[u32], now: &[u32]) -> Vec<u32> {
+    now.iter().filter(|ip| !before.contains(ip)).copied().collect()
+}
+
+/// How long a connection a sweep opened stays once nothing more comes.
+pub const SWEEP_QUIET_MS: u64 = 3_000;
+
+/// Whether a connection a sweep opened has done its work: the peer has
+/// sent nothing for SWEEP_QUIET_MS since `last_ms` (what waited for this
+/// device comes at once after the handshake), and nothing of ours waits
+/// for its ack.
+pub fn sweep_settled(last_ms: u64, now_ms: u64, ours_waiting: bool) -> bool {
+    !ours_waiting && now_ms >= last_ms + SWEEP_QUIET_MS
+}
+
+/// The longest a delivery holds the device awake.
+pub const HOLD_MAX_MS: u64 = 120_000;
+
+/// Whether dials and deliveries under way since `busy_since_ms` (None:
+/// nothing under way) hold the device awake: for HOLD_MAX_MS at most, so
+/// that a peer that never acks cannot keep it from sleeping.
+pub fn hold_awake(busy_since_ms: Option<u64>, now_ms: u64) -> bool {
+    busy_since_ms.is_some_and(|t| now_ms < t + HOLD_MAX_MS)
 }
 
 /// Two connections between the same pair: whether to keep the new one,
@@ -645,7 +687,66 @@ mod tests {
     }
 
     fn peer(waiting: bool, connected: bool, dialable: bool, retry: Retry) -> DialCandidate {
-        DialCandidate { waiting, connected, dialable, retry }
+        DialCandidate { waiting, connected, dialable, retry, online: false, swept: false }
+    }
+
+    fn online(c: DialCandidate) -> DialCandidate {
+        DialCandidate { online: true, ..c }
+    }
+
+    fn swept(c: DialCandidate) -> DialCandidate {
+        DialCandidate { swept: true, ..c }
+    }
+
+    #[test]
+    fn a_sweep_reaches_those_waiting_and_those_online() {
+        let mut later = Retry::default();
+        later.failed(0);
+        let list = [
+            peer(true, false, true, later),                 // waiting, backing off: reached all the same
+            online(peer(false, false, true, Retry::default())), // online, nothing waits: reached
+            peer(false, false, true, Retry::default()),    // offline, nothing waits
+            online(peer(true, true, true, Retry::default())), // connected already
+            online(peer(true, false, false, Retry::default())), // nowhere to dial
+        ];
+        assert_eq!(to_sweep(&list), vec![0, 1]);
+    }
+
+    #[test]
+    fn those_swept_are_dialled_with_nothing_waiting_and_before_the_rest() {
+        let mut later = Retry::default();
+        later.failed(0);
+        let list = [
+            peer(true, false, true, Retry::default()),          // waiting, due
+            swept(peer(false, false, true, Retry::default())),  // swept: dialled first
+            swept(peer(true, false, true, later)),              // swept: the backoff does not hold it
+            swept(peer(false, true, true, Retry::default())),   // connected meanwhile
+        ];
+        assert_eq!(to_dial(&list, 1000, 4), vec![1, 2, 0]);
+        assert_eq!(to_dial(&list, 1000, 2), vec![1, 2], "a sweep first, as the slots allow");
+    }
+
+    #[test]
+    fn peers_newly_online_are_those_not_online_before() {
+        assert_eq!(came_online(&[1, 2], &[2, 3, 4]), vec![3, 4]);
+        assert_eq!(came_online(&[1, 2], &[1]), Vec::<u32>::new());
+        assert_eq!(came_online(&[], &[5]), vec![5]);
+    }
+
+    #[test]
+    fn a_swept_connection_closes_once_quiet_with_nothing_of_ours_waiting() {
+        // open at 1000, its last frame at 2000
+        assert!(!sweep_settled(2000, 4999, false), "quiet for less than 3 s");
+        assert!(sweep_settled(2000, 5000, false));
+        assert!(!sweep_settled(2000, 60_000, true), "something of ours still waits for its ack");
+    }
+
+    #[test]
+    fn a_delivery_holds_the_device_awake_for_two_minutes_at_most() {
+        assert!(!hold_awake(None, 0), "nothing under way");
+        assert!(hold_awake(Some(1000), 1000));
+        assert!(hold_awake(Some(1000), 120_999));
+        assert!(!hold_awake(Some(1000), 121_000), "a peer that never acks does not keep it awake");
     }
 
     #[test]

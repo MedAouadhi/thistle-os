@@ -147,6 +147,12 @@ void      tailnet_chat_set_viewing(const char *key);
 bool      tailnet_chat_read_receipts(void);
 esp_err_t tailnet_chat_set_read_receipts(bool on);
 
+/* How often, in minutes, the background check "tailnet chat" dials the
+ * contacts while the device sleeps (thistle_os.tailnet_chat.check_minutes,
+ * 15); 0 is never. */
+uint32_t  tailnet_chat_check_minutes(void);
+esp_err_t tailnet_chat_set_check_minutes(uint32_t minutes);
+
 /* Messages received from contacts and not yet read. */
 uint32_t  tailnet_chat_unread_count(void);
 

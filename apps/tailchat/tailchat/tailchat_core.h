@@ -57,3 +57,15 @@ const char *tailchat_tab_label(tailchat_tab_t tab, int waiting, char *out, size_
 
 /* What a contact answered this device's request: -1 nothing yet. */
 const char *tailchat_answer_text(int8_t accepted_by_them);
+
+/* A contact's address as the user types it: a tailnet name or address,
+ * and ":port" if not the default; spaces around it are dropped. The host
+ * into `host`, the port into `*port` (0: the default). False for nothing,
+ * a space inside, a port not in 1..65535, or a host too long for `n`. */
+bool tailchat_parse_address(const char *text, char *host, size_t n, uint16_t *port);
+
+/* How often the device looks for messages while asleep, in minutes (0
+ * off): the button's label, and the next of the choices it goes round
+ * (5, 15, 30, 60, off). */
+const char *tailchat_check_label(uint32_t minutes, char *out, size_t n);
+uint32_t tailchat_next_check_minutes(uint32_t minutes);

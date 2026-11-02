@@ -399,6 +399,8 @@ struct Conn {
     closing: bool,
     /// Outbox ids sent on this connection.
     sent: Vec<String>,
+    /// Dialled by a sweep: closed once the peer has sent what waited.
+    swept: bool,
 }
 
 impl Conn {
@@ -465,6 +467,7 @@ impl Conn {
             pinged_ms: now,
             closing: false,
             sent: Vec::new(),
+            swept: false,
         }
     }
 }
@@ -490,6 +493,21 @@ struct State {
     retries: Vec<(Key, Retry)>,
     /// Contacts whose dial's connect is on its task now.
     dialling: Vec<Key>,
+    /// Contacts a sweep is to dial, not dialled yet.
+    sweep: Vec<Key>,
+    /// Of `dialling`, those dialled for a sweep.
+    sweep_dials: Vec<Key>,
+    /// The tailnet's joins, as last seen (tailnet_manager::joins).
+    joins: u32,
+    /// The tailnet peers online at the last look, their addresses.
+    online: Vec<u32>,
+    /// Since when dials or deliveries have been under way.
+    busy_since: Option<u64>,
+    /// Keeps the device awake while they are.
+    hold: Option<crate::power_manager::HoldGuard>,
+    /// Messages received and frames delivered since boot, for the check's log.
+    received_n: u32,
+    delivered_n: u32,
     requests: Vec<Request>,
     /// The latest messages of each contact, read from the card the first
     /// time they are wanted.
@@ -547,6 +565,14 @@ impl State {
             outbox,
             retries: Vec::new(),
             dialling: Vec::new(),
+            sweep: Vec::new(),
+            sweep_dials: Vec::new(),
+            joins: 0,
+            online: Vec::new(),
+            busy_since: None,
+            hold: None,
+            received_n: 0,
+            delivered_n: 0,
             requests: Vec::new(),
             convs: Vec::new(),
             typing: Vec::new(),
@@ -742,6 +768,7 @@ fn msg_alert_viewing(key: Option<&Key>) {
 pub(crate) fn start() {
     let json = std::fs::read_to_string(crate::system_json::path()).ok();
     let settings = settings_in(json.as_deref());
+    let minutes = settings.check_minutes;
     {
         let mut guard = lock();
         if guard.is_some() {
@@ -753,8 +780,92 @@ pub(crate) fn start() {
         return;
     }
     crate::kworker::every(tick, std::ptr::null_mut(), Duration::from_millis(POLL_MS));
+    let every = check_every(minutes);
+    let id = crate::background_check::register("tailnet chat", every, CHECK_RAM, CHECK_STACK, run_check);
+    let _ = CHECK.set(id);
     #[cfg(not(target_os = "espidf"))]
     sim_control::start();
+}
+
+// ---------------------------------------------------------------------------
+// The background check
+// ---------------------------------------------------------------------------
+
+/// What the check needs free: a dial's task, and room for what it brings.
+const CHECK_RAM: usize = 24 * 1024;
+/// The check's own task only waits on the module.
+const CHECK_STACK: usize = 4096;
+/// How long the check waits for the tailnet to (re)join after a wake.
+const CHECK_JOIN_WAIT: Duration = Duration::from_secs(60);
+/// How long the check waits for its sweep's connections to settle.
+const CHECK_SWEEP_WAIT: Duration = Duration::from_secs(45);
+
+static CHECK: OnceLock<crate::background_check::CheckId> = OnceLock::new();
+
+/// The check's interval: `check_minutes`, 0 off; THISTLE_SIM_CHAT_CHECK_S
+/// in seconds in the simulator.
+fn check_every(minutes: u32) -> Duration {
+    #[cfg(not(target_os = "espidf"))]
+    if let Some(sec) = std::env::var("THISTLE_SIM_CHAT_CHECK_S").ok().and_then(|v| v.parse().ok()) {
+        return Duration::from_secs(sec);
+    }
+    Duration::from_secs(u64::from(minutes) * 60)
+}
+
+/// The check "tailnet chat", on a task of its own: once the tailnet is up,
+/// sweep every contact (those with something waiting, those online) and
+/// wait for what comes to settle.
+fn run_check() -> crate::background_check::Outcome {
+    use crate::background_check::Outcome;
+    let started = Instant::now();
+    let pause = || std::thread::sleep(Duration::from_millis(250));
+    loop {
+        match with(|s| s.listener.is_some()) {
+            None => return Outcome::Skipped("chat is not running".into()),
+            Some(true) => break,
+            Some(false) if started.elapsed() >= CHECK_JOIN_WAIT => {
+                return Outcome::Skipped("the tailnet is not connected".into())
+            }
+            Some(false) => pause(),
+        }
+    }
+    let Some((dialled, received, delivered)) = with(|s| {
+        let online: Vec<u32> =
+            crate::tailnet_manager::peers().into_iter().filter(|p| p.online).map(|p| p.ip).collect();
+        sweep(s, "the background check", &online, None);
+        // A sweep already under way, the tailnet's (re)join after the wake
+        // that brought this check, counts as the check's own.
+        let dialling = s.sweep.len() + s.sweep_dials.len() + s.conns.iter().filter(|c| c.swept && !c.closing).count();
+        (dialling, s.received_n, s.delivered_n)
+    }) else {
+        return Outcome::Skipped("chat is not running".into());
+    };
+    let swept = Instant::now();
+    while !with(|s| sweep_over(s)).unwrap_or(true) && swept.elapsed() < CHECK_SWEEP_WAIT {
+        pause();
+    }
+    let (r, d) = with(|s| (s.received_n - received, s.delivered_n - delivered)).unwrap_or((0, 0));
+    if dialled == 0 {
+        return Outcome::Done("nobody to dial".into());
+    }
+    Outcome::Done(format!("dialled {dialled}, {r} received, {d} delivered"))
+}
+
+/// The check's interval in minutes, 0 off.
+pub(crate) fn check_minutes() -> u32 {
+    with(|s| s.settings.check_minutes).unwrap_or(15)
+}
+
+/// Set the check's interval in minutes, 0 off; saved in system.json.
+pub(crate) fn set_check_minutes(minutes: u32) -> i32 {
+    let minutes = minutes.min(24 * 60);
+    with(|s| s.settings.check_minutes = minutes);
+    if let Some(id) = CHECK.get() {
+        crate::background_check::set_interval(*id, check_every(minutes));
+    }
+    info(&format!("checks every {minutes} minutes (0: off)"));
+    changed();
+    crate::system_json::save(SECTION, "check_minutes", serde_json::Value::from(minutes))
 }
 
 /// Whether the tailnet is up, and if not, why, for the user.
@@ -792,6 +903,7 @@ unsafe extern "C" fn tick(_arg: *mut c_void) {
         poll(s, now);
         dial_due(s, now);
     }
+    hold(s, now);
 }
 
 /// Once a second: start or stop with the tailnet.
@@ -820,6 +932,9 @@ fn look(s: &mut State) {
     }
     if shown != Shown::Listening && s.listener.is_some() {
         stop_listening(s, "the tailnet is down");
+    }
+    if s.listener.is_some() {
+        watch_tailnet(s);
     }
     if shown != s.shown || why != s.why {
         if shown != Shown::Listening && !why.is_empty() && shown != s.shown {
@@ -895,16 +1010,25 @@ fn resolve(at: &Dial) -> Result<SocketAddr, String> {
     }
 }
 
-/// Dial each contact with something waiting whose retry is due, as the
-/// connections left allow (tailnet_chat_policy::to_dial).
-fn dial_due(s: &mut State, now: u64) {
-    take_dialled(s, now);
-    let open = s.conns.len() + s.dialling.len();
-    let free = CONNECTIONS_MAX.saturating_sub(open);
-    if free == 0 || s.outbox.iter().all(|(_, f)| f.is_empty()) {
-        return;
+/// Contact `i`'s tailnet address, as the peer list knows it: where it was
+/// last seen, else where the user said to dial it (an address, or a peer's
+/// name in the tailnet's map).
+fn contact_ip(s: &State, i: usize) -> Option<u32> {
+    let c = &s.book.contacts[i];
+    let ip = c.address.or_else(|| {
+        let host = &c.dial.as_ref()?.host;
+        host.parse::<IpAddr>().ok().or_else(|| crate::tailnet_manager::resolve_peer(host).map(IpAddr::V4))
+    })?;
+    match ip {
+        IpAddr::V4(v4) => Some(u32::from(v4)),
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map(u32::from),
     }
-    let candidates: Vec<DialCandidate> = (0..s.book.contacts.len())
+}
+
+/// Every contact, as dialling sees it; `online` says which addresses count
+/// as online for this look.
+fn candidates(s: &State, online: &[u32]) -> Vec<DialCandidate> {
+    (0..s.book.contacts.len())
         .map(|i| {
             let key = s.book.contacts[i].key;
             DialCandidate {
@@ -912,11 +1036,118 @@ fn dial_due(s: &mut State, now: u64) {
                 connected: s.reaching(&key),
                 dialable: s.book.dial_of(i).is_some(),
                 retry: s.retries.iter().find(|(k, _)| k == &key).map_or_else(Retry::default, |(_, r)| *r),
+                online: contact_ip(s, i).is_some_and(|ip| online.contains(&ip)),
+                swept: s.sweep.contains(&key),
             }
         })
+        .collect()
+}
+
+/// Dial each contact with something waiting and each the peer list shows
+/// online (`online`), so both sides' outboxes flush
+/// (tailnet_chat_policy::to_sweep). `only`: just the contacts at these
+/// addresses, a peer seen coming online. How many it will dial.
+fn sweep(s: &mut State, why: &str, online: &[u32], only: Option<&[u32]>) -> usize {
+    let mut list = candidates(s, online);
+    if let Some(only) = only {
+        for (i, c) in list.iter_mut().enumerate() {
+            if !contact_ip(s, i).is_some_and(|ip| only.contains(&ip)) {
+                c.waiting = false;
+                c.online = false;
+            }
+        }
+    }
+    let chosen = policy::to_sweep(&list);
+    for &i in &chosen {
+        let key = s.book.contacts[i].key;
+        s.retry(&key).seen_online();
+        if !s.sweep.contains(&key) {
+            s.sweep.push(key);
+        }
+    }
+    if !chosen.is_empty() {
+        let names: Vec<String> = chosen.iter().map(|&i| s.book.contacts[i].name.clone()).collect();
+        info(&format!("{why}: dialling {}", names.join(", ")));
+    }
+    chosen.len()
+}
+
+/// Once a second while listening: a (re)join of the tailnet, after a sleep
+/// or a change of network, sweeps every contact; a peer seen coming online
+/// sweeps its contact.
+fn watch_tailnet(s: &mut State) {
+    let online: Vec<u32> = crate::tailnet_manager::peers().into_iter().filter(|p| p.online).map(|p| p.ip).collect();
+    let joins = crate::tailnet_manager::joins();
+    if joins != s.joins {
+        s.joins = joins;
+        // Whatever waits is tried now, the backoff carrying on after.
+        s.retries.iter_mut().for_each(|(_, r)| r.seen_online());
+        sweep(s, "the tailnet joined", &online, None);
+    } else {
+        let new = policy::came_online(&s.online, &online);
+        if !new.is_empty() {
+            sweep(s, "seen online", &online, Some(&new));
+        }
+    }
+    s.online = online;
+}
+
+/// Whether a sweep has done its work: nothing left to dial, no dial on its
+/// way, no connection it opened still open.
+fn sweep_over(s: &State) -> bool {
+    s.sweep.is_empty() && s.sweep_dials.is_empty() && !s.conns.iter().any(|c| c.swept && !c.closing)
+}
+
+/// Hold the device awake while dials and deliveries are under way, two
+/// minutes at most (tailnet_chat_policy::hold_awake).
+fn hold(s: &mut State, now: u64) {
+    let busy = !s.dialling.is_empty()
+        || !s.sweep.is_empty()
+        || s.conns.iter().any(|c| {
+            !c.closing
+                && (c.swept
+                    || (c.dialled_for.is_some() && c.key().is_none())
+                    || c.key().is_some_and(|k| s.waiting(k)))
+        });
+    s.busy_since = match (busy, s.busy_since) {
+        (false, _) => None,
+        (true, None) => Some(now),
+        (true, since) => since,
+    };
+    let want = policy::hold_awake(s.busy_since, now);
+    if want && s.hold.is_none() {
+        s.hold = Some(crate::power_manager::HoldGuard::new(b"tailnet chat\0"));
+        info("holding the device awake: delivering");
+    } else if !want && s.hold.is_some() {
+        s.hold = None;
+        info(if busy { "no longer holding the device awake: 2 minutes delivering" } else { "deliveries over" });
+    }
+}
+
+/// Dial those a sweep asked for, then each contact with something waiting
+/// whose retry is due, as the connections left allow
+/// (tailnet_chat_policy::to_dial).
+fn dial_due(s: &mut State, now: u64) {
+    take_dialled(s, now);
+    // A contact removed, connected meanwhile, or with nowhere to dial is
+    // no longer the sweep's to dial.
+    let sweep = std::mem::take(&mut s.sweep);
+    s.sweep = sweep
+        .into_iter()
+        .filter(|k| !s.reaching(k) && s.book.find(k).is_some_and(|i| s.book.dial_of(i).is_some()))
         .collect();
+    let open = s.conns.len() + s.dialling.len();
+    let free = CONNECTIONS_MAX.saturating_sub(open);
+    if free == 0 || (s.sweep.is_empty() && s.outbox.iter().all(|(_, f)| f.is_empty())) {
+        return;
+    }
+    let candidates = candidates(s, &[]);
     for i in policy::to_dial(&candidates, now, free) {
         let (Some(at), key) = (s.book.dial_of(i), s.book.contacts[i].key) else { continue };
+        if candidates[i].swept {
+            s.sweep.retain(|k| k != &key);
+            s.sweep_dials.push(key);
+        }
         dial(s, key, at, now);
     }
 }
@@ -927,12 +1158,14 @@ fn dial(s: &mut State, key: Key, at: Dial, now: u64) {
         Ok(a) => a,
         Err(e) => {
             s.retry(&key).failed(now);
+            s.sweep_dials.retain(|k| k != &key);
             info(&format!("could not dial {name}: {e}"));
             return;
         }
     };
     if !policy::admitted(addr.ip(), SIMULATOR) {
         s.retry(&key).failed(now);
+        s.sweep_dials.retain(|k| k != &key);
         info(&format!("not dialling {name} at {addr}: not on the tailnet"));
         return;
     }
@@ -946,6 +1179,7 @@ fn dial(s: &mut State, key: Key, at: Dial, now: u64) {
     };
     if !crate::kernel_task::spawn(c"chat_dial", DIAL_STACK, crate::kernel_task::PRIORITY_DEFAULT, job) {
         s.dialling.retain(|k| k != &key);
+        s.sweep_dials.retain(|k| k != &key);
         s.retry(&key).failed(now);
         warn(&format!("could not dial {name}: no task"));
     }
@@ -957,6 +1191,8 @@ fn take_dialled(s: &mut State, now: u64) {
     let done: Vec<_> = std::mem::take(&mut *DIALLED.lock().unwrap_or_else(PoisonError::into_inner));
     for (key, result) in done {
         s.dialling.retain(|k| k != &key);
+        let swept = s.sweep_dials.contains(&key);
+        s.sweep_dials.retain(|k| k != &key);
         let name = s.contact_name(&key);
         match result {
             Err(e) => {
@@ -971,6 +1207,7 @@ fn take_dialled(s: &mut State, now: u64) {
                 }
                 let _ = sock.set_nodelay(true);
                 let mut c = Conn::new(sock, addr, now, Some(key));
+                c.swept = swept;
                 let host = addr.ip().to_string();
                 c.tx.extend_from_slice(wire::upgrade_request(&host, addr.port(), &c.ws_key).as_bytes());
                 s.conns.push(c);
@@ -1004,6 +1241,19 @@ fn poll(s: &mut State, now: u64) {
                 c.pinged_ms = now;
                 c.send_op(wire::OP_PING, b"");
             }
+        }
+    }
+    // A connection a sweep opened closes once the peer has sent what waited.
+    for i in 0..s.conns.len() {
+        let c = &s.conns[i];
+        let Some(key) = c.key().copied().filter(|_| c.swept && !c.closing) else { continue };
+        if s.viewing == Some(key) {
+            // On screen: the user is talking to it; it stays as any other.
+            s.conns[i].swept = false;
+            continue;
+        }
+        if policy::sweep_settled(c.last_ms, now, s.waiting(&key)) {
+            s.conns[i].close(wire::CLOSE_NORMAL, "nothing more waits");
         }
     }
     let mut gone: Vec<(Option<Key>, Option<Key>)> = Vec::new();
@@ -1392,6 +1642,7 @@ fn on_frame(s: &mut State, i: usize, text: &[u8]) {
             s.outbox.retain(|(_, f)| !f.is_empty());
             if s.outbox.iter().map(|(_, f)| f.len()).sum::<usize>() != before {
                 info(&format!("delivered {id} to {name}"));
+                s.delivered_n += 1;
                 save(s);
                 if contact {
                     state_of_mine(s, &key, &[id], "delivered");
@@ -1514,6 +1765,7 @@ fn received(s: &mut State, key: &Key, name: &str, m: Message) -> bool {
         insert_by_ts(&mut conv.messages, m, SHOWN_MAX);
         msg_log::chat_record(false, &fp, &line);
         info(&format!("received {} from {name}", line.id));
+        s.received_n += 1;
         // On screen, it is read once acked (on_frame); else it alerts.
         if s.viewing != Some(*key) {
             s.book.contacts[ci].unread = s.book.contacts[ci].unread.saturating_add(1);
@@ -1676,6 +1928,13 @@ pub(crate) fn add_contact(host: &str, port: u16, name: &str) -> Result<Key, i32>
         info(&format!("added {} at {host}:{port}", c.name));
         let key = c.key;
         save(s);
+        // Online now: reached at once, so its key is pinned.
+        if s.listener.is_some() {
+            if let Some(ip) = contact_ip(s, i) {
+                let online = s.online.clone();
+                sweep(s, "added", &online, Some(&[ip]));
+            }
+        }
         changed();
         Ok(key)
     })
@@ -2246,6 +2505,18 @@ pub extern "C" fn tailnet_chat_set_read_receipts(on: bool) -> i32 {
     set_read_receipts(on)
 }
 
+/// How often, in minutes, the device looks for messages while it sleeps;
+/// 0 is never.
+#[no_mangle]
+pub extern "C" fn tailnet_chat_check_minutes() -> u32 {
+    check_minutes()
+}
+
+#[no_mangle]
+pub extern "C" fn tailnet_chat_set_check_minutes(minutes: u32) -> i32 {
+    set_check_minutes(minutes)
+}
+
 /// Messages received from contacts and not yet read, for the status bar's
 /// envelope and Home's row.
 #[no_mangle]
@@ -2463,6 +2734,9 @@ mod sim_control {
             "set" => {
                 if let Some(on) = cmd.get("read_receipts").and_then(Value::as_bool) {
                     set_read_receipts(on);
+                }
+                if let Some(m) = cmd.get("check_minutes").and_then(Value::as_u64) {
+                    set_check_minutes(m.min(u64::from(u32::MAX)) as u32);
                 }
                 Ok(Value::Bool(true))
             }

@@ -158,6 +158,16 @@ impl State {
 
 static STATE: Mutex<Option<State>> = Mutex::new(None);
 
+/// How many times the client has connected since boot: a module that
+/// wants to act on every (re)join, after a sleep or a change of network,
+/// watches it change.
+static JOINS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// How many times the tailnet has connected since boot.
+pub(crate) fn joins() -> u32 {
+    JOINS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 fn lock() -> MutexGuard<'static, Option<State>> {
     STATE.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -382,6 +392,7 @@ unsafe extern "C" fn tick(_arg: *mut c_void) {
     let shown = policy::shown(platform::available(), &inputs, s.failures > 0);
     if shown != s.shown {
         if shown == Shown::Connected {
+            JOINS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             // What the client's tasks and sockets cost is worth knowing.
             #[cfg(not(test))]
             let free_kb = unsafe { crate::app_manager::get_free_memory() } / 1024;
@@ -586,7 +597,7 @@ pub extern "C" fn tailnet_is_connected() -> bool {
 }
 
 /// The peers last seen, while connected.
-fn peers() -> Vec<Peer> {
+pub(crate) fn peers() -> Vec<Peer> {
     with(|s| match &s.polled {
         Some(p) if s.running_on.is_some() && p.client == Client::Connected => p.peers.clone(),
         _ => Vec::new(),
@@ -1083,10 +1094,23 @@ mod platform {
             return host_peers().map(|(_, p)| p).unwrap_or_default();
         }
         let peer = |ip, name: &str, direct| super::Peer { ip, name: name.to_string(), direct, online: true };
-        vec![
+        let mut list = vec![
             peer(0x6440_0002, "homelab.tail-sim.ts.net", true),
             peer(0x6440_0003, "laptop.tail-sim.ts.net", false),
-        ]
+        ];
+        // THISTLE_SIM_TAILNET_LOOPBACK_PEER=NAME[:offline]: a peer at
+        // 127.0.0.1, where a test's chat peers listen, online or not.
+        let loopback = env("THISTLE_SIM_TAILNET_LOOPBACK_PEER");
+        if !loopback.is_empty() {
+            let (name, offline) = match loopback.strip_suffix(":offline") {
+                Some(n) => (n, true),
+                None => (loopback.as_str(), false),
+            };
+            let mut p = peer(0x7f00_0001, &format!("{name}.tail-sim.ts.net"), true);
+            p.online = !offline;
+            list.push(p);
+        }
+        list
     }
 
     fn parse_ip(s: &str) -> Option<u32> {
