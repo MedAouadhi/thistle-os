@@ -161,6 +161,25 @@ class Target:
 
     can_cellular = True
 
+    # Sharing the tailnet's peer list (ticket 14).
+
+    def share_peers(self, peers: list) -> list:
+        """Give the target `peers` as its tailnet's online peers, where it
+        can, and return what it shares with a contact at an address outside
+        them. A target whose platform has a peer list of its own (the
+        simulator) keeps it and returns what it shares of that."""
+        return self.call({"cmd": "set_peers", "peers": peers})
+
+    def ask_peers(self, to) -> list:
+        """Have the target ask its contact `to` for its peer list. A target
+        that never asks (the device) raises Skipped."""
+        try:
+            return self.call({"cmd": "ask_peers", "to": list(to) if isinstance(to, tuple) else to})
+        except RuntimeError as e:
+            if "no command" in str(e) or "not on this device" in str(e):
+                raise Skipped("the target does not ask for peers")
+            raise
+
     def stop(self):
         pass
 
@@ -977,9 +996,97 @@ def call_unreachable(target: Target) -> None:
 
 
 VOICE_SCENARIOS = [voice_message_from_target, voice_message_broken_and_restarted]
+
+
+# -- sharing the tailnet's peer list (ticket 14) ---------------------------------
+
+PEERS = [{"name": "homelab", "addrs": ["100.64.0.2"]},
+         {"name": "laptop", "addrs": ["100.64.0.3", "fd7a:115c:a1e0::3"]}]
+
+
+def _within_limits(shared: list) -> None:
+    assert len(shared) <= protocol.MAX_PEERS, f"{len(shared)} peers shared"
+    for p in shared:
+        assert 0 < len(p["name"].encode("utf-8")) <= protocol.MAX_NAME_BYTES, p
+        assert 1 <= len(p["addrs"]) <= protocol.MAX_PEER_ADDRS, p
+        assert all(protocol.in_tailnet(a) for a in p["addrs"]), f"an address outside the tailnet: {p}"
+
+
+def _ask(conn: RawConn) -> list:
+    conn.send(protocol.peers_ask())
+    return conn.expect("peers")["peers"]
+
+
+def peers_shared_with_a_contact(target: Target) -> None:
+    """A contact's `peers_ask` is answered with the tailnet's online peers."""
+    expected = target.share_peers(PEERS)
+    conn = RawConn(target.address, name="asker").handshake()
+    assert "peers" in conn.their["caps"], conn.their["caps"]
+    _become_contact(target, conn)
+    shared = _ask(conn)
+    assert shared == expected, (shared, expected)
+    _within_limits(shared)
+    conn.close()
+
+
+def peers_not_shared_with_a_stranger(target: Target) -> None:
+    """A stranger's `peers_ask` is answered with an empty list."""
+    target.share_peers(PEERS)
+    conn = RawConn(target.address, name="nosy").handshake()
+    assert _ask(conn) == []
+    conn.close()
+
+
+def peers_unannounced_is_unsupported(target: Target) -> None:
+    """`peers_ask` from a peer whose hello did not announce `peers` draws
+    `error unsupported`; an unasked `peers` is ignored."""
+    target.share_peers(PEERS)
+    quiet = RawConn(target.address, name="quiet", caps=[c for c in protocol.CAPS_V1 if c != "peers"]).handshake()
+    _become_contact(target, quiet)
+    quiet.send(protocol.peers_ask())
+    err = quiet.expect("error", code="unsupported")
+    assert err.get("what") == "peers_ask", err
+    quiet.close()
+    conn = RawConn(target.address, name="chatty").handshake()
+    conn.send(protocol.peers(PEERS))
+    m = _msg("still here")
+    conn.send(m)
+    conn.expect("ack", id=m["id"])
+    conn.close()
+
+
+def peers_kept_to_the_limits(target: Target) -> None:
+    """At most 64 peers, two addresses each inside the tailnet, names of 64 bytes."""
+    many = [{"name": "peer-%02d" % i, "addrs": ["100.64.1.%d" % i]} for i in range(70)]
+    many.insert(0, {"name": "n" * 80, "addrs": ["192.168.1.2", "100.64.2.1", "fd7a:115c:a1e0::21", "100.64.2.2"]})
+    many.insert(1, {"name": "lan-only", "addrs": ["192.168.1.3"]})
+    expected = target.share_peers(many)
+    conn = RawConn(target.address, name="counter").handshake()
+    _become_contact(target, conn)
+    shared = _ask(conn)
+    assert shared == expected, (shared, expected)
+    _within_limits(shared)
+    conn.close()
+
+
+def peers_asked_by_target(target: Target) -> None:
+    """The target asks a contact for its peer list and gets it."""
+    me = ChatPeer(name="sharer").start()
+    try:
+        me.tailnet_peers = PEERS
+        me.add_contact(key=target.key, name="target")
+        target.add_contact(me.address, name="sharer")
+        got = target.ask_peers(me.address)
+        assert got == protocol.shared_peers(PEERS, "127.0.0.1"), got
+    finally:
+        me.stop()
+
+
+PEERS_SCENARIOS = [peers_shared_with_a_contact, peers_not_shared_with_a_stranger,
+                   peers_unannounced_is_unsupported, peers_kept_to_the_limits, peers_asked_by_target]
 CALL_SCENARIOS = [call_answered, call_placed_by_target, call_declined, call_busy, call_ended_by_cellular,
                   call_far_end_silent, call_unreachable]
-SCENARIOS += VOICE_SCENARIOS + CALL_SCENARIOS
+SCENARIOS += VOICE_SCENARIOS + CALL_SCENARIOS + PEERS_SCENARIOS
 
 
 def run(make_target, scenarios=None, out=None, skipped: list | None = None) -> int:

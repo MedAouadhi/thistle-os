@@ -53,7 +53,9 @@ class ChatModel extends ChangeNotifier {
     this.background,
     this.permissions,
     AudioDevices? audio,
-  }) : notifier = notifier ?? _Silent(),
+    Future<ProbeResult?> Function(PeerAddress address)? probe,
+  }) : _probe = probe,
+       notifier = notifier ?? _Silent(),
        audio = audio ?? NoAudioDevices('no audio devices given');
 
   final Identity identity;
@@ -81,6 +83,9 @@ class ChatModel extends ChangeNotifier {
 
   /// The microphone and speaker: PulseAudio/PipeWire on Linux, or files.
   final AudioDevices audio;
+
+  /// How discovery probes an address; `ChatPeer.probe` unless a test says.
+  final Future<ProbeResult?> Function(PeerAddress address)? _probe;
 
   /// Voice messages and calls.
   late final Talk talk = Talk(
@@ -136,6 +141,9 @@ class ChatModel extends ChangeNotifier {
       callPolicy: CallPolicy.ignore, // calls ring for the user
       log: log,
     );
+    // A contact that asks is told the tailnet's online peers, as Tailscale
+    // shows them now; on Android, none.
+    p.tailnetPeers = () async => (await readStatus()).toShare;
     _events = p.events.listen(_onEvent);
     return p;
   }
@@ -365,18 +373,32 @@ class ChatModel extends ChangeNotifier {
 
   // -- discovery ------------------------------------------------------------------
 
-  /// Chat peers found among the online tailnet peers, less the contacts.
+  /// Chat peers found among the online tailnet peers, less the contacts
+  /// and this device.
   List<DiscoveredPeer> get discovered => [
     for (final d in _discovered)
-      if (!contacts.any((c) => c.key == d.probe.key || c.address == d.probe.address)) d,
+      if (d.probe.key != identity.keyHex && !contacts.any((c) => c.key == d.probe.key || c.address == d.probe.address))
+        d,
   ];
 
+  /// Look for chat peers: among the tailnet's online peers where the
+  /// platform lists them (Linux), else among those the contacts share
+  /// (Android), asking each for a few seconds at most.
   Future<void> discover() async {
     discovering = true;
     notifyListeners();
     try {
       status = await readStatus();
-      _discovered = await discoverChatPeers(status, (a) => _peer.probe(a), port: discoveryPort);
+      final probe = _probe ?? (PeerAddress a) => _peer.probe(a);
+      _discovered = status.hasPeerList
+          ? await discoverChatPeers(status, probe, port: discoveryPort)
+          : await discoverThroughContacts(
+              contacts,
+              (c) => _peer.askPeers(_who(c)).timeout(const Duration(seconds: 8), onTimeout: () => null),
+              probe,
+              port: discoveryPort,
+              ownAddresses: status.selfIps.toSet(),
+            );
     } finally {
       discovering = false;
       notifyListeners();

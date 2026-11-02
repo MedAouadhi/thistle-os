@@ -230,6 +230,31 @@ void main() {
     expect(alice.calls[answered]!.missed, isFalse);
   });
 
+  test('a contact is told the tailnet peers, and a stranger none', () async {
+    bob.tailnetPeers = () async => const [
+      SharedPeer('homelab', ['100.64.0.2']),
+    ];
+    await befriend(alice, bob);
+    expect(await alice.askPeers('bob'), [
+      const SharedPeer('homelab', ['100.64.0.2']),
+    ]);
+    final carol = await startPeer('carol');
+    addTearDown(carol.stop);
+    carol.addContact(bob.address, name: 'bob');
+    expect(await carol.askPeers('bob'), isEmpty);
+  });
+
+  test('a peer that does not announce peers is not asked', () async {
+    final quiet = await startPeer('quiet', caps: [...capsV1.where((c) => c != 'peers')]);
+    addTearDown(quiet.stop);
+    final answered = <ChatEvent>[];
+    quiet.events.where((e) => e.kind == 'answered').listen(answered.add);
+    alice.addContact(quiet.address, name: 'quiet');
+    expect(await alice.askPeers('quiet'), isNull);
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+    expect(answered, isEmpty, reason: 'nothing was sent that it could not take');
+  });
+
   test("a probe reads a chat peer's hello and leaves no request behind; nothing listening is null", () async {
     final hello = await alice.probe(bob.address);
     expect(hello!.key, bob.identity.keyHex);

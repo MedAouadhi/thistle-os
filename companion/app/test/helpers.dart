@@ -112,7 +112,9 @@ ChatModel testModel(
   FakePermissions? permissions,
   String store = ':memory:',
   AudioDevices? audio,
+  Future<ProbeResult?> Function(PeerAddress address)? probe,
 }) => ChatModel(
+  probe: probe,
   audio: audio ?? FakeAudio(),
   identity: Identity.generate(),
   openStore: () => Store.open(store),

@@ -140,6 +140,52 @@ class Checking(unittest.TestCase):
         self.assertEqual(error, {"type": "error", "code": "unsupported", "what": "codec:aac", "id": ID})
 
 
+class SharingPeers(unittest.TestCase):
+    """What a peer shares of its tailnet's peer list, and what an asker probes of one."""
+
+    ONLINE = [{"name": "homelab", "addrs": ["100.64.0.2", "fd7a:115c:a1e0::2"]},
+              {"name": "laptop", "addrs": ["100.64.0.3"]},
+              {"name": "printer", "addrs": ["192.168.1.20"]}]
+
+    def test_the_answer_is_the_tailnet_peers_less_the_asker(self):
+        shared = protocol.shared_peers(self.ONLINE, asker="100.64.0.3")
+        self.assertEqual(shared, [{"name": "homelab", "addrs": ["100.64.0.2", "fd7a:115c:a1e0::2"]}])
+
+    def test_an_ipv4_mapped_asker_is_its_ipv4_address(self):
+        shared = protocol.shared_peers(self.ONLINE, asker="::ffff:100.64.0.2")
+        self.assertEqual([p["name"] for p in shared], ["laptop"])
+
+    def test_the_answer_keeps_to_the_limits(self):
+        many = [{"name": "n%d" % i, "addrs": ["100.64.1.%d" % i]} for i in range(70)]
+        many.append({"name": "x" * 80, "addrs": ["100.64.2.1", "fd7a:115c:a1e0::9", "100.64.2.2"]})
+        shared = protocol.shared_peers(many[-1:] + many, asker=None)
+        self.assertEqual(len(shared), 64)
+        self.assertEqual(shared[0], {"name": "x" * 64, "addrs": ["100.64.2.1", "fd7a:115c:a1e0::9"]})
+        frame, error = protocol.check(protocol.encode(protocol.peers(shared)))
+        self.assertIsNone(error)
+
+    def test_a_peer_with_no_name_is_left_out(self):
+        self.assertEqual(protocol.shared_peers([{"name": "", "addrs": ["100.64.0.9"]}], asker=None), [])
+
+    def test_the_asker_probes_only_tailnet_addresses_once_each(self):
+        got = [{"name": "homelab", "addrs": ["100.64.0.2", "fd7a:115c:a1e0::2"]},
+               {"name": "evil", "addrs": ["8.8.8.8", "127.0.0.1"]},
+               {"name": "again", "addrs": ["100.64.0.2"]},
+               {"name": "junk", "addrs": ["not an address"]}]
+        self.assertEqual(protocol.addresses_to_probe(got), ["100.64.0.2", "fd7a:115c:a1e0::2"])
+
+    def test_peers_frames_are_checked(self):
+        self.assertIsNone(protocol.check('{"type":"peers_ask"}')[1])
+        self.assertIsNone(protocol.check('{"type":"peers","peers":[]}')[1])
+        for text in ('{"type":"peers"}', '{"type":"peers","peers":{}}',
+                     '{"type":"peers","peers":[{"name":"a","addrs":[]}]}',
+                     '{"type":"peers","peers":[{"name":"","addrs":["100.64.0.1"]}]}',
+                     '{"type":"peers","peers":[{"addrs":["100.64.0.1"]}]}',
+                     '{"type":"peers","peers":["100.64.0.1"]}'):
+            _, error = protocol.check(text)
+            self.assertEqual(error and (error["code"], error.get("what")), ("bad_request", "peers"), text)
+
+
 PEER_PY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tailnet_chat", "peer.py")
 VECTORS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "docs", "tailnet-chat", "vectors")
 
@@ -378,6 +424,25 @@ class TwoPeers(unittest.TestCase):
         self.assertFalse(protocol.admitted("100.128.0.1"))
         self.assertFalse(protocol.admitted("127.0.0.1"))
         self.assertTrue(protocol.admitted("127.0.0.1", loopback=True))
+
+    def test_a_contact_is_told_the_tailnet_peers_and_a_stranger_nothing(self):
+        self.bob.tailnet_peers = [{"name": "homelab", "addrs": ["100.64.0.2"]}]
+        self.befriend()
+        self.assertEqual(self.alice.ask_peers("Bob"), [{"name": "homelab", "addrs": ["100.64.0.2"]}])
+        carol = ChatPeer(name="carol").start()
+        self.addCleanup(carol.stop)
+        carol.add_contact(self.bob.address, name="Bob")
+        self.assertEqual(carol.ask_peers("Bob"), [], "a stranger is told nothing")
+
+    def test_a_peer_that_does_not_announce_peers_is_not_asked(self):
+        quiet = ChatPeer(name="quiet", caps=[c for c in protocol.CAPS_V1 if c != "peers"]).start()
+        self.addCleanup(quiet.stop)
+        self.alice.add_contact(quiet.address, name="quiet")
+        self.assertIsNone(self.alice.ask_peers("quiet"))
+        conn = quiet.connect(self.bob.address)
+        conn.send({"type": "peers_ask"})
+        quiet.wait_for(lambda: quiet.errors)
+        self.assertEqual(quiet.errors[0][1], {"type": "error", "code": "unsupported", "what": "peers_ask"})
 
     def test_a_voice_message_arrives_whole(self):
         self.befriend()

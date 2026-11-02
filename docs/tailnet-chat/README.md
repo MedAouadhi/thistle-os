@@ -47,12 +47,17 @@ of `Target`s: a target for the simulator implements `Target`'s methods
 message scenarios `react`, `mark_read`, `set_typing`, `is_typing`,
 `set_read_receipts`, `flush`; for the voice and call scenarios
 `send_voice`, `set_call_policy`, `place_call`, `calls`, `answer_call`,
-`end_call`, `talk`, `cellular_call`) with the
+`end_call`, `talk`, `cellular_call`; for the peer list scenarios
+`share_peers`, `ask_peers`) with the
 simulator's keys, screen and card, and gives its `address` and `key`.
 A target without cellular calls sets `can_cellular = False` (or answers
 `cellular_call` with `no command`), and `call_ended_by_cellular` is
 reported as skipped, not failed. The call scenarios take about 15 s more,
-`call_far_end_silent` waiting out the 10 s without a frame.
+`call_far_end_silent` waiting out the 10 s without a frame. A target
+whose platform keeps its own peer list (the simulator) answers
+`set_peers` with what it shares of that list instead, and one that never
+asks for a list (the device) answers `ask_peers` with `no command`, and
+`peers_asked_by_target` is skipped.
 
 ## The control protocol
 
@@ -93,6 +98,8 @@ name, or an address as `[host, port]`.
 | `end_call` | `call`, `reason`? | `true` |
 | `talk` | `call`, `seconds`? | `true`: the target sends audio on the call (the reference peer the vector's packets, 1 s by default; one whose microphone always streams does nothing more) |
 | `cellular_call` | | `true`: a cellular call takes over, every call ends as `cellular` (the reference peer; the simulator's modem) |
+| `set_peers` | `peers` (`[{"name", "addrs"}]`) | these are the tailnet's online peers from now on; the list a contact outside them is told (protocol section 4.10) |
+| `ask_peers` | `to` | the contact's `peers` list, or `null` if either side does not announce `peers` |
 | `stop` | | `true`, then the program exits |
 
 A message is `{"id", "mine", "ts", "state", "text"?, "reply_to"?,

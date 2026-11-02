@@ -233,7 +233,9 @@ def case_conformance(simulator: Path, root: Path) -> None:
         log = dev.log_text()
         for line in ("[tailnet_chat] listening on 127.0.0.1:", "a stranger", "contact request from stranger",
                      "refused 127.0.0.1: a signature that does not verify",
-                     "not the key pinned for laptop-"):
+                     "not the key pinned for laptop-",
+                     # The pretend tailnet's two online peers, homelab and laptop.
+                     "told asker 2 tailnet peers", "told nosy 0 tailnet peers"):
             assert line in log, f"no {line!r} in the log"
         # The voice message received whole is kept beside the history, and
         # nothing of the broken transfer is.

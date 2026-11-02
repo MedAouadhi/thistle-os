@@ -80,6 +80,70 @@ void main() {
     });
   });
 
+  test('what is shared with a contact that asks: the online peers by MagicDNS name; Android shares none', () {
+    final s = parseTailscaleStatus(fixture('tailscale_status_running.json'));
+    expect(s.toShare, const [
+      SharedPeer('thistle-46cf20', ['100.110.0.38', 'fd7a:115c:a1e0::bb02']),
+      SharedPeer('homelab', ['100.125.0.43', 'fd7a:115c:a1e0::dd04']),
+      SharedPeer('pixel-8', ['fd7a:115c:a1e0::ee05']),
+    ]);
+    expect(
+      statusFromInterfaces({
+        'tun0': ['100.99.0.7'],
+      }).toShare,
+      isEmpty,
+    );
+  });
+
+  group('discoverThroughContacts', () {
+    final laptop = Contact(id: 1, name: 'laptop', key: 'k1', address: const PeerAddress('100.64.0.4', 4810));
+    final device = Contact(id: 2, name: 'device', key: 'k2', address: const PeerAddress('100.64.0.5', 4810));
+
+    test("asks each contact, probes each tailnet address shared once, and says who shared it", () async {
+      final asked = <String>[];
+      final probed = <PeerAddress>[];
+      final found = await discoverThroughContacts(
+        [laptop, device],
+        (c) async {
+          asked.add(c.name);
+          if (c.name == 'device') return null; // announces no `peers`
+          return const [
+            SharedPeer('homelab', ['100.64.0.2', 'fd7a:115c:a1e0::2']),
+            SharedPeer('evil', ['8.8.8.8', '127.0.0.1']),
+            SharedPeer('me', ['100.99.0.7']),
+            SharedPeer('device', ['100.64.0.5']),
+            SharedPeer('nothing', ['100.64.0.9']),
+          ];
+        },
+        (address) async {
+          probed.add(address);
+          return address.host == '100.64.0.2'
+              ? ProbeResult(address, 'ab' * 32, 'homelab', 'abcd abcd abcd abcd abcd', capsV1)
+              : null;
+        },
+        ownAddresses: {'100.99.0.7'},
+      );
+      expect(asked.toSet(), {'laptop', 'device'});
+      expect(probed.toSet(), {
+        const PeerAddress('100.64.0.2', 4810),
+        const PeerAddress('fd7a:115c:a1e0::2', 4810),
+        const PeerAddress('100.64.0.9', 4810),
+      });
+      expect(found.single.probe.name, 'homelab');
+      expect(found.single.via, 'laptop');
+      expect(found.single.peer.hostName, '', reason: 'no name is taken from the shared list');
+    });
+
+    test('a contact that cannot be asked is passed over', () async {
+      final found = await discoverThroughContacts(
+        [laptop],
+        (c) async => throw const SocketException('down'),
+        (a) async => null,
+      );
+      expect(found, isEmpty);
+    });
+  });
+
   group('discoverChatPeers', () {
     test('lists the online peers that answer as chat peers, with their tailnet names', () async {
       final s = parseTailscaleStatus(fixture('tailscale_status_running.json'));

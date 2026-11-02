@@ -1,4 +1,5 @@
 import 'package:tailnet_chat_core/policy.dart';
+import 'package:tailnet_chat_core/protocol.dart' show SharedPeer;
 import 'package:test/test.dart';
 
 const a = 'aa00000000000000000000000000000000000000000000000000000000000000';
@@ -118,6 +119,49 @@ void main() {
     expect(reactionReplaces(existingTs: null, newTs: 5), isTrue);
     expect(reactionReplaces(existingTs: 5, newTs: 6), isTrue);
     expect(reactionReplaces(existingTs: 6, newTs: 5), isFalse);
+  });
+
+  group('sharing the peer list', () {
+    const online = [
+      SharedPeer('homelab', ['100.64.0.2', 'fd7a:115c:a1e0::2']),
+      SharedPeer('laptop', ['100.64.0.3']),
+      SharedPeer('printer', ['192.168.1.20']),
+    ];
+
+    test("a contact is told the tailnet's online peers, less itself", () {
+      expect(sharedPeers(online, asker: '100.64.0.3', contact: true), [
+        const SharedPeer('homelab', ['100.64.0.2', 'fd7a:115c:a1e0::2']),
+      ]);
+      expect(sharedPeers(online, asker: '::ffff:100.64.0.2', contact: true), [
+        const SharedPeer('laptop', ['100.64.0.3']),
+      ]);
+    });
+
+    test('a stranger is told none', () {
+      expect(sharedPeers(online, asker: '100.64.0.9', contact: false), isEmpty);
+    });
+
+    test('at most 64 peers, two tailnet addresses each, a name of 64 bytes, none unnamed', () {
+      final many = [
+        SharedPeer('é' * 40, ['192.168.1.2', '100.64.2.1', 'fd7a:115c:a1e0::21', '100.64.2.2']),
+        const SharedPeer('', ['100.64.2.3']),
+        for (var i = 0; i < 70; i++) SharedPeer('p$i', ['100.64.1.$i']),
+      ];
+      final shared = sharedPeers(many, contact: true);
+      expect(shared, hasLength(64));
+      expect(shared.first, SharedPeer('é' * 32, ['100.64.2.1', 'fd7a:115c:a1e0::21']));
+      expect(shared[1].name, 'p0');
+    });
+
+    test('an asker probes only tailnet addresses, each once', () {
+      const got = [
+        SharedPeer('homelab', ['100.64.0.2', 'fd7a:115c:a1e0::2']),
+        SharedPeer('evil', ['8.8.8.8', '127.0.0.1']),
+        SharedPeer('again', ['100.64.0.2']),
+        SharedPeer('junk', ['not an address']),
+      ];
+      expect(addressesToProbe(got), ['100.64.0.2', 'fd7a:115c:a1e0::2']);
+    });
   });
 
   group('calls', () {

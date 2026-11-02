@@ -292,7 +292,7 @@ void main() {
     await finish(tester);
   });
 
-  testWidgets('Android: says when the Tailscale app is not connected, and offers no discovery', (tester) async {
+  testWidgets('Android: says when the Tailscale app is not connected, and looks through the contacts', (tester) async {
     tailnet.status = statusFromInterfaces({
       'wlan0': ['192.168.1.23'],
     });
@@ -308,9 +308,9 @@ void main() {
 
     await tester.tap(find.text('Contacts'));
     await tester.pump();
-    expect(find.byTooltip('Look for chat peers'), findsNothing);
+    expect(find.byTooltip('Look for chat peers'), findsOneWidget);
     expect(find.byTooltip('Add by name or address'), findsOneWidget);
-    expect(find.textContaining('Add a chat peer by its tailnet name'), findsOneWidget);
+    expect(find.textContaining('Look for chat peers through your contacts'), findsOneWidget);
     await finish(tester);
   });
 

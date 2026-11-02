@@ -34,10 +34,8 @@ class ContactsPage extends StatelessWidget {
           child: Row(
             children: [
               Expanded(child: Text('On your tailnet', style: Theme.of(context).textTheme.titleSmall)),
-              // Android has no peer list to look through: add by name or address.
-              if (!model.status.hasPeerList)
-                const SizedBox.shrink()
-              else if (model.discovering)
+              // Android has no peer list of its own: it looks through those the contacts share.
+              if (model.discovering)
                 const Padding(
                   padding: EdgeInsets.all(12),
                   child: SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)),
@@ -62,7 +60,8 @@ class ContactsPage extends StatelessWidget {
             child: Text(
               model.status.hasPeerList
                   ? 'Look for chat peers among the machines Tailscale shows online, or add one by name or address.'
-                  : 'Add a chat peer by its tailnet name (MagicDNS) or its 100.x address.',
+                  : 'Look for chat peers through your contacts, which share the machines their Tailscale shows '
+                        'online, or add one by its tailnet name (MagicDNS) or its 100.x address.',
               style: small,
             ),
           ),
@@ -70,7 +69,11 @@ class ContactsPage extends StatelessWidget {
           ListTile(
             leading: const Icon(Icons.devices),
             title: Text(d.probe.name),
-            subtitle: Text('${d.peer.hostName}, ${d.probe.address}\n${d.probe.fingerprint}'),
+            subtitle: Text(
+              d.via == null
+                  ? '${d.peer.hostName}, ${d.probe.address}\n${d.probe.fingerprint}'
+                  : '${d.probe.address}, via ${d.via}\n${d.probe.fingerprint}',
+            ),
             isThreeLine: true,
             trailing: TextButton(onPressed: () => model.addDiscovered(d), child: const Text('Add')),
           ),

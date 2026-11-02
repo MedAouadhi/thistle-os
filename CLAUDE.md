@@ -802,6 +802,14 @@ client.
   `tailscale status --json`, `NAME=IP[:offline],...` lists them); whether
   it has joined is a file in `THISTLE_SIM_SPIFFS`.
   `simulator/tests/test_tailscale.py`.
+- **Tailnet chat shares this peer list with a contact that asks**
+  (`peers_ask`, protocol.md section 4.10, ticket 14 of
+  `.scratch/tailnet-chat/`): the online peers the kernel keeps, by the
+  first label of their names, less the asker, IPv4 only, 64 at most
+  (`tailnet_chat_policy::shared_peers`); a stranger is told none. The
+  device never asks. The Android companion app, which has no peer list,
+  looks for chat peers among what its contacts share, probing only
+  addresses inside the tailnet's ranges and taking nothing else from it.
 
 ### Hermes
 
@@ -868,6 +876,31 @@ ticks a task off, Backspace removes it, and typing goes back to the field.
 - `simulator/tests/test_todo.py`. `--type` fills a 32-event key queue, so a
   run types one short task, and a case that needs a list writes `todo.md`
   first.
+
+### WhatsApp
+
+An AGPL part, `components/whatsapp/` (its own `LICENSE`, ADR-0013), built
+only when the repository's `.env` sets `THISTLE_WHATSAPP=1`
+(`cmake/thistle_whatsapp.cmake`); otherwise the component is excluded and
+nothing of it is compiled. `.scratch/whatsapp/spec.md` has the plan.
+
+- **The kernel's own `Cargo.toml` and `Cargo.lock` never name it**: Cargo
+  would fetch and lock even an optional dependency, and CI would carry it.
+  A WhatsApp build compiles the kernel from a manifest
+  `components/whatsapp/kernel.cmake` generates (`kernel/Cargo.toml`,
+  git-ignored; `kernel/Cargo.lock` committed) into `kernel/target/`, with
+  the kernel feature `whatsapp`, which calls `thistle_whatsapp::start()`
+  from `kernel_init`. A change to kernel_rs's `Cargo.toml` that the
+  generator's edits no longer find stops the configure.
+- **Upstream whatsapp-rust's core only**, pinned by commit in
+  `components/whatsapp/rust/Cargo.toml`; nothing of the ESP32 port. Ours:
+  the runtime (`executor.rs`), the WebSocket (`ws.rs`, `transport.rs`, over
+  esp-tls in `wa_net_shim.c`), the HTTP client (`http.rs`).
+- **It does not fit a kernel slot yet**: 8.13 MiB against 4.5 MiB (ticket
+  01), so a WhatsApp build stops at `app_check_size`.
+- Its host tests are not CI's, which builds nothing of it: `cd
+  components/whatsapp/rust && cargo test --target <host-triple>`.
+  `tools/test_whatsapp_part.py` (CI) checks the gate and the licence.
 
 ### App Store
 
