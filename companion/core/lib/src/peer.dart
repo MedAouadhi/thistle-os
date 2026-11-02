@@ -613,7 +613,9 @@ class ChatPeer {
     conn.send(helloFrame(identity.key, name, caps, conn.nonce));
     conn.ws.listen(
       (data) {
-        if (!_running) return;
+        // A connection we closed (a changed key, a duplicate) may still have
+        // frames in flight: none of them is acted on.
+        if (!_running || conn.closed) return;
         conn.lastActivity = DateTime.now();
         try {
           if (conn.stage != _Stage.open) {

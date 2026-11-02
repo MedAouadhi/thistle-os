@@ -183,4 +183,17 @@ void main() {
     await eventually(() => alice.waiting('bob').isEmpty, what: 'the outbox to flush');
     expect(alice.messages('bob').last.id, id);
   });
+
+  test("an impostor under a contact's tailnet name is flagged, and what it sends is not held as a request", () async {
+    await befriend(alice, bob); // bob knows alice as tailnet name 'alice'
+    final port = alice.address.port;
+    await alice.stop();
+    alice = await startPeer('alice', port: port); // a new key under the old name
+    alice.addContact(bob.address, name: 'bob');
+    alice.sendText(bob.address, 'it is me, honest');
+    await eventually(() => bob.contacts().single.flaggedKey, what: 'the new key flagged');
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    expect(bob.requests(), isEmpty);
+    expect(bob.contacts().single.flaggedKey, alice.identity.keyHex);
+  });
 }

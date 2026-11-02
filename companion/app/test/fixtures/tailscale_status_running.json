@@ -1,0 +1,53 @@
+{
+  "Version": "1.90.6-t0123456789-gabcdef012",
+  "TUN": true,
+  "BackendState": "Running",
+  "HaveNodeKey": true,
+  "AuthURL": "",
+  "TailscaleIPs": ["100.91.10.1", "fd7a:115c:a1e0::aa01"],
+  "Self": {
+    "ID": "nSelf",
+    "HostName": "laptop",
+    "DNSName": "laptop.tail0000.ts.net.",
+    "OS": "linux",
+    "TailscaleIPs": ["100.91.10.1", "fd7a:115c:a1e0::aa01"],
+    "Online": true
+  },
+  "MagicDNSSuffix": "tail0000.ts.net",
+  "CurrentTailnet": {"Name": "user@example.com", "MagicDNSSuffix": "tail0000.ts.net", "MagicDNSEnabled": true},
+  "Peer": {
+    "nodekey:01": {
+      "ID": "n01",
+      "HostName": "thistle-46cf20",
+      "DNSName": "thistle-46cf20.tail0000.ts.net.",
+      "OS": "linux",
+      "TailscaleIPs": ["100.110.0.38", "fd7a:115c:a1e0::bb02"],
+      "Online": true
+    },
+    "nodekey:02": {
+      "ID": "n02",
+      "HostName": "Someone’s MacBook Pro",
+      "DNSName": "someones-macbook-pro.tail0000.ts.net.",
+      "OS": "macOS",
+      "TailscaleIPs": ["100.107.0.22", "fd7a:115c:a1e0::cc03"],
+      "Online": false
+    },
+    "nodekey:03": {
+      "ID": "n03",
+      "HostName": "homelab",
+      "DNSName": "homelab.tail0000.ts.net.",
+      "OS": "linux",
+      "TailscaleIPs": ["100.125.0.43", "fd7a:115c:a1e0::dd04"],
+      "Online": true
+    },
+    "nodekey:04": {
+      "ID": "n04",
+      "HostName": "Pixel 8",
+      "DNSName": "pixel-8.tail0000.ts.net.",
+      "OS": "android",
+      "TailscaleIPs": ["fd7a:115c:a1e0::ee05"],
+      "Online": true
+    }
+  },
+  "User": {}
+}

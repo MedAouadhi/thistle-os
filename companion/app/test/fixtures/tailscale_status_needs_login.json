@@ -1,0 +1,8 @@
+{
+  "Version": "1.90.6-t0123456789-gabcdef012",
+  "BackendState": "NeedsLogin",
+  "AuthURL": "https://login.tailscale.com/a/0123456789abcd",
+  "TailscaleIPs": null,
+  "Self": {"HostName": "laptop", "DNSName": "", "TailscaleIPs": null, "Online": false},
+  "Peer": null
+}
