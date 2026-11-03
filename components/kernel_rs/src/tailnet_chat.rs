@@ -244,10 +244,38 @@ fn held_from_file(text: &str) -> Vec<Request> {
 
 /// Write `text` to `path` whole: beside it first, then renamed.
 fn write_whole(path: &Path, text: &str, what: &str) {
-    let tmp = path.with_extension("tmp");
-    let ok = std::fs::write(&tmp, text).and_then(|_| std::fs::rename(&tmp, path));
-    if let Err(e) = ok {
+    if let Err(e) = write_whole_with(path, text, |from, to| std::fs::rename(from, to)) {
         warn(&format!("could not save {what} to {}: {e}", path.display()));
+    }
+}
+
+/// SPIFFS renames onto no file that is there (ESP-IDF answers EIO), so the
+/// old one is removed first; a restart between the two leaves the new text
+/// beside it, which `read_whole` takes.
+fn write_whole_with<F>(path: &Path, text: &str, rename: F) -> std::io::Result<()>
+where
+    F: FnOnce(&Path, &Path) -> std::io::Result<()>,
+{
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, text)?;
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() != ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
+    rename(&tmp, path)
+}
+
+/// `path`'s text; if a `write_whole` ended between removing it and the
+/// rename, the text beside it, renamed into place now.
+fn read_whole(path: &Path) -> std::io::Result<String> {
+    match std::fs::read_to_string(path) {
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            let tmp = path.with_extension("tmp");
+            let text = std::fs::read_to_string(&tmp)?;
+            let _ = std::fs::rename(&tmp, path);
+            Ok(text)
+        }
+        other => other,
     }
 }
 
@@ -776,7 +804,7 @@ fn fp_id(key: &Key) -> String {
 
 impl State {
     fn new(settings: Settings) -> State {
-        let (book, outbox) = std::fs::read_to_string(book_path())
+        let (book, outbox) = read_whole(&book_path())
             .map(|t| policy::from_file(&t))
             .unwrap_or_default();
         let mut s = State {
@@ -788,7 +816,7 @@ impl State {
             conns: Vec::new(),
             book,
             outbox,
-            recent: std::fs::read_to_string(recent_path()).map(|t| RecentIds::from_file(&t)).unwrap_or_default(),
+            recent: read_whole(&recent_path()).map(|t| RecentIds::from_file(&t)).unwrap_or_default(),
             retries: Vec::new(),
             dialling: Vec::new(),
             sweep: Vec::new(),
@@ -816,7 +844,7 @@ impl State {
     /// The contact requests from before this boot: the module's own file;
     /// the card's, from a build before it.
     fn read_requests(&mut self) {
-        if let Ok(text) = std::fs::read_to_string(held_path()) {
+        if let Ok(text) = read_whole(&held_path()) {
             for r in held_from_file(&text) {
                 if self.book.find(&r.key).is_none() && self.requests.len() < REQUESTS_MAX {
                     self.requests.push(r);
@@ -3901,5 +3929,43 @@ mod tests {
         let last = back.last().unwrap();
         assert_eq!(last.key, [REQUESTS_MAX as u8 - 1; 32], "the newest request is kept");
         assert_eq!(last.held.last().unwrap().id, format!("{:032x}", HELD_MAX - 1));
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("tailnet_chat_{name}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// SPIFFS' rename, and FatFs': never onto a file that is there.
+    fn rename_as_spiffs(from: &Path, to: &Path) -> std::io::Result<()> {
+        if to.exists() {
+            return Err(std::io::Error::other("Input/output error"));
+        }
+        std::fs::rename(from, to)
+    }
+
+    #[test]
+    fn a_file_written_again_holds_the_latest() {
+        let dir = scratch("again");
+        let path = dir.join("tailnet_chat.json");
+        write_whole_with(&path, "first", rename_as_spiffs).unwrap();
+        write_whole_with(&path, "second", rename_as_spiffs).unwrap();
+        assert_eq!(read_whole(&path).unwrap(), "second");
+        assert!(!path.with_extension("tmp").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_write_cut_off_before_its_rename_is_read_from_beside() {
+        let dir = scratch("cut");
+        let path = dir.join("tailnet_chat.json");
+        std::fs::write(path.with_extension("tmp"), "new").unwrap();
+        assert_eq!(read_whole(&path).unwrap(), "new");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new", "renamed into place");
+        assert!(!path.with_extension("tmp").exists());
+        assert!(read_whole(&dir.join("none.json")).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
