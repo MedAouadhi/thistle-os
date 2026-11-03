@@ -56,24 +56,25 @@ APP = "com.thistle.tailchat"
 # Every scenario but the calls, which have a case of their own.
 SCENARIOS = [s for s in conformance.SCENARIOS if s not in conformance.CALL_SCENARIOS]
 
-# The app's tabs and first row, on the T-Deck Max.
-TAB_REQUESTS = "195,40"
-TAB_CONTACTS = "120,40"
-FIRST_ROW = "120,95"
-# On the request's page, below a message of one line.
-ACCEPT = "42,195"
-# On the contacts page with no contacts, and then the add page.
-ADD_CONTACT = "60,163"
-CHECK_INTERVAL = "110,235"
-ADD = "30,219"
-# The first row of Contacts, which has no banner over it; on its page, the
-# first button.
-CONTACT_ROW = "120,72"
-MESSAGE = "48,206"
-# On the contacts page with no contacts or one, Look for chat peers; on the
-# page it opens, the first chat peer found.
-LOOK = "88,271"
-FIRST_FOUND = "120,138"
+# The app's tabs, along the bottom, and a tab's first row, on the T-Deck Max.
+TAB_REQUESTS = "200,298"
+TAB_CONTACTS = "120,298"
+FIRST_ROW = "120,91"
+# On a request's page, the right of the two buttons along the bottom.
+ACCEPT = "180,300"
+# Contacts' second row, then the add page's button.
+ADD_CONTACT = "120,143"
+ADD = "120,290"
+# Settings, at a tab's top right, and its second row.
+SETTINGS = "218,44"
+CHECK_INTERVAL = "120,230"
+# The first contact, Contacts' third row; on its page, Message.
+CONTACT_ROW = "120,195"
+MESSAGE = "82,205"
+# Contacts' first row, Look for chat peers; on the page it opens, the first
+# chat peer found.
+LOOK = "120,91"
+FIRST_FOUND = "120,127"
 
 
 def free_port() -> int:
@@ -518,10 +519,12 @@ def case_app(simulator: Path, root: Path) -> None:
         assert line in log, f"no {line!r}: {log[-1500:]}"
     assert ppm_has_text(shot), "the Requests screen is blank"
 
-    # Accept from the request's page: Accept is its first button.
+    # Accept from the request's page, which opens the conversation; back
+    # from it is Requests.
     log = dev.run(["--launch-app", APP, "--tap", TAB_REQUESTS, "--tap", FIRST_ROW, "--tap", ACCEPT,
-                   "--tap", TAB_CONTACTS], 11000)
+                   "--tap", "back", "--tap", TAB_CONTACTS], 12500)
     assert "[tailnet_chat] accepted laptop" in log, log[-1500:]
+    assert "(tailchat) conversation laptop: 1 messages" in log, log[-1500:]
     assert "(tailchat) page contacts: 1 rows" in log, log[-1500:]
     assert (dev.card / "messages" / "tailnet" / f"{fp}.jsonl").is_file()
     saved = json.loads((dev.spiffs / "tailnet_chat.json").read_text())
@@ -536,8 +539,8 @@ def case_app_add_contact(simulator: Path, root: Path) -> None:
     """Story 2 on the device: a contact added by its tailnet name from the
     app and written to from its page, and the check's interval set there."""
     dev = Device(simulator, root, "app-add")
-    # The interval first, while there is no contact above its button.
-    log = dev.run(["--launch-app", APP, "--tap", TAB_CONTACTS, "--tap", CHECK_INTERVAL, "--tap", "wait"], 6000)
+    # The interval first, in Settings.
+    log = dev.run(["--launch-app", APP, "--tap", SETTINGS, "--tap", CHECK_INTERVAL, "--tap", "wait"], 6000)
     assert "(tailchat) check every 30 minutes" in log, log[-3000:]
     log = dev.run(["--launch-app", APP, "--tap", TAB_CONTACTS, "--tap", ADD_CONTACT,
                    "--tap", "type:homelab", "--tap", ADD, "--tap", "wait"], 9000)
@@ -645,12 +648,11 @@ def voice_device(simulator: Path, root: Path, name: str, history: list) -> tuple
     return dev, key_hex, fp
 
 
-# The conversation page on the T-Deck Max with one message: its row, the
-# first button of the actions the row's tap shows (Play, for a voice
-# message), and the voice button right of Send (the call button after it).
-CONV_ROW = "120,101"
-FIRST_ACTION = "32,135"
-VOICE_BUTTON = "174,135"
+# The conversation page on the T-Deck Max with one message, under its day's
+# heading: its bubble, which plays when tapped if it is a voice message, and
+# the microphone at the composer's right.
+CONV_ROW = "60,124"
+VOICE_BUTTON = "217,299"
 
 
 def case_voice(simulator: Path, root: Path) -> None:
@@ -706,7 +708,7 @@ def case_voice(simulator: Path, root: Path) -> None:
     try:
         shot = root / "voice-play.ppm"
         log = dev.run(["--launch-app", APP, "--tap", FIRST_ROW, "--tap", "wait", "--tap", CONV_ROW,
-                       "--tap", FIRST_ACTION, "--tap", "wait", "--tap", "wait"], 13000, shot)
+                       "--tap", "wait", "--tap", "wait"], 12000, shot)
     finally:
         os.environ.pop("THISTLE_SIM_SPEAKER")
     assert "(tailchat) chose " + rid in log, log[-3000:]

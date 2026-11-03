@@ -441,6 +441,20 @@ switch (`AUDIO_SEL`, XL9555 P12, HIGH = modem). ADR-0008 has the reasons,
   `THISTLE_SIM_TAILNET_PEERS=NAME=IP,...` lists its pretend peers, such as
   reference chat peers on 127.0.0.2 and 127.0.0.3;
   `test_tailchat.py --only app-discovery`.
+- **The Chat app's lists and bubbles are drawn, not built**
+  (`apps/tailchat/tailchat/tailchat_ui.c`): each list and conversation is
+  one `lv_table` holding a few characters a row, enough for its height
+  (a bubble's text, as it wraps), and `draw_list_row()` / `draw_bubble()`
+  draw the monograms, ticks, bubbles and reactions from rows kept in
+  PSRAM, in `LV_EVENT_DRAW_TASK_ADDED`. Text a draw task shows is read
+  after the event returns, so it lives in those rows, never on the
+  stack; a cell's own text is hidden by its opacity alone, as Arabic
+  there is a copy the task frees. A list is redrawn only when a row
+  changed. Its emoji are Noto Emoji (OFL) cut by
+  `apps/tailchat/tools/gen_emoji_font.sh`, its pictures drawn by
+  `gen_icons.py`, chained after Montserrat as `lv_font_t.fallback`.
+  Leaving a conversation asks the e-paper panel for a full refresh, for
+  the black bubbles' ghost.
 
 ### The clock
 

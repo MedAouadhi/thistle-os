@@ -55,37 +55,50 @@ void tailchat_one_line(char *out, size_t n, const char *text, size_t max_chars)
     out[at] = '\0';
 }
 
-void tailchat_row(char *out, size_t n, const char *title, const char *detail, size_t max_chars)
+bool tailchat_excerpt(char *out, size_t n, const char *text, size_t max_chars, size_t max_lines)
 {
-    char line[160];
-    tailchat_one_line(line, sizeof line, detail, max_chars);
-    if (line[0]) snprintf(out, n, "%s\n%s", title ? title : "", line);
-    else snprintf(out, n, "%s", title ? title : "");
-}
+    if (!out || n == 0) return false;
+    out[0] = '\0';
+    if (!text || max_chars == 0 || max_lines == 0) return false;
 
-void tailchat_message_row(char *out, size_t n, bool mine, const char *name, const char *text,
-                          size_t max_chars)
-{
-    char line[512];
-    tailchat_one_line(line, sizeof line, text, max_chars);
-    snprintf(out, n, "%s: %s", mine ? "You" : (name ? name : ""), line);
-}
+    size_t total = 0;
+    for (const char *p = text; *p; p += char_len((unsigned char)*p)) total += *p != '\r' && *p != '\n';
+    size_t keep = total > max_chars ? max_chars - 1 : total;
+    size_t room = n - 1 > sizeof ELLIPSIS - 1 ? n - 1 - (sizeof ELLIPSIS - 1) : 0;
 
-const char *tailchat_tab_label(tailchat_tab_t tab, int waiting, char *out, size_t n)
-{
-    switch (tab) {
-    case TAILCHAT_TAB_CHATS:
-        snprintf(out, n, "Chats");
-        break;
-    case TAILCHAT_TAB_CONTACTS:
-        snprintf(out, n, "Contacts");
-        break;
-    case TAILCHAT_TAB_REQUESTS:
-        if (waiting > 0) snprintf(out, n, "Requests %d", waiting);
-        else snprintf(out, n, "Requests");
-        break;
+    size_t at = 0, chars = 0, lines = 1, breaks = 0;
+    bool cut = total > max_chars;
+    for (const char *p = text; *p;) {
+        size_t len = char_len((unsigned char)*p);
+        if (strnlen(p, len) < len) break; /* a character cut short in the text */
+        if (*p == '\r' || *p == '\n') {
+            /* Line breaks wait until something follows them. */
+            breaks += *p == '\n';
+            p++;
+            continue;
+        }
+        if (chars >= keep) break;
+        size_t take = at == 0 ? 0 : breaks > 2 ? 2 : breaks;
+        if (lines + take > max_lines || at + take + len > room) {
+            cut = true;
+            break;
+        }
+        for (size_t k = 0; k < take; k++) out[at++] = '\n';
+        lines += take;
+        breaks = 0;
+        if (*p == '\t') out[at] = ' ';
+        else memcpy(out + at, p, len);
+        at += *p == '\t' ? 1 : len;
+        p += len;
+        chars++;
     }
-    return out;
+    if (cut) {
+        while (at > 0 && (out[at - 1] == ' ' || out[at - 1] == '\n')) at--;
+        memcpy(out + at, ELLIPSIS, sizeof ELLIPSIS - 1);
+        at += sizeof ELLIPSIS - 1;
+    }
+    out[at] = '\0';
+    return cut;
 }
 
 const char *tailchat_answer_text(int8_t accepted_by_them)
@@ -95,13 +108,14 @@ const char *tailchat_answer_text(int8_t accepted_by_them)
     return "";
 }
 
-#define SEP ", "
-
+/* The companion app's choices, in its order. */
 const char *const tailchat_reactions[TAILCHAT_REACTIONS] = {
     "\xf0\x9f\x91\x8d",          /* thumbs up */
     "\xe2\x9d\xa4\xef\xb8\x8f",  /* red heart */
     "\xf0\x9f\x98\x82",          /* tears of joy */
-    "\xf0\x9f\x8e\x89",          /* party popper */
+    "\xf0\x9f\x98\xae",          /* open mouth */
+    "\xf0\x9f\x98\xa2",          /* crying */
+    "\xf0\x9f\x99\x8f",          /* folded hands */
 };
 
 const char *tailchat_emoji_label(const char *emoji)
@@ -123,69 +137,12 @@ const char *tailchat_emoji_label(const char *emoji)
     return "*";
 }
 
-static const char *state_text(const char *state)
-{
-    if (!state) return "";
-    if (strcmp(state, "waiting") == 0) return "Waiting";
-    if (strcmp(state, "delivered") == 0) return "Delivered";
-    if (strcmp(state, "read") == 0) return "Read";
-    return "";
-}
-
 const char *tailchat_duration(char *out, size_t n, uint32_t ms)
 {
     /* Whole seconds, but never 0:00 for a short one. */
     uint32_t s = ms >= 1000 ? ms / 1000 : ms > 0;
     snprintf(out, n, "%u:%02u", (unsigned)(s / 60), (unsigned)(s % 60));
     return out;
-}
-
-void tailchat_bubble(char *out, size_t n, const tailchat_bubble_t *b, size_t max_chars)
-{
-    if (!out || n == 0) return;
-    out[0] = '\0';
-    if (!b) return;
-    const char *name = b->name ? b->name : "";
-    size_t at = 0;
-#define PUT(...)                                                  \
-    do {                                                          \
-        if (at < n) {                                             \
-            int w_ = snprintf(out + at, n - at, __VA_ARGS__);     \
-            at += w_ > 0 ? (size_t)w_ : 0;                        \
-        }                                                         \
-    } while (0)
-
-    char line[512];
-    if (b->quote && b->quote[0]) {
-        tailchat_one_line(line, sizeof line, b->quote, 30);
-        PUT("> %s: %s\n", b->quote_mine ? "You" : name, line);
-    } else if (b->quoted) {
-        PUT("> an earlier message\n");
-    }
-    if (b->voice_ms) {
-        char length[16];
-        PUT("%s: Voice message %s%s", b->mine ? "You" : name, tailchat_duration(length, sizeof length, b->voice_ms),
-            b->playing ? ", playing" : "");
-    } else {
-        tailchat_one_line(line, sizeof line, b->text, max_chars);
-        PUT("%s: %s", b->mine ? "You" : name, line);
-    }
-
-    const char *sep = "\n";
-    const char *st = b->mine ? state_text(b->state) : "";
-    if (st[0]) {
-        PUT("%s%s", sep, st);
-        sep = SEP;
-    }
-    if (b->react_them && b->react_them[0]) {
-        PUT("%s%s %s", sep, name, tailchat_emoji_label(b->react_them));
-        sep = SEP;
-    }
-    if (b->react_me && b->react_me[0]) {
-        PUT("%sYou %s", sep, tailchat_emoji_label(b->react_me));
-    }
-#undef PUT
-    if (at >= n) out[n - 1] = '\0';
 }
 
 bool tailchat_parse_address(const char *text, char *host, size_t n, uint16_t *port)
@@ -219,9 +176,10 @@ static const uint32_t CHECK_CHOICES[] = {5, 15, 30, 60};
 
 const char *tailchat_check_label(uint32_t minutes, char *out, size_t n)
 {
-    if (minutes == 0) snprintf(out, n, "Check while asleep: off");
-    else if (minutes % 60 == 0) snprintf(out, n, "Check while asleep: %u h", (unsigned)(minutes / 60));
-    else snprintf(out, n, "Check while asleep: %u min", (unsigned)minutes);
+    if (minutes == 0) snprintf(out, n, "Off");
+    else if (minutes == 60) snprintf(out, n, "Every hour");
+    else if (minutes % 60 == 0) snprintf(out, n, "Every %u hours", (unsigned)(minutes / 60));
+    else snprintf(out, n, "Every %u min", (unsigned)minutes);
     return out;
 }
 
@@ -232,4 +190,143 @@ uint32_t tailchat_next_check_minutes(uint32_t minutes)
         if (CHECK_CHOICES[i] > minutes) return CHECK_CHOICES[i];
     }
     return 0;
+}
+
+const char *tailchat_initials(const char *name, char *out, size_t n)
+{
+    if (!out || n == 0) return out;
+    size_t at = 0;
+    int words = 0;
+    bool in_word = false;
+    for (const char *p = name ? name : ""; *p && words < 2;) {
+        unsigned char c = (unsigned char)*p;
+        size_t len = char_len(c);
+        if (strnlen(p, len) < len) break;
+        /* A word starts at a letter or digit; ASCII punctuation and spaces
+         * part words, and anything past ASCII counts as a letter. */
+        bool letter = c >= 0x80 || (c >= '0' && c <= '9') || ((c | 0x20) >= 'a' && (c | 0x20) <= 'z');
+        if (letter && !in_word) {
+            if (at + len >= n) break;
+            memcpy(out + at, p, len);
+            if (len == 1 && c >= 'a' && c <= 'z') out[at] = (char)(c - 'a' + 'A');
+            at += len;
+            words++;
+        }
+        /* A hyphen or a dot goes on with the word: "lena-laptop" is one. */
+        in_word = letter || (in_word && (c == '-' || c == '.' || c == '_'));
+        p += len;
+    }
+    if (at == 0 && n > 1) out[at++] = '?';
+    out[at] = '\0';
+    return out;
+}
+
+static const char *const DAY_SHORT[7] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+static const char *const DAY_LONG[7] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday",
+                                        "Saturday"};
+static const char *const MONTH_SHORT[12] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                            "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+static const char *const MONTH_LONG[12] = {"January", "February", "March", "April", "May", "June", "July",
+                                           "August", "September", "October", "November", "December"};
+
+bool tailchat_same_day(const struct tm *a, const struct tm *b)
+{
+    return a->tm_year == b->tm_year && a->tm_yday == b->tm_yday;
+}
+
+/* Days from `then` to `now` by the calendar, 0 for the same day; negative
+ * for a day after now. */
+static long days_before(const struct tm *now, const struct tm *then)
+{
+    long d = 0;
+    for (int y = then->tm_year; y < now->tm_year; y++) {
+        int year = y + 1900;
+        d += (year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)) ? 366 : 365;
+    }
+    for (int y = now->tm_year; y < then->tm_year; y++) {
+        int year = y + 1900;
+        d -= (year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)) ? 366 : 365;
+    }
+    return d + now->tm_yday - then->tm_yday;
+}
+
+const char *tailchat_clock(const struct tm *then, bool h24, char *out, size_t n)
+{
+    if (h24) {
+        snprintf(out, n, "%02d:%02d", then->tm_hour, then->tm_min);
+    } else {
+        int h = then->tm_hour % 12;
+        snprintf(out, n, "%d:%02d %s", h ? h : 12, then->tm_min, then->tm_hour < 12 ? "AM" : "PM");
+    }
+    return out;
+}
+
+const char *tailchat_when(const struct tm *now, const struct tm *then, bool h24, char *out, size_t n)
+{
+    long days = days_before(now, then);
+    if (days <= 0) return tailchat_clock(then, h24, out, n);
+    if (days == 1) snprintf(out, n, "Yesterday");
+    else if (days < 7) snprintf(out, n, "%s", DAY_SHORT[then->tm_wday % 7]);
+    else if (then->tm_year == now->tm_year) snprintf(out, n, "%d %s", then->tm_mday, MONTH_SHORT[then->tm_mon % 12]);
+    else snprintf(out, n, "%d %s %d", then->tm_mday, MONTH_SHORT[then->tm_mon % 12], then->tm_year + 1900);
+    return out;
+}
+
+const char *tailchat_day(const struct tm *now, const struct tm *then, char *out, size_t n)
+{
+    long days = days_before(now, then);
+    if (days <= 0) snprintf(out, n, "Today");
+    else if (days == 1) snprintf(out, n, "Yesterday");
+    else if (days < 7) snprintf(out, n, "%s", DAY_LONG[then->tm_wday % 7]);
+    else if (then->tm_year == now->tm_year)
+        snprintf(out, n, "%s, %d %s", DAY_LONG[then->tm_wday % 7], then->tm_mday, MONTH_LONG[then->tm_mon % 12]);
+    else snprintf(out, n, "%d %s %d", then->tm_mday, MONTH_LONG[then->tm_mon % 12], then->tm_year + 1900);
+    return out;
+}
+
+bool tailchat_joins(bool before_mine, uint64_t before_ts, bool mine, uint64_t ts)
+{
+    if (before_mine != mine) return false;
+    uint64_t gap = ts >= before_ts ? ts - before_ts : before_ts - ts;
+    return gap <= TAILCHAT_RUN_MS;
+}
+
+const char *tailchat_presence(const tailchat_presence_t *p)
+{
+    if (!p) return "";
+    if (p->typing) return "typing...";
+    if (p->pending) return "Not reached yet";
+    if (p->waiting) return p->connected ? "Sending..." : "Waiting to send";
+    if (p->connected) return "Online";
+    return p->seen_name ? p->seen_name : "";
+}
+
+void tailchat_waveform(const char *id, uint8_t *bars, size_t count, uint8_t max)
+{
+    /* FNV-1a over the id, then a xorshift for each bar, smoothed a little
+     * so neighbours rise and fall together as speech does. */
+    uint32_t h = 2166136261u;
+    for (const char *p = id ? id : ""; *p; p++) h = (h ^ (uint8_t)*p) * 16777619u;
+    if (max == 0) max = 1;
+    uint32_t prev = max / 2;
+    for (size_t i = 0; i < count; i++) {
+        h ^= h << 13;
+        h ^= h >> 17;
+        h ^= h << 5;
+        uint32_t level = 1 + h % max;
+        level = (level * 2 + prev) / 3;
+        if (level < 1) level = 1;
+        if (level > max) level = max;
+        bars[i] = (uint8_t)level;
+        prev = level;
+    }
+}
+
+tailchat_tick_t tailchat_tick(bool mine, const char *state)
+{
+    if (!mine || !state) return TAILCHAT_TICK_NONE;
+    if (strcmp(state, "waiting") == 0) return TAILCHAT_TICK_WAITING;
+    if (strcmp(state, "delivered") == 0) return TAILCHAT_TICK_DELIVERED;
+    if (strcmp(state, "read") == 0) return TAILCHAT_TICK_READ;
+    return TAILCHAT_TICK_NONE;
 }
