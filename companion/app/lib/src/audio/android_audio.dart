@@ -141,10 +141,12 @@ class AndroidCallRoute implements CallRoute {
   final void Function(String)? log;
 
   @override
-  Future<void> begin() async {
-    await _platform('rtc.begin');
-    await _output(() => Helper.setSpeakerphoneOn(false));
-  }
+  bool get cameraPausesAway => true;
+
+  /// The output waits for [video]: libwebrtc's audio switch, which the
+  /// output goes through, starts with the media.
+  @override
+  Future<void> begin() => _platform('rtc.begin');
 
   @override
   Future<void> video(bool shown) async {

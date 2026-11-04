@@ -13,6 +13,7 @@ import 'protocol.dart'
         SharedPeer,
         admitted,
         capWebrtc,
+        capWebrtcPrflx,
         capWsOpus,
         inTailnet,
         ipOf,
@@ -160,11 +161,17 @@ class CallAnswer {
   final bool ringing;
 }
 
+/// Whether a call between two hellos' peers runs on WebRTC (protocol 4.11):
+/// both announce `call:webrtc`, and not both `call:webrtc-prflx`, as two
+/// phones would, with no candidate between them.
+bool webrtcBetween(List<String> mine, List<String> theirs) =>
+    mayUse(capWebrtc, mine, theirs) && !mayUse(capWebrtcPrflx, mine, theirs);
+
 /// The transports a call offer lists, best first (protocol 4.8): `webrtc`
-/// when both hellos announce `call:webrtc`, then `ws-opus` when both
+/// when both hellos allow it ([webrtcBetween]), then `ws-opus` when both
 /// announce `call:ws-opus`. Empty: no call is possible.
 List<String> offerTransports(List<String> mine, List<String> theirs) => [
-  if (mayUse(capWebrtc, mine, theirs)) transportWebrtc,
+  if (webrtcBetween(mine, theirs)) transportWebrtc,
   if (mayUse(capWsOpus, mine, theirs)) transportWsOpus,
 ];
 

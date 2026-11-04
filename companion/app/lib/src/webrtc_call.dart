@@ -24,8 +24,16 @@ class WebrtcCall {
     bool camera = false,
     this.cameraAllowed,
     this.route,
+    bool Function()? away,
     this.log,
-  }) : _wantCamera = camera {
+  }) : _wantCamera = camera,
+       away = away ?? (() => false) {
+    // Answered or placed away, a camera asked for waits for the app's return.
+    if (this.away()) {
+      _pausedAway = true;
+      _resume = _wantCamera;
+      _wantCamera = false;
+    }
     _previewFollows();
   }
 
@@ -45,6 +53,10 @@ class WebrtcCall {
 
   /// The phone's loudspeaker or earpiece, following the video; Android's.
   final CallRoute? route;
+
+  /// Whether our camera is to be let go: the app is away on a platform
+  /// with no camera in the background (Android). Followed by [followAway].
+  final bool Function() away;
   final void Function(String)? log;
 
   /// The media, once started; the other side's SDP and candidates wait in
@@ -99,7 +111,8 @@ class WebrtcCall {
     await _previewing;
     final preview = _preview;
     _preview = null;
-    // The listening service takes the microphone before it opens.
+    // The listening service takes the microphone before it opens; the
+    // output is chosen once the media plays (followRoute, below).
     _routed = route != null;
     await route?.begin();
     final CallSession session;
@@ -136,7 +149,7 @@ class WebrtcCall {
       _take(session, p);
     }
     _waiting.clear();
-    List<String> found;
+    List<Camera> found;
     try {
       found = await engine.cameras();
     } on Object catch (e) {
@@ -152,7 +165,7 @@ class WebrtcCall {
       peer().setCamera(id, CameraState.on);
     } else if (found.isEmpty || _noPicture) {
       peer().setCamera(id, CameraState.none);
-    } else if (_away && _resume) {
+    } else if (_pausedAway && _resume) {
       peer().setCamera(id, CameraState.paused);
     } else if (_wantCamera) {
       await _applyCamera(session, on: true);
@@ -178,7 +191,7 @@ class WebrtcCall {
 
   /// This machine's cameras, once the camera was asked for as it rang or
   /// the media has started; empty with none.
-  List<String>? cameras;
+  List<Camera>? cameras;
   int _cameraAt = 0;
 
   /// Whether our camera is sending.
@@ -189,9 +202,10 @@ class WebrtcCall {
 
   bool get canSwitchCamera => (cameras?.length ?? 0) > 1;
 
-  /// Whether the camera switch shows on: sending, or asked for before the
-  /// media has started (Video call, while it rings).
-  bool get cameraSwitchOn => _session == null ? _wantCamera : cameraOn;
+  /// Whether the camera switch shows on: sending, asked for before the
+  /// media has started (Video call, while it rings), or to come back with
+  /// the app.
+  bool get cameraSwitchOn => _pausedAway ? _resume : (_session == null ? _wantCamera : cameraOn);
 
   /// Whether the other side's video is to be drawn.
   bool get remoteVideoShown => _session != null && _call?.remoteCamera == CameraState.on;
@@ -202,10 +216,19 @@ class WebrtcCall {
   /// The video's frames so far.
   Future<VideoStats?> videoStats() async => _session?.videoStats();
 
-  /// Our camera on or off: before the media starts, as it starts.
+  /// Our camera on or off: before the media starts, as it starts. While
+  /// the app is away only the wish is kept, told as paused, and the camera
+  /// opens on the app's return.
   Future<void> setCameraOn(bool on) async {
     final session = _session;
     cameraProblem = null;
+    if (_pausedAway) {
+      if (on == _resume) return;
+      _resume = on;
+      if (session != null && !_closed) peer().setCamera(id, on ? CameraState.paused : CameraState.off);
+      changed();
+      return;
+    }
     if (session == null) {
       _wantCamera = on;
       _noPicture = false;
@@ -244,13 +267,14 @@ class WebrtcCall {
   bool _routed = false;
   bool? _videoShown;
 
-  /// The app is away (Android: no camera in the background), or back.
+  /// [away] may have changed (Android: no camera in the background).
   /// Away, a camera that is on is let go and told as paused, the voice
   /// going on; back, it opens again and is told as on. One asked for
   /// while a call we placed rings is let go and opened again the same way.
-  Future<void> setAway(bool away) async {
-    if (away == _away || _closed) return;
-    _away = away;
+  Future<void> followAway() async {
+    final away = this.away();
+    if (away == _pausedAway || _closed) return;
+    _pausedAway = away;
     final session = _session;
     if (away) {
       if (session == null) {
@@ -260,11 +284,7 @@ class WebrtcCall {
         await _previewing;
       } else if (cameraOn) {
         _resume = true;
-        await session.setCamera(null);
-        cameraOn = false;
-        children.cameraClosed();
-        log?.call('${callLabel(id)}: our camera paused, the app away');
-        peer().setCamera(id, CameraState.paused);
+        await _applyCamera(session, on: false, off: CameraState.paused);
       }
     } else if (_resume) {
       _resume = false;
@@ -280,40 +300,55 @@ class WebrtcCall {
     changed();
   }
 
-  bool _away = false;
+  /// The camera let go while the app is away.
+  bool _pausedAway = false;
 
-  /// Our camera was on when the app went away: it comes back with it.
+  /// Our camera was on, or asked for, when the app went away: it comes
+  /// back with it.
   bool _resume = false;
 
   /// No child process starts while the camera is on, and the camera waits
-  /// for those running (child_processes.dart); a camera that gives no
-  /// picture is turned off, said so, and told as none: the other side's
-  /// tile reads No camera, not Camera off.
-  Future<void> _applyCamera(CallSession session, {required bool on}) async {
+  /// for those running (child_processes.dart). Off is told as `off`, or
+  /// as `paused` while the app is away; a camera refused or giving no
+  /// picture is [_noCamera].
+  Future<void> _applyCamera(CallSession session, {required bool on, CameraState off = CameraState.off}) async {
     final camera = on ? cameras![_cameraAt] : null;
-    if (on && !await _allowed()) {
-      cameraOn = false;
-      if (!_closed) peer().setCamera(id, CameraState.none);
-      followRoute();
-      return;
-    }
+    if (on && !await _allowed()) return _noCamera(_notAllowed);
     if (on) await children.cameraOpening();
-    var state = on ? CameraState.on : CameraState.off;
     try {
       await session.setCamera(camera);
-      cameraOn = on;
     } on CameraUnavailable catch (e) {
-      cameraOn = false;
-      state = CameraState.none;
-      cameraProblem = 'The camera is off: $e. Another program may be using it.';
+      children.cameraClosed();
       log?.call('${callLabel(id)}: camera $camera gave no picture: $e');
+      return _noCamera(_noPictureFrom(e));
     }
-    if (!cameraOn) children.cameraClosed();
+    cameraOn = on;
+    if (!on) children.cameraClosed();
     if (_closed) return;
-    log?.call('${callLabel(id)}: our camera ${cameraOn ? 'on, $camera' : state.wire}');
-    peer().setCamera(id, state);
+    log?.call('${callLabel(id)}: our camera ${on ? 'on, $camera' : off.wire}');
+    peer().setCamera(id, on ? CameraState.on : off);
     followRoute();
   }
+
+  /// The camera refused or gave no picture: off, the screen says why, and
+  /// the other side is told none, at once or once the media starts. Its
+  /// tile reads No camera, not Camera off.
+  void _noCamera(String problem) {
+    cameraOn = false;
+    _wantCamera = false;
+    cameraProblem = problem;
+    if (_closed) return;
+    if (_session == null) {
+      _noPicture = true;
+      changed();
+      return;
+    }
+    peer().setCamera(id, CameraState.none);
+    followRoute();
+  }
+
+  static const _notAllowed = 'The camera is not allowed, so the other side sees No camera.';
+  static String _noPictureFrom(CameraUnavailable e) => 'The camera is off: $e. Another program may be using it.';
 
   /// While a call we placed rings, our camera follows the switch: opened
   /// to show our picture, let go when switched off. Nothing opens before
@@ -342,7 +377,7 @@ class WebrtcCall {
 
   Future<void> _openPreview() async {
     if (!_ringingOut) return;
-    List<String> found;
+    List<Camera> found;
     try {
       found = await engine.cameras();
     } on Object catch (e) {
@@ -352,11 +387,7 @@ class WebrtcCall {
     cameras = found;
     if (found.isEmpty || !_wantCamera || !_ringingOut) return changed();
     final camera = found[_cameraAt];
-    if (!await _allowed()) {
-      _wantCamera = false;
-      _noPicture = true;
-      return changed();
-    }
+    if (!await _allowed()) return _noCamera(_notAllowed);
     await children.cameraOpening();
     try {
       final preview = await engine.preview(camera);
@@ -368,19 +399,15 @@ class WebrtcCall {
       }
       await preview.close();
     } on CameraUnavailable catch (e) {
-      _wantCamera = false;
-      _noPicture = true;
-      cameraProblem = 'The camera is off: $e. Another program may be using it.';
       log?.call('${callLabel(id)}: camera $camera gave no picture: $e');
-      changed();
+      _noCamera(_noPictureFrom(e));
     }
     children.cameraClosed();
   }
 
-  /// Whether the camera may open; refused, the screen says so.
+  /// Whether the camera may open.
   Future<bool> _allowed() async {
     if (cameraAllowed == null || await cameraAllowed!()) return true;
-    cameraProblem = 'The camera is not allowed, so the other side sees No camera.';
     log?.call('${callLabel(id)}: the camera is not allowed');
     return false;
   }

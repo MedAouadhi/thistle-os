@@ -1,6 +1,6 @@
 import 'dart:convert';
 
-import 'package:tailnet_chat_core/policy.dart' show candidateAdmitted, tailnetOnlySdp;
+import 'package:tailnet_chat_core/policy.dart' show candidateAdmitted, offerTransports, tailnetOnlySdp;
 import 'package:tailnet_chat_core/protocol.dart';
 import 'package:test/test.dart';
 
@@ -124,6 +124,13 @@ void main() {
         expect(candidateAdmitted(c['candidate'] as String), c['admitted'], reason: c['candidate'] as String);
       }
       expect(tailnetOnlySdp(v['sdp']['written'] as String), v['sdp']['tailnet_only']);
+    });
+
+    test('an offer lists webrtc unless both sides gather no tailnet candidate (two phones)', () {
+      for (final o in (v['offers'] as List).cast<Map<String, dynamic>>()) {
+        final caller = (o['caller'] as List).cast<String>(), callee = (o['callee'] as List).cast<String>();
+        expect(offerTransports(caller, callee), o['transports'], reason: o['name'] as String);
+      }
     });
   });
 

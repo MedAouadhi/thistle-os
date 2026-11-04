@@ -109,7 +109,8 @@ On Linux and Android the app announces `call:webrtc` (protocol section
 4.11, ADR-0016), and a call with another companion app that does runs on
 WebRTC through flutter_webrtc and its prebuilt libwebrtc, camera or not; a
 call with the T-Deck, or with an app that does not announce it (an older
-build, or `--no-webrtc` on Linux), stays `ws-opus`. The
+build, or `--no-webrtc` on Linux), stays `ws-opus`, and so does a call
+between two phones (Android, below). The
 caller makes the SDP offer; one audio and one video track are negotiated
 from the start, so a camera switched on, off or to another replaces the
 track and never renegotiates. There is no STUN or
@@ -320,9 +321,13 @@ contact that asks with what `tailscale status --json` shows online.
   the tailnet), and a call connects from the other side's: the phone's
   checks reach a laptop's tailnet address through the VPN, which nothing
   bypasses, and both ends then see a peer-reflexive pair on tailnet
-  addresses, which passes the off-tailnet check. A call between two phones,
-  where neither side has a tailnet candidate to signal, is not expected to
-  connect: it ends as "it could not connect" after 15 s.
+  addresses, which passes the off-tailnet check. Two phones would have no
+  candidate between them, so the app on Android also announces
+  `call:webrtc-prflx` (protocol 4.11), and a call between two phones that
+  both announce it is `ws-opus`, voice only, with no Video call button, as
+  before ticket 05. A phone and a laptop stay on WebRTC. A phone whose app
+  predates the word announces `call:webrtc` alone, and a call between it
+  and a phone still ends as "it could not connect" after 15 s.
 - **Calls filling the screen**: Android 14 and later allow it only to
   calling apps unless the user allows it. The app checks at start, when a
   call comes and when it comes to the front; without it Settings says
@@ -418,10 +423,13 @@ GRADLE_USER_HOME=$(mktemp -d) ./gradlew --write-verification-metadata sha256 \
   unreachable; a refused microphone on Android. With another companion
   app on WebRTC, through the fake call engine: the camera's states, and
   the other app on Android: a refused camera told as `none`, leaving the
-  app sending `paused` and coming back `on`, the call route following the
-  video.
-- `test/call_engine_test.dart`: a phone's front camera first, and which
-  pictures are mirrored.
+  app sending `paused` and coming back `on`, the camera switched on while
+  away opening only on the return, Answer with video in the call window
+  over the lock screen opening the camera at once, the call route
+  following the video and choosing the output only once the media has
+  started; two phones calling on `ws-opus`.
+- `test/call_engine_test.dart`: a camera's facing from its label, a
+  phone's front camera first, and which pictures are mirrored.
 - `test/android_audio_test.dart`: the Android audio devices against a fake
   of `Audio.kt`'s channels: a recording's frames, a refused microphone, a
   voice message's PCM to the speaker and drained, the ring, a call's

@@ -24,6 +24,10 @@ const List<String> capsV1 = ['text', 'receipts', 'typing', 'reply', 'react', 'vo
 const String capWsOpus = 'call:ws-opus';
 const String capWebrtc = 'call:webrtc';
 
+/// Announced beside `call:webrtc` by a peer whose WebRTC gathers no
+/// candidate on the tailnet (Android's): two such peers call on `ws-opus`.
+const String capWebrtcPrflx = 'call:webrtc-prflx';
+
 /// The transports a `call_offer` lists and a `call_answer` picks.
 const String transportWsOpus = 'ws-opus';
 const String transportWebrtc = 'webrtc';

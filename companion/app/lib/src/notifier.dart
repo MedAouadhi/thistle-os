@@ -42,6 +42,10 @@ abstract interface class CallRinger {
 /// so a locked phone is back at its lock screen.
 abstract interface class CallWindow implements Listenable {
   bool get shown;
+
+  /// Shown and in front (resumed): the app is not away while it is, though
+  /// its main window is hidden behind the lock screen.
+  bool get inFront;
   void finish();
 }
 

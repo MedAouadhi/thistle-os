@@ -243,10 +243,29 @@ SDP_OFFER = (
 )
 
 
+# Which transports a call offer lists, by both hellos' call capabilities
+# (protocol sections 4.8 and 4.11), written out by hand: a laptop, a phone
+# (whose WebRTC gathers no tailnet candidate), a phone from before
+# `call:webrtc-prflx`, and the T-Deck.
+LAPTOP = ["call:ws-opus", "call:webrtc"]
+PHONE = ["call:ws-opus", "call:webrtc", "call:webrtc-prflx"]
+OLDER_PHONE = ["call:ws-opus", "call:webrtc"]
+TDECK = ["call:ws-opus"]
+OFFERS = [
+    ("a laptop calls a phone", LAPTOP, PHONE, ["webrtc", "ws-opus"]),
+    ("a phone calls a laptop", PHONE, LAPTOP, ["webrtc", "ws-opus"]),
+    ("a phone calls a phone", PHONE, PHONE, ["ws-opus"]),
+    ("an older phone calls a phone", OLDER_PHONE, PHONE, ["webrtc", "ws-opus"]),
+    ("a phone calls an older phone", PHONE, OLDER_PHONE, ["webrtc", "ws-opus"]),
+    ("a phone calls the T-Deck", PHONE, TDECK, ["ws-opus"]),
+    ("call:webrtc-prflx alone is nothing of WebRTC", ["call:ws-opus", "call:webrtc-prflx"], LAPTOP, ["ws-opus"]),
+]
+
+
 def webrtc() -> dict:
     """WebRTC calls between video-capable chat peers (protocol section 4.11):
-    their frames, which candidates are admitted, and an SDP with those of
-    the tailnet alone."""
+    their frames, which candidates are admitted, an SDP with those of the
+    tailnet alone, and which transports an offer lists."""
     call = mid("call 2")
     tailnet = protocol.tailnet_only_sdp(SDP_OFFER)
     valid = [
@@ -290,11 +309,14 @@ def webrtc() -> dict:
     return {"description": "WebRTC calls (protocol section 4.11). 'valid': one of each frame; 'invalid': "
                            "frames that MUST draw the error shown. 'candidates': ICE candidates and "
                            "whether a side may send or take them. 'sdp': an SDP as written, and as "
-                           "sent or taken, its candidates outside the tailnet removed.",
+                           "sent or taken, its candidates outside the tailnet removed. 'offers': the "
+                           "call capabilities of a caller's and a callee's hellos, and the transports "
+                           "the caller's offer lists.",
             "valid": [{"name": n, "text": protocol.encode(f)} for n, f in valid],
             "invalid": [{"name": n, "text": t, "error": e} for n, t, e in invalid],
             "candidates": [{"candidate": c, "admitted": a} for c, a in CANDIDATES],
-            "sdp": {"written": SDP_OFFER, "tailnet_only": tailnet}}
+            "sdp": {"written": SDP_OFFER, "tailnet_only": tailnet},
+            "offers": [{"name": n, "caller": a, "callee": b, "transports": t} for n, a, b, t in OFFERS]}
 
 
 def build(directory: str = DEFAULT_DIR) -> dict:

@@ -17,6 +17,7 @@ class MainActivity : FlutterActivity() {
 
     override fun detachFromFlutterEngine() {
         evicted = true
+        attached = null
         super.detachFromFlutterEngine()
     }
 
@@ -36,12 +37,27 @@ class MainActivity : FlutterActivity() {
         return drop
     }
 
+    /** The engine this window draws, while it is attached. */
+    private var attached: FlutterEngine? = null
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        attached = flutterEngine
         Platform.of(flutterEngine, applicationContext).activity = this
     }
 
+    /**
+     * In front again: the window for prompts and for keeping the screen on
+     * during a video call ([Audio.window]), which the call window cleared
+     * when it closed.
+     */
+    override fun onResume() {
+        super.onResume()
+        attached?.let { Platform.of(it, applicationContext).activity = this }
+    }
+
     override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
+        attached = null
         Platform.of(flutterEngine, applicationContext).let { if (it.activity === this) it.activity = null }
         super.cleanUpFlutterEngine(flutterEngine)
     }

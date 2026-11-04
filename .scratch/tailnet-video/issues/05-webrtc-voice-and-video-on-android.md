@@ -17,8 +17,8 @@
 
 ## Comments
 
-**2026-11-04, implementer.** Branch `tv-05-android-webrtc`, from
-`tailnet-video` at 51a0c5c. Every box but the first is done and tested
+**2026-11-04, implementer.** On `tailnet-video` (03d5429), from
+51a0c5c. Every box but the first is done and tested
 here; the first is a call on the phone, which could not be placed (below).
 
 What was built:
@@ -83,8 +83,8 @@ What was built:
   procedure. The CI job needed no change beyond a comment; Gradle reads
   the file itself.
 - **Docs**: README (WebRTC, Video, Android, Tests), protocol 4.11 (a
-  peer-reflexive tailnet end passes; Android signals none; two phones do
-  not connect), ADR-0016 (the Android pin, the tun1 finding, the camera
+  peer-reflexive tailnet end passes; Android signals none; two phones
+  call on `ws-opus`, after the review), ADR-0016 (the Android pin, the tun1 finding, the camera
   pausing), THIRD_PARTY_LICENSES (the Android libwebrtc and audioswitch,
   Apache-2.0).
 
@@ -101,12 +101,11 @@ gathers is outside the tailnet, and the core drops it), and the call
 connects from the other side's: Android's checks reach the laptop's
 tailnet address through the VPN, both sides see a peer-reflexive pair
 with tailnet addresses at both ends, and the off-tailnet check passes on
-it (ticket 02's phone run: local prflx fd7a:...d801:966). A call between
-two phones has no candidate on either side and should end "it could not
-connect" after 15 s. Written into the README, protocol 4.11 and
-ADR-0016. If phone-to-phone calls matter, the way out is not in this
-stack: a TURN-less relay of our own, or offering `ws-opus` first when
-both sides are phones (the protocol would need a hint of that).
+it (ticket 02's phone run: local prflx fd7a:...d801:966). Two phones
+have no candidate between them; after the review, the app on Android
+announces `call:webrtc-prflx`, and a call between two phones that both
+announce it is `ws-opus`, voice only (below). Written into the README,
+protocol 4.11 and ADR-0016.
 
 **The phone.** The Pixel 8 was attached over wireless adb but locked with
 its PIN (`deviceLocked=1`), and the laptop's `default` profile, the
@@ -159,5 +158,37 @@ empty Gradle cache and an unbuilt copy of the Flutter SDK (as CI), `flutter buil
    The notification on the unlocked phone says "Tailnet video call".
 6. A call from the phone to the T-Deck: no Video call button, `ws-opus`
    as before (earpiece, AcousticEchoCanceler).
-7. Two phones, if a second is to hand: expected not to connect (above);
-   check it ends as "it could not connect" and nothing hangs.
+7. Two phones, if a second is to hand: the call is `ws-opus`, voice
+   only, with no Video call button on either (`call:webrtc-prflx` on
+   both hellos), earpiece and AcousticEchoCanceler as with the T-Deck.
+
+**2026-11-05, implementer: the review's fixes.** Branch
+`tv-05-review-fixes`, from `tailnet-video` at 03d5429. Two phones call on
+`ws-opus`: the app on Android announces `call:webrtc-prflx` beside
+`call:webrtc` (its WebRTC gathers no tailnet candidate), and an offer
+lists `webrtc` only when both hellos announce `call:webrtc` and not both
+`call:webrtc-prflx` (protocol 4.8 and 4.11; `offers` in
+`vectors/webrtc.json`; the reference peer, the core's `webrtcBetween`, a
+contact's stored hello with it, schema 3; conformance
+`webrtc_not_offered_between_two_phones`). An older app, with
+`call:webrtc` alone, behaves as before; Linux and the T-Deck are
+unchanged. The camera switched on while the app is away keeps only the
+wish, told as `paused`, and opens on the return. The call window tells
+Dart when it is resumed, and the app is not away while it is in front,
+so Answer with video over the lock screen opens the camera at once.
+`MainActivity` registers itself again on resume, so a video call keeps
+the screen on in it after the call window closes. The call route chooses
+no output at `begin`; the first `video(false)` after the media starts
+picks the earpiece. Cleanups: one owner of away (`ChatModel.hidden` and
+`away`, which Talk and WebrtcCall read), `cameraPausesAway` a property
+of `CallRoute`, `Audio.kt`'s calls sharing `callStarted`/`callEnded`, one
+permission helper in Talk, a refused or pictureless camera handled in one
+place (`_noCamera`), the camera paused through `_applyCamera`, a
+`Camera(id, facing)` value from `CallEngine.cameras`, `FakeCallRoute.now`
+null before any output. Verified: core `dart test` (105), app `flutter
+test` (152, the Secret Service one included), `flutter analyze
+--fatal-infos`, `dart format`, `tools/test_tailnet_chat.py` (59), the
+conformance suite against the headless core (38 of 39, one skipped),
+`flutter build apk --release`, `flutter build linux --release`. The
+Pixel was not attached: nothing installed. Box 7 of the hardware run now
+checks two phones on `ws-opus`.

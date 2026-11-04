@@ -240,9 +240,9 @@ through the outbox, and acked.
   binary frames of kind `02` on `stream`, one Opus packet each, sequence
   numbers counting frames from 0. Both directions use the same stream id.
   **`webrtc`**, between two chat peers whose hellos both announce
-  `call:webrtc` (section 4.11). A caller MUST list `webrtc` first when both
-  announce it, then `ws-opus` when both announce `call:ws-opus`, and MUST
-  NOT list `webrtc` otherwise.
+  `call:webrtc` and do not both announce `call:webrtc-prflx` (section
+  4.11). A caller MUST list `webrtc` first when that holds, then `ws-opus`
+  when both announce `call:ws-opus`, and MUST NOT list `webrtc` otherwise.
 - `video`, a boolean, goes with an offer that lists `webrtc`, and only
   then: whether the caller's camera is on as it rings.
 - The callee MUST pick `webrtc` whenever it is offered and the callee
@@ -318,7 +318,9 @@ Neither frame is queued or acked: both are sent on an open connection.
 
 Between two video-capable chat peers (both hellos announce `call:webrtc`;
 the companion apps on Linux and Android do, the T-Deck does not) a call
-runs on WebRTC, with or without a camera on. ADR-0016 has the reasons.
+runs on WebRTC, with or without a camera on, unless both hellos also
+announce `call:webrtc-prflx` (below): then it runs on `ws-opus`, voice
+only. ADR-0016 has the reasons.
 `vectors/webrtc.json` has one of each frame, frames that must be refused,
 which candidates are admitted, and an SDP with its candidates outside the
 tailnet removed.
@@ -367,8 +369,18 @@ tailnet removed.
   no candidate on the Tailscale app's interface (libwebrtc's, which
   flutter_webrtc gives no way to change), so it signals none, and its
   checks reach the other side's tailnet address through the VPN; both
-  sides then see a peer-reflexive tailnet address at the phone's end. Two such sides have no candidate between them and do not
-  connect: the call ends with `call_end` `timeout` 15 s after the answer.
+  sides then see a peer-reflexive tailnet address at the phone's end.
+- **`call:webrtc-prflx`**: a side whose WebRTC gathers no candidate in
+  the ranges above (the companion app on Android) announces it beside
+  `call:webrtc`. Two such sides would have no candidate between them and
+  never connect, so a call between them is not offered `webrtc` (section
+  4.8) and runs on `ws-opus`, with no `video` member and no camera. With
+  one such side the call is WebRTC as above. A peer that announces
+  `call:webrtc-prflx` without `call:webrtc` announces nothing of WebRTC.
+  A peer from before this word (an older Android app) announces
+  `call:webrtc` alone; a call between it and a phone is offered `webrtc`
+  and, having no candidate, ends with `call_end` `timeout` 15 s after the
+  answer.
 - **Codecs.** VP8 SHOULD be first in the video codec preferences and Opus
   in the audio ones; H.264 SHOULD NOT be offered. The media is WebRTC's,
   not this protocol's binary frames; kind `02` stays `ws-opus`'s.
@@ -391,7 +403,8 @@ tailnet removed.
 
 v1 announces: `text`, `receipts`, `typing`, `reply`, `react`,
 `voice-message`, `call:ws-opus`, `peers`; a video-capable chat peer adds
-`call:webrtc` (section 4.11).
+`call:webrtc`, and one whose WebRTC gathers no tailnet candidate also
+`call:webrtc-prflx` (section 4.11).
 
 - A peer MUST use a feature only if both hellos announce it: no `read`
   unless both have `receipts`, no `typing` frame unless both have

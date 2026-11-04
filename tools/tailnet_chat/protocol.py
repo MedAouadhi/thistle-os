@@ -19,6 +19,9 @@ PATH = "/tailnet-chat/1"
 CAPS_V1 = ("text", "receipts", "typing", "reply", "react", "voice-message", "call:ws-opus", "peers")
 # A video-capable chat peer adds it (section 4.11); the T-Deck does not.
 CAP_WEBRTC = "call:webrtc"
+# And one whose WebRTC gathers no tailnet candidate (Android's) adds this
+# too: two such peers call on ws-opus (section 4.11).
+CAP_WEBRTC_PRFLX = "call:webrtc-prflx"
 CAMERA_STATES = ("on", "off", "paused", "none")
 
 LABEL = b"tailnet-chat/1 auth\x00"
@@ -157,11 +160,19 @@ def addresses_to_probe(peers) -> list:
     return out
 
 
+def webrtc_between(mine, theirs) -> bool:
+    """Whether a call between two hellos' peers runs on WebRTC: both announce
+    `call:webrtc`, and not both `call:webrtc-prflx` (no candidate between
+    them)."""
+    return (CAP_WEBRTC in mine and CAP_WEBRTC in theirs
+            and not (CAP_WEBRTC_PRFLX in mine and CAP_WEBRTC_PRFLX in theirs))
+
+
 def offer_transports(mine, theirs) -> list:
-    """What a call offer lists, best first: `webrtc` when both hellos announce
-    `call:webrtc`, then `ws-opus` when both announce `call:ws-opus`."""
+    """What a call offer lists, best first: `webrtc` when both hellos allow it
+    (webrtc_between), then `ws-opus` when both announce `call:ws-opus`."""
     out = []
-    if CAP_WEBRTC in mine and CAP_WEBRTC in theirs:
+    if webrtc_between(mine, theirs):
         out.append("webrtc")
     if "call:ws-opus" in mine and "call:ws-opus" in theirs:
         out.append("ws-opus")

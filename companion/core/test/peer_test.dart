@@ -299,6 +299,34 @@ void main() {
       expect(alice.videoCapable(key), isFalse);
     });
 
+    test('two phones, which gather no tailnet candidate, are not video-capable with each other and call on '
+        'ws-opus; a phone and a laptop are, across a restart too', () async {
+      const phone = [...video, capWebrtcPrflx];
+      await alice.stop();
+      await bob.stop();
+      final db = '${tmp.path}/alice.db', identity = Identity.generate();
+      alice = await startPeer('alice', caps: phone, db: db, identity: identity);
+      bob = await startPeer('bob', caps: phone);
+      final laptop = await startPeer('laptop', caps: video);
+      addTearDown(laptop.stop);
+      await befriend(alice, bob);
+      await befriend(alice, laptop);
+      expect(alice.videoCapable(bob.identity.keyHex), isFalse);
+      expect(bob.videoCapable(alice.identity.keyHex), isFalse);
+      expect(alice.videoCapable(laptop.identity.keyHex), isTrue);
+      expect(laptop.videoCapable(alice.identity.keyHex), isTrue);
+      final call = await alice.call('bob', video: true);
+      await eventually(() => alice.calls[call]!.state == 'connected', what: 'the answer');
+      expect(alice.calls[call]!.transport, 'ws-opus');
+      expect(bob.calls[call]!.transports, ['ws-opus']);
+      expect(bob.calls[call]!.video, isFalse);
+      alice.endCall(call);
+      await alice.stop();
+      alice = await startPeer('alice', caps: phone, db: db, identity: identity);
+      expect(alice.videoCapable(bob.identity.keyHex), isFalse, reason: "bob's stored hello");
+      expect(alice.videoCapable(laptop.identity.keyHex), isTrue, reason: "the laptop's stored hello");
+    });
+
     test("a database from before video keeps its contacts, none of them video-capable until it hears them", () {
       final path = '${tmp.path}/v1.db';
       sqlite3.open(path)
@@ -315,8 +343,27 @@ void main() {
       final bob = store.contactByKey('b' * 64)!;
       expect(bob.name, 'bob');
       expect(bob.webrtc, isFalse);
-      store.setWebrtc(bob.id, true);
+      store.setCallCaps(bob.id, [capWebrtc]);
       expect(store.contactByKey('b' * 64)!.webrtc, isTrue);
+    });
+
+    test("a database from before call:webrtc-prflx keeps each contact's call:webrtc, and learns the rest", () {
+      final path = '${tmp.path}/v2.db';
+      sqlite3.open(path)
+        ..execute('''
+          CREATE TABLE contacts (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, key TEXT UNIQUE,
+            host TEXT, port INTEGER, tailnet_name TEXT, flagged_key TEXT, accepted_by_them INTEGER,
+            declined_by_them INTEGER NOT NULL DEFAULT 0, webrtc INTEGER NOT NULL DEFAULT 0);
+          INSERT INTO contacts (name, key, webrtc) VALUES ('bob', '${'b' * 64}', 1);
+          PRAGMA user_version = 2;
+        ''')
+        ..close();
+      final store = Store.open(path);
+      addTearDown(store.close);
+      final bob = store.contactByKey('b' * 64)!;
+      expect(bob.callCaps, [capWebrtc]);
+      store.setCallCaps(bob.id, [...capsV1, capWebrtc, capWebrtcPrflx]);
+      expect(store.contactByKey('b' * 64)!.callCaps, [capWebrtc, capWebrtcPrflx]);
     });
 
     test('a peer without call:webrtc (the T-Deck) is offered ws-opus alone and takes it', () async {

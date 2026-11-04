@@ -1,5 +1,5 @@
 {
-  "description": "WebRTC calls (protocol section 4.11). 'valid': one of each frame; 'invalid': frames that MUST draw the error shown. 'candidates': ICE candidates and whether a side may send or take them. 'sdp': an SDP as written, and as sent or taken, its candidates outside the tailnet removed.",
+  "description": "WebRTC calls (protocol section 4.11). 'valid': one of each frame; 'invalid': frames that MUST draw the error shown. 'candidates': ICE candidates and whether a side may send or take them. 'sdp': an SDP as written, and as sent or taken, its candidates outside the tailnet removed. 'offers': the call capabilities of a caller's and a callee's hellos, and the transports the caller's offer lists.",
   "valid": [
     {
       "name": "call_offer webrtc first, camera on",
@@ -147,5 +147,115 @@
   "sdp": {
     "written": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\nm=audio 47998 UDP/TLS/RTP/SAVPF 111\r\nc=IN IP4 100.91.111.54\r\na=candidate:1 1 udp 2122260223 100.91.111.54 47998 typ host generation 0\r\na=candidate:3 1 udp 2122194687 192.168.2.131 40000 typ host generation 0\r\na=ice-ufrag:8hhY\r\na=ice-pwd:asd88fgpdd777uzjYhagZg5Q\r\na=fingerprint:sha-256 19:E2:1C:3B:4B:9F:81:E6:B8:5C:F4:A5:A8:D8:73:04:BB:05:2F:70:9F:04:A9:0E:05:E9:26:33:E8:70:88:A2\r\na=setup:actpass\r\na=mid:0\r\na=sendrecv\r\na=rtcp-mux\r\na=rtpmap:111 opus/48000/2\r\nm=video 9 UDP/TLS/RTP/SAVPF 96 97\r\nc=IN IP4 0.0.0.0\r\na=mid:1\r\na=sendrecv\r\na=rtcp-mux\r\na=rtpmap:96 VP8/90000\r\na=rtpmap:97 rtx/90000\r\na=fmtp:97 apt=96\r\n",
     "tailnet_only": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\nm=audio 47998 UDP/TLS/RTP/SAVPF 111\r\nc=IN IP4 100.91.111.54\r\na=candidate:1 1 udp 2122260223 100.91.111.54 47998 typ host generation 0\r\na=ice-ufrag:8hhY\r\na=ice-pwd:asd88fgpdd777uzjYhagZg5Q\r\na=fingerprint:sha-256 19:E2:1C:3B:4B:9F:81:E6:B8:5C:F4:A5:A8:D8:73:04:BB:05:2F:70:9F:04:A9:0E:05:E9:26:33:E8:70:88:A2\r\na=setup:actpass\r\na=mid:0\r\na=sendrecv\r\na=rtcp-mux\r\na=rtpmap:111 opus/48000/2\r\nm=video 9 UDP/TLS/RTP/SAVPF 96 97\r\nc=IN IP4 0.0.0.0\r\na=mid:1\r\na=sendrecv\r\na=rtcp-mux\r\na=rtpmap:96 VP8/90000\r\na=rtpmap:97 rtx/90000\r\na=fmtp:97 apt=96\r\n"
-  }
+  },
+  "offers": [
+    {
+      "name": "a laptop calls a phone",
+      "caller": [
+        "call:ws-opus",
+        "call:webrtc"
+      ],
+      "callee": [
+        "call:ws-opus",
+        "call:webrtc",
+        "call:webrtc-prflx"
+      ],
+      "transports": [
+        "webrtc",
+        "ws-opus"
+      ]
+    },
+    {
+      "name": "a phone calls a laptop",
+      "caller": [
+        "call:ws-opus",
+        "call:webrtc",
+        "call:webrtc-prflx"
+      ],
+      "callee": [
+        "call:ws-opus",
+        "call:webrtc"
+      ],
+      "transports": [
+        "webrtc",
+        "ws-opus"
+      ]
+    },
+    {
+      "name": "a phone calls a phone",
+      "caller": [
+        "call:ws-opus",
+        "call:webrtc",
+        "call:webrtc-prflx"
+      ],
+      "callee": [
+        "call:ws-opus",
+        "call:webrtc",
+        "call:webrtc-prflx"
+      ],
+      "transports": [
+        "ws-opus"
+      ]
+    },
+    {
+      "name": "an older phone calls a phone",
+      "caller": [
+        "call:ws-opus",
+        "call:webrtc"
+      ],
+      "callee": [
+        "call:ws-opus",
+        "call:webrtc",
+        "call:webrtc-prflx"
+      ],
+      "transports": [
+        "webrtc",
+        "ws-opus"
+      ]
+    },
+    {
+      "name": "a phone calls an older phone",
+      "caller": [
+        "call:ws-opus",
+        "call:webrtc",
+        "call:webrtc-prflx"
+      ],
+      "callee": [
+        "call:ws-opus",
+        "call:webrtc"
+      ],
+      "transports": [
+        "webrtc",
+        "ws-opus"
+      ]
+    },
+    {
+      "name": "a phone calls the T-Deck",
+      "caller": [
+        "call:ws-opus",
+        "call:webrtc",
+        "call:webrtc-prflx"
+      ],
+      "callee": [
+        "call:ws-opus"
+      ],
+      "transports": [
+        "ws-opus"
+      ]
+    },
+    {
+      "name": "call:webrtc-prflx alone is nothing of WebRTC",
+      "caller": [
+        "call:ws-opus",
+        "call:webrtc-prflx"
+      ],
+      "callee": [
+        "call:ws-opus",
+        "call:webrtc"
+      ],
+      "transports": [
+        "ws-opus"
+      ]
+    }
+  ]
 }

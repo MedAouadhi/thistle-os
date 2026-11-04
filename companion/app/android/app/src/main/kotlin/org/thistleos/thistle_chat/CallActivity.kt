@@ -56,8 +56,29 @@ class CallActivity : FlutterActivity() {
         Platform.of(flutterEngine, applicationContext).let {
             it.activity = this
             it.callWindow = this
-            it.toDart("call.window", mapOf("shown" to true))
+            it.toDart("call.window", mapOf("shown" to true, "resumed" to false))
         }
+    }
+
+    /**
+     * In front, over the lock screen or not: the app is not away while it
+     * is, so a call answered with video here opens the camera at once.
+     */
+    override fun onResume() {
+        super.onResume()
+        tellResumed(true)
+    }
+
+    override fun onPause() {
+        tellResumed(false)
+        super.onPause()
+    }
+
+    private fun tellResumed(resumed: Boolean) {
+        val platform = Engines.current()?.let { Platform.of(it, applicationContext) } ?: return
+        if (platform.callWindow !== this) return
+        if (resumed) platform.activity = this // the window that keeps the screen on, as MainActivity's does
+        platform.toDart("call.window", mapOf("shown" to true, "resumed" to resumed))
     }
 
     override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {

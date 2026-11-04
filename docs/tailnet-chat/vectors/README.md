@@ -9,7 +9,7 @@ any implementation can reproduce them byte for byte; hex is lowercase.
 | `messages.json` | `valid`: one of each JSON frame as the reference peer writes it. `invalid`: frames that must draw the `error` given (`code`, and `what` and `id` where present). |
 | `frames.json` | Binary frames: kind, stream, sequence, payload and the whole frame; and malformed ones. |
 | `voice.json` | `voice.opus` as a voice message: its `voice` frame, its binary chunks, its Opus packets (20 ms frames) in order, and the first three as call audio. |
-| `webrtc.json` | WebRTC calls (section 4.11): one of each frame (`call_offer` with `webrtc` and `video`, `call_rtc` with an SDP or a candidate, `call_camera`), frames to refuse, ICE candidates with whether they are admitted, and an SDP as written and with its candidates outside the tailnet removed. Apart from `messages.json`, as a peer without `call:webrtc` (the T-Deck) knows none of these frames. |
+| `webrtc.json` | WebRTC calls (section 4.11): one of each frame (`call_offer` with `webrtc` and `video`, `call_rtc` with an SDP or a candidate, `call_camera`), frames to refuse, ICE candidates with whether they are admitted, an SDP as written and with its candidates outside the tailnet removed, and `offers`: a caller's and a callee's call capabilities (a laptop, a phone with `call:webrtc-prflx`, an older phone, the T-Deck) and the transports the offer lists. Apart from `messages.json`, as a peer without `call:webrtc` (the T-Deck) knows none of these frames. |
 | `voice.opus` | 1.5 s of a 440 Hz tone, Ogg/Opus, mono, 16 kHz input, 20 ms frames. |
 
 The JSON files are written by `tools/tailnet_chat/make_vectors.py` from

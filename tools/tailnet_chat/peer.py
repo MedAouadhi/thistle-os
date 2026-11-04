@@ -1162,6 +1162,10 @@ def control(peer: ChatPeer, command: dict):
             peer.caps = [c for c in peer.caps if c != protocol.CAP_WEBRTC]
             if command["webrtc"]:
                 peer.caps.append(protocol.CAP_WEBRTC)
+        if "webrtc_prflx" in command:  # and call:webrtc-prflx, as a phone does
+            peer.caps = [c for c in peer.caps if c != protocol.CAP_WEBRTC_PRFLX]
+            if command["webrtc_prflx"]:
+                peer.caps.append(protocol.CAP_WEBRTC_PRFLX)
         return True
     if cmd == "messages":
         return [_message_json(m) for m in peer.messages(to)]

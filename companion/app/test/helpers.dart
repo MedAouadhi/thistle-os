@@ -103,10 +103,13 @@ class _Kept implements AudioOut {
   Future<void> close() async => onClose?.call(Int16List.fromList(_into));
 }
 
-/// Android's call window over the lock screen, shown and finished by hand.
+/// Android's call window over the lock screen, shown and finished by hand;
+/// shown, it is in front.
 class TestCallWindow extends ChangeNotifier implements CallWindow {
   @override
   bool shown = false;
+  @override
+  bool get inFront => shown;
   int finished = 0;
 
   void show() {
@@ -174,6 +177,7 @@ class FakeCallEngine implements CallEngine {
     this.connects = true,
     this.path = const CallPath(local: '100.64.0.1', remote: '100.64.0.2', localType: 'host', remoteType: 'host'),
     this.cameraList = const ['Integrated Webcam'],
+    this.tailnetCandidates = true,
   });
 
   static const tailnetCandidate = 'candidate:1 1 udp 2122260223 100.64.0.1 47998 typ host generation 0';
@@ -182,8 +186,16 @@ class FakeCallEngine implements CallEngine {
   final List<String> candidates;
   bool connects;
   CallPath? path;
+
+  /// Cameras by id, facing no way said.
   List<String> cameraList;
   bool picture = true;
+
+  @override
+  final bool tailnetCandidates;
+
+  /// Called as a session starts, before it is handed back.
+  void Function()? onStart;
 
   /// Whether starting a session throws, as WebRTC that does not start.
   bool fails = false;
@@ -195,12 +207,12 @@ class FakeCallEngine implements CallEngine {
   FakeCallSession get session => sessions.last;
 
   @override
-  Future<List<String>> cameras() async => cameraList;
+  Future<List<Camera>> cameras() async => [for (final id in cameraList) Camera(id)];
 
   @override
-  Future<CameraPreview> preview(String camera) async {
+  Future<CameraPreview> preview(Camera camera) async {
     if (!picture) throw const CameraUnavailable('no picture came from it');
-    final p = FakeCameraPreview(camera);
+    final p = FakeCameraPreview(camera.id);
     previews.add(p);
     return p;
   }
@@ -213,9 +225,10 @@ class FakeCallEngine implements CallEngine {
     CameraPreview? camera,
   }) async {
     if (fails) throw StateError('no peer connection');
+    onStart?.call();
     final s = FakeCallSession(this, offerer, send, onState)
       ..adopted = camera
-      ..camera = camera?.camera;
+      ..camera = camera?.camera.id;
     sessions.add(s);
     if (offerer) send(const RtcSdp('offer', 'v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\n'));
     for (final c in candidates) {
@@ -264,7 +277,8 @@ class FakeCallSession implements CallSession {
   @override
   Future<CallPath?> selectedPath() async => engine.path;
 
-  /// The camera sending now, null for none; and every one it was set to.
+  /// The camera sending now, by id, null for none; and every one it was
+  /// set to.
   String? camera;
   final List<String?> cameraLog = [];
 
@@ -272,13 +286,13 @@ class FakeCallSession implements CallSession {
   CameraPreview? adopted;
 
   @override
-  Future<void> setCamera(String? camera) async {
-    cameraLog.add(camera);
+  Future<void> setCamera(Camera? camera) async {
+    cameraLog.add(camera?.id);
     if (camera != null && !engine.picture) {
       this.camera = null;
       throw const CameraUnavailable('no picture came from it');
     }
-    this.camera = camera;
+    this.camera = camera?.id;
   }
 
   @override
@@ -299,9 +313,9 @@ class FakeCallSession implements CallSession {
 }
 
 class FakeCameraPreview implements CameraPreview {
-  FakeCameraPreview(this.camera);
+  FakeCameraPreview(String id) : camera = Camera(id);
   @override
-  final String camera;
+  final Camera camera;
   bool closed = false;
 
   @override
@@ -312,12 +326,17 @@ class FakeCameraPreview implements CameraPreview {
 }
 
 /// A phone's call route, as Android's would follow it: what it was told,
-/// in order (`begin`, `loudspeaker`, `earpiece`, `end`).
+/// in order (`begin`, `loudspeaker`, `earpiece`, `end`). Its camera pauses
+/// while the app is away.
 class FakeCallRoute implements CallRoute {
   final List<String> log = [];
 
-  /// Where the sound goes now, the last of `loudspeaker` or `earpiece`.
-  String? get now => log.lastWhere((e) => e == 'loudspeaker' || e == 'earpiece', orElse: () => '');
+  @override
+  bool get cameraPausesAway => true;
+
+  /// Where the sound goes now, the last of `loudspeaker` or `earpiece`;
+  /// null before either was told.
+  String? get now => log.where((e) => e == 'loudspeaker' || e == 'earpiece').lastOrNull;
 
   @override
   Future<void> begin() async => log.add('begin');
@@ -338,19 +357,20 @@ ChatModel testModel(
   AudioDevices? audio,
   CallEngine? callEngine,
   CallRoute? callRoute,
-  bool cameraPausesAway = false,
+  CallWindow? callWindow,
+  String name = 'laptop',
   Future<ProbeResult?> Function(PeerAddress address)? probe,
 }) => ChatModel(
   probe: probe,
   callEngine: callEngine,
   callRoute: callRoute,
-  cameraPausesAway: cameraPausesAway,
+  callWindow: callWindow,
   audio: audio ?? FakeAudio(),
   identity: Identity.generate(),
   openStore: () => Store.open(store),
   background: service,
   permissions: permissions == null ? null : Permissions(permissions),
-  name: 'laptop',
+  name: name,
   readStatus: tailnet.read,
   notifier: notifier,
   listenHost: '127.0.0.1',

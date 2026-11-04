@@ -23,7 +23,12 @@ import 'package:tailnet_chat_core/tailnet_chat_core.dart' show MediaState, RtcCa
 import 'call_engine.dart';
 
 class WebrtcCallEngine implements CallEngine {
-  WebrtcCallEngine({this.log});
+  WebrtcCallEngine({this.tailnetCandidates = true, this.log});
+
+  /// False on Android, whose libwebrtc gathers nothing on the Tailscale
+  /// app's interface and flutter_webrtc has no switch for it (ticket 02).
+  @override
+  final bool tailnetCandidates;
   final void Function(String)? log;
 
   /// No STUN, no TURN: the tailnet's own addresses are the only path.
@@ -41,31 +46,23 @@ class WebrtcCallEngine implements CallEngine {
   static const firstFrame = Duration(milliseconds: 2500);
 
   @override
-  Future<List<String>> cameras() async {
+  Future<List<Camera>> cameras() async {
     final devices = await navigator.mediaDevices.enumerateDevices();
     final found = [
       for (final d in devices)
         if (d.kind == 'videoinput') d,
     ];
     log?.call('cameras: ${found.isEmpty ? 'none' : found.map((d) => d.label).join(', ')}');
-    _labels
-      ..clear()
-      ..addAll({for (final d in found) d.deviceId: d.label});
-    return frontFirst([for (final d in found) (d.deviceId, d.label)]);
+    return frontFirst([for (final d in found) Camera.labelled(d.deviceId, d.label)]);
   }
 
-  /// Each camera's label, from the last [cameras]: whether its picture is
-  /// mirrored.
-  final Map<String, String> _labels = {};
-  bool _mirror(String? camera) => mirrored(_labels[camera] ?? '');
-
   @override
-  Future<CameraPreview> preview(String camera) async {
+  Future<CameraPreview> preview(Camera camera) async {
     final view = RTCVideoRenderer();
     await view.initialize();
     try {
       final stream = await _openCamera(camera, view, log);
-      return _Preview(camera, stream, view, mirror: _mirror(camera));
+      return _Preview(camera, stream, view);
     } on Object {
       await view.dispose();
       rethrow;
@@ -100,7 +97,7 @@ class WebrtcCallEngine implements CallEngine {
       await preview?._close();
       rethrow;
     }
-    final s = _Session(pc, mic, send, onState, log, preview, _mirror);
+    final s = _Session(pc, mic, send, onState, log, preview);
     try {
       await s._open(offerer);
     } on Object {
@@ -125,16 +122,16 @@ Future<void> _stop(MediaStream stream) async {
 /// 1280x720 at 30 fps, and its first frame waited for, as getUserMedia
 /// succeeds on a camera another process holds, which then gives nothing.
 /// Throws [CameraUnavailable], `into` left empty.
-Future<MediaStream> _openCamera(String camera, RTCVideoRenderer into, void Function(String)? log) async {
+Future<MediaStream> _openCamera(Camera camera, RTCVideoRenderer into, void Function(String)? log) async {
   await _drawn();
   final MediaStream stream;
   try {
     stream = await navigator.mediaDevices.getUserMedia({
       'audio': false,
       'video': {
-        'deviceId': camera,
+        'deviceId': camera.id,
         'optional': [
-          {'sourceId': camera},
+          {'sourceId': camera.id},
         ],
         'width': {'ideal': maxVideoWidth, 'max': maxVideoWidth},
         'height': {'ideal': maxVideoHeight, 'max': maxVideoHeight},
@@ -169,16 +166,16 @@ Future<MediaStream> _openCamera(String camera, RTCVideoRenderer into, void Funct
 /// A camera open while a call rings, with what draws it; the session that
 /// starts with it takes both.
 class _Preview implements CameraPreview {
-  _Preview(this.camera, this.stream, this.renderer, {required this.mirror});
+  _Preview(this.camera, this.stream, this.renderer);
   @override
-  final String camera;
-  final bool mirror;
+  final Camera camera;
   final MediaStream stream;
   final RTCVideoRenderer renderer;
   bool _taken = false, _closed = false;
 
   @override
-  Widget view() => RTCVideoView(renderer, objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover, mirror: mirror);
+  Widget view() =>
+      RTCVideoView(renderer, objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover, mirror: camera.mirrored);
 
   @override
   Future<void> close() async {
@@ -195,20 +192,19 @@ class _Preview implements CameraPreview {
 }
 
 class _Session implements CallSession {
-  _Session(this.pc, this.mic, this._send, this._onState, this.log, _Preview? preview, this._mirror)
+  _Session(this.pc, this.mic, this._send, this._onState, this.log, _Preview? preview)
     : _local = preview?.renderer ?? RTCVideoRenderer(),
       _localReady = preview != null,
       _camera = preview?.stream,
-      _cameraId = preview?.camera;
+      _sending = preview?.camera;
   final RTCPeerConnection pc;
   final MediaStream mic;
   final SendRtc _send;
   final void Function(MediaState) _onState;
   final void Function(String)? log;
-  final bool Function(String? camera) _mirror;
 
   /// Which camera is sending, for whether its picture is mirrored.
-  String? _cameraId;
+  Camera? _sending;
 
   /// Our candidates wait until our SDP has gone, and theirs until theirs is
   /// set: either may otherwise reach a connection with no description.
@@ -368,7 +364,7 @@ class _Session implements CallSession {
   }
 
   @override
-  Future<void> setCamera(String? camera) async {
+  Future<void> setCamera(Camera? camera) async {
     if (_closed) return;
     final sender = _video ?? (throw const CameraUnavailable('the call has no video track yet'));
     final old = _camera;
@@ -386,7 +382,7 @@ class _Session implements CallSession {
       await _stop(old);
     }
     final stream = await _openCamera(camera, _local, log);
-    _cameraId = camera;
+    _sending = camera;
     if (_closed) {
       _local.srcObject = null;
       await _stop(stream);
@@ -448,8 +444,11 @@ class _Session implements CallSession {
   Widget remoteVideo() => RTCVideoView(_remote, objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover);
 
   @override
-  Widget localVideo() =>
-      RTCVideoView(_local, objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover, mirror: _mirror(_cameraId));
+  Widget localVideo() => RTCVideoView(
+    _local,
+    objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+    mirror: _sending?.mirrored ?? true,
+  );
 
   @override
   Future<CallPath?> selectedPath() async {

@@ -37,21 +37,42 @@ class CameraUnavailable implements Exception {
 /// Quality); WebRTC's congestion control does the rest.
 const maxVideoWidth = 1280, maxVideoHeight = 720, maxVideoFps = 30;
 
-/// Cameras, as `(id, label)`, in the order Switch camera goes round: a
-/// phone's front camera first, so a call starts on it, else the order they
-/// came in. flutter_webrtc labels Android's `Camera 1, Facing front, ...`.
-List<String> frontFirst(List<(String, String)> cameras) => [
-  for (final (id, label) in cameras)
-    if (_facing(label) == 'front') id,
-  for (final (id, label) in cameras)
-    if (_facing(label) != 'front') id,
+/// Which way a phone's camera faces.
+enum Facing { front, back }
+
+/// One of this machine's cameras: the id the engine opens it by, and which
+/// way it faces, if it says (a laptop's does not).
+class Camera {
+  const Camera(this.id, {this.facing});
+
+  /// From flutter_webrtc's device label, which on Android says the facing:
+  /// `Camera 1, Facing front, Orientation 270`.
+  factory Camera.labelled(String id, String label) => Camera(
+    id,
+    facing: switch (RegExp(r'Facing (\w+)').firstMatch(label)?.group(1)) {
+      'front' => Facing.front,
+      'back' => Facing.back,
+      _ => null,
+    },
+  );
+
+  final String id;
+  final Facing? facing;
+
+  /// Whether our own picture from it is drawn as in a mirror: one facing
+  /// us, which a camera that says nothing of facing (a laptop's) is.
+  bool get mirrored => facing != Facing.back;
+
+  @override
+  String toString() => id;
+}
+
+/// Cameras in the order Switch camera goes round: a phone's front camera
+/// first, so a call starts on it, else the order they came in.
+List<Camera> frontFirst(List<Camera> cameras) => [
+  ...cameras.where((c) => c.facing == Facing.front),
+  ...cameras.where((c) => c.facing != Facing.front),
 ];
-
-/// Whether our own picture from a camera is drawn as in a mirror: one
-/// facing us, which a camera that says nothing of facing (a laptop's) is.
-bool mirrored(String label) => _facing(label) != 'back';
-
-String? _facing(String label) => RegExp(r'Facing (\w+)').firstMatch(label)?.group(1);
 
 /// What a call's video has done so far, for the log.
 class VideoStats {
@@ -80,15 +101,20 @@ class VideoStats {
 }
 
 abstract interface class CallEngine {
+  /// Whether its WebRTC gathers candidates on the tailnet's interface.
+  /// Android's does not (ticket 02): the app then announces
+  /// `call:webrtc-prflx`, and a call with another such app is `ws-opus`.
+  bool get tailnetCandidates;
+
   /// The cameras this machine has, the usual one first: what
   /// [CallSession.setCamera] takes, in the order Switch camera goes round.
   /// Empty without one.
-  Future<List<String>> cameras();
+  Future<List<Camera>> cameras();
 
   /// Open `camera`, one of [cameras], before a call's media starts: the
   /// caller's own picture while it rings. Throws [CameraUnavailable] if it
   /// gives no picture.
-  Future<CameraPreview> preview(String camera);
+  Future<CameraPreview> preview(Camera camera);
 
   /// Start a call's media: the microphone, the camera off unless `camera`
   /// is given, one audio and one video track negotiated both ways, no ICE
@@ -107,7 +133,7 @@ abstract interface class CallEngine {
 /// A camera opened while a call rings, before its media: our own picture.
 abstract interface class CameraPreview {
   /// Which of [CallEngine.cameras] it is.
-  String get camera;
+  Camera get camera;
   Widget view();
 
   /// Let the camera go; once given to [CallEngine.start], the session does.
@@ -132,7 +158,7 @@ abstract interface class CallSession {
   /// Send `camera`'s picture, one of [CallEngine.cameras], or none with
   /// null: the video track is replaced. Throws [CameraUnavailable] if the
   /// camera gives no picture, which leaves it off.
-  Future<void> setCamera(String? camera);
+  Future<void> setCamera(Camera? camera);
 
   /// The video's frames so far; null if it cannot be told.
   Future<VideoStats?> videoStats();
@@ -145,19 +171,26 @@ abstract interface class CallSession {
   Future<void> close();
 }
 
-/// Where a WebRTC call's sound goes on a phone, and what the screen does
-/// (tailnet-video spec, Android): while either side's video is on screen,
-/// the loudspeaker, the screen kept on and no proximity screen-off; with
-/// both cameras off, the earpiece and the screen dark at the ear. Talk
-/// tells it as the video comes and goes; Android's is over the app's audio
-/// channel and flutter_webrtc's audio switch (android_audio.dart). Linux
-/// has none.
+/// What a phone does with a WebRTC call (tailnet-video spec, Android):
+/// where the sound goes and what the screen does, and the camera while the
+/// app is away. While either side's video is on screen, the loudspeaker,
+/// the screen kept on and no proximity screen-off; with both cameras off,
+/// the earpiece and the screen dark at the ear. Talk tells it as the video
+/// comes and goes; Android's is over the app's audio channel and
+/// flutter_webrtc's audio switch (android_audio.dart). Linux has none.
 abstract interface class CallRoute {
-  /// The call's media starts: the listening service keeps the microphone
-  /// with the app away, and the sound goes to the earpiece.
+  /// Whether our camera pauses while the app is away (Android: no camera
+  /// in the background, nor picture-in-picture).
+  bool get cameraPausesAway;
+
+  /// The call's media is about to start: the listening service keeps the
+  /// microphone with the app away, the screen dark at the ear. No output
+  /// is chosen until [video], once the media plays.
   Future<void> begin();
 
-  /// Whether a picture is on screen: ours, or the other side's.
+  /// Whether a picture is on screen, ours or the other side's: the
+  /// loudspeaker or the earpiece. Told first once the media has started,
+  /// then as it changes.
   Future<void> video(bool shown);
 
   /// The call's media ended: all of it undone.

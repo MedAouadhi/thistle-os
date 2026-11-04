@@ -248,12 +248,13 @@ class ChatPeer {
   /// What each chat peer's last proven hello announced, by key, this run.
   final Map<String, List<String>> _heardCaps = {};
 
-  /// Whether a call with `key` may carry video: its last hello announced
-  /// `call:webrtc` and ours does. A contact's last hello is kept with it, so
-  /// this survives a restart; anyone else is not until heard from.
+  /// Whether a call with `key` may carry video: it would run on WebRTC,
+  /// by its last hello and ours ([webrtcBetween]). A contact's last hello
+  /// is kept with it, so this survives a restart; anyone else is not until
+  /// heard from.
   bool videoCapable(String key) {
-    final theirs = _heardCaps[key] ?? [if (store.contactByKey(key)?.webrtc ?? false) capWebrtc];
-    return mayUse(capWebrtc, caps, theirs);
+    final theirs = _heardCaps[key] ?? store.contactByKey(key)?.callCaps ?? const [];
+    return webrtcBetween(caps, theirs);
   }
 
   /// The tailnet peers the platform shows online, shared with a contact
@@ -364,7 +365,7 @@ class ChatPeer {
   Contact accept(String key) {
     if (store.request(key) == null) throw ArgumentError('no request from $key');
     final c = store.acceptRequest(key);
-    if (_heardCaps[key] case final heard?) store.setWebrtc(c.id, heard.contains(capWebrtc));
+    if (_heardCaps[key] case final heard?) store.setCallCaps(c.id, heard);
     store.queue(key, {'type': 'contact', 'id': newId(), 'state': 'accepted'});
     _emit(ChatEvent('contact', key: key, detail: 'accepted'));
     _flushSoon(key);
@@ -977,12 +978,12 @@ class ChatPeer {
         _emit(ChatEvent('contact', key: key, detail: 'pinned ${c.name} as ${fingerprintOf(conn.peerKey!)}'));
         who = 'contact ${c.name}';
         if (c.tailnetName == null) store.setTailnetName(c.id, conn.peerName);
-        store.setWebrtc(c.id, conn.peerCaps.contains(capWebrtc));
+        store.setCallCaps(c.id, conn.peerCaps);
       case KnownContact(:final contact):
         final c = store.contactById(contact)!;
         who = 'contact ${c.name}';
         if (c.tailnetName == null) store.setTailnetName(c.id, conn.peerName);
-        store.setWebrtc(c.id, conn.peerCaps.contains(capWebrtc));
+        store.setCallCaps(c.id, conn.peerCaps);
       case Stranger():
         break;
     }

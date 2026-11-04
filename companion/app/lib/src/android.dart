@@ -31,7 +31,7 @@ class AndroidPlatform implements KeyVault, BackgroundService, PermissionPlatform
   Future<void> _fromAndroid(MethodCall call) async {
     switch (call.method) {
       case 'call.window':
-        callWindow._set(call.arguments['shown'] == true);
+        callWindow._set(call.arguments['shown'] == true, inFront: call.arguments['resumed'] == true);
       case 'call.answer':
         onCall?.call(call.arguments['id'] as String, true);
       case 'call.decline':
@@ -86,9 +86,14 @@ class AndroidCallWindow extends ChangeNotifier implements CallWindow {
   @override
   bool shown = false;
 
-  void _set(bool on) {
-    if (on == shown) return;
+  @override
+  bool inFront = false;
+
+  void _set(bool on, {bool inFront = false}) {
+    final front = on && inFront;
+    if (on == shown && front == this.inFront) return;
     shown = on;
+    this.inFront = front;
     notifyListeners();
   }
 

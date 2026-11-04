@@ -156,20 +156,32 @@ void main() {
       );
     });
 
-    test('begins on the earpiece with the screen dark at the ear; video moves it to the loudspeaker, a headset '
-        'first; the end undoes it', () async {
+    test('begins with the screen dark at the ear and no output chosen before the media plays; no video is the '
+        'earpiece, video the loudspeaker, a headset first; the end undoes it', () async {
       final fake = FakeAndroidAudio();
       final route = AndroidCallRoute();
       await route.begin();
+      expect(webrtc, isEmpty, reason: "the output is chosen once libwebrtc's audio has started");
+      await route.video(false);
       await route.video(true);
       await route.video(false);
       await route.end();
-      expect(fake.calls, ['rtc.begin null', 'rtc.video shown=true', 'rtc.video shown=false', 'rtc.end null']);
+      expect(fake.calls, [
+        'rtc.begin null',
+        'rtc.video shown=false',
+        'rtc.video shown=true',
+        'rtc.video shown=false',
+        'rtc.end null',
+      ]);
       expect(webrtc, [
         'enableSpeakerphone {enable: false}',
         'enableSpeakerphoneButPreferBluetooth null',
         'enableSpeakerphone {enable: false}',
       ]);
+    });
+
+    test('pauses the camera while the app is away: Android has no camera in the background', () {
+      expect(AndroidCallRoute().cameraPausesAway, isTrue);
     });
 
     test('a refusal of either side is logged, not thrown: the call goes on', () async {

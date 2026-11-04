@@ -112,9 +112,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final model = widget.model;
     model.foreground = state == AppLifecycleState.resumed;
     if (state == AppLifecycleState.resumed) {
-      model.away = false;
-    } else if (state != AppLifecycleState.inactive && !model.away) {
-      model.away = true;
+      model.hidden = false;
+    } else if (state != AppLifecycleState.inactive && !model.hidden) {
+      model.hidden = true;
     }
   }
 

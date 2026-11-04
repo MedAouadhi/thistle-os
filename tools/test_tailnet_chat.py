@@ -276,6 +276,11 @@ class Vectors(unittest.TestCase):
         self.assertNotIn("192.168.2.131", v["sdp"]["tailnet_only"])
         self.assertIn("100.91.111.54 47998", v["sdp"]["tailnet_only"])
 
+    def test_an_offer_lists_webrtc_unless_both_sides_gather_no_tailnet_candidate(self):
+        for example in load("webrtc.json")["offers"]:
+            self.assertEqual(protocol.offer_transports(example["caller"], example["callee"]),
+                             example["transports"], example["name"])
+
     def test_every_invalid_example_draws_its_error(self):
         for example in load("messages.json")["invalid"] + load("webrtc.json")["invalid"]:
             _, error = protocol.check(example["text"])
@@ -535,6 +540,17 @@ class TwoPeers(unittest.TestCase):
         self.bob.wait_for(lambda: self.bob.calls.get(call))
         self.assertEqual(self.bob.calls[call]["transports"], ["ws-opus"])
         self.assertIsNone(self.bob.calls[call]["video"], "no video member without webrtc")
+
+    def test_two_peers_that_gather_no_tailnet_candidate_call_on_ws_opus(self):
+        for p in (self.alice, self.bob):
+            p.caps += [protocol.CAP_WEBRTC, protocol.CAP_WEBRTC_PRFLX]
+        self.befriend()
+        call = self.alice.call("Bob", video=True)
+        self.alice.wait_for(lambda: self.alice.calls[call]["state"] == "connected")
+        self.bob.wait_for(lambda: self.bob.calls.get(call, {}).get("state") == "connected")
+        self.assertEqual(self.bob.calls[call]["transports"], ["ws-opus"])
+        self.assertIsNone(self.bob.calls[call]["video"], "no video member without webrtc")
+        self.assertEqual(self.alice.calls[call]["transport"], "ws-opus")
 
     def test_a_webrtc_call_whose_media_never_connects_ends_as_timeout(self):
         self.alice.media_connect_s = 0.5

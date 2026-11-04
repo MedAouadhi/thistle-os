@@ -57,13 +57,17 @@ class ChatModel extends ChangeNotifier {
     AudioDevices? audio,
     this.callEngine,
     this.callRoute,
-    this.cameraPausesAway = false,
+    this.callWindow,
     ChildProcesses? children,
     Future<ProbeResult?> Function(PeerAddress address)? probe,
   }) : _probe = probe,
        children = children ?? ChildProcesses(),
        notifier = notifier ?? _Silent(),
-       audio = audio ?? NoAudioDevices('no audio devices given');
+       audio = audio ?? NoAudioDevices('no audio devices given') {
+    callWindow?.addListener(_callWindowChanged);
+  }
+
+  void _callWindowChanged() => unawaited(talk.awayChanged());
 
   final Identity identity;
   final Store Function() openStore;
@@ -92,15 +96,17 @@ class ChatModel extends ChangeNotifier {
   final AudioDevices audio;
 
   /// WebRTC calls' media; with one, this app announces `call:webrtc` and
-  /// calls another such app over WebRTC. Null: `ws-opus` only.
+  /// calls another such app over WebRTC (and `call:webrtc-prflx` if its
+  /// WebRTC gathers no tailnet candidate: a call between two such is
+  /// `ws-opus`). Null: `ws-opus` only.
   final CallEngine? callEngine;
 
-  /// A WebRTC call's loudspeaker or earpiece, and the screen; Android's.
+  /// What a phone does with a WebRTC call; Android's.
   final CallRoute? callRoute;
 
-  /// Whether our camera pauses while the app is away (Android: no camera
-  /// in the background, nor picture-in-picture).
-  final bool cameraPausesAway;
+  /// Android's call window over the lock screen: while it is in front the
+  /// app is not [away].
+  final CallWindow? callWindow;
 
   /// The app's child processes, none started while a camera is on.
   final ChildProcesses children;
@@ -114,9 +120,9 @@ class ChatModel extends ChangeNotifier {
     audio: audio,
     engine: callEngine,
     route: callRoute,
-    cameraPausesAway: cameraPausesAway,
     notifier: notifier,
     foreground: () => _foreground,
+    away: () => away,
     changed: () {
       if (!_closed) notifyListeners();
     },
@@ -164,7 +170,10 @@ class ChatModel extends ChangeNotifier {
       host: host,
       port: port,
       loopback: loopback,
-      caps: [...capsV1, if (callEngine != null) capWebrtc],
+      caps: [
+        ...capsV1,
+        if (callEngine case final engine?) ...[capWebrtc, if (!engine.tailnetCandidates) capWebrtcPrflx],
+      ],
       callPolicy: CallPolicy.ignore, // calls ring for the user
       log: log,
     );
@@ -243,6 +252,7 @@ class ChatModel extends ChangeNotifier {
   Future<void> _background = Future.value();
 
   Future<void> close() async {
+    callWindow?.removeListener(_callWindowChanged);
     await talk.close();
     _closed = true;
     _refresh?.cancel();
@@ -267,16 +277,21 @@ class ChatModel extends ChangeNotifier {
     if (back) unawaited(permissions?.checkFillScreen());
   }
 
-  /// Whether the window is out of sight: hidden or paused, not merely
-  /// inactive behind a prompt or the notification shade. A WebRTC call's
-  /// camera pauses meanwhile where [cameraPausesAway].
-  bool get away => _away;
-  set away(bool on) {
-    _away = on;
-    unawaited(talk.setAway(on));
+  /// Whether the main window is out of sight: hidden or paused, not merely
+  /// inactive behind a prompt or the notification shade. Set from the
+  /// app's lifecycle.
+  bool get hidden => _hidden;
+  set hidden(bool on) {
+    _hidden = on;
+    unawaited(talk.awayChanged());
   }
 
-  bool _away = false;
+  bool _hidden = false;
+
+  /// Whether the app is out of sight: its main window [hidden], and no
+  /// call window in front (Answer with video over the lock screen). A
+  /// WebRTC call's camera pauses meanwhile where the call route says.
+  bool get away => _hidden && !(callWindow?.inFront ?? false);
 
   String? get openConversationBox => _open;
 

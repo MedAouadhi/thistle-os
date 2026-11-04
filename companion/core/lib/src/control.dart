@@ -7,7 +7,8 @@ import 'dart:io';
 
 import 'peer.dart';
 import 'policy.dart';
-import 'protocol.dart' show CameraState, MediaState, RtcCandidate, RtcPayload, RtcSdp, SharedPeer, capWebrtc;
+import 'protocol.dart'
+    show CameraState, MediaState, RtcCandidate, RtcPayload, RtcSdp, SharedPeer, capWebrtc, capWebrtcPrflx;
 import 'store.dart';
 
 Map<String, Object?> identityJson(ChatPeer peer) => {
@@ -121,6 +122,12 @@ Future<Object?> control(Controlled controlled, Map<String, dynamic> command) asy
         peer.callPolicy = CallPolicy.values.byName(command['call_policy'] as String);
       if (command.containsKey('webrtc')) {
         peer.caps = [...peer.caps.where((c) => c != capWebrtc), if (command['webrtc'] == true) capWebrtc];
+      }
+      if (command.containsKey('webrtc_prflx')) {
+        peer.caps = [
+          ...peer.caps.where((c) => c != capWebrtcPrflx),
+          if (command['webrtc_prflx'] == true) capWebrtcPrflx,
+        ];
       }
       return true;
     case 'messages':

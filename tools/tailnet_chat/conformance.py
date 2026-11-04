@@ -147,6 +147,11 @@ class Target:
         Skipped for True."""
         return self.call({"cmd": "set", "webrtc": on})
 
+    def set_webrtc_prflx(self, on: bool):
+        """Announce `call:webrtc-prflx` beside `call:webrtc` from now on, or
+        not, as a phone whose WebRTC gathers no tailnet candidate does."""
+        return self.call({"cmd": "set", "webrtc_prflx": on})
+
     def rtc(self, call: str, sdp: dict | None = None, candidate: dict | None = None) -> bool:
         """The target's WebRTC gave this SDP or candidate: whether it was sent."""
         command = {"cmd": "rtc", "call": call}
@@ -1092,6 +1097,26 @@ def webrtc_offered_by_capability(target: Target) -> None:
     conn.close()
 
 
+def webrtc_not_offered_between_two_phones(target: Target) -> None:
+    """A target that gathers no tailnet candidate (a phone) offers another
+    such peer `ws-opus` alone, with no `video`, and a laptop `webrtc` first."""
+    target.set_webrtc(True)
+    target.set_webrtc_prflx(True)
+    phone = WEBRTC_CAPS + [protocol.CAP_WEBRTC_PRFLX]
+    for caps, want in ((phone, ["ws-opus"]), (WEBRTC_CAPS, ["webrtc", "ws-opus"])):
+        conn = RawConn(target.address, name="callee-" + str(len(caps)), caps=caps).handshake()
+        assert protocol.CAP_WEBRTC_PRFLX in conn.their["caps"], conn.their["caps"]
+        _become_contact(target, conn)
+        call = target.place_call(conn.key_hex, video=True)
+        offer = conn.expect("call_offer", call=call)
+        assert offer["transports"] == want, (caps, offer)
+        assert ("video" in offer) == (want[0] == "webrtc"), offer
+        target.end_call(call)
+        conn.close()
+    target.set_webrtc_prflx(False)
+    target.set_webrtc(False)
+
+
 def webrtc_unannounced_answers_ws_opus(target: Target) -> None:
     """A target without call:webrtc (the T-Deck) announces none, and answers
     an offer of both with `ws-opus`."""
@@ -1214,7 +1239,8 @@ def webrtc_busy(target: Target) -> None:
         c.close()
 
 
-WEBRTC_SCENARIOS = [webrtc_offered_by_capability, webrtc_unannounced_answers_ws_opus, webrtc_picked_by_target,
+WEBRTC_SCENARIOS = [webrtc_offered_by_capability, webrtc_not_offered_between_two_phones,
+                    webrtc_unannounced_answers_ws_opus, webrtc_picked_by_target,
                     webrtc_signalling_relayed, webrtc_camera_states, webrtc_never_connected, webrtc_disconnected,
                     webrtc_busy]
 

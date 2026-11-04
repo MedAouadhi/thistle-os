@@ -98,12 +98,16 @@ Future<void> main(List<String> args) async {
     permissions: android == null ? null : Permissions(android),
     audio: audio,
     children: children,
-    // Calls with another companion app on WebRTC. On Android the sound
-    // follows the video (loudspeaker or earpiece), and the camera pauses
-    // while the app is away; the call lives on in the listening service.
-    callEngine: options.webrtc ? WebrtcCallEngine(log: options.verbose ? stderr.writeln : null) : null,
+    // Calls with another companion app on WebRTC; Android's gathers no
+    // tailnet candidate, so two phones call on ws-opus. On Android the
+    // sound follows the video (loudspeaker or earpiece), and the camera
+    // pauses while the app is away; the call lives on in the listening
+    // service.
+    callEngine: options.webrtc
+        ? WebrtcCallEngine(tailnetCandidates: android == null, log: options.verbose ? stderr.writeln : null)
+        : null,
     callRoute: android != null ? AndroidCallRoute(log: options.verbose ? stderr.writeln : null) : null,
-    cameraPausesAway: android != null,
+    callWindow: android?.callWindow,
     notifier: notifier,
     listenHost: options.listenHost,
     port: options.port,

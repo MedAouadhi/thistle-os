@@ -159,24 +159,21 @@ class Audio(private val context: Context, engine: FlutterEngine) :
         inCall = true
         savedMode = audioManager.mode
         audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
-        darkAtTheEar(true)
-        ListenService.call(context, true)
+        callStarted()
     }
 
     private fun endCall() {
         if (!inCall) return
         inCall = false
         audioManager.mode = savedMode
-        darkAtTheEar(false)
-        ListenService.call(context, false)
+        callEnded()
     }
 
     /** A WebRTC call: the service and the screen, no mode (libwebrtc's audio switch has it). */
     private fun beginRtc() {
         if (inRtc) return
         inRtc = true
-        darkAtTheEar(true)
-        ListenService.call(context, true)
+        callStarted()
     }
 
     /** Video on screen: the screen stays on and lit; none: dark at the ear again. */
@@ -190,9 +187,19 @@ class Audio(private val context: Context, engine: FlutterEngine) :
     private fun endRtc() {
         if (!inRtc) return
         inRtc = false
-        darkAtTheEar(false)
         keepScreenOn = false
         window?.let { keepOn(it, false) }
+        callEnded()
+    }
+
+    /** What every call has: the screen dark at the ear, and the service in the foreground as using the microphone. */
+    private fun callStarted() {
+        darkAtTheEar(true)
+        ListenService.call(context, true)
+    }
+
+    private fun callEnded() {
+        darkAtTheEar(false)
         ListenService.call(context, false)
     }
 

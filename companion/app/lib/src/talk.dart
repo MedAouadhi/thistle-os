@@ -25,9 +25,9 @@ class Talk {
     required this.audio,
     this.engine,
     this.route,
-    this.cameraPausesAway = false,
     required this.notifier,
     required this.foreground,
+    required this.away,
     required this.changed,
     required this.sendVoice,
     required this.callee,
@@ -42,13 +42,14 @@ class Talk {
   /// WebRTC calls' media; null where the app announces no `call:webrtc`.
   final CallEngine? engine;
 
-  /// A WebRTC call's loudspeaker or earpiece, and the screen; Android's.
+  /// A WebRTC call's loudspeaker or earpiece, the screen, and the camera
+  /// while the app is away; Android's.
   final CallRoute? route;
-
-  /// Whether our camera pauses while the app is away (Android).
-  final bool cameraPausesAway;
   final Notifier notifier;
   final bool Function() foreground;
+
+  /// Whether the app is out of sight (ChatModel.away).
+  final bool Function() away;
 
   /// Something on screen may have changed.
   final void Function() changed;
@@ -73,16 +74,16 @@ class Talk {
 
   int get recordingMs => _recorder?.ms ?? 0;
 
-  Future<bool> _microphone() async => permissions == null || await permissions!.need(AppPermission.microphone);
-
-  /// Asked the first time the camera is switched on in a call.
-  Future<bool> _camera() async => permissions == null || await permissions!.need(AppPermission.camera);
+  /// Whether `p` is allowed, asked the first time it is needed: the
+  /// microphone for a recording or a call, the camera when first switched
+  /// on in a call.
+  Future<bool> _allowed(AppPermission p) async => permissions == null || await permissions!.need(p);
 
   /// Start recording a voice message for `box`; why not, or null.
   Future<String?> startRecording(String box) async {
     if (recordingBox != null) return 'already recording';
     if (_callLive) return 'not during a call';
-    if (!await _microphone()) return 'The microphone is not allowed: voice messages need it.';
+    if (!await _allowed(AppPermission.microphone)) return 'The microphone is not allowed: voice messages need it.';
     final VoiceRecorder rec;
     try {
       rec = VoiceRecorder();
@@ -246,7 +247,7 @@ class Talk {
   Future<String?> startCall(String box, {bool video = false}) async {
     if (_callLive) return null;
     if (recordingBox != null) await stopRecording(send: false);
-    if (!await _microphone()) {
+    if (!await _allowed(AppPermission.microphone)) {
       _audioProblem = 'The microphone is not allowed: calls need it.';
       changed();
       return null;
@@ -269,7 +270,7 @@ class Talk {
     if (c == null || c.state != 'ringing') return;
     callId = id;
     _audioProblem = null;
-    if (!await _microphone()) {
+    if (!await _allowed(AppPermission.microphone)) {
       _audioProblem = 'The microphone is not allowed: calls need it.';
     }
     if (recordingBox != null) await stopRecording(send: false);
@@ -293,14 +294,17 @@ class Talk {
             children: children,
             changed: changed,
             camera: camera,
-            cameraAllowed: _camera,
+            cameraAllowed: () => _allowed(AppPermission.camera),
             route: route,
+            away: _cameraAway,
             log: log,
           )
           ..muted = _muted
           ..volume = _volume;
-    if (cameraPausesAway && _away) unawaited(_webrtc!.setAway(true));
   }
+
+  /// Whether our camera is let go: the app away, where the camera pauses.
+  bool _cameraAway() => (route?.cameraPausesAway ?? false) && away();
 
   void decline([String? id]) {
     id ??= callId;
@@ -412,7 +416,7 @@ class Talk {
 
   /// This machine's cameras, once the call's media has started; empty
   /// with none.
-  List<String>? get cameras => _webrtc?.cameras;
+  List<Camera>? get cameras => _webrtc?.cameras;
 
   /// Whether our camera is sending.
   bool get cameraOn => _webrtc?.cameraOn ?? false;
@@ -444,14 +448,9 @@ class Talk {
   /// Our camera on or off: before the call's media starts, as it starts.
   Future<void> setCameraOn(bool on) async => _webrtc?.setCameraOn(on);
 
-  /// The app went out of sight, or came back: on Android our camera pauses
-  /// meanwhile, the call going on in the listening service.
-  Future<void> setAway(bool away) async {
-    _away = away;
-    if (cameraPausesAway) await _webrtc?.setAway(away);
-  }
-
-  bool _away = false;
+  /// The app went out of sight, or came back ([away]): on Android our
+  /// camera pauses meanwhile, the call going on in the listening service.
+  Future<void> awayChanged() async => _webrtc?.followAway();
 
   /// The next camera, round and back to the first.
   Future<void> switchCamera() async => _webrtc?.switchCamera();
