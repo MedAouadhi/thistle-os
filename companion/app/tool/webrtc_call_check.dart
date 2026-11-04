@@ -93,7 +93,7 @@ Future<bool> check() async {
       final c = m.peer.calls[id]!;
       final good = c.transport == 'webrtc' && c.state == 'connected' && c.remoteCamera == CameraState.off;
       print(
-        'call $round, $who: ${c.transport} ${c.state}, their camera ${c.remoteCamera}, '
+        'call $round, $who: ${c.transport} ${c.state}, their camera ${c.remoteCamera?.wire}, '
         'echo cancellation ${m.talk.echoCancellation}${good ? '' : '  <- wrong'}',
       );
       ok &= good;
