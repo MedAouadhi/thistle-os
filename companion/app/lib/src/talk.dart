@@ -313,7 +313,7 @@ class Talk {
     if (!c.live) {
       unawaited(_stopMedia());
       if (c.missed) unawaited(notifier.show(_missed(c), 'from ${nameOf(c.peer)}'));
-      log?.call('call ${id.substring(0, 8)} ${c.state}${c.transport == null ? '' : ', over ${c.transport}'}');
+      log?.call('${callLabel(id)} ${c.state}${c.transport == null ? '' : ', over ${c.transport}'}');
     }
     changed();
   }
@@ -364,7 +364,7 @@ class Talk {
     await devices?.close();
     if (session != null) {
       final video = await session.videoStats().catchError((Object _) => null);
-      if (video != null && id != null) log?.call('call ${id.substring(0, 8)}: video $video');
+      if (video != null && id != null) log?.call('${callLabel(id)}: video $video');
     }
     await session?.close();
     children.cameraClosed();
@@ -387,26 +387,26 @@ class Talk {
   /// One at a time, in the order they came: a candidate never reaches the
   /// connection before the SDP it belongs to.
   void _take(CallSession session, CallRtc r) =>
-      _rtcTaken = _rtcTaken.then((_) => session.take(sdp: r.sdp, candidate: r.candidate)).catchError((Object e) {
-        log?.call('call ${r.call.substring(0, 8)}: WebRTC refused what the other side sent: $e');
+      _rtcTaken = _rtcTaken.then((_) => session.take(r.payload)).catchError((Object e) {
+        log?.call('${callLabel(r.call)}: WebRTC refused what the other side sent: $e');
       });
 
   Future<void> _startWebrtc(String id, Call c) async {
     final engine = this.engine;
     if (engine == null) return;
     _sessionStarting = true;
-    log?.call('call ${id.substring(0, 8)} over webrtc');
+    log?.call('${callLabel(id)} over webrtc');
     final CallSession session;
     try {
       session = await engine.start(
         offerer: c.mine,
-        send: ({sdp, candidate}) => peer().sendRtc(id, sdp: sdp, candidate: candidate),
+        send: (payload) => peer().sendRtc(id, payload),
         onState: (state) => _onMediaState(id, state),
       );
     } on Object catch (e) {
       _sessionStarting = false;
       audioProblem = 'The call has no audio: $e';
-      log?.call('call ${id.substring(0, 8)}: WebRTC did not start: $e');
+      log?.call('${callLabel(id)}: WebRTC did not start: $e');
       if (peer().calls[id]?.live ?? false) peer().endCall(id, reason: 'error');
       changed();
       return;
@@ -428,18 +428,18 @@ class Talk {
     try {
       found = await engine.cameras();
     } on Object catch (e) {
-      log?.call('call ${id.substring(0, 8)}: no camera found: $e');
+      log?.call('${callLabel(id)}: no camera found: $e');
       found = const [];
     }
     if (_session != session) return;
     cameras = found;
     // Said at the answer, as every change will be.
     if (found.isEmpty) {
-      peer().setCamera(id, 'none');
+      peer().setCamera(id, CameraState.none);
     } else if (_wantCamera) {
       await _applyCamera(session, id, on: true);
     } else {
-      peer().setCamera(id, 'off');
+      peer().setCamera(id, CameraState.off);
     }
     changed();
   }
@@ -463,7 +463,7 @@ class Talk {
   /// Whether the call screen offers the camera switch: a WebRTC call.
   bool get cameraSwitch {
     final c = call;
-    return c != null && c.live && (c.webrtc || (c.state == 'offered' && c.transports.contains('webrtc')));
+    return c != null && c.live && (c.webrtc || (c.state == 'offered' && c.transports.contains(transportWebrtc)));
   }
 
   bool get canSwitchCamera => (cameras?.length ?? 0) > 1;
@@ -473,7 +473,7 @@ class Talk {
   bool get cameraSwitchOn => _session == null ? _wantCamera : cameraOn;
 
   /// Whether the other side's video is to be drawn.
-  bool get remoteVideoShown => _session != null && call?.remoteCamera == 'on';
+  bool get remoteVideoShown => _session != null && call?.remoteCamera == CameraState.on;
 
   Widget? remoteVideo() => _session?.remoteVideo();
   Widget? localVideo() => cameraOn ? _session?.localVideo() : null;
@@ -516,16 +516,16 @@ class Talk {
     } on CameraUnavailable catch (e) {
       cameraOn = false;
       cameraProblem = 'The camera is off: $e. Another program may be using it.';
-      log?.call('call ${id.substring(0, 8)}: camera $camera gave no picture: $e');
+      log?.call('${callLabel(id)}: camera $camera gave no picture: $e');
     }
     if (!cameraOn) children.cameraClosed();
     if (_session != session) return;
-    log?.call('call ${id.substring(0, 8)}: our camera ${cameraOn ? 'on, $camera' : 'off'}');
-    peer().setCamera(id, cameraOn ? 'on' : 'off');
+    log?.call('${callLabel(id)}: our camera ${cameraOn ? 'on, $camera' : 'off'}');
+    peer().setCamera(id, cameraOn ? CameraState.on : CameraState.off);
   }
 
-  void _onMediaState(String id, String state) {
-    final first = state == 'connected' && !(peer().calls[id]?.mediaEverConnected ?? true);
+  void _onMediaState(String id, MediaState state) {
+    final first = state == MediaState.connected && !(peer().calls[id]?.mediaEverConnected ?? true);
     peer().setMediaState(id, state);
     if (first) unawaited(_checkPath(id));
     changed();
@@ -545,16 +545,16 @@ class Talk {
       final session = _session;
       final call = peer().calls[id];
       if (session == null || callId != id || call == null || !call.live) return;
-      if (call.media != 'connected') continue;
+      if (call.media != MediaState.connected) continue;
       final path = await session.selectedPath();
       if (path == null) continue;
       final local = ipOf(path.local)?.address, remote = ipOf(path.remote)?.address;
       if (local != null && remote != null && inTailnet(local) && inTailnet(remote)) {
-        if (!logged) log?.call('call ${id.substring(0, 8)}: media over $path');
+        if (!logged) log?.call('${callLabel(id)}: media over $path');
         logged = true;
         continue;
       }
-      log?.call('call ${id.substring(0, 8)}: media outside the tailnet, $path: ending it');
+      log?.call('${callLabel(id)}: media outside the tailnet, $path: ending it');
       if (call.live) peer().endCall(id, reason: 'error');
       return;
     }

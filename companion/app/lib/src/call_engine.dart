@@ -8,9 +8,10 @@
 library;
 
 import 'package:flutter/widgets.dart' show Widget;
+import 'package:tailnet_chat_core/tailnet_chat_core.dart' show MediaState, RtcPayload;
 
 /// Our SDP or one of our candidates, for the other side.
-typedef SendRtc = void Function({Map<String, Object?>? sdp, Map<String, Object?>? candidate});
+typedef SendRtc = void Function(RtcPayload payload);
 
 /// The two ends of the candidate pair the connection selected.
 class CallPath {
@@ -71,12 +72,11 @@ abstract interface class CallEngine {
   /// Start a call's media: the microphone, the camera off, one audio and one
   /// video track negotiated both ways, no ICE server. The caller (`offerer`)
   /// makes the SDP offer. `send` takes what is to go to the other side,
-  /// `onState` the connection's state as it changes: `connected`,
-  /// `disconnected`, `failed`.
+  /// `onState` the connection's state as it changes.
   Future<CallSession> start({
     required bool offerer,
     required SendRtc send,
-    required void Function(String state) onState,
+    required void Function(MediaState state) onState,
   });
 }
 
@@ -85,7 +85,7 @@ abstract interface class CallSession {
   String get echoCancellation;
 
   /// Take the other side's SDP or candidate, in the order they came.
-  Future<void> take({Map<String, Object?>? sdp, Map<String, Object?>? candidate});
+  Future<void> take(RtcPayload payload);
 
   set muted(bool on);
 

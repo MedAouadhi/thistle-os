@@ -196,13 +196,13 @@ class FakeCallEngine implements CallEngine {
   Future<CallSession> start({
     required bool offerer,
     required SendRtc send,
-    required void Function(String state) onState,
+    required void Function(MediaState state) onState,
   }) async {
     final s = FakeCallSession(this, offerer, send, onState);
     sessions.add(s);
-    if (offerer) send(sdp: {'type': 'offer', 'sdp': 'v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\n'});
+    if (offerer) send(const RtcSdp('offer', 'v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\n'));
     for (final c in candidates) {
-      send(candidate: {'candidate': c, 'sdpMid': '0', 'sdpMLineIndex': 0});
+      send(RtcCandidate(c, sdpMid: '0', sdpMLineIndex: 0));
     }
     return s;
   }
@@ -213,32 +213,34 @@ class FakeCallSession implements CallSession {
   final FakeCallEngine engine;
   final bool offerer;
   final SendRtc _send;
-  final void Function(String) _onState;
+  final void Function(MediaState) _onState;
 
   /// What it took from the other side, in order.
-  final List<Map<String, Object?>> sdps = [];
+  final List<RtcSdp> sdps = [];
   final List<String> candidates = [];
   bool muted = false;
   double volume = 1;
   bool closed = false;
   bool _connected = false;
 
-  void state(String s) => _onState(s);
+  void state(MediaState s) => _onState(s);
 
   @override
   String get echoCancellation => 'on (WebRTC, fake)';
 
   @override
-  Future<void> take({Map<String, Object?>? sdp, Map<String, Object?>? candidate}) async {
+  Future<void> take(RtcPayload payload) async {
     if (closed) return;
-    if (sdp != null) {
-      sdps.add(sdp);
-      if (sdp['type'] == 'offer') _send(sdp: {'type': 'answer', 'sdp': 'v=0\r\no=- 3 4 IN IP4 127.0.0.1\r\n'});
+    switch (payload) {
+      case RtcSdp():
+        sdps.add(payload);
+        if (payload.type == 'offer') _send(const RtcSdp('answer', 'v=0\r\no=- 3 4 IN IP4 127.0.0.1\r\n'));
+      case RtcCandidate(:final candidate):
+        candidates.add(candidate);
     }
-    if (candidate != null) candidates.add(candidate['candidate'] as String);
     if (!_connected && engine.connects && sdps.isNotEmpty && candidates.isNotEmpty) {
       _connected = true;
-      _onState('connected');
+      _onState(MediaState.connected);
     }
   }
 

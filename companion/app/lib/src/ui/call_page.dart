@@ -1,7 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:tailnet_chat_core/tailnet_chat_core.dart' show Call;
+import 'package:tailnet_chat_core/tailnet_chat_core.dart' show Call, CameraState, transportWebrtc;
 
 import '../chat_model.dart';
 import 'theme.dart';
@@ -68,6 +68,13 @@ void showCall(BuildContext context, ChatModel model) {
   });
 }
 
+/// What the other side's tile says while its camera gives no picture.
+const remoteCameraTile = <CameraState, String>{
+  CameraState.off: 'Camera off',
+  CameraState.paused: 'Camera paused',
+  CameraState.none: 'No camera',
+};
+
 /// What a finished call's state says, for the call screen; on WebRTC, a
 /// timeout is media that never connected.
 String callOutcome(String state, {String? transport}) => switch (state) {
@@ -75,7 +82,7 @@ String callOutcome(String state, {String? transport}) => switch (state) {
   'declined:busy' => 'Busy: in another call',
   'declined:declined' => 'Declined',
   'declined:unsupported' => 'Their app cannot take calls',
-  'ended:timeout' when transport == 'webrtc' => 'Call ended: it could not connect',
+  'ended:timeout' when transport == transportWebrtc => 'Call ended: it could not connect',
   'ended:timeout' => 'Call ended: no sound for 10 s',
   'ended:cellular' => 'Call ended: a phone call took over',
   'ended:error' => 'Call ended: the connection dropped',
@@ -156,14 +163,7 @@ class _CallPageState extends State<CallPage> {
       final remoteVideo = state == 'connected' && talk.remoteVideoShown ? talk.remoteVideo() : null;
       final localVideo = call.live ? talk.localVideo() : null;
       // What the other side's camera is doing, when there is no picture.
-      final tile = !call.webrtc || state != 'connected'
-          ? null
-          : switch (call.remoteCamera) {
-              'off' => 'Camera off',
-              'paused' => 'Camera paused',
-              'none' => 'No camera',
-              _ => null,
-            };
+      final tile = !call.webrtc || state != 'connected' ? null : remoteCameraTile[call.remoteCamera];
       final status = switch (state) {
         'offered' => 'Calling…',
         'ringing' when call.video => 'Video call',

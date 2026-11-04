@@ -7,7 +7,7 @@ import 'dart:io';
 
 import 'peer.dart';
 import 'policy.dart';
-import 'protocol.dart' show SharedPeer, capWebrtc;
+import 'protocol.dart' show CameraState, MediaState, RtcCandidate, RtcPayload, RtcSdp, SharedPeer, capWebrtc;
 import 'store.dart';
 
 Map<String, Object?> identityJson(ChatPeer peer) => {
@@ -35,17 +35,35 @@ Map<String, Object?> _contactJson(Contact c) => {
   'declined_by_them': c.declinedByThem,
 };
 
-final Expando<Map<String, List<Map<String, Object?>>>> _rtcIn = Expando();
+/// A chat peer driven by the control protocol, and what the headless core
+/// keeps for it: the other side's SDP and candidates on each WebRTC call,
+/// for `rtc_received`, as it has no engine to take them.
+class Controlled {
+  Controlled(this.peer) {
+    peer.callRtc.listen((r) => (rtcReceived[r.call] ??= []).add(r.payload.toJson()));
+  }
 
-/// Keep the other side's SDP and candidates on each WebRTC call, for
-/// `rtc_received`: the headless core has no engine to take them.
-void keepRtc(ChatPeer peer) {
-  final kept = _rtcIn[peer] = {};
-  peer.callRtc.listen((r) => (kept[r.call] ??= []).add(r.sdp != null ? {'sdp': r.sdp} : {'candidate': r.candidate}));
+  final ChatPeer peer;
+
+  /// By call id, in the order they came.
+  final Map<String, List<Map<String, Object?>>> rtcReceived = {};
+}
+
+/// The `sdp` or `candidate` of an `rtc` command, as a `call_rtc` carries it.
+RtcPayload _rtcPayload(Map<String, dynamic> command) {
+  final sdp = command['sdp'] as Map?, candidate = command['candidate'] as Map?;
+  if ((sdp == null) == (candidate == null)) throw ArgumentError('rtc takes sdp or candidate');
+  if (sdp != null) return RtcSdp(sdp['type'] as String, sdp['sdp'] as String);
+  return RtcCandidate(
+    candidate!['candidate'] as String,
+    sdpMid: candidate['sdpMid'] as String?,
+    sdpMLineIndex: candidate['sdpMLineIndex'] as int?,
+  );
 }
 
 /// One control command; its result, JSON-able.
-Future<Object?> control(ChatPeer peer, Map<String, dynamic> command) async {
+Future<Object?> control(Controlled controlled, Map<String, dynamic> command) async {
+  final peer = controlled.peer;
   final to = command['to'];
   switch (command['cmd']) {
     case 'identity':
@@ -127,21 +145,19 @@ Future<Object?> control(ChatPeer peer, Map<String, dynamic> command) async {
             'missed': value.missed,
             'transport': value.transport,
             'video': value.video,
-            'camera': value.remoteCamera,
+            'camera': value.remoteCamera?.wire,
           },
       };
     case 'rtc':
-      return peer.sendRtc(
-        command['call'] as String,
-        sdp: (command['sdp'] as Map?)?.cast<String, Object?>(),
-        candidate: (command['candidate'] as Map?)?.cast<String, Object?>(),
-      );
+      return peer.sendRtc(command['call'] as String, _rtcPayload(command));
     case 'rtc_received':
-      return _rtcIn[peer]?[command['call']] ?? const [];
+      return controlled.rtcReceived[command['call']] ?? const [];
     case 'camera':
-      return peer.setCamera(command['call'] as String, command['camera'] as String);
+      final camera = CameraState.fromWire(command['camera']) ?? (throw ArgumentError('no camera ${command['camera']}'));
+      return peer.setCamera(command['call'] as String, camera);
     case 'media':
-      peer.setMediaState(command['call'] as String, command['state'] as String);
+      final state = MediaState.fromWire(command['state']) ?? (throw ArgumentError('no media ${command['state']}'));
+      peer.setMediaState(command['call'] as String, state);
       return true;
     case 'talk':
       return true; // a connected call streams its microphone (the headless core's --mic) by itself

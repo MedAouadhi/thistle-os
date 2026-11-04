@@ -84,14 +84,14 @@ Future<bool> check() async {
     await eventually(() => b.talk.call?.state == 'ringing');
     await b.talk.answer();
     await eventually(
-      () => a.peer.calls[id]!.media == 'connected' && b.peer.calls[id]!.media == 'connected',
+      () => a.peer.calls[id]!.media == MediaState.connected && b.peer.calls[id]!.media == MediaState.connected,
       timeout: const Duration(seconds: 15),
     );
     print('call $round: media connected ${clock.elapsedMilliseconds} ms after the offer');
     await Future<void>.delayed(const Duration(seconds: 4)); // past the pair check
     for (final (who, m) in [('a', a), ('b', b)]) {
       final c = m.peer.calls[id]!;
-      final good = c.transport == 'webrtc' && c.state == 'connected' && c.remoteCamera == 'off';
+      final good = c.transport == 'webrtc' && c.state == 'connected' && c.remoteCamera == CameraState.off;
       print(
         'call $round, $who: ${c.transport} ${c.state}, their camera ${c.remoteCamera}, '
         'echo cancellation ${m.talk.echoCancellation}${good ? '' : '  <- wrong'}',
@@ -124,7 +124,7 @@ Future<bool> videoCall(ChatModel a, ChatModel b) async {
   await eventually(() => b.talk.call?.state == 'ringing');
   print('call 3: offered with video ${b.peer.calls[id]!.video}');
   await b.talk.answer();
-  await eventually(() => b.peer.calls[id]!.remoteCamera == 'on', timeout: const Duration(seconds: 15));
+  await eventually(() => b.peer.calls[id]!.remoteCamera == CameraState.on, timeout: const Duration(seconds: 15));
   print('call 3: cameras at a ${a.talk.cameras}, Switch camera ${a.talk.canSwitchCamera ? 'shown' : 'not shown'}');
 
   Future<bool> flows(ChatModel from, ChatModel to, String what, {int seconds = 4}) async {
@@ -152,10 +152,10 @@ Future<bool> videoCall(ChatModel a, ChatModel b) async {
     ok &= await flows(a, b, "a's second camera");
   }
   await a.talk.setCameraOn(false);
-  await eventually(() => b.peer.calls[id]!.remoteCamera == 'off');
+  await eventually(() => b.peer.calls[id]!.remoteCamera == CameraState.off);
   final before = (await b.talk.videoStats())?.framesReceived ?? 0;
   await b.talk.setCameraOn(true);
-  await eventually(() => a.peer.calls[id]!.remoteCamera == 'on');
+  await eventually(() => a.peer.calls[id]!.remoteCamera == CameraState.on);
   print('call 3: b camera on (${b.talk.cameraProblem ?? 'no problem'}); b had received $before frames');
   ok &= b.talk.cameraOn;
   ok &= await flows(b, a, "b's camera");

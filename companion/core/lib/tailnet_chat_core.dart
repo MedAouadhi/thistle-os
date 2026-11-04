@@ -4,7 +4,7 @@
 library;
 
 export 'src/call_media.dart';
-export 'src/control.dart' show control, identityJson, keepRtc;
+export 'src/control.dart' show Controlled, control, identityJson;
 export 'src/identity_file.dart';
 export 'src/jitter.dart';
 export 'src/opus.dart';

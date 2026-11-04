@@ -24,6 +24,86 @@ const List<String> capsV1 = ['text', 'receipts', 'typing', 'reply', 'react', 'vo
 const String capWsOpus = 'call:ws-opus';
 const String capWebrtc = 'call:webrtc';
 
+/// The transports a `call_offer` lists and a `call_answer` picks.
+const String transportWsOpus = 'ws-opus';
+const String transportWebrtc = 'webrtc';
+
+/// What `call_camera` says of one side's camera (protocol section 4.11):
+/// `paused` while its app is out of the foreground, `none` with no camera,
+/// no permission, or one that gives no picture.
+enum CameraState {
+  on,
+  off,
+  paused,
+  none;
+
+  String get wire => name;
+
+  /// The state a `call_camera` names, or null for another word.
+  static CameraState? fromWire(Object? v) => values.where((c) => c.wire == v).firstOrNull;
+}
+
+/// A WebRTC call's media connection, as the app's engine reports it; `new`
+/// until it first says.
+enum MediaState {
+  fresh('new'),
+  connected('connected'),
+  disconnected('disconnected'),
+  failed('failed');
+
+  const MediaState(this.wire);
+  final String wire;
+
+  static MediaState? fromWire(Object? v) => values.where((m) => m.wire == v).firstOrNull;
+}
+
+/// What one `call_rtc` carries: exactly one of an SDP or an ICE candidate,
+/// opaque to the chat peer but for the candidates' addresses.
+sealed class RtcPayload {
+  const RtcPayload();
+
+  /// The frame's member for it: `{"sdp": ...}` or `{"candidate": ...}`.
+  Map<String, Object?> toJson();
+
+  /// The payload of a checked `call_rtc` frame.
+  static RtcPayload fromFrame(Map<String, dynamic> frame) {
+    final sdp = frame['sdp'] as Map?, candidate = frame['candidate'] as Map?;
+    if (sdp != null) return RtcSdp(sdp['type'] as String, sdp['sdp'] as String);
+    return RtcCandidate(
+      candidate!['candidate'] as String,
+      sdpMid: candidate['sdpMid'] as String?,
+      sdpMLineIndex: candidate['sdpMLineIndex'] as int?,
+    );
+  }
+}
+
+/// An SDP offer or answer.
+class RtcSdp extends RtcPayload {
+  const RtcSdp(this.type, this.sdp);
+
+  /// `offer` or `answer`.
+  final String type;
+  final String sdp;
+
+  @override
+  Map<String, Object?> toJson() => {
+    'sdp': {'type': type, 'sdp': sdp},
+  };
+}
+
+/// One trickled ICE candidate: its line, `candidate:...`.
+class RtcCandidate extends RtcPayload {
+  const RtcCandidate(this.candidate, {this.sdpMid, this.sdpMLineIndex});
+  final String candidate;
+  final String? sdpMid;
+  final int? sdpMLineIndex;
+
+  @override
+  Map<String, Object?> toJson() => {
+    'candidate': {'candidate': candidate, 'sdpMid': ?sdpMid, 'sdpMLineIndex': ?sdpMLineIndex},
+  };
+}
+
 const int kindVoice = 0x01;
 const int kindCallAudio = 0x02;
 const int maxChunk = 4096;
@@ -284,9 +364,6 @@ bool _candidate(Object? v) =>
     _str(1024, empty: false)(v['candidate']) &&
     (v['sdpMid'] == null || _str(64)(v['sdpMid'])) &&
     (v['sdpMLineIndex'] == null || _int(0, 65535)(v['sdpMLineIndex']));
-
-/// What `call_camera` says of one side's camera (protocol section 4.11).
-const List<String> cameraStates = ['on', 'off', 'paused', 'none'];
 bool _anyString(Object? v) => v is String;
 
 final _id = _hex(32);
@@ -333,7 +410,13 @@ final Map<String, (Map<String, _Ok>, Map<String, _Ok>)> _schema = {
   'call_answer': ({'call': _id}, {'transport': _str(32, empty: false), 'decline': _str(32, empty: false)}),
   'call_end': ({'call': _id, 'reason': _str(32, empty: false)}, {}),
   'call_rtc': ({'call': _id}, {'sdp': _sdp, 'candidate': _candidate}),
-  'call_camera': ({'call': _id, 'camera': _oneOf(cameraStates)}, {}),
+  'call_camera': (
+    {
+      'call': _id,
+      'camera': _oneOf([for (final c in CameraState.values) c.wire]),
+    },
+    {},
+  ),
   'peers_ask': ({}, {}),
   'peers': ({'peers': _list(_peer, 0, maxPeers)}, {}),
   'error': ({'code': _str(32, empty: false)}, {'what': _str(256), 'id': _id, 'detail': _str(512)}),

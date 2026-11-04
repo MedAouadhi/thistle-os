@@ -16,6 +16,7 @@ import 'dart:async';
 
 import 'package:flutter/widgets.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:tailnet_chat_core/tailnet_chat_core.dart' show MediaState, RtcCandidate, RtcPayload, RtcSdp;
 
 import 'call_engine.dart';
 
@@ -52,7 +53,7 @@ class WebrtcCallEngine implements CallEngine {
   Future<CallSession> start({
     required bool offerer,
     required SendRtc send,
-    required void Function(String state) onState,
+    required void Function(MediaState state) onState,
   }) async {
     // getUserMedia holds the UI thread for about a second on Linux (ticket
     // 02): let the call screen draw first, so the stall lands on no tap.
@@ -92,7 +93,7 @@ class _Session implements CallSession {
   final RTCPeerConnection pc;
   final MediaStream mic;
   final SendRtc _send;
-  final void Function(String) _onState;
+  final void Function(MediaState) _onState;
   final void Function(String)? log;
 
   /// Our candidates wait until our SDP has gone, and theirs until theirs is
@@ -119,9 +120,9 @@ class _Session implements CallSession {
     pc.onIceConnectionState = (state) {
       final s = switch (state) {
         RTCIceConnectionState.RTCIceConnectionStateConnected ||
-        RTCIceConnectionState.RTCIceConnectionStateCompleted => 'connected',
-        RTCIceConnectionState.RTCIceConnectionStateDisconnected => 'disconnected',
-        RTCIceConnectionState.RTCIceConnectionStateFailed => 'failed',
+        RTCIceConnectionState.RTCIceConnectionStateCompleted => MediaState.connected,
+        RTCIceConnectionState.RTCIceConnectionStateDisconnected => MediaState.disconnected,
+        RTCIceConnectionState.RTCIceConnectionStateFailed => MediaState.failed,
         _ => null,
       };
       if (s != null && !_closed) _onState(s);
@@ -165,7 +166,7 @@ class _Session implements CallSession {
   }
 
   void _sendDescription(RTCSessionDescription d) {
-    _send(sdp: {'type': d.type, 'sdp': d.sdp});
+    _send(RtcSdp(d.type ?? '', d.sdp ?? ''));
     _localSent = true;
     for (final c in _ours) {
       _sendCandidate(c);
@@ -174,7 +175,7 @@ class _Session implements CallSession {
   }
 
   void _sendCandidate(RTCIceCandidate c) =>
-      _send(candidate: {'candidate': c.candidate, 'sdpMid': c.sdpMid, 'sdpMLineIndex': c.sdpMLineIndex});
+      _send(RtcCandidate(c.candidate ?? '', sdpMid: c.sdpMid, sdpMLineIndex: c.sdpMLineIndex));
 
   /// VP8 first and no H.264 for video, Opus first for audio.
   Future<void> _preferCodecs() async {
@@ -199,16 +200,17 @@ class _Session implements CallSession {
   String get echoCancellation => "on (WebRTC's own canceller, in the app)";
 
   @override
-  Future<void> take({Map<String, Object?>? sdp, Map<String, Object?>? candidate}) async {
+  Future<void> take(RtcPayload payload) async {
     if (_closed) return;
-    if (sdp != null) {
-      await pc.setRemoteDescription(RTCSessionDescription(sdp['sdp'] as String?, sdp['type'] as String?));
-      _remoteSet = true;
-      for (final c in _theirs) {
-        await pc.addCandidate(c);
-      }
-      _theirs.clear();
-      if (sdp['type'] == 'offer') {
+    switch (payload) {
+      case RtcSdp(:final type, :final sdp):
+        await pc.setRemoteDescription(RTCSessionDescription(sdp, type));
+        _remoteSet = true;
+        for (final c in _theirs) {
+          await pc.addCandidate(c);
+        }
+        _theirs.clear();
+        if (type != 'offer') return;
         for (final t in await pc.getTransceivers()) {
           if (t.receiver.track?.kind != 'video') continue;
           await t.setDirection(TransceiverDirection.SendRecv);
@@ -218,15 +220,9 @@ class _Session implements CallSession {
         final answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
         _sendDescription(answer);
-      }
-    }
-    if (candidate != null) {
-      final c = RTCIceCandidate(
-        candidate['candidate'] as String?,
-        candidate['sdpMid'] as String?,
-        candidate['sdpMLineIndex'] as int?,
-      );
-      _remoteSet ? await pc.addCandidate(c) : _theirs.add(c);
+      case RtcCandidate(:final candidate, :final sdpMid, :final sdpMLineIndex):
+        final c = RTCIceCandidate(candidate, sdpMid, sdpMLineIndex);
+        _remoteSet ? await pc.addCandidate(c) : _theirs.add(c);
     }
   }
 

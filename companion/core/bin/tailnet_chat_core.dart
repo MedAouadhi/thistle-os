@@ -94,7 +94,7 @@ Future<void> main(List<String> args) async {
     log: verbose ? stderr.writeln : null,
   );
   if (!readReceipts) peer.readReceipts = false;
-  keepRtc(peer);
+  final controlled = Controlled(peer);
   await peer.start();
 
   // A connected call streams audio, as a device's microphone does: the
@@ -126,7 +126,7 @@ Future<void> main(List<String> args) async {
     try {
       command = jsonDecode(line);
       if (command is! Map<String, dynamic>) throw const FormatException('a command is a JSON object');
-      reply = {'ok': await control(peer, command)};
+      reply = {'ok': await control(controlled, command)};
     } on Object catch (e) {
       reply = {'error': '${e.runtimeType}: $e'};
     }

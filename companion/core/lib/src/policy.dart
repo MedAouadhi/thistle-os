@@ -4,10 +4,24 @@
 library;
 
 import 'dart:convert';
+import 'dart:io' show InternetAddress;
 import 'dart:math';
 
 import 'protocol.dart'
-    show SharedPeer, admitted, capWebrtc, capWsOpus, inTailnet, ipOf, maxNameBytes, maxPeerAddrs, maxPeers, typingLapse;
+    show
+        MediaState,
+        SharedPeer,
+        admitted,
+        capWebrtc,
+        capWsOpus,
+        inTailnet,
+        ipOf,
+        maxNameBytes,
+        maxPeerAddrs,
+        maxPeers,
+        transportWebrtc,
+        transportWsOpus,
+        typingLapse;
 
 /// A chat peer's address to dial.
 class PeerAddress {
@@ -150,15 +164,15 @@ class CallAnswer {
 /// when both hellos announce `call:webrtc`, then `ws-opus` when both
 /// announce `call:ws-opus`. Empty: no call is possible.
 List<String> offerTransports(List<String> mine, List<String> theirs) => [
-  if (mayUse(capWebrtc, mine, theirs)) 'webrtc',
-  if (mayUse(capWsOpus, mine, theirs)) 'ws-opus',
+  if (mayUse(capWebrtc, mine, theirs)) transportWebrtc,
+  if (mayUse(capWsOpus, mine, theirs)) transportWsOpus,
 ];
 
 /// The transport an answer picks from an offer: `webrtc` whenever it is
 /// offered and the callee announced it, else `ws-opus`; null if neither.
 String? pickTransport(List<String> offered, List<String> caps) {
-  if (offered.contains('webrtc') && caps.contains(capWebrtc)) return 'webrtc';
-  if (offered.contains('ws-opus') && caps.contains(capWsOpus)) return 'ws-opus';
+  if (offered.contains(transportWebrtc) && caps.contains(capWebrtc)) return transportWebrtc;
+  if (offered.contains(transportWsOpus) && caps.contains(capWsOpus)) return transportWsOpus;
   return null;
 }
 
@@ -199,22 +213,22 @@ const mediaLostTimeout = Duration(seconds: 10);
 /// The reason a call ends by itself now, or null: `since` is when it
 /// entered `state`, `lastFrame` when the other side's audio last came.
 /// A WebRTC call carries no frames of ours: `media` is its connection's
-/// state (`new`, `connected`, `disconnected`, `failed`), `mediaSince` when
-/// that last changed, and `mediaEverConnected` whether it ever connected.
+/// state, `mediaSince` when that last changed, and `mediaEverConnected`
+/// whether it ever connected.
 String? callEndDue({
   required String state,
   required DateTime since,
   required DateTime lastFrame,
   required DateTime now,
   String? transport,
-  String media = 'new',
+  MediaState media = MediaState.fresh,
   DateTime? mediaSince,
   bool mediaEverConnected = false,
 }) => switch (state) {
-  'connected' when transport == 'webrtc' =>
+  'connected' when transport == transportWebrtc =>
     !mediaEverConnected
         ? (now.difference(since) > mediaConnectTimeout ? 'timeout' : null)
-        : (media != 'connected' && now.difference(mediaSince ?? since) > mediaLostTimeout ? 'error' : null),
+        : (media != MediaState.connected && now.difference(mediaSince ?? since) > mediaLostTimeout ? 'error' : null),
   'connected' when now.difference(lastFrame) > silenceTimeout => 'timeout',
   'offered' || 'ringing' when now.difference(since) > ringTimeout => 'timeout',
   _ => null,
@@ -222,27 +236,36 @@ String? callEndDue({
 
 // -- WebRTC's candidates: the tailnet's alone (protocol 4.11) ----------------------
 
+/// An ICE candidate's line, read as far as admission and the log need:
+/// with or without SDP's `a=`; null if it is no candidate line.
+({String protocol, String type, InternetAddress? ip})? _parseCandidate(String candidate) {
+  var line = candidate.trim();
+  if (line.startsWith('a=')) line = line.substring(2);
+  if (!line.startsWith('candidate:')) return null;
+  final f = line.split(RegExp(r'\s+'));
+  final typ = f.indexOf('typ');
+  return (
+    protocol: f.length > 2 ? f[2].toLowerCase() : '?',
+    type: typ >= 0 && typ + 1 < f.length ? f[typ + 1] : '?',
+    ip: f.length >= 8 ? ipOf(f[4]) : null,
+  );
+}
+
 /// Whether an ICE candidate may be sent or taken: UDP, from an address in
 /// the tailnet's ranges. `candidate` is the candidate's line, with or
 /// without SDP's `a=`; a host name (mDNS) is not an address.
 bool candidateAdmitted(String candidate) {
-  var line = candidate.trim();
-  if (line.startsWith('a=')) line = line.substring(2);
-  if (!line.startsWith('candidate:')) return false;
-  final f = line.split(RegExp(r'\s+'));
-  if (f.length < 8 || f[2].toLowerCase() != 'udp') return false;
-  final ip = ipOf(f[4]);
-  return ip != null && inTailnet(ip.address);
+  final c = _parseCandidate(candidate);
+  return c != null && c.protocol == 'udp' && c.ip != null && inTailnet(c.ip!.address);
 }
 
 /// A candidate's kind, for a log: its type, its protocol, and whether its
 /// address is the tailnet's (`host/udp tailnet`, `srflx/udp other`).
 String candidateKind(String candidate) {
-  final f = candidate.trim().replaceFirst(RegExp('^a='), '').split(RegExp(r'\s+'));
-  final typ = f.indexOf('typ');
-  final ip = f.length > 4 ? ipOf(f[4]) : null;
-  final where = ip != null && inTailnet(ip.address) ? 'tailnet' : 'other';
-  return '${typ >= 0 && typ + 1 < f.length ? f[typ + 1] : '?'}/${f.length > 2 ? f[2].toLowerCase() : '?'} $where';
+  final c = _parseCandidate(candidate);
+  if (c == null) return '?/? other';
+  final ip = c.ip;
+  return '${c.type}/${c.protocol} ${ip != null && inTailnet(ip.address) ? 'tailnet' : 'other'}';
 }
 
 /// An SDP with each `a=candidate` line outside the tailnet taken out, the

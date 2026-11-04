@@ -583,7 +583,7 @@ void main() {
     testWidgets('Video call rings with video and our camera on, its picture in a corner', (tester) async {
       final id = await placed(tester, button: 'video-call');
       expect(device.calls[id]!.video, isTrue);
-      await until(tester, () => device.calls[id]!.remoteCamera == 'on');
+      await until(tester, () => device.calls[id]!.remoteCamera == CameraState.on);
       expect(find.byKey(const Key('fake-local-video')), findsOneWidget);
       expect(engine!.session.camera, 'Integrated Webcam');
       await hangUp(tester);
@@ -594,11 +594,11 @@ void main() {
       final id = await placed(tester);
       expect(find.byKey(const Key('fake-remote-video')), findsNothing);
       for (final (camera, says) in [
-        ('on', null),
-        ('paused', 'Camera paused'),
-        ('on', null),
-        ('off', 'Camera off'),
-        ('none', 'No camera'),
+        (CameraState.on, null),
+        (CameraState.paused, 'Camera paused'),
+        (CameraState.on, null),
+        (CameraState.off, 'Camera off'),
+        (CameraState.none, 'No camera'),
       ]) {
         device.setCamera(id, camera);
         await until(tester, () => app.talk.call!.remoteCamera == camera);
@@ -613,14 +613,14 @@ void main() {
     testWidgets('the camera switch turns ours on and off; with one camera there is no Switch camera', (tester) async {
       final id = await placed(tester);
       expect(find.byKey(const Key('fake-local-video')), findsNothing, reason: 'Call keeps the camera off');
-      await until(tester, () => device.calls[id]!.remoteCamera == 'off');
+      await until(tester, () => device.calls[id]!.remoteCamera == CameraState.off);
       expect(find.byKey(const Key('call-switch-camera')), findsNothing);
       await tester.tap(find.byKey(const Key('call-camera')));
-      await until(tester, () => device.calls[id]!.remoteCamera == 'on');
+      await until(tester, () => device.calls[id]!.remoteCamera == CameraState.on);
       await tester.pump();
       expect(find.byKey(const Key('fake-local-video')), findsOneWidget);
       await tester.tap(find.byKey(const Key('call-camera')));
-      await until(tester, () => device.calls[id]!.remoteCamera == 'off');
+      await until(tester, () => device.calls[id]!.remoteCamera == CameraState.off);
       await tester.pump();
       expect(find.byKey(const Key('fake-local-video')), findsNothing);
       await hangUp(tester);
@@ -640,7 +640,7 @@ void main() {
 
     testWidgets('without a camera the switch says No camera and cannot be turned on', (tester) async {
       final id = await placed(tester, cameras: const []);
-      await until(tester, () => device.calls[id]!.remoteCamera == 'none');
+      await until(tester, () => device.calls[id]!.remoteCamera == CameraState.none);
       await tester.pump();
       expect(find.text('No camera'), findsOneWidget);
       await tester.tap(find.byKey(const Key('call-camera')), warnIfMissed: false);
@@ -662,7 +662,7 @@ void main() {
       expect(find.byKey(const Key('call-answer-video')), findsOneWidget);
       expect(find.byKey(const Key('call-decline')), findsOneWidget);
       await tester.tap(find.byKey(const Key('call-answer')));
-      await until(tester, () => device.calls[id]!.remoteCamera == 'off');
+      await until(tester, () => device.calls[id]!.remoteCamera == CameraState.off);
       expect(engine!.session.cameraLog, isEmpty, reason: 'never on without a tap');
       await hangUp(tester);
       await finish(tester);
@@ -675,7 +675,7 @@ void main() {
       await tester.runAsync(() async => id = await device.call('laptop', video: true));
       await until(tester, () => find.byKey(const Key('call-answer-video')).evaluate().isNotEmpty);
       await tester.tap(find.byKey(const Key('call-answer-video')));
-      await until(tester, () => device.calls[id]!.remoteCamera == 'on');
+      await until(tester, () => device.calls[id]!.remoteCamera == CameraState.on);
       await hangUp(tester);
       await finish(tester);
     });

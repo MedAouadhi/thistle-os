@@ -307,19 +307,24 @@ void main() {
         expect(theirs.session.offerer, isFalse);
         // The offer and the answer crossed, and the tailnet's candidate alone.
         await eventually(() => theirs.session.sdps.isNotEmpty && mine.session.sdps.isNotEmpty);
-        expect(theirs.session.sdps.single['type'], 'offer');
-        expect(mine.session.sdps.single['type'], 'answer');
+        expect(theirs.session.sdps.single.type, 'offer');
+        expect(mine.session.sdps.single.type, 'answer');
         await eventually(() => mine.session.candidates.isNotEmpty && theirs.session.candidates.isNotEmpty);
         await Future<void>.delayed(const Duration(milliseconds: 200));
         expect(theirs.session.candidates, [FakeCallEngine.tailnetCandidate]);
         expect(mine.session.candidates, [FakeCallEngine.tailnetCandidate]);
-        await eventually(() => app.peer.calls[id]!.media == 'connected' && friend.peer.calls[id]!.media == 'connected');
+        await eventually(
+          () =>
+              app.peer.calls[id]!.media == MediaState.connected && friend.peer.calls[id]!.media == MediaState.connected,
+        );
         expect(app.talk.echoCancellation, 'on (WebRTC, fake)');
         expect(audio.callsOpened, 0, reason: 'no ws-opus devices, no PipeWire canceller');
         expect(friendAudio.callsOpened, 0);
         // Each side says its camera is off, at the answer.
         await eventually(
-          () => app.peer.calls[id]!.remoteCamera == 'off' && friend.peer.calls[id]!.remoteCamera == 'off',
+          () =>
+              app.peer.calls[id]!.remoteCamera == CameraState.off &&
+              friend.peer.calls[id]!.remoteCamera == CameraState.off,
         );
       });
 
@@ -377,7 +382,7 @@ void main() {
           await eventually(() => friend.talk.call?.state == 'ringing');
           expect(friend.peer.calls[id]!.video, isTrue);
           await friend.talk.answer();
-          await eventually(() => friend.peer.calls[id]!.remoteCamera == 'on');
+          await eventually(() => friend.peer.calls[id]!.remoteCamera == CameraState.on);
           expect(mine.session.camera, 'Integrated Webcam');
           expect(app.talk.cameraOn, isTrue);
         });
@@ -388,7 +393,7 @@ void main() {
           await app.talk.setCameraOn(true);
           expect(app.talk.cameraSwitchOn, isTrue);
           await friend.talk.answer();
-          await eventually(() => friend.peer.calls[id]!.remoteCamera == 'on');
+          await eventually(() => friend.peer.calls[id]!.remoteCamera == CameraState.on);
           expect(mine.session.camera, 'Integrated Webcam');
         });
 
@@ -396,7 +401,7 @@ void main() {
           final id = (await app.talk.startCall(friendBox, video: true))!;
           await eventually(() => friend.talk.call?.state == 'ringing');
           await friend.talk.answer();
-          await eventually(() => app.peer.calls[id]!.remoteCamera == 'off');
+          await eventually(() => app.peer.calls[id]!.remoteCamera == CameraState.off);
           expect(theirs.session.cameraLog, isEmpty, reason: 'the camera never opened');
           expect(friend.talk.cameraOn, isFalse);
         });
@@ -406,7 +411,7 @@ void main() {
           await eventually(() => friend.talk.call?.state == 'ringing');
           expect(friend.peer.calls[id]!.video, isFalse);
           await friend.talk.answer(null, true);
-          await eventually(() => app.peer.calls[id]!.remoteCamera == 'on');
+          await eventually(() => app.peer.calls[id]!.remoteCamera == CameraState.on);
           expect(theirs.session.camera, 'Integrated Webcam');
           expect(mine.session.cameraLog, isEmpty, reason: 'the caller started with it off');
         });
@@ -416,10 +421,10 @@ void main() {
           await eventually(() => mine.sessions.isNotEmpty && app.talk.cameras != null);
           expect(app.talk.canSwitchCamera, isFalse, reason: 'one camera');
           await app.talk.setCameraOn(true);
-          await eventually(() => friend.peer.calls[id]!.remoteCamera == 'on');
+          await eventually(() => friend.peer.calls[id]!.remoteCamera == CameraState.on);
           expect(mine.session.camera, 'Integrated Webcam');
           await app.talk.setCameraOn(false);
-          await eventually(() => friend.peer.calls[id]!.remoteCamera == 'off');
+          await eventually(() => friend.peer.calls[id]!.remoteCamera == CameraState.off);
           expect(mine.session.cameraLog, ['Integrated Webcam', null]);
           expect(mine.sessions, hasLength(1), reason: 'the same session: no renegotiation');
         });
@@ -441,8 +446,8 @@ void main() {
           final id = (await app.talk.startCall(friendBox, video: true))!;
           await eventually(() => friend.talk.call?.state == 'ringing');
           await friend.talk.answer(null, true);
-          await eventually(() => app.peer.calls[id]!.remoteCamera == 'none');
-          await eventually(() => friend.peer.calls[id]!.remoteCamera == 'on');
+          await eventually(() => app.peer.calls[id]!.remoteCamera == CameraState.none);
+          await eventually(() => friend.peer.calls[id]!.remoteCamera == CameraState.on);
           expect(friend.talk.cameraOn, isFalse);
           expect(theirs.session.cameraLog, isEmpty);
           expect(friend.talk.remoteVideoShown, isTrue);
@@ -456,7 +461,7 @@ void main() {
           expect(app.talk.cameraOn, isFalse);
           expect(app.talk.cameraProblem, contains('no picture'));
           await Future<void>.delayed(const Duration(milliseconds: 200));
-          expect(friend.peer.calls[id]!.remoteCamera, 'off');
+          expect(friend.peer.calls[id]!.remoteCamera, CameraState.off);
         });
 
         test('a video call rings as one, and unanswered is a missed video call', () async {
@@ -473,7 +478,7 @@ void main() {
           final id = await connected();
           await eventually(() => app.talk.cameras != null);
           await app.talk.setCameraOn(true);
-          await eventually(() => friend.peer.calls[id]!.remoteCamera == 'on');
+          await eventually(() => friend.peer.calls[id]!.remoteCamera == CameraState.on);
           final reads = tailnet.reads;
           await app.refresh();
           await app.peer.tailnetPeers!(); // a contact asks for the peer list
@@ -486,8 +491,8 @@ void main() {
 
       test('media lost for 10 s ends the call as an error', () async {
         final id = await connected();
-        await eventually(() => app.peer.calls[id]!.media == 'connected');
-        mine.session.state('disconnected');
+        await eventually(() => app.peer.calls[id]!.media == MediaState.connected);
+        mine.session.state(MediaState.disconnected);
         app.peer.calls[id]!.mediaSince = DateTime.now().subtract(const Duration(seconds: 11));
         await eventually(() => app.peer.calls[id]!.state == 'ended:error');
       });

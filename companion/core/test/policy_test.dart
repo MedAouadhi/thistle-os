@@ -1,5 +1,5 @@
 import 'package:tailnet_chat_core/policy.dart';
-import 'package:tailnet_chat_core/protocol.dart' show SharedPeer;
+import 'package:tailnet_chat_core/protocol.dart' show MediaState, SharedPeer;
 import 'package:test/test.dart';
 
 const a = 'aa00000000000000000000000000000000000000000000000000000000000000';
@@ -280,7 +280,7 @@ void main() {
 
       group('ends', () {
         final t0 = DateTime(2026, 11, 4, 12);
-        String? due({required String media, int answeredS = 0, int mediaS = 0, bool ever = false, int nowS = 0}) =>
+        String? due({required MediaState media, int answeredS = 0, int mediaS = 0, bool ever = false, int nowS = 0}) =>
             callEndDue(
               state: 'connected',
               since: t0.add(Duration(seconds: answeredS)),
@@ -293,19 +293,19 @@ void main() {
             );
 
         test('not connected 15 s after the answer ends as timeout', () {
-          expect(due(media: 'new', nowS: 15), isNull);
-          expect(due(media: 'new', nowS: 16), 'timeout');
-          expect(due(media: 'failed', mediaS: 3, nowS: 16), 'timeout', reason: 'never connected');
+          expect(due(media: MediaState.fresh, nowS: 15), isNull);
+          expect(due(media: MediaState.fresh, nowS: 16), 'timeout');
+          expect(due(media: MediaState.failed, mediaS: 3, nowS: 16), 'timeout', reason: 'never connected');
         });
 
         test('connected, it does not end however long no ws-opus frame comes', () {
-          expect(due(media: 'connected', mediaS: 1, ever: true, nowS: 600), isNull);
+          expect(due(media: MediaState.connected, mediaS: 1, ever: true, nowS: 600), isNull);
         });
 
         test('disconnected for 10 s after it connected ends as error, not before', () {
-          expect(due(media: 'disconnected', mediaS: 100, ever: true, nowS: 110), isNull);
-          expect(due(media: 'disconnected', mediaS: 100, ever: true, nowS: 111), 'error');
-          expect(due(media: 'failed', mediaS: 100, ever: true, nowS: 111), 'error');
+          expect(due(media: MediaState.disconnected, mediaS: 100, ever: true, nowS: 110), isNull);
+          expect(due(media: MediaState.disconnected, mediaS: 100, ever: true, nowS: 111), 'error');
+          expect(due(media: MediaState.failed, mediaS: 100, ever: true, nowS: 111), 'error');
         });
 
         test('ringing, the 45 s rule is unchanged', () {
