@@ -4,13 +4,13 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [x] A Linux to Android call and an Android to Linux call, each with audio and video both ways, over tailnet candidates only, on WiFi and through DERP; the candidates' kinds logged
 - [x] Issue 2070: three calls in a row on Linux, the time each set-up and hang-up blocks the UI, written here
 - [x] Issue 2225: the camera opened while the app runs `tailscale status`, and whether a second call can open it, written here
 - [x] The release APK's split sizes and the Linux bundle's size, before and after
-- [ ] A verdict in this ticket: go, or stop for a decision (if 2070 is confirmed, the plan stops here, as the spec says)
+- [x] A verdict in this ticket: go, or stop for a decision (if 2070 is confirmed, the plan stops here, as the spec says)
 
 ## Comments
 
@@ -216,4 +216,4 @@ the spike's own TCP signalling. Every call: VP8 and Opus, 640x480.
 - The laptop encodes about 17 fps from its webcam on every path,
   `qualityLimitationReason` none: the camera's rate, not the network.
 
-**Verdict: go**, on 2070. The box is the user's.
+**Verdict: go**, given by the user on 2026-11-04 after the phone run.
