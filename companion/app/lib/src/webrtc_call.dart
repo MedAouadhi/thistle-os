@@ -106,7 +106,7 @@ class WebrtcCall {
       }
       audioProblem = 'The call has no audio: $e';
       log?.call('${callLabel(id)}: WebRTC did not start: $e');
-      if (_live) peer().endCall(id, reason: 'error');
+      if (_live) peer().endCall(id, reason: 'error', fault: CallFault.webrtcFailed);
       changed();
       return;
     }
@@ -325,7 +325,7 @@ class WebrtcCall {
         continue;
       }
       log?.call('${callLabel(id)}: media outside the tailnet, $path: ending it');
-      if (call.live) peer().endCall(id, reason: 'error');
+      if (call.live) peer().endCall(id, reason: 'error', fault: CallFault.offTailnet);
       return;
     }
   }

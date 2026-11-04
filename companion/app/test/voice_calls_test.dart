@@ -349,7 +349,7 @@ void main() {
         app.talk.hangUp();
       });
 
-      test('a connection whose selected pair leaves the tailnet ends the call as an error', () async {
+      test('a connection whose selected pair leaves the tailnet ends the call as an error, and says so', () async {
         mine.path = const CallPath(
           local: '192.168.2.131',
           remote: '100.64.0.2',
@@ -361,7 +361,18 @@ void main() {
         await friend.talk.answer();
         await eventually(() => app.peer.calls[id]!.state == 'ended:error');
         await eventually(() => friend.peer.calls[id]!.state == 'ended:error');
-        expect(callOutcome('ended:error', transport: 'webrtc'), 'Call ended: the connection dropped');
+        expect(callOutcome(app.peer.calls[id]!), 'Call ended: its media left the tailnet');
+        expect(callOutcome(friend.peer.calls[id]!), 'Call ended: it failed on their side');
+      });
+
+      test('WebRTC that does not start ends the call as an error, and says so', () async {
+        theirs.fails = true;
+        final id = (await app.talk.startCall(friendBox))!;
+        await eventually(() => friend.talk.call?.state == 'ringing');
+        await friend.talk.answer();
+        await eventually(() => friend.peer.calls[id]!.state == 'ended:error');
+        expect(callOutcome(friend.peer.calls[id]!), 'Call ended: the call could not start');
+        expect(friend.talk.audioProblem, contains('no audio'));
       });
 
       test('media that never connects ends the call as not connected, and the screen says so', () async {
@@ -372,8 +383,9 @@ void main() {
         await eventually(() => app.peer.calls[id]!.state == 'ended:timeout');
         await eventually(() => friend.peer.calls[id]!.state == 'ended:timeout');
         await eventually(() => mine.session.closed);
-        expect(callOutcome('ended:timeout', transport: 'webrtc'), 'Call ended: it could not connect');
-        expect(callOutcome('ended:timeout', transport: 'ws-opus'), 'Call ended: no sound for 10 s');
+        expect(callOutcome(app.peer.calls[id]!), 'Call ended: it could not connect');
+        final silent = Call(peer: '', stream: 1, mine: true, state: 'ended:timeout')..transport = 'ws-opus';
+        expect(callOutcome(silent), 'Call ended: no sound for 10 s');
       });
 
       group('video', () {
@@ -528,12 +540,13 @@ void main() {
         });
       });
 
-      test('media lost for 10 s ends the call as an error', () async {
+      test('media lost for 10 s ends the call as an error, and says so', () async {
         final id = await connected();
         await eventually(() => app.peer.calls[id]!.media == MediaState.connected);
         mine.session.state(MediaState.disconnected);
         app.peer.calls[id]!.mediaSince = DateTime.now().subtract(const Duration(seconds: 11));
         await eventually(() => app.peer.calls[id]!.state == 'ended:error');
+        expect(callOutcome(app.peer.calls[id]!), 'Call ended: the connection was lost for 10 s');
       });
     });
 

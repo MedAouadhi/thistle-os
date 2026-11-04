@@ -1,7 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:tailnet_chat_core/tailnet_chat_core.dart' show Call, CameraState, transportWebrtc;
+import 'package:tailnet_chat_core/tailnet_chat_core.dart' show Call, CallFault, CameraState, transportWebrtc;
 
 import '../chat_model.dart';
 import '../notifier.dart' show CallWindow;
@@ -67,17 +67,23 @@ const remoteCameraTile = <CameraState, String>{
   CameraState.none: 'No camera',
 };
 
-/// What a finished call's state says, for the call screen; on WebRTC, a
-/// timeout is media that never connected.
-String callOutcome(String state, {String? transport}) => switch (state) {
+/// What a finished call says, for the call screen; on WebRTC, a timeout is
+/// media that never connected, and an error says why where this side knows.
+String callOutcome(Call call) => switch (call.state) {
   'ended:unreachable' => 'Not reachable now. Leave a voice message instead.',
   'declined:busy' => 'Busy: in another call',
   'declined:declined' => 'Declined',
   'declined:unsupported' => 'Their app cannot take calls',
-  'ended:timeout' when transport == transportWebrtc => 'Call ended: it could not connect',
+  'ended:timeout' when call.transport == transportWebrtc => 'Call ended: it could not connect',
   'ended:timeout' => 'Call ended: no sound for 10 s',
   'ended:cellular' => 'Call ended: a phone call took over',
-  'ended:error' => 'Call ended: the connection dropped',
+  'ended:error' => switch (call.fault) {
+    CallFault.mediaLost => 'Call ended: the connection was lost for 10 s',
+    CallFault.offTailnet => 'Call ended: its media left the tailnet',
+    CallFault.webrtcFailed => 'Call ended: the call could not start',
+    CallFault.theirs => 'Call ended: it failed on their side',
+    CallFault.connectionLost || null => 'Call ended: the connection dropped',
+  },
   _ => 'Call ended',
 };
 
@@ -161,7 +167,7 @@ class _CallPageState extends State<CallPage> {
         'ringing' when call.video => 'Video call',
         'ringing' => 'Calling you',
         'connected' => '${d.inMinutes}:${(d.inSeconds % 60).toString().padLeft(2, '0')}',
-        _ => callOutcome(state, transport: call.transport),
+        _ => callOutcome(call),
       };
       if (!call.live) _closeSoon();
       return Scaffold(

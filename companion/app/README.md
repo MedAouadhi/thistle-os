@@ -116,9 +116,14 @@ track and never renegotiates. There is no STUN or
 TURN server and no TCP candidate; the core sends and takes only UDP
 candidates in the tailnet's ranges, and the app reads the pair in use
 from WebRTC's statistics 2 s after it connects and every 5 s after,
-ending the call as an error if either end is outside the tailnet. A call
-whose media does not connect within 15 s of the answer ends as "it could
-not connect"; one disconnected for 10 s, as "the connection dropped".
+ending the call as an error if either end is outside the tailnet ("its
+media left the tailnet"). A call whose media does not connect within 15 s
+of the answer ends as "it could not connect"; one disconnected for 10 s,
+as "the connection was lost for 10 s"; one whose WebRTC does not start,
+as "the call could not start". The wire says `error` alone, so the other
+side reads "it failed on their side", and a chat connection that closes
+under a call, "the connection dropped". The log's `call ... ended: error,
+...` line says which (`CallFault`).
 With `--verbose` the log says the transport, each candidate's kind and
 whether it went, the pair in use, the cameras found, each camera change
 and the size it captures, the video's frames sent and received at the

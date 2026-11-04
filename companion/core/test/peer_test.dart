@@ -205,12 +205,13 @@ void main() {
     await sub2.cancel();
   });
 
-  test('a call whose connection drops ends at once, as an error', () async {
+  test('a call whose connection drops ends at once, as an error, the connection lost', () async {
     await befriend(alice, bob);
     final call = await alice.call('bob');
     await eventually(() => alice.calls[call]!.state == 'connected', what: 'the answer');
     await bob.stop();
     await eventually(() => alice.calls[call]!.state == 'ended:error', what: 'the call to end');
+    expect(alice.calls[call]!.fault, CallFault.connectionLost);
   });
 
   group('WebRTC calls between video-capable peers', () {
@@ -336,7 +337,7 @@ void main() {
       await eventually(() => bob.calls[call]!.state == 'ended:timeout', what: "bob's end");
     });
 
-    test('connected, no ws-opus frame is awaited; disconnected for 10 s, the call ends as error', () async {
+    test('connected, no ws-opus frame is awaited; disconnected for 10 s, the call ends as error, media lost', () async {
       final call = await webrtcCall();
       alice.setMediaState(call, MediaState.connected);
       alice.calls[call]!.lastFrame = DateTime.now().subtract(const Duration(seconds: 30));
@@ -346,6 +347,15 @@ void main() {
       alice.calls[call]!.mediaSince = DateTime.now().subtract(const Duration(seconds: 11));
       await eventually(() => alice.calls[call]!.state == 'ended:error', what: 'the end');
       await eventually(() => bob.calls[call]!.state == 'ended:error', what: "bob's end");
+      expect(alice.calls[call]!.fault, CallFault.mediaLost);
+      expect(bob.calls[call]!.fault, CallFault.theirs, reason: 'the wire says error alone');
+    });
+
+    test('a call ended as an error says why on the side that ended it', () async {
+      final call = await webrtcCall();
+      alice.endCall(call, reason: 'error', fault: CallFault.offTailnet);
+      await eventually(() => bob.calls[call]!.state == 'ended:error', what: "bob's end");
+      expect(alice.calls[call]!.fault, CallFault.offTailnet);
     });
   });
 

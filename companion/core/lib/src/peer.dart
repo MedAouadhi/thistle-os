@@ -74,6 +74,9 @@ class Call {
   /// says.
   CameraState? remoteCamera;
 
+  /// Why it ended as `error`, on this side: the wire says `error` alone.
+  CallFault? fault;
+
   /// A WebRTC call's media connection, as the app's engine reports it, and
   /// since when.
   MediaState media = MediaState.fresh;
@@ -102,6 +105,29 @@ class Call {
 
   /// Someone called, and it ended unanswered without the user declining.
   bool get missed => isMissedCall(mine: mine, answered: answered, state: state);
+}
+
+/// Why a call ended as `error`, kept on this side for the log and the call
+/// screen; `call_end` carries `error` alone. A WebRTC call that never
+/// connected ends as `timeout` instead.
+enum CallFault {
+  /// The chat connection the call lived on closed.
+  connectionLost('the chat connection closed'),
+
+  /// A WebRTC call's media, once connected, was disconnected for 10 s.
+  mediaLost('its media was disconnected for 10 s'),
+
+  /// A WebRTC call's media went over a path outside the tailnet.
+  offTailnet('its media went outside the tailnet'),
+
+  /// WebRTC did not start on this side.
+  webrtcFailed('WebRTC did not start'),
+
+  /// The other side ended it as `error`, for a reason of its own.
+  theirs('the other side ended it as an error');
+
+  const CallFault(this.why);
+  final String why;
 }
 
 /// One packet of the other side's call audio, as it arrived.
@@ -572,11 +598,18 @@ class ChatPeer {
   }
 
   /// Hang up (or cancel an offer); a call already over is left as it is.
-  void endCall(String id, {String reason = 'hangup'}) {
+  /// `fault` says why an `error` end was one, here only.
+  void endCall(String id, {String reason = 'hangup', CallFault? fault}) {
     final call = calls[id] ?? (throw ArgumentError('no call $id'));
     if (!call.live) return;
     _connected(call.peer)?.send({'type': 'call_end', 'call': id, 'reason': reason});
+    _ended(id, call, reason, fault);
+  }
+
+  void _ended(String id, Call call, String reason, CallFault? fault) {
+    call.fault = fault;
     call.state = 'ended:$reason';
+    if (fault != null) log?.call('[$name] ${callLabel(id)} ended: $reason, ${fault.why}');
     _emit(ChatEvent('call', key: call.peer, id: id, detail: call.state));
   }
 
@@ -856,10 +889,7 @@ class ChatPeer {
     // A call lives on its connection: with it gone, the call is over.
     if (wasOpen && _connected(conn.key) == null) {
       for (final MapEntry(key: id, value: call) in calls.entries) {
-        if (call.live && call.peer == conn.key) {
-          call.state = 'ended:error';
-          _emit(ChatEvent('call', key: call.peer, id: id, detail: call.state));
-        }
+        if (call.live && call.peer == conn.key) _ended(id, call, 'error', CallFault.connectionLost);
       }
     }
   }
@@ -1058,8 +1088,8 @@ class ChatPeer {
       case 'call_end':
         final call = calls[frame['call']];
         if (call != null && call.peer == conn.key && call.live) {
-          call.state = 'ended:${frame['reason']}';
-          _emit(ChatEvent('call', key: conn.key, id: frame['call'] as String, detail: call.state));
+          final reason = frame['reason'] as String;
+          _ended(frame['call'] as String, call, reason, reason == 'error' ? CallFault.theirs : null);
         }
       case 'error':
         _emit(ChatEvent('error', key: conn.key, detail: '${frame['code']} ${frame['what'] ?? ''}'));
@@ -1259,7 +1289,8 @@ class ChatPeer {
             mediaEverConnected: call.mediaEverConnected,
           )
           case final why?) {
-        endCall(id, reason: why);
+        // A WebRTC call's media lost is its only `error` end by time.
+        endCall(id, reason: why, fault: why == 'error' ? CallFault.mediaLost : null);
       }
     }
     final inCall = {

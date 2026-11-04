@@ -184,6 +184,9 @@ class FakeCallEngine implements CallEngine {
   CallPath? path;
   List<String> cameraList;
   bool picture = true;
+
+  /// Whether starting a session throws, as WebRTC that does not start.
+  bool fails = false;
   final List<FakeCallSession> sessions = [];
 
   /// Cameras opened before a call's media, while it rings.
@@ -209,6 +212,7 @@ class FakeCallEngine implements CallEngine {
     required void Function(MediaState state) onState,
     CameraPreview? camera,
   }) async {
+    if (fails) throw StateError('no peer connection');
     final s = FakeCallSession(this, offerer, send, onState)
       ..adopted = camera
       ..camera = camera?.camera;

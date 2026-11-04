@@ -257,6 +257,7 @@ class Talk {
     final c = id == null ? null : peer().calls[id];
     if (c == null || c.state != 'ringing') return;
     callId = id;
+    _audioProblem = null;
     if (!await _microphone()) {
       _audioProblem = 'The microphone is not allowed: calls need it.';
     }
@@ -375,6 +376,7 @@ class Talk {
   Future<void> _stopWebrtc() async {
     final webrtc = _webrtc;
     _webrtc = null;
+    _audioProblem ??= webrtc?.audioProblem; // kept for the ended call's screen
     await webrtc?.close();
   }
 
