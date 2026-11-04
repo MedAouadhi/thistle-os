@@ -66,6 +66,8 @@ mod codec {
         fn opus_encode(enc: *mut c_void, pcm: *const i16, frame: i32, data: *mut u8, max: i32) -> i32;
         fn opus_decode(dec: *mut c_void, data: *const u8, len: i32, pcm: *mut i16, frame: i32, fec: i32) -> i32;
         fn thistle_opus_scratch_used() -> usize;
+        fn thistle_opus_take(who: *const u8, holder: *mut *const u8) -> bool;
+        fn thistle_opus_give();
     }
 
     pub struct Codec {
@@ -73,8 +75,25 @@ mod codec {
         dec: *mut c_void,
     }
 
+    /// Opus is one user's at a time (its pseudostack is shared): a voice
+    /// message recording or playing gives it back within a frame or two of
+    /// seeing the call (rs_call_in_progress), so the call waits up to a
+    /// second for it.
+    fn take() -> bool {
+        for _ in 0..50 {
+            if unsafe { thistle_opus_take(b"a call\0".as_ptr(), std::ptr::null_mut()) } {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        false
+    }
+
     impl Codec {
         pub fn new() -> Option<Codec> {
+            if !take() {
+                return None;
+            }
             let enc = unsafe { thistle_opus_encoder_new(24_000) };
             let dec = unsafe { thistle_opus_decoder_new() };
             if enc.is_null() || dec.is_null() {
@@ -85,6 +104,7 @@ mod codec {
                     if !dec.is_null() {
                         thistle_opus_decoder_free(dec);
                     }
+                    thistle_opus_give();
                 }
                 return None;
             }
@@ -112,6 +132,7 @@ mod codec {
             unsafe {
                 thistle_opus_encoder_free(self.enc);
                 thistle_opus_decoder_free(self.dec);
+                thistle_opus_give();
             }
         }
     }

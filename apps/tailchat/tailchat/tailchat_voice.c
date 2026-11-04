@@ -107,6 +107,12 @@ static void record_task(void *arg)
     if (enc) opus_encoder_ctl(enc, OPUS_GET_LOOKAHEAD(&lookahead));
     while (err == ESP_OK && !atomic_load(&job->stop) && frames < FRAMES_MAX &&
            used + THISTLE_OPUS_MAX_PACKET <= PACKETS_MAX) {
+        /* A call that comes takes the audio and Opus: the recording is
+         * dropped. */
+        if (rs_call_in_progress()) {
+            err = ESP_ERR_INVALID_STATE;
+            break;
+        }
         err = a->record((uint8_t *)pcm, FRAME_BYTES);
         if (err != ESP_OK) break;
         int n = opus_encode(enc, pcm, FRAME_SAMPLES, packets + used, THISTLE_OPUS_MAX_PACKET);
@@ -124,7 +130,9 @@ static void record_task(void *arg)
     free(pcm);
 
     uint32_t ms = (uint32_t)(frames * FRAME_MS);
-    if (err != ESP_OK) {
+    if (err == ESP_ERR_INVALID_STATE) {
+        job->why = "A call came; the recording was dropped";
+    } else if (err != ESP_OK) {
         ESP_LOGW(TAG, "recording failed: %s", esp_err_to_name(err));
         job->why = "The microphone failed";
     } else if (ms < TAILCHAT_VOICE_MIN_MS) {
@@ -177,7 +185,9 @@ static void play_task(void *arg)
         size_t skip = info.pre_skip / 3;   /* 48 kHz samples to ours */
         size_t at = 0, filled = 0, played = 0;
         ESP_LOGI(TAG, "playing %s: %u ms", job->id, (unsigned)tailchat_ogg_ms(&info));
-        for (size_t i = 0; err == ESP_OK && i < info.count && !atomic_load(&job->stop); i++) {
+        /* A call that comes stops it. */
+        for (size_t i = 0; err == ESP_OK && i < info.count && !atomic_load(&job->stop) && !rs_call_in_progress();
+             i++) {
             int n = opus_decode(dec, packets + at, lens[i], pcm + filled, FRAME_SAMPLES, 0);
             at += lens[i];
             if (n <= 0) continue;

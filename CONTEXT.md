@@ -114,14 +114,10 @@ _Avoid_: credential permission, secret request
 ### Background work
 
 **Background check**:
-A short, periodic piece of work a kernel module registers to look for news while nothing in front asks for it, such as fetching the WhatsApp messages that came in since the last one. It runs at an interval, only with a network up, may wake the device from light sleep, and finishes on its own; it is paused while the module's app holds a live connection.
+A short, periodic piece of work a kernel module registers to look for news while nothing in front asks for it, such as collecting the Tailnet chat messages waiting for the device since the last one. It runs at an interval, only with a network up, may wake the device from light sleep, and finishes on its own; it is paused while the module's app holds a live connection.
 _Avoid_: poll, sync, background job, push
 
 ### Messaging
-
-**Linked device**:
-A device that a phone's WhatsApp account has linked as one of its companions, by a QR code or a pairing code, and that then sends and receives as that account. It is identified by keys it made at linking, not by a credential, and stays linked until the phone unlinks it or it is gone too long.
-_Avoid_: WhatsApp account, session, login
 
 **Tailnet chat**:
 Messaging, voice and video between installs that speak its protocol over the user's tailnet: the T-Deck's own app, and the companion app on Linux and phones. Peers connect to each other directly; there is no server. A message to a peer that is away waits with its sender until it is delivered.

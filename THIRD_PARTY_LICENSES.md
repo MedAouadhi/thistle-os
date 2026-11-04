@@ -872,4 +872,4 @@ All dependencies are compatible with the ThistleOS BSD 3-Clause license:
 | MPL-2.0 (file-level copyleft) | Yes, used unmodified | dbus (companion app only) |
 | SIL OFL 1.1 | Yes, not sold alone | Fraunces, Instrument Sans, JetBrains Mono (companion app, unmodified); Noto Emoji (the Chat app's emoji, cut to bitmaps) |
 
-No GPL, LGPL or AGPL code is in the firmware's default build (the optional WhatsApp part, `components/whatsapp/`, is AGPL and built only on request; ADR-0013). The one copyleft dependency elsewhere is the companion app's `dbus`, MPL-2.0, above.
+No GPL, LGPL or AGPL code is in the firmware. The one copyleft dependency elsewhere is the companion app's `dbus`, MPL-2.0, above.
