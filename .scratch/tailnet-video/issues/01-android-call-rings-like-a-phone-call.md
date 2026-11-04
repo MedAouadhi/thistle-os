@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** in-review (the on-phone run is the user's)
 
 - [x] A call window of its own, apart from the main one, shows over the lock screen and turns the screen on, on the one Flutter engine, and shows only the call screen; the main window stays off the lock screen
 - [x] Answer and Decline work from the lock screen without unlocking; after the call the window finishes and a locked phone is back at the lock screen, with the chats reachable only by unlocking

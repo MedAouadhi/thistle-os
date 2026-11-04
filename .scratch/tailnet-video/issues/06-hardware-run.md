@@ -4,7 +4,7 @@
 
 **Blocked by:** 05
 
-**Status:** ready-for-agent
+**Status:** ready-for-human (the hardware run is the user's)
 
 - [ ] Linux to Android and back, and Linux to Linux, over WiFi directly and through DERP, and with mobile data on the phone: video both ways, the camera switched mid-call
 - [ ] A laptop without a camera; camera permission refused on the phone

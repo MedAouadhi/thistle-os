@@ -4,7 +4,7 @@
 
 **Blocked by:** 01, 04
 
-**Status:** ready-for-agent
+**Status:** in-review (the on-phone run is the user's)
 
 - [ ] The call media engine runs on Android; a call between the Android app and the Linux app is WebRTC, voice and video both ways
 - [x] Camera permission asked on first use; refused, `call_camera` `none` and the call continues
