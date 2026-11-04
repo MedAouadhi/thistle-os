@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:tailnet_chat_core/policy.dart' show candidateAdmitted, tailnetOnlySdp;
 import 'package:tailnet_chat_core/protocol.dart';
 import 'package:test/test.dart';
 
@@ -99,6 +100,30 @@ void main() {
     test('members in another order, and unknown ones, still check', () {
       final r = checkFrame('{"on": false, "future": [1], "type": "typing"}');
       expect(r.frame!['on'], false);
+    });
+  });
+
+  group('the WebRTC vectors', () {
+    final v = vector('webrtc.json');
+
+    test('every valid frame checks, and every invalid one draws its error', () {
+      for (final f in (v['valid'] as List).cast<Map<String, dynamic>>()) {
+        final r = checkFrame(f['text'] as String);
+        expect(r.error, isNull, reason: f['name'] as String);
+      }
+      for (final f in (v['invalid'] as List).cast<Map<String, dynamic>>()) {
+        final r = checkFrame(f['text'] as String);
+        final want = f['error'] as Map<String, dynamic>;
+        expect(r.error?['code'], want['code'], reason: f['name'] as String);
+        expect(r.error?['what'], want['what'], reason: f['name'] as String);
+      }
+    });
+
+    test('each candidate is admitted or not as the vector says, and the SDP keeps the tailnet\'s', () {
+      for (final c in (v['candidates'] as List).cast<Map<String, dynamic>>()) {
+        expect(candidateAdmitted(c['candidate'] as String), c['admitted'], reason: c['candidate'] as String);
+      }
+      expect(tailnetOnlySdp(v['sdp']['written'] as String), v['sdp']['tailnet_only']);
     });
   });
 

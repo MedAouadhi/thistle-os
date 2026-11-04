@@ -131,8 +131,38 @@ class Target:
         only accept `ignore`."""
         return self.call({"cmd": "set", "call_policy": policy})
 
-    def place_call(self, to) -> str:
-        return self.call({"cmd": "call", "to": list(to) if isinstance(to, tuple) else to})
+    def place_call(self, to, video: bool = False) -> str:
+        command = {"cmd": "call", "to": list(to) if isinstance(to, tuple) else to}
+        if video:
+            command["video"] = True
+        return self.call(command)
+
+    # WebRTC calls (protocol section 4.11; tailnet-video ticket 03). What the
+    # target's WebRTC would do (its SDP, its candidates, its camera, its
+    # connection's state) goes through the control protocol.
+
+    def set_webrtc(self, on: bool):
+        """Announce `call:webrtc` in hellos from now on, or not. A target
+        that is not video-capable (the device) takes False and raises
+        Skipped for True."""
+        return self.call({"cmd": "set", "webrtc": on})
+
+    def rtc(self, call: str, sdp: dict | None = None, candidate: dict | None = None) -> bool:
+        """The target's WebRTC gave this SDP or candidate: whether it was sent."""
+        command = {"cmd": "rtc", "call": call}
+        command.update({"sdp": sdp} if sdp is not None else {"candidate": candidate})
+        return self.call(command)
+
+    def rtc_received(self, call: str) -> list:
+        """What the target took for its WebRTC, in order: [{"sdp"} or {"candidate"}]."""
+        return self.call({"cmd": "rtc_received", "call": call})
+
+    def camera(self, call: str, camera: str) -> bool:
+        return self.call({"cmd": "camera", "call": call, "camera": camera})
+
+    def media(self, call: str, state: str):
+        """The target's WebRTC connection is `connected`, `disconnected` or `failed`."""
+        return self.call({"cmd": "media", "call": call, "state": state})
 
     def calls(self) -> dict:
         return self.call({"cmd": "calls"})
@@ -998,6 +1028,197 @@ def call_unreachable(target: Target) -> None:
 VOICE_SCENARIOS = [voice_message_from_target, voice_message_broken_and_restarted]
 
 
+# -- WebRTC calls between video-capable chat peers (section 4.11) -------------------
+# (tailnet-video ticket 03.) The target's WebRTC is played through the control
+# protocol: what it would send (rtc, camera), what it takes (rtc_received)
+# and its connection's state (media). The other side is a RawConn.
+
+WEBRTC_CAPS = list(protocol.CAPS_V1) + [protocol.CAP_WEBRTC]
+
+
+def _webrtc(name: str) -> dict:
+    return next(json.loads(v["text"]) for v in _vector("webrtc.json")["valid"] if v["name"] == name)
+
+
+def _candidate(index: int) -> dict:
+    return {"candidate": _vector("webrtc.json")["candidates"][index]["candidate"], "sdpMid": "0", "sdpMLineIndex": 0}
+
+
+TAILNET_CANDIDATE, LAN_CANDIDATE = 0, 2
+
+
+def _webrtc_call(target: Target, name: str) -> tuple[RawConn, str, float]:
+    """A video-capable contact calls the target over WebRTC, and its user
+    answers: (conn, call id, when the answer came)."""
+    target.set_call_policy("ignore")
+    target.set_webrtc(True)
+    conn = RawConn(target.address, name=name, caps=WEBRTC_CAPS).handshake()
+    assert protocol.CAP_WEBRTC in conn.their["caps"], conn.their["caps"]
+    _become_contact(target, conn)
+    call = new_id()
+    conn.send({"type": "call_offer", "call": call, "transports": ["webrtc", "ws-opus"], "stream": 5, "video": False})
+    eventually(lambda: _call_state(target, call) == "ringing", what="the target to ring")
+    target.answer_call(call)
+    answer = conn.expect("call_answer", call=call)
+    answered = time.monotonic()
+    assert answer.get("transport") == "webrtc", answer
+    eventually(lambda: _call_state(target, call) == "connected", what="the call to connect")
+    return conn, call, answered
+
+
+def webrtc_offered_by_capability(target: Target) -> None:
+    """The target offers `webrtc` first, with `video`, only when both hellos
+    announce call:webrtc; else `ws-opus` alone, with no `video`."""
+    target.set_webrtc(True)
+    for caps, want in ((WEBRTC_CAPS, ["webrtc", "ws-opus"]), (list(protocol.CAPS_V1), ["ws-opus"])):
+        conn = RawConn(target.address, name="callee-" + want[0], caps=caps).handshake()
+        _become_contact(target, conn)
+        call = target.place_call(conn.key_hex, video=True)
+        offer = conn.expect("call_offer", call=call)
+        assert offer["transports"] == want, (caps, offer)
+        if want[0] == "webrtc":
+            assert offer.get("video") is True, offer
+        else:
+            assert "video" not in offer, offer
+        target.end_call(call)
+        conn.close()
+    target.set_webrtc(False)
+    conn = RawConn(target.address, name="callee-plain", caps=WEBRTC_CAPS).handshake()
+    assert protocol.CAP_WEBRTC not in conn.their["caps"], conn.their["caps"]
+    _become_contact(target, conn)
+    call = target.place_call(conn.key_hex)
+    assert conn.expect("call_offer", call=call)["transports"] == ["ws-opus"]
+    target.end_call(call)
+    conn.close()
+
+
+def webrtc_unannounced_answers_ws_opus(target: Target) -> None:
+    """A target without call:webrtc (the T-Deck) announces none, and answers
+    an offer of both with `ws-opus`."""
+    target.set_webrtc(False)
+    target.set_call_policy("ignore")
+    conn = RawConn(target.address, name="video-caller", caps=WEBRTC_CAPS).handshake()
+    assert protocol.CAP_WEBRTC not in conn.their["caps"], conn.their["caps"]
+    _become_contact(target, conn)
+    call, stream = new_id(), 11
+    conn.send({"type": "call_offer", "call": call, "transports": ["webrtc", "ws-opus"], "stream": stream, "video": True})
+    eventually(lambda: _call_state(target, call) == "ringing", what="the target to ring")
+    target.answer_call(call)
+    answer = conn.expect("call_answer", call=call)
+    assert answer.get("transport") == "ws-opus", answer
+    conn.send({"type": "call_end", "call": call, "reason": "hangup"})
+    eventually(lambda: _call_state(target, call) == "ended:hangup", what="the call to end")
+    conn.close()
+
+
+def webrtc_picked_by_target(target: Target) -> None:
+    """A video-capable target picks `webrtc` whenever it is offered, first or not."""
+    target.set_call_policy("ignore")
+    target.set_webrtc(True)
+    conn = RawConn(target.address, name="caller", caps=WEBRTC_CAPS).handshake()
+    _become_contact(target, conn)
+    call = new_id()
+    conn.send({"type": "call_offer", "call": call, "transports": ["ws-opus", "webrtc"], "stream": 5, "video": True})
+    eventually(lambda: _call_state(target, call) == "ringing", what="the target to ring")
+    assert target.calls()[call].get("video") is True, target.calls()[call]
+    target.answer_call(call)
+    assert conn.expect("call_answer", call=call).get("transport") == "webrtc"
+    conn.send({"type": "call_end", "call": call, "reason": "hangup"})
+    conn.close()
+
+
+def webrtc_signalling_relayed(target: Target) -> None:
+    """SDP and candidates go both ways as `call_rtc`; a candidate outside the
+    tailnet is neither sent nor taken, in a frame or inside an SDP."""
+    conn, call, _ = _webrtc_call(target, "rtc")
+    v = _vector("webrtc.json")
+    conn.send({"type": "call_rtc", "call": call, "sdp": {"type": "offer", "sdp": v["sdp"]["written"]}})
+    conn.send({"type": "call_rtc", "call": call, "candidate": _candidate(LAN_CANDIDATE)})
+    conn.send({"type": "call_rtc", "call": call, "candidate": _candidate(TAILNET_CANDIDATE)})
+    conn.send({"type": "call_rtc", "call": new_id(), "candidate": _candidate(TAILNET_CANDIDATE)})  # unknown call
+    want = [{"sdp": {"type": "offer", "sdp": v["sdp"]["tailnet_only"]}}, {"candidate": _candidate(TAILNET_CANDIDATE)}]
+    got = eventually(lambda: (lambda r: r if len(r) >= 2 else None)(target.rtc_received(call)),
+                     what="the SDP and the candidate to reach the target's WebRTC")
+    time.sleep(0.3)
+    assert target.rtc_received(call) == want, target.rtc_received(call)
+    assert got[:2] == want
+    assert target.rtc(call, sdp={"type": "answer", "sdp": v["sdp"]["written"]}) is True
+    sdp = conn.expect("call_rtc", call=call)
+    assert sdp.get("sdp") == {"type": "answer", "sdp": v["sdp"]["tailnet_only"]}, sdp
+    assert target.rtc(call, candidate=_candidate(LAN_CANDIDATE)) is False, "a LAN candidate was sent"
+    assert target.rtc(call, candidate=_candidate(TAILNET_CANDIDATE)) is True
+    cand = conn.expect("call_rtc", call=call)
+    assert cand.get("candidate") == _candidate(TAILNET_CANDIDATE), cand
+    assert not [f for f in conn.drain(0.5) if isinstance(f, dict) and f["type"] in ("call_rtc", "error")]
+    conn.send({"type": "call_end", "call": call, "reason": "hangup"})
+    conn.close()
+
+
+def webrtc_camera_states(target: Target) -> None:
+    """`call_camera` both ways: the target's goes out, and the other side's
+    on, off, paused and none are what the target shows."""
+    conn, call, _ = _webrtc_call(target, "camera")
+    assert target.camera(call, "off") is True
+    assert conn.expect("call_camera", call=call)["camera"] == "off"
+    for state in protocol.CAMERA_STATES:
+        conn.send({"type": "call_camera", "call": call, "camera": state})
+        eventually(lambda: target.calls()[call].get("camera") == state, what=f"the camera shown as {state}")
+    conn.send({"type": "call_camera", "call": new_id(), "camera": "on"})  # unknown call: ignored
+    assert not [f for f in conn.drain(0.5) if isinstance(f, dict) and f["type"] == "error"]
+    assert target.calls()[call]["camera"] == "none"
+    conn.send({"type": "call_end", "call": call, "reason": "hangup"})
+    conn.close()
+
+
+def webrtc_never_connected(target: Target) -> None:
+    """A WebRTC call whose media is not connected 15 s after the answer is
+    ended by the target with `call_end` `timeout`."""
+    conn, call, answered = _webrtc_call(target, "unconnected")
+    end = conn.expect("call_end", call=call, timeout=20)
+    waited = time.monotonic() - answered
+    assert end["reason"] == "timeout", end
+    assert 14.5 <= waited <= 18.5, f"ended after {waited:.1f} s, not 15"
+    eventually(lambda: _call_state(target, call) == "ended:timeout", what="the call to end")
+    conn.close()
+
+
+def webrtc_disconnected(target: Target) -> None:
+    """Connected, a WebRTC call sends no frames of ours and is not ended for
+    silence; disconnected for 10 s, it is ended with `call_end` `error`."""
+    conn, call, _ = _webrtc_call(target, "dropped")
+    target.media(call, "connected")
+    quiet = [f for f in conn.drain(11.5) if isinstance(f, dict) and f["type"] == "call_end"]
+    assert not quiet, f"a connected WebRTC call was ended: {quiet}"
+    target.media(call, "disconnected")
+    t0 = time.monotonic()
+    end = conn.expect("call_end", call=call, timeout=15)
+    waited = time.monotonic() - t0
+    assert end["reason"] == "error", end
+    assert 9.5 <= waited <= 13.5, f"ended after {waited:.1f} s, not 10"
+    eventually(lambda: _call_state(target, call) == "ended:error", what="the call to end")
+    conn.close()
+
+
+def webrtc_busy(target: Target) -> None:
+    """Another call during a WebRTC call gets `busy`; the WebRTC call goes on."""
+    first, call, _ = _webrtc_call(target, "first")
+    target.media(call, "connected")
+    second = RawConn(target.address, name="second", caps=WEBRTC_CAPS).handshake()
+    _become_contact(target, second)
+    other = new_id()
+    second.send({"type": "call_offer", "call": other, "transports": ["webrtc", "ws-opus"], "stream": 7, "video": True})
+    assert second.expect("call_answer", call=other).get("decline") == "busy"
+    assert _call_state(target, call) == "connected", "the WebRTC call was disturbed"
+    first.send({"type": "call_end", "call": call, "reason": "hangup"})
+    for c in (first, second):
+        c.close()
+
+
+WEBRTC_SCENARIOS = [webrtc_offered_by_capability, webrtc_unannounced_answers_ws_opus, webrtc_picked_by_target,
+                    webrtc_signalling_relayed, webrtc_camera_states, webrtc_never_connected, webrtc_disconnected,
+                    webrtc_busy]
+
+
 # -- sharing the tailnet's peer list (ticket 14) ---------------------------------
 
 PEERS = [{"name": "homelab", "addrs": ["100.64.0.2"]},
@@ -1086,7 +1307,7 @@ PEERS_SCENARIOS = [peers_shared_with_a_contact, peers_not_shared_with_a_stranger
                    peers_unannounced_is_unsupported, peers_kept_to_the_limits, peers_asked_by_target]
 CALL_SCENARIOS = [call_answered, call_placed_by_target, call_declined, call_busy, call_ended_by_cellular,
                   call_far_end_silent, call_unreachable]
-SCENARIOS += VOICE_SCENARIOS + CALL_SCENARIOS + PEERS_SCENARIOS
+SCENARIOS += VOICE_SCENARIOS + CALL_SCENARIOS + PEERS_SCENARIOS + WEBRTC_SCENARIOS
 
 
 def run(make_target, scenarios=None, out=None, skipped: list | None = None) -> int:

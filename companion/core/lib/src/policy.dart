@@ -6,7 +6,8 @@ library;
 import 'dart:convert';
 import 'dart:math';
 
-import 'protocol.dart' show SharedPeer, admitted, inTailnet, ipOf, maxNameBytes, maxPeerAddrs, maxPeers, typingLapse;
+import 'protocol.dart'
+    show SharedPeer, admitted, capWebrtc, capWsOpus, inTailnet, ipOf, maxNameBytes, maxPeerAddrs, maxPeers, typingLapse;
 
 /// A chat peer's address to dial.
 class PeerAddress {
@@ -145,6 +146,22 @@ class CallAnswer {
   final bool ringing;
 }
 
+/// The transports a call offer lists, best first (protocol 4.8): `webrtc`
+/// when both hellos announce `call:webrtc`, then `ws-opus` when both
+/// announce `call:ws-opus`. Empty: no call is possible.
+List<String> offerTransports(List<String> mine, List<String> theirs) => [
+  if (mayUse(capWebrtc, mine, theirs)) 'webrtc',
+  if (mayUse(capWsOpus, mine, theirs)) 'ws-opus',
+];
+
+/// The transport an answer picks from an offer: `webrtc` whenever it is
+/// offered and the callee announced it, else `ws-opus`; null if neither.
+String? pickTransport(List<String> offered, List<String> caps) {
+  if (offered.contains('webrtc') && caps.contains(capWebrtc)) return 'webrtc';
+  if (offered.contains('ws-opus') && caps.contains(capWsOpus)) return 'ws-opus';
+  return null;
+}
+
 /// How to answer a call offer: one call at a time, contacts only, a
 /// transport in common.
 CallAnswer answerOffer({
@@ -156,11 +173,10 @@ CallAnswer answerOffer({
 }) {
   if (!isContact) return const CallAnswer.refuse('declined');
   if (busy) return const CallAnswer.refuse('busy');
-  if (!transports.contains('ws-opus') || !caps.contains('call:ws-opus')) {
-    return const CallAnswer.refuse('unsupported');
-  }
+  final pick = pickTransport(transports, caps);
+  if (pick == null) return const CallAnswer.refuse('unsupported');
   return switch (policy) {
-    CallPolicy.answer => const CallAnswer.pick('ws-opus'),
+    CallPolicy.answer => CallAnswer.pick(pick),
     CallPolicy.decline => const CallAnswer.refuse('declined'),
     CallPolicy.busy => const CallAnswer.refuse('busy'),
     CallPolicy.ignore => const CallAnswer.ring(),
@@ -173,18 +189,68 @@ const ringTimeout = Duration(seconds: 45);
 /// A connected call ends after this long without a frame (protocol 4.8).
 const silenceTimeout = Duration(seconds: 10);
 
+/// A WebRTC call whose media has not connected this long after the answer
+/// ends as `timeout`.
+const mediaConnectTimeout = Duration(seconds: 15);
+
+/// A WebRTC call whose media has been disconnected this long ends as `error`.
+const mediaLostTimeout = Duration(seconds: 10);
+
 /// The reason a call ends by itself now, or null: `since` is when it
 /// entered `state`, `lastFrame` when the other side's audio last came.
+/// A WebRTC call carries no frames of ours: `media` is its connection's
+/// state (`new`, `connected`, `disconnected`, `failed`), `mediaSince` when
+/// that last changed, and `mediaEverConnected` whether it ever connected.
 String? callEndDue({
   required String state,
   required DateTime since,
   required DateTime lastFrame,
   required DateTime now,
+  String? transport,
+  String media = 'new',
+  DateTime? mediaSince,
+  bool mediaEverConnected = false,
 }) => switch (state) {
+  'connected' when transport == 'webrtc' =>
+    !mediaEverConnected
+        ? (now.difference(since) > mediaConnectTimeout ? 'timeout' : null)
+        : (media != 'connected' && now.difference(mediaSince ?? since) > mediaLostTimeout ? 'error' : null),
   'connected' when now.difference(lastFrame) > silenceTimeout => 'timeout',
   'offered' || 'ringing' when now.difference(since) > ringTimeout => 'timeout',
   _ => null,
 };
+
+// -- WebRTC's candidates: the tailnet's alone (protocol 4.11) ----------------------
+
+/// Whether an ICE candidate may be sent or taken: UDP, from an address in
+/// the tailnet's ranges. `candidate` is the candidate's line, with or
+/// without SDP's `a=`; a host name (mDNS) is not an address.
+bool candidateAdmitted(String candidate) {
+  var line = candidate.trim();
+  if (line.startsWith('a=')) line = line.substring(2);
+  if (!line.startsWith('candidate:')) return false;
+  final f = line.split(RegExp(r'\s+'));
+  if (f.length < 8 || f[2].toLowerCase() != 'udp') return false;
+  final ip = ipOf(f[4]);
+  return ip != null && inTailnet(ip.address);
+}
+
+/// A candidate's kind, for a log: its type, its protocol, and whether its
+/// address is the tailnet's (`host/udp tailnet`, `srflx/udp other`).
+String candidateKind(String candidate) {
+  final f = candidate.trim().replaceFirst(RegExp('^a='), '').split(RegExp(r'\s+'));
+  final typ = f.indexOf('typ');
+  final ip = f.length > 4 ? ipOf(f[4]) : null;
+  final where = ip != null && inTailnet(ip.address) ? 'tailnet' : 'other';
+  return '${typ >= 0 && typ + 1 < f.length ? f[typ + 1] : '?'}/${f.length > 2 ? f[2].toLowerCase() : '?'} $where';
+}
+
+/// An SDP with each `a=candidate` line outside the tailnet taken out, the
+/// rest as it was.
+String tailnetOnlySdp(String sdp) => [
+  for (final m in RegExp(r'[^\n]*\n|[^\n]+$').allMatches(sdp))
+    if (!m[0]!.startsWith('a=candidate:') || candidateAdmitted(m[0]!)) m[0]!,
+].join();
 
 /// A call to show as missed: someone called, and it ended without being
 /// answered and without the user turning it down.

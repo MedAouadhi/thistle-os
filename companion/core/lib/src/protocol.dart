@@ -19,6 +19,11 @@ const String wsPath = '/tailnet-chat/1';
 
 const List<String> capsV1 = ['text', 'receipts', 'typing', 'reply', 'react', 'voice-message', 'call:ws-opus', 'peers'];
 
+/// Calls over `ws-opus`, and over WebRTC between video-capable chat peers
+/// (protocol section 4.11).
+const String capWsOpus = 'call:ws-opus';
+const String capWebrtc = 'call:webrtc';
+
 const int kindVoice = 0x01;
 const int kindCallAudio = 0x02;
 const int maxChunk = 4096;
@@ -272,6 +277,16 @@ bool _peer(Object? v) =>
     _str(maxNameBytes, empty: false)(v['name']) &&
     _list(_str(64, empty: false), 1, maxPeerAddrs)(v['addrs']);
 bool _bool(Object? v) => v is bool;
+bool _sdp(Object? v) =>
+    v is Map && _oneOf(['offer', 'answer'])(v['type']) && _str(maxJsonFrame, empty: false)(v['sdp']);
+bool _candidate(Object? v) =>
+    v is Map &&
+    _str(1024, empty: false)(v['candidate']) &&
+    (v['sdpMid'] == null || _str(64)(v['sdpMid'])) &&
+    (v['sdpMLineIndex'] == null || _int(0, 65535)(v['sdpMLineIndex']));
+
+/// What `call_camera` says of one side's camera (protocol section 4.11).
+const List<String> cameraStates = ['on', 'off', 'paused', 'none'];
 bool _anyString(Object? v) => v is String;
 
 final _id = _hex(32);
@@ -314,9 +329,11 @@ final Map<String, (Map<String, _Ok>, Map<String, _Ok>)> _schema = {
     },
     {'reply_to': _id},
   ),
-  'call_offer': ({'call': _id, 'transports': _list(_str(32, empty: false), 1, 8), 'stream': _u32}, {}),
+  'call_offer': ({'call': _id, 'transports': _list(_str(32, empty: false), 1, 8), 'stream': _u32}, {'video': _bool}),
   'call_answer': ({'call': _id}, {'transport': _str(32, empty: false), 'decline': _str(32, empty: false)}),
   'call_end': ({'call': _id, 'reason': _str(32, empty: false)}, {}),
+  'call_rtc': ({'call': _id}, {'sdp': _sdp, 'candidate': _candidate}),
+  'call_camera': ({'call': _id, 'camera': _oneOf(cameraStates)}, {}),
   'peers_ask': ({}, {}),
   'peers': ({'peers': _list(_peer, 0, maxPeers)}, {}),
   'error': ({'code': _str(32, empty: false)}, {'what': _str(256), 'id': _id, 'detail': _str(512)}),
@@ -379,6 +396,9 @@ Checked checkFrame(String text) {
   }
   if (kind == 'call_answer' && frame.containsKey('transport') == frame.containsKey('decline')) {
     return Checked.refused(errorFrame('bad_request', what: kind, detail: 'transport or decline'));
+  }
+  if (kind == 'call_rtc' && frame.containsKey('sdp') == frame.containsKey('candidate')) {
+    return Checked.refused(errorFrame('bad_request', what: kind, detail: 'sdp or candidate'));
   }
   return Checked.ok(frame);
 }

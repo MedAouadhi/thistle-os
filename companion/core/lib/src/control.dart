@@ -7,7 +7,7 @@ import 'dart:io';
 
 import 'peer.dart';
 import 'policy.dart';
-import 'protocol.dart' show SharedPeer;
+import 'protocol.dart' show SharedPeer, capWebrtc;
 import 'store.dart';
 
 Map<String, Object?> identityJson(ChatPeer peer) => {
@@ -34,6 +34,15 @@ Map<String, Object?> _contactJson(Contact c) => {
   'accepted_by_them': c.acceptedByThem,
   'declined_by_them': c.declinedByThem,
 };
+
+final Expando<Map<String, List<Map<String, Object?>>>> _rtcIn = Expando();
+
+/// Keep the other side's SDP and candidates on each WebRTC call, for
+/// `rtc_received`: the headless core has no engine to take them.
+void keepRtc(ChatPeer peer) {
+  final kept = _rtcIn[peer] = {};
+  peer.callRtc.listen((r) => (kept[r.call] ??= []).add(r.sdp != null ? {'sdp': r.sdp} : {'candidate': r.candidate}));
+}
 
 /// One control command; its result, JSON-able.
 Future<Object?> control(ChatPeer peer, Map<String, dynamic> command) async {
@@ -92,6 +101,9 @@ Future<Object?> control(ChatPeer peer, Map<String, dynamic> command) async {
       if (command.containsKey('read_receipts')) peer.readReceipts = command['read_receipts'] as bool;
       if (command.containsKey('call_policy'))
         peer.callPolicy = CallPolicy.values.byName(command['call_policy'] as String);
+      if (command.containsKey('webrtc')) {
+        peer.caps = [...peer.caps.where((c) => c != capWebrtc), if (command['webrtc'] == true) capWebrtc];
+      }
       return true;
     case 'messages':
       return peer.messages(_who(to)).map(messageJson).toList();
@@ -103,7 +115,7 @@ Future<Object?> control(ChatPeer peer, Map<String, dynamic> command) async {
       await peer.flush(to == null ? null : _who(to));
       return true;
     case 'call':
-      return peer.call(_who(to));
+      return peer.call(_who(to), video: command['video'] == true);
     case 'calls':
       return {
         for (final MapEntry(:key, :value) in peer.calls.entries)
@@ -113,8 +125,24 @@ Future<Object?> control(ChatPeer peer, Map<String, dynamic> command) async {
             'frames': value.frames,
             'mine': value.mine,
             'missed': value.missed,
+            'transport': value.transport,
+            'video': value.video,
+            'camera': value.remoteCamera,
           },
       };
+    case 'rtc':
+      return peer.sendRtc(
+        command['call'] as String,
+        sdp: (command['sdp'] as Map?)?.cast<String, Object?>(),
+        candidate: (command['candidate'] as Map?)?.cast<String, Object?>(),
+      );
+    case 'rtc_received':
+      return _rtcIn[peer]?[command['call']] ?? const [];
+    case 'camera':
+      return peer.setCamera(command['call'] as String, command['camera'] as String);
+    case 'media':
+      peer.setMediaState(command['call'] as String, command['state'] as String);
+      return true;
     case 'talk':
       return true; // a connected call streams its microphone (the headless core's --mic) by itself
     case 'answer_call':

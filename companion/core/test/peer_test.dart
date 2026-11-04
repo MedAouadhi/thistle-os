@@ -212,6 +212,85 @@ void main() {
     await eventually(() => alice.calls[call]!.state == 'ended:error', what: 'the call to end');
   });
 
+  group('WebRTC calls between video-capable peers', () {
+    const video = [...capsV1, capWebrtc];
+    final v = vector('webrtc.json');
+    Map<String, Object?> candidate(int i) => {
+      'candidate': (v['candidates'] as List)[i]['candidate'],
+      'sdpMid': '0',
+      'sdpMLineIndex': 0,
+    };
+    final sdp = v['sdp'] as Map<String, dynamic>;
+
+    Future<String> webrtcCall({bool camera = false}) async {
+      await alice.stop();
+      await bob.stop();
+      alice = await startPeer('alice', caps: video);
+      bob = await startPeer('bob', caps: video);
+      await befriend(alice, bob);
+      final call = await alice.call('bob', video: camera);
+      await eventually(() => alice.calls[call]!.state == 'connected', what: 'the answer');
+      await eventually(() => bob.calls[call]?.state == 'connected', what: "bob's side");
+      return call;
+    }
+
+    test('the call runs on webrtc, with the offer\'s video, and SDP and tailnet candidates go both ways', () async {
+      final call = await webrtcCall(camera: true);
+      expect(alice.calls[call]!.transport, 'webrtc');
+      expect(bob.calls[call]!.transport, 'webrtc');
+      expect(bob.calls[call]!.video, isTrue);
+      final atBob = <CallRtc>[], atAlice = <CallRtc>[];
+      final s1 = bob.callRtc.listen(atBob.add), s2 = alice.callRtc.listen(atAlice.add);
+      expect(alice.sendRtc(call, sdp: {'type': 'offer', 'sdp': sdp['written']}), isTrue);
+      expect(bob.sendRtc(call, candidate: candidate(2)), isFalse, reason: 'a LAN candidate is not sent');
+      expect(bob.sendRtc(call, candidate: candidate(0)), isTrue);
+      await eventually(() => atBob.isNotEmpty && atAlice.isNotEmpty, what: 'the signalling');
+      expect(atBob.single.call, call);
+      expect(atBob.single.sdp, {'type': 'offer', 'sdp': sdp['tailnet_only']});
+      expect(atAlice.single.candidate, candidate(0));
+      await s1.cancel();
+      await s2.cancel();
+    });
+
+    test("each side's camera state reaches the other, for its tile", () async {
+      final call = await webrtcCall();
+      expect(bob.setCamera(call, 'paused'), isTrue);
+      await eventually(() => alice.calls[call]!.remoteCamera == 'paused', what: 'the camera');
+      alice.setCamera(call, 'none');
+      await eventually(() => bob.calls[call]!.remoteCamera == 'none', what: 'the camera');
+    });
+
+    test('a peer without call:webrtc (the T-Deck) is offered ws-opus alone and takes it', () async {
+      await alice.stop();
+      alice = await startPeer('alice', caps: video);
+      await befriend(alice, bob);
+      final call = await alice.call('bob', video: true);
+      await eventually(() => alice.calls[call]!.state == 'connected', what: 'the answer');
+      expect(alice.calls[call]!.transport, 'ws-opus');
+      expect(bob.calls[call]!.transports, ['ws-opus']);
+      expect(bob.calls[call]!.video, isFalse);
+    });
+
+    test('media never connected 15 s after the answer ends the call as timeout, on both sides', () async {
+      final call = await webrtcCall();
+      alice.calls[call]!.since = DateTime.now().subtract(const Duration(seconds: 16));
+      await eventually(() => alice.calls[call]!.state == 'ended:timeout', what: 'the end');
+      await eventually(() => bob.calls[call]!.state == 'ended:timeout', what: "bob's end");
+    });
+
+    test('connected, no ws-opus frame is awaited; disconnected for 10 s, the call ends as error', () async {
+      final call = await webrtcCall();
+      alice.setMediaState(call, 'connected');
+      alice.calls[call]!.lastFrame = DateTime.now().subtract(const Duration(seconds: 30));
+      await Future<void>.delayed(const Duration(milliseconds: 1500));
+      expect(alice.calls[call]!.state, 'connected');
+      alice.setMediaState(call, 'disconnected');
+      alice.calls[call]!.mediaSince = DateTime.now().subtract(const Duration(seconds: 11));
+      await eventually(() => alice.calls[call]!.state == 'ended:error', what: 'the end');
+      await eventually(() => bob.calls[call]!.state == 'ended:error', what: "bob's end");
+    });
+  });
+
   test('an incoming call nobody answered is missed; an answered one is not', () async {
     await befriend(alice, bob);
     bob.callPolicy = CallPolicy.ignore;

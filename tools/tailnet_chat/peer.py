@@ -200,6 +200,16 @@ class Connection:
         raise Refused(why)
 
 
+def _new_call(peer: str, state: str, stream: int, mine: bool, transports=None, video=None) -> dict:
+    """A call as self.calls keeps it. `transport` is the one answered;
+    `video`, the offer's; `camera`, the other side's last `call_camera`;
+    `rtc`, the other side's SDP and candidates in order; `media`, the
+    WebRTC connection's state as this side's user reports it."""
+    return {"peer": peer, "state": state, "stream": stream, "frames": [], "mine": mine,
+            "transports": transports, "transport": None, "video": video, "camera": None,
+            "rtc": [], "media": "new", "media_since": time.monotonic(), "ever_connected": False}
+
+
 class ChatPeer:
     def __init__(self, name: str = "reference", seed: bytes | None = None,
                  host: str = "127.0.0.1", port: int = 0, loopback: bool = True,
@@ -215,6 +225,8 @@ class ChatPeer:
         self.read_receipts = read_receipts
         self.call_policy = call_policy   # answer, decline, busy, ignore
         self.call_silence_s = 10.0       # a connected call ends after this long without a frame
+        self.media_connect_s = 15.0      # a WebRTC call not connected this long after the answer ends
+        self.media_lost_s = 10.0         # a WebRTC call disconnected this long ends
         self.ping_s, self.idle_s = ping_s, idle_s
         self.sign_override = None        # a test may set fn(transcript) -> signature
         self.log_fn = log
@@ -432,14 +444,15 @@ class ChatPeer:
     def set_typing(self, who, on: bool) -> None:
         self._send_now(self._resolve(who).key, {"type": "typing", "on": bool(on)})
 
-    def call(self, who, transports=("ws-opus",)) -> str:
-        """Offer a call; the outcome lands in self.calls[call id]["state"]."""
+    def call(self, who, transports=None, video: bool = False) -> str:
+        """Offer a call; the outcome lands in self.calls[call id]["state"].
+        `transports` by default as both hellos allow, `webrtc` first; `video`,
+        whether this side's camera is on as it rings, goes with `webrtc`."""
         c = self._resolve(who)
         call_id = new_id()
         stream = int.from_bytes(os.urandom(4), "big") | 1
         with self.cond:
-            self.calls[call_id] = {"peer": c.key, "state": "offered", "stream": stream,
-                                   "frames": [], "mine": True}
+            self.calls[call_id] = _new_call(c.key, "offered", stream, mine=True)
         try:
             conn = self._connection_for(c)
         except (Refused, OSError):
@@ -449,8 +462,67 @@ class ChatPeer:
                 self.calls[call_id]["state"] = "ended:unreachable"
                 self.cond.notify_all()
             return call_id
-        conn.send({"type": "call_offer", "call": call_id, "transports": list(transports), "stream": stream})
+        offered = list(transports) if transports else protocol.offer_transports(self.caps, conn.peer_caps)
+        if not offered:
+            with self.cond:
+                self.calls[call_id]["state"] = "ended:unsupported"
+                self.cond.notify_all()
+            return call_id
+        frame = {"type": "call_offer", "call": call_id, "transports": offered, "stream": stream}
+        if "webrtc" in offered:
+            frame["video"] = bool(video)
+        with self.cond:
+            self.calls[call_id]["transports"] = offered
+        conn.send(frame)
         return call_id
+
+    # -- WebRTC calls (protocol section 4.11): SDP and candidates as opaque
+    # values, between this peer's user (a test, the control protocol) and
+    # the other side. The media is not this peer's.
+
+    def _webrtc_call(self, call_id: str):
+        call = self.calls.get(call_id)
+        if call and call["state"] == "connected" and call.get("transport") == "webrtc":
+            return call
+        return None
+
+    def send_rtc(self, call_id: str, sdp: dict | None = None, candidate: dict | None = None) -> bool:
+        """Send our SDP or one of our candidates; a candidate outside the
+        tailnet is not sent (False), and an SDP loses those it holds."""
+        call = self._webrtc_call(call_id)
+        conn = self.connected(call["peer"]) if call else None
+        if conn is None:
+            return False
+        frame = {"type": "call_rtc", "call": call_id}
+        if sdp is not None:
+            frame["sdp"] = {"type": sdp["type"], "sdp": protocol.tailnet_only_sdp(sdp["sdp"])}
+        else:
+            if not protocol.candidate_admitted(candidate.get("candidate", "")):
+                self.log("call candidate not sent", f"{call_id[:8]}: {candidate.get('candidate')}")
+                return False
+            frame["candidate"] = candidate
+        conn.send(frame)
+        return True
+
+    def set_camera(self, call_id: str, camera: str) -> bool:
+        """Tell the other side what this side's camera is doing."""
+        call = self._webrtc_call(call_id)
+        conn = self.connected(call["peer"]) if call else None
+        if conn is None:
+            return False
+        conn.send({"type": "call_camera", "call": call_id, "camera": camera})
+        return True
+
+    def set_media(self, call_id: str, state: str) -> None:
+        """The media connection's state as this side's WebRTC reports it:
+        `connected`, `disconnected` or `failed`; it drives the 15 s and 10 s
+        ends."""
+        with self.cond:
+            call = self._webrtc_call(call_id)
+            if call and call["media"] != state:
+                call["media"], call["media_since"] = state, time.monotonic()
+                call["ever_connected"] = call["ever_connected"] or state == "connected"
+            self.cond.notify_all()
 
     def send_call_audio(self, call_id: str, seq: int, packet: bytes) -> None:
         call = self.calls[call_id]
@@ -893,31 +965,37 @@ class ChatPeer:
         call_id = frame["call"]
         with self.cond:
             busy = any(c["state"] in ("connected", "offered", "ringing") for c in self.calls.values())
-            self.calls[call_id] = {"peer": key, "state": "ringing", "stream": frame["stream"],
-                                   "frames": [], "mine": False, "transports": frame["transports"]}
+            self.calls[call_id] = _new_call(key, "ringing", frame["stream"], mine=False,
+                                            transports=frame["transports"], video=frame.get("video"))
             self.cond.notify_all()
+        pick = protocol.pick_transport(frame["transports"], self.caps)
         if not self.contact(key):
             answer = {"decline": "declined"}
         elif busy:
             answer = {"decline": "busy"}
-        elif "ws-opus" not in frame["transports"] or "call:ws-opus" not in self.caps:
+        elif pick is None:
             answer = {"decline": "unsupported"}
         elif self.call_policy == "answer":
-            answer = {"transport": "ws-opus"}
+            answer = {"transport": pick}
         elif self.call_policy in ("decline", "busy"):
             answer = {"decline": "declined" if self.call_policy == "decline" else "busy"}
         else:
             return  # ringing; a test answers with answer_call()
         self._answer(conn, call_id, answer)
 
-    def answer_call(self, call_id: str, transport: str | None = "ws-opus", decline: str | None = None) -> None:
-        conn = self.connected(self.calls[call_id]["peer"])
-        self._answer(conn, call_id, {"decline": decline} if decline else {"transport": transport})
+    def answer_call(self, call_id: str, transport: str | None = None, decline: str | None = None) -> None:
+        call = self.calls[call_id]
+        conn = self.connected(call["peer"])
+        transport = transport or protocol.pick_transport(call.get("transports") or [], self.caps)
+        self._answer(conn, call_id, {"decline": decline or "unsupported"} if decline or not transport
+                     else {"transport": transport})
 
     def _answer(self, conn, call_id, answer):
         with self.cond:
-            self.calls[call_id]["state"] = "connected" if "transport" in answer else "declined:" + answer["decline"]
-            self.calls[call_id]["last_frame"] = time.monotonic()
+            call = self.calls[call_id]
+            call["state"] = "connected" if "transport" in answer else "declined:" + answer["decline"]
+            call["transport"] = answer.get("transport")
+            call["last_frame"] = call["media_since"] = time.monotonic()
             self.cond.notify_all()
         self._reply(conn, dict({"type": "call_answer", "call": call_id}, **answer))
 
@@ -926,7 +1004,32 @@ class ChatPeer:
             call = self.calls.get(frame["call"])
             if call:
                 call["state"] = "connected" if "transport" in frame else "declined:" + frame["decline"]
-                call["last_frame"] = time.monotonic()
+                call["transport"] = frame.get("transport")
+                call["last_frame"] = call["media_since"] = time.monotonic()
+            self.cond.notify_all()
+
+    def _on_call_rtc(self, conn, key, frame):
+        """The other side's SDP or candidate, for this side's WebRTC; one for
+        a call that is not a WebRTC call of this peer's, or a candidate
+        outside the tailnet, is ignored."""
+        with self.cond:
+            call = self._webrtc_call(frame["call"])
+            if call is None or call["peer"] != key:
+                return
+            if "sdp" in frame:
+                sdp = frame["sdp"]
+                call["rtc"].append({"sdp": {"type": sdp["type"], "sdp": protocol.tailnet_only_sdp(sdp["sdp"])}})
+            elif protocol.candidate_admitted(frame["candidate"]["candidate"]):
+                call["rtc"].append({"candidate": frame["candidate"]})
+            else:
+                self.log("call candidate ignored", f"{frame['call'][:8]}: {frame['candidate']['candidate']}")
+            self.cond.notify_all()
+
+    def _on_call_camera(self, conn, key, frame):
+        with self.cond:
+            call = self._webrtc_call(frame["call"])
+            if call is not None and call["peer"] == key:
+                call["camera"] = frame["camera"]
             self.cond.notify_all()
 
     def _on_call_end(self, conn, key, frame):
@@ -965,10 +1068,21 @@ class ChatPeer:
                 conns = [c for c in self.connections if c.authenticated and not c.closed]
                 in_call = {c["peer"] for c in self.calls.values() if c["state"] == "connected"}
                 silent = [call_id for call_id, call in self.calls.items()
-                          if call["state"] == "connected"
+                          if call["state"] == "connected" and call.get("transport") != "webrtc"
                           and now - call.get("last_frame", now) > self.call_silence_s]
+                due = []  # protocol 4.11: a WebRTC call never connected, or lost
+                for call_id, call in self.calls.items():
+                    if call["state"] != "connected" or call.get("transport") != "webrtc":
+                        continue
+                    if not call["ever_connected"] and now - call["media_since"] > self.media_connect_s:
+                        due.append((call_id, "timeout"))
+                    elif (call["ever_connected"] and call["media"] != "connected"
+                          and now - call["media_since"] > self.media_lost_s):
+                        due.append((call_id, "error"))
             for call_id in silent:  # protocol 4.8: either side MUST end it, and says so
                 self.end_call(call_id, "timeout")
+            for call_id, why in due:
+                self.end_call(call_id, why)
             if now - last_ping >= self.ping_s:
                 last_ping = now
                 for c in conns:
@@ -1044,6 +1158,10 @@ def control(peer: ChatPeer, command: dict):
         for name in ("read_receipts", "call_policy"):
             if name in command:
                 setattr(peer, name, command[name])
+        if "webrtc" in command:  # announce call:webrtc in hellos from now on, or not
+            peer.caps = [c for c in peer.caps if c != protocol.CAP_WEBRTC]
+            if command["webrtc"]:
+                peer.caps.append(protocol.CAP_WEBRTC)
         return True
     if cmd == "messages":
         return [_message_json(m) for m in peer.messages(to)]
@@ -1055,10 +1173,20 @@ def control(peer: ChatPeer, command: dict):
         peer.flush(to)
         return True
     if cmd == "calls":
-        return {k: {"peer": v["peer"], "state": v["state"], "frames": len(v["frames"]), "mine": v["mine"]}
+        return {k: {"peer": v["peer"], "state": v["state"], "frames": len(v["frames"]), "mine": v["mine"],
+                    "transport": v["transport"], "video": v["video"], "camera": v["camera"]}
                 for k, v in peer.calls.items()}
     if cmd == "call":
-        return peer.call(to)
+        return peer.call(to, video=bool(command.get("video")))
+    if cmd == "rtc":
+        return peer.send_rtc(command["call"], sdp=command.get("sdp"), candidate=command.get("candidate"))
+    if cmd == "rtc_received":
+        return list(peer.calls[command["call"]]["rtc"])
+    if cmd == "camera":
+        return peer.set_camera(command["call"], command["camera"])
+    if cmd == "media":
+        peer.set_media(command["call"], command["state"])
+        return True
     if cmd == "answer_call":
         peer.answer_call(command["call"], decline=command.get("decline"))
         return True

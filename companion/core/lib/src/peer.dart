@@ -48,10 +48,36 @@ class ProbeResult {
 }
 
 class Call {
-  Call({required this.peer, required this.stream, required this.mine, required String state}) : _state = state;
+  Call({
+    required this.peer,
+    required this.stream,
+    required this.mine,
+    required String state,
+    this.transports = const [],
+    this.video = false,
+  }) : _state = state;
   final String peer;
   final int stream;
   final bool mine;
+
+  /// What the offer listed, best first.
+  final List<String> transports;
+
+  /// Whether the caller's camera was on as it rang (the offer's `video`).
+  final bool video;
+
+  /// The transport the answer picked, once answered: `ws-opus` or `webrtc`.
+  String? transport;
+
+  /// The other side's camera, from its last `call_camera`: on, off, paused,
+  /// none; null before it says.
+  String? remoteCamera;
+
+  /// A WebRTC call's media connection, as the app's engine reports it
+  /// (`new`, `connected`, `disconnected`, `failed`), and since when.
+  String media = 'new';
+  DateTime mediaSince = DateTime.now();
+  bool mediaEverConnected = false;
   String _state;
 
   /// offered, ringing, connected, declined:<reason>, ended:<reason>.
@@ -71,6 +97,7 @@ class Call {
   int frames = 0;
   DateTime lastFrame = DateTime.now();
   bool get live => state == 'offered' || state == 'ringing' || state == 'connected';
+  bool get webrtc => transport == 'webrtc';
 
   /// Someone called, and it ended unanswered without the user declining.
   bool get missed => isMissedCall(mine: mine, answered: answered, state: state);
@@ -82,6 +109,19 @@ class CallAudio {
   final String call;
   final int seq;
   final Uint8List packet;
+}
+
+/// The other side's SDP or one of its ICE candidates on a WebRTC call, for
+/// the app's engine: opaque values, the tailnet's candidates alone.
+class CallRtc {
+  CallRtc(this.call, {this.sdp, this.candidate});
+  final String call;
+
+  /// `{"type": "offer" | "answer", "sdp": ...}`
+  final Map<String, Object?>? sdp;
+
+  /// `{"candidate", "sdpMid", "sdpMLineIndex"}`
+  final Map<String, Object?>? candidate;
 }
 
 class _Transfer {
@@ -159,7 +199,7 @@ class ChatPeer {
     List<String> caps = capsV1,
     this.callPolicy = CallPolicy.answer,
     this.log,
-  }) : caps = List.unmodifiable(caps);
+  }) : _caps = List.unmodifiable(caps);
 
   final Identity identity;
   final Store store;
@@ -169,7 +209,12 @@ class ChatPeer {
 
   /// Admit loopback as well as the tailnet: for tests and the simulator.
   final bool loopback;
-  final List<String> caps;
+  List<String> _caps;
+
+  /// What this peer's hellos announce; a change applies to connections
+  /// made after it.
+  List<String> get caps => _caps;
+  set caps(List<String> v) => _caps = List.unmodifiable(v);
   CallPolicy callPolicy;
   final void Function(String line)? log;
 
@@ -187,6 +232,7 @@ class ChatPeer {
   final Map<String, DateTime> _nextTry = {};
   final StreamController<ChatEvent> _events = StreamController.broadcast();
   final StreamController<CallAudio> _audio = StreamController.broadcast(sync: true);
+  final StreamController<CallRtc> _rtc = StreamController.broadcast(sync: true);
   ServerSocket? _socket;
   HttpServer? _server;
   Timer? _ticker;
@@ -197,6 +243,9 @@ class ChatPeer {
   /// The other side's audio on connected calls, packet by packet: for a
   /// jitter buffer and a decoder.
   Stream<CallAudio> get callAudio => _audio.stream;
+
+  /// The other side's SDP and candidates on WebRTC calls, in order.
+  Stream<CallRtc> get callRtc => _rtc.stream;
   PeerAddress get address => PeerAddress(host, port);
 
   bool get readReceipts => store.setting('read_receipts') != 'off';
@@ -238,6 +287,7 @@ class ChatPeer {
     _connections.clear();
     await _events.close();
     await _audio.close();
+    await _rtc.close();
     store.close();
   }
 
@@ -408,23 +458,34 @@ class ChatPeer {
   // -- calls: signalling and frames; the codec and devices are CallMedia's ------
 
   /// Offer a call; its outcome is in [calls]. Unreachable fails at once.
-  Future<String> call(Object who) async {
+  /// `video`: the caller's camera is on as it rings, said only with webrtc.
+  Future<String> call(Object who, {bool video = false}) async {
     final c = _resolve(who);
     final id = newId();
     final stream = randomBytes(4).buffer.asByteData().getUint32(0) | 1;
     calls[id] = Call(peer: c.key ?? '', stream: stream, mine: true, state: 'offered');
     final conn = await _connectionFor(c);
+    final transports = conn == null ? const <String>[] : offerTransports(caps, conn.peerCaps);
     if (conn == null) {
       calls[id]!.state = 'ended:unreachable';
-    } else if (!mayUse('call:ws-opus', caps, conn.peerCaps)) {
+    } else if (transports.isEmpty) {
       calls[id] = Call(peer: conn.key, stream: stream, mine: true, state: 'ended:unsupported');
     } else {
-      calls[id] = Call(peer: conn.key, stream: stream, mine: true, state: 'offered');
+      final webrtc = transports.contains('webrtc');
+      calls[id] = Call(
+        peer: conn.key,
+        stream: stream,
+        mine: true,
+        state: 'offered',
+        transports: transports,
+        video: webrtc && video,
+      );
       conn.send({
         'type': 'call_offer',
         'call': id,
-        'transports': ['ws-opus'],
+        'transports': transports,
         'stream': stream,
+        if (webrtc) 'video': video,
       });
     }
     _emit(ChatEvent('call', key: c.key, id: id, detail: calls[id]!.state));
@@ -435,7 +496,61 @@ class ChatPeer {
   void answerCall(String id, {String? decline}) {
     final call = calls[id] ?? (throw ArgumentError('no call $id'));
     final conn = _connected(call.peer);
-    _answer(conn, id, decline == null ? const CallAnswer.pick('ws-opus') : CallAnswer.refuse(decline));
+    final pick = pickTransport(call.transports, caps);
+    _answer(
+      conn,
+      id,
+      decline != null || pick == null ? CallAnswer.refuse(decline ?? 'unsupported') : CallAnswer.pick(pick),
+    );
+  }
+
+  // -- WebRTC calls (protocol 4.11): SDP and candidates are opaque values
+  // between the chat connection and the app's engine; no WebRTC here.
+
+  _Connection? _webrtcConnection(Call? call) =>
+      call != null && call.state == 'connected' && call.webrtc ? _connected(call.peer) : null;
+
+  /// Send our engine's SDP or one of its candidates; whether it went. A
+  /// candidate outside the tailnet is not sent, and an SDP loses those.
+  bool sendRtc(String id, {Map<String, Object?>? sdp, Map<String, Object?>? candidate}) {
+    final conn = _webrtcConnection(calls[id]);
+    if (conn == null || (sdp == null) == (candidate == null)) return false;
+    if (candidate != null) {
+      final line = '${candidate['candidate'] ?? ''}';
+      if (!candidateAdmitted(line)) {
+        log?.call('[$name] call ${id.substring(0, 8)}: our ${candidateKind(line)} candidate not sent');
+        return false;
+      }
+      log?.call('[$name] call ${id.substring(0, 8)}: our ${candidateKind(line)} candidate sent');
+      conn.send({'type': 'call_rtc', 'call': id, 'candidate': candidate});
+    } else {
+      conn.send({
+        'type': 'call_rtc',
+        'call': id,
+        'sdp': {'type': sdp!['type'], 'sdp': tailnetOnlySdp('${sdp['sdp']}')},
+      });
+    }
+    return true;
+  }
+
+  /// Tell the other side what our camera is doing: on, off, paused, none.
+  bool setCamera(String id, String camera) {
+    final conn = _webrtcConnection(calls[id]);
+    if (conn == null) return false;
+    log?.call('[$name] call ${id.substring(0, 8)}: our camera $camera');
+    conn.send({'type': 'call_camera', 'call': id, 'camera': camera});
+    return true;
+  }
+
+  /// The engine's media connection changed: `connected`, `disconnected` or
+  /// `failed`. It decides the 15 s and 10 s ends (policy's callEndDue).
+  void setMediaState(String id, String state) {
+    final call = calls[id];
+    if (call == null || !call.webrtc || !call.live || call.media == state) return;
+    call.media = state;
+    call.mediaSince = DateTime.now();
+    if (state == 'connected') call.mediaEverConnected = true;
+    log?.call('[$name] call ${id.substring(0, 8)}: media $state');
   }
 
   /// One packet of our audio on a connected call.
@@ -906,11 +1021,25 @@ class ChatPeer {
       case 'call_offer':
         _onCallOffer(conn, frame);
       case 'call_answer':
-        final call = calls[frame['call']];
+        final id = frame['call'] as String;
+        final call = calls[id];
         if (call != null && call.peer == conn.key && call.state == 'offered') {
+          call.transport = frame['transport'] as String?;
           call.state = frame.containsKey('transport') ? 'connected' : 'declined:${frame['decline']}';
           call.lastFrame = DateTime.now();
-          _emit(ChatEvent('call', key: conn.key, id: frame['call'] as String, detail: call.state));
+          if (call.transport != null) log?.call('[$name] call ${id.substring(0, 8)} over ${call.transport}');
+          _emit(ChatEvent('call', key: conn.key, id: id, detail: call.state));
+        }
+      case 'call_rtc':
+        _onCallRtc(conn, frame);
+      case 'call_camera':
+        // One for a call that is not a WebRTC call of this connection is ignored.
+        final id = frame['call'] as String;
+        final call = calls[id];
+        if (_webrtcConnection(call) == conn) {
+          call!.remoteCamera = frame['camera'] as String;
+          log?.call('[$name] call ${id.substring(0, 8)}: their camera ${call.remoteCamera}');
+          _emit(ChatEvent('call', key: conn.key, id: id, detail: 'camera ${call.remoteCamera}'));
         }
       case 'call_end':
         final call = calls[frame['call']];
@@ -1042,14 +1171,48 @@ class ChatPeer {
     }
   }
 
+  /// The other side's SDP or candidate, for the engine. One for a call that
+  /// is not a WebRTC call of this connection, or a candidate outside the
+  /// tailnet, is ignored; an SDP loses its candidates outside it.
+  void _onCallRtc(_Connection conn, Map<String, dynamic> frame) {
+    final id = frame['call'] as String;
+    if (_webrtcConnection(calls[id]) != conn) return;
+    final sdp = frame['sdp'] as Map<String, dynamic>?;
+    final candidate = frame['candidate'] as Map<String, dynamic>?;
+    if (candidate != null) {
+      final line = candidate['candidate'] as String;
+      if (!candidateAdmitted(line)) {
+        log?.call('[$name] call ${id.substring(0, 8)}: their ${candidateKind(line)} candidate ignored');
+        return;
+      }
+      log?.call('[$name] call ${id.substring(0, 8)}: their ${candidateKind(line)} candidate taken');
+    }
+    if (_rtc.isClosed) return;
+    _rtc.add(
+      CallRtc(
+        id,
+        sdp: sdp == null ? null : {'type': sdp['type'], 'sdp': tailnetOnlySdp(sdp['sdp'] as String)},
+        candidate: candidate,
+      ),
+    );
+  }
+
   void _onCallOffer(_Connection conn, Map<String, dynamic> frame) {
     final id = frame['call'] as String;
     final busy = calls.values.any((c) => c.live);
-    calls[id] = Call(peer: conn.key, stream: frame['stream'] as int, mine: false, state: 'ringing');
+    final transports = (frame['transports'] as List).cast<String>();
+    calls[id] = Call(
+      peer: conn.key,
+      stream: frame['stream'] as int,
+      mine: false,
+      state: 'ringing',
+      transports: transports,
+      video: frame['video'] == true,
+    );
     final answer = answerOffer(
       isContact: store.contactByKey(conn.key) != null,
       busy: busy,
-      transports: (frame['transports'] as List).cast<String>(),
+      transports: transports,
       caps: caps,
       policy: callPolicy,
     );
@@ -1059,7 +1222,9 @@ class ChatPeer {
 
   void _answer(_Connection? conn, String id, CallAnswer answer) {
     final call = calls[id]!;
+    call.transport = answer.transport;
     call.state = answer.transport != null ? 'connected' : 'declined:${answer.decline}';
+    if (answer.transport != null) log?.call('[$name] call ${id.substring(0, 8)} over ${answer.transport}');
     call.lastFrame = DateTime.now();
     conn?.send({
       'type': 'call_answer',
@@ -1081,7 +1246,17 @@ class ChatPeer {
       if (due == null || !now.isBefore(due)) _flushSoon(box);
     }
     for (final MapEntry(key: id, value: call) in List.of(calls.entries)) {
-      if (callEndDue(state: call.state, since: call.since, lastFrame: call.lastFrame, now: now) case final why?) {
+      if (callEndDue(
+            state: call.state,
+            since: call.since,
+            lastFrame: call.lastFrame,
+            now: now,
+            transport: call.transport,
+            media: call.media,
+            mediaSince: call.mediaSince,
+            mediaEverConnected: call.mediaEverConnected,
+          )
+          case final why?) {
         endCall(id, reason: why);
       }
     }

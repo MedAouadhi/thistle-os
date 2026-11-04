@@ -48,7 +48,8 @@ message scenarios `react`, `mark_read`, `set_typing`, `is_typing`,
 `set_read_receipts`, `flush`; for the voice and call scenarios
 `send_voice`, `set_call_policy`, `place_call`, `calls`, `answer_call`,
 `end_call`, `talk`, `cellular_call`; for the peer list scenarios
-`share_peers`, `ask_peers`) with the
+`share_peers`, `ask_peers`; for the WebRTC scenarios `set_webrtc`,
+`rtc`, `rtc_received`, `camera`, `media`) with the
 simulator's keys, screen and card, and gives its `address` and `key`.
 A target without cellular calls sets `can_cellular = False` (or answers
 `cellular_call` with `no command`), and `call_ended_by_cellular` is
@@ -58,6 +59,12 @@ whose platform keeps its own peer list (the simulator) answers
 `set_peers` with what it shares of that list instead, and one that never
 asks for a list (the device) answers `ask_peers` with `no command`, and
 `peers_asked_by_target` is skipped.
+The WebRTC scenarios play the target's WebRTC through the control
+protocol (its SDP and candidates, its camera, its connection's state), so
+they need no camera and no libwebrtc; they take about 45 s, waiting out
+the 15 s and 10 s ends. A target that is not video-capable (the device)
+raises Skipped for `set_webrtc(True)`, and of them only
+`webrtc_unannounced_answers_ws_opus` runs.
 
 ## The control protocol
 
@@ -87,13 +94,17 @@ name, or an address as `[host, port]`.
 | `send_voice` | `to`, `file` (an Ogg/Opus path), `ms` | the message id |
 | `mark_read` | `to`, `ids`? | `true` |
 | `typing` | `to`, `on` | `true` |
-| `set` | `read_receipts`?, `call_policy`? (`answer`, `decline`, `busy`, `ignore`) | `true` |
+| `set` | `read_receipts`?, `call_policy`? (`answer`, `decline`, `busy`, `ignore`), `webrtc`? (announce `call:webrtc` in hellos from now on) | `true` |
 | `messages` | `to` | `[message]` |
 | `waiting` | `to` | the ids still in the outbox |
 | `is_typing` | `key` | boolean |
 | `flush` | `to`? | `true` |
-| `call` | `to` | the call id |
-| `calls` | | `{call id: {"peer", "state", "frames", "mine"}}` (the core adds `missed`) |
+| `call` | `to`, `video`? | the call id |
+| `calls` | | `{call id: {"peer", "state", "frames", "mine", "transport", "video", "camera"}}` (the core adds `missed`); `camera` is the other side's last `call_camera` |
+| `rtc` | `call`, `sdp`? or `candidate`? | whether it was sent: the target's WebRTC gave this SDP or candidate (section 4.11) |
+| `rtc_received` | `call` | `[{"sdp"} or {"candidate"}]`: what the target took for its WebRTC, in order |
+| `camera` | `call`, `camera` | whether `call_camera` was sent |
+| `media` | `call`, `state` (`connected`, `disconnected`, `failed`) | `true`: the target's WebRTC connection changed |
 | `answer_call` | `call`, `decline`? (a reason) | `true` |
 | `end_call` | `call`, `reason`? | `true` |
 | `talk` | `call`, `seconds`? | `true`: the target sends audio on the call (the reference peer the vector's packets, 1 s by default; one whose microphone always streams does nothing more) |
@@ -124,8 +135,12 @@ default), `--address HOST`, `--port N` (or `--listen HOST:PORT`), `--name`,
 `--loopback`, `--no-read-receipts`, `--call-policy`, `--verbose`,
 `--mic FILE.wav` (what a connected call sends, a 16 kHz mono WAV file
 looped; silence without it) and `--speaker FILE.wav` (what it heard,
-written when the call ends). A connected call streams Opus through the
-system's libopus (`libopus0`); it has no `cellular_call`.
+written when the call ends). A connected `ws-opus` call streams Opus
+through the system's libopus (`libopus0`); it has no `cellular_call`.
+`--webrtc` announces `call:webrtc` (as `set` `webrtc` does): the core
+does no WebRTC itself, so such a call's SDP, candidates and connection
+state are the control protocol's `rtc`, `rtc_received` and `media`, and
+without `media` it ends after 15 s as never connected.
 
 ## The companion app
 

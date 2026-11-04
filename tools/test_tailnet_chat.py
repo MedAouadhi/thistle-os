@@ -260,16 +260,24 @@ class Vectors(unittest.TestCase):
                                                  bytes.fromhex(auth["sig"])), bad["why"])
 
     def test_every_message_type_has_a_valid_example(self):
-        v = load("messages.json")
         seen = set()
-        for example in v["valid"]:
+        for example in load("messages.json")["valid"] + load("webrtc.json")["valid"]:
             frame, error = protocol.check(example["text"])
             self.assertIsNone(error, example["name"])
             seen.add(frame["type"])
         self.assertEqual(seen, set(protocol.SCHEMA))
 
+    def test_webrtcs_candidates_and_sdp(self):
+        v = load("webrtc.json")
+        for example in v["candidates"]:
+            self.assertEqual(protocol.candidate_admitted(example["candidate"]), example["admitted"],
+                             example["candidate"])
+        self.assertEqual(protocol.tailnet_only_sdp(v["sdp"]["written"]), v["sdp"]["tailnet_only"])
+        self.assertNotIn("192.168.2.131", v["sdp"]["tailnet_only"])
+        self.assertIn("100.91.111.54 47998", v["sdp"]["tailnet_only"])
+
     def test_every_invalid_example_draws_its_error(self):
-        for example in load("messages.json")["invalid"]:
+        for example in load("messages.json")["invalid"] + load("webrtc.json")["invalid"]:
             _, error = protocol.check(example["text"])
             self.assertEqual(error and error["code"], example["error"]["code"], example["name"])
             for name in ("what", "id"):
@@ -486,6 +494,64 @@ class TwoPeers(unittest.TestCase):
         self.alice.wait_for(lambda: self.alice.calls[call]["state"] == "connected")
         self.bob.cellular_call()
         self.alice.wait_for(lambda: self.alice.calls[call]["state"] == "ended:cellular")
+
+    def webrtc_call(self):
+        """Both video-capable: Alice calls Bob over WebRTC."""
+        for p in (self.alice, self.bob):
+            p.caps.append(protocol.CAP_WEBRTC)
+        self.befriend()
+        call = self.alice.call("Bob", video=True)
+        self.alice.wait_for(lambda: self.alice.calls[call]["state"] == "connected")
+        self.bob.wait_for(lambda: self.bob.calls.get(call, {}).get("state") == "connected")
+        return call
+
+    def test_two_video_capable_peers_call_over_webrtc_and_relay_sdp_and_tailnet_candidates(self):
+        call = self.webrtc_call()
+        self.assertEqual(self.bob.calls[call]["transports"], ["webrtc", "ws-opus"])
+        self.assertTrue(self.bob.calls[call]["video"])
+        self.assertEqual((self.alice.calls[call]["transport"], self.bob.calls[call]["transport"]),
+                         ("webrtc", "webrtc"))
+        v = load("webrtc.json")
+        self.assertTrue(self.alice.send_rtc(call, sdp={"type": "offer", "sdp": v["sdp"]["written"]}))
+        self.bob.wait_for(lambda: self.bob.calls[call]["rtc"])
+        self.assertEqual(self.bob.calls[call]["rtc"][0], {"sdp": {"type": "offer", "sdp": v["sdp"]["tailnet_only"]}})
+        lan, tailnet = v["candidates"][2]["candidate"], v["candidates"][0]["candidate"]
+        self.assertFalse(self.bob.send_rtc(call, candidate={"candidate": lan, "sdpMid": "0", "sdpMLineIndex": 0}))
+        self.assertTrue(self.bob.send_rtc(call, candidate={"candidate": tailnet, "sdpMid": "0", "sdpMLineIndex": 0}))
+        self.alice.wait_for(lambda: self.alice.calls[call]["rtc"])
+        self.assertEqual([r["candidate"]["candidate"] for r in self.alice.calls[call]["rtc"]], [tailnet])
+        # One sent anyway by a peer that does not filter is not taken.
+        self.bob.connected(self.alice.key_hex).send({"type": "call_rtc", "call": call,
+                                                      "candidate": {"candidate": lan, "sdpMid": "0"}})
+        self.bob.set_camera(call, "off")
+        self.alice.wait_for(lambda: self.alice.calls[call].get("camera") == "off")
+        self.assertEqual(len(self.alice.calls[call]["rtc"]), 1)
+
+    def test_a_peer_without_call_webrtc_is_offered_ws_opus_alone(self):
+        self.alice.caps.append(protocol.CAP_WEBRTC)
+        self.befriend()
+        self.bob.call_policy = "ignore"
+        call = self.alice.call("Bob", video=True)
+        self.bob.wait_for(lambda: self.bob.calls.get(call))
+        self.assertEqual(self.bob.calls[call]["transports"], ["ws-opus"])
+        self.assertIsNone(self.bob.calls[call]["video"], "no video member without webrtc")
+
+    def test_a_webrtc_call_whose_media_never_connects_ends_as_timeout(self):
+        self.alice.media_connect_s = 0.5
+        call = self.webrtc_call()
+        self.alice.wait_for(lambda: self.alice.calls[call]["state"] == "ended:timeout", timeout=5)
+        self.bob.wait_for(lambda: self.bob.calls[call]["state"] == "ended:timeout")
+
+    def test_a_webrtc_call_disconnected_for_a_while_ends_as_error_and_never_on_silence(self):
+        self.alice.media_lost_s = 0.5
+        self.alice.call_silence_s = 0.2
+        call = self.webrtc_call()
+        self.alice.set_media(call, "connected")
+        time.sleep(1.0)
+        self.assertEqual(self.alice.calls[call]["state"], "connected", "no ws-opus frames are due")
+        self.alice.set_media(call, "disconnected")
+        self.alice.wait_for(lambda: self.alice.calls[call]["state"] == "ended:error", timeout=5)
+        self.bob.wait_for(lambda: self.bob.calls[call]["state"] == "ended:error")
 
     def test_a_call_to_an_unreachable_peer_fails_at_once(self):
         self.befriend()
