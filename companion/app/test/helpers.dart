@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math';
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:tailnet_chat_core/tailnet_chat_core.dart';
 import 'package:thistle_chat/src/chat_model.dart';
 import 'package:thistle_chat/src/audio/devices.dart';
@@ -9,6 +10,7 @@ import 'package:thistle_chat/src/background.dart';
 import 'package:thistle_chat/src/notifier.dart';
 import 'package:thistle_chat/src/permissions.dart';
 import 'package:thistle_chat/src/tailnet.dart';
+import 'package:thistle_chat/src/ui/call_page.dart';
 
 class TestTailnet {
   TestTailnet(this.status);
@@ -25,13 +27,25 @@ class Shown {
 }
 
 class RecordingNotifier implements Notifier {
+  RecordingNotifier({this.ringsItself = false});
   final List<Shown> shown = [];
   final List<String> rang = [];
+
+  /// Whether each ring was asked with the app in front.
+  final List<bool> rangInFront = [];
   final List<String> stoppedRinging = [];
+
+  /// Android's notifier rings the phone itself.
+  @override
+  final bool ringsItself;
   @override
   Future<void> show(String title, String body, {String? conversation}) async => shown.add(Shown(title, body));
   @override
-  Future<void> ringing(String caller, String callId) async => rang.add(caller);
+  Future<void> ringing(String caller, String callId, {bool inFront = false}) async {
+    rang.add(caller);
+    rangInFront.add(inFront);
+  }
+
   @override
   Future<void> stopRinging(String callId) async => stoppedRinging.add(callId);
 }
@@ -75,6 +89,25 @@ class _Kept implements AudioOut {
   Future<void> close() async => onClose?.call(Int16List.fromList(_into));
 }
 
+/// Android's call window over the lock screen, shown and finished by hand.
+class TestCallWindow extends ChangeNotifier implements CallWindow {
+  @override
+  bool shown = false;
+  int finished = 0;
+
+  void show() {
+    shown = true;
+    notifyListeners();
+  }
+
+  @override
+  void finish() {
+    finished++;
+    shown = false;
+    notifyListeners();
+  }
+}
+
 class FakeService implements BackgroundService {
   bool running = false;
   final List<bool> calls = [];
@@ -91,6 +124,19 @@ class FakePermissions implements PermissionPlatform {
   final Map<AppPermission, PermissionAnswer> state = {};
   final List<AppPermission> asked = [];
   int settingsOpened = 0;
+
+  /// Whether calls may fill the screen (Android 14's full-screen intents).
+  bool fillScreen = true;
+  int fillScreenChecks = 0;
+  int fillScreenOpened = 0;
+  @override
+  Future<bool> canFillScreen() async {
+    fillScreenChecks++;
+    return fillScreen;
+  }
+
+  @override
+  Future<void> openFillScreenSettings() async => fillScreenOpened++;
   @override
   Future<PermissionAnswer> status(AppPermission p) async => state[p] ?? PermissionAnswer.denied;
   @override

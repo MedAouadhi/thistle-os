@@ -8,6 +8,53 @@ import 'widgets.dart';
 
 bool _showing = false;
 
+/// Android's call window over the lock screen (CallActivity.kt), on the
+/// app's one engine: while it shows, the app draws the call screen and
+/// nothing of the chats, and closing the call screen finishes the window,
+/// so a locked phone is back at its lock screen.
+abstract interface class CallWindow implements Listenable {
+  bool get shown;
+  void finish();
+}
+
+/// What the app draws in its window: the screens, or while [window] shows,
+/// the call alone, the screens kept but neither drawn nor reachable.
+class CallWindowed extends StatelessWidget {
+  const CallWindowed({super.key, required this.model, required this.window, required this.child});
+  final ChatModel model;
+  final CallWindow window;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) => ListenableBuilder(
+    listenable: window,
+    builder: (context, _) => Stack(
+      children: [
+        Offstage(
+          offstage: window.shown,
+          child: TickerMode(enabled: !window.shown, child: child),
+        ),
+        if (window.shown)
+          // A navigator of its own for the call screen's dialogs and
+          // tooltips, with nothing beneath to go back to.
+          HeroControllerScope.none(
+            child: Navigator(
+              onGenerateRoute: (_) => MaterialPageRoute<void>(
+                builder: (_) => CallPage(
+                  model: model,
+                  onClose: () {
+                    model.talk.dismissCall();
+                    window.finish();
+                  },
+                ),
+              ),
+            ),
+          ),
+      ],
+    ),
+  );
+}
+
 /// Show the call screen over whatever is on screen, once.
 void showCall(BuildContext context, ChatModel model) {
   if (_showing) return;
@@ -36,8 +83,11 @@ String callOutcome(String state) => switch (state) {
 /// call coming in, then mute, volume and hang up. Always dark, whatever
 /// the theme: a call is a room of its own.
 class CallPage extends StatefulWidget {
-  const CallPage({super.key, required this.model});
+  const CallPage({super.key, required this.model, this.onClose});
   final ChatModel model;
+
+  /// How the screen closes; by going back unless given.
+  final VoidCallback? onClose;
 
   @override
   State<CallPage> createState() => _CallPageState();
@@ -64,8 +114,13 @@ class _CallPageState extends State<CallPage> {
 
   void _closeSoon() {
     _close ??= Timer(const Duration(seconds: 3), () {
-      if (mounted) Navigator.of(context).maybePop();
+      if (mounted) _closeNow();
     });
+  }
+
+  void _closeNow() {
+    final close = widget.onClose;
+    close != null ? close() : Navigator.of(context).maybePop();
   }
 
   @override
@@ -218,11 +273,7 @@ class _CallPageState extends State<CallPage> {
                             onPressed: talk.hangUp,
                           ),
                         ] else
-                          FilledButton(
-                            key: const Key('call-close'),
-                            onPressed: () => Navigator.of(context).maybePop(),
-                            child: const Text('Close'),
-                          ),
+                          FilledButton(key: const Key('call-close'), onPressed: _closeNow, child: const Text('Close')),
                       ],
                     ),
                   ],

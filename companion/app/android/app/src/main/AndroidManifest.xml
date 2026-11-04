@@ -7,12 +7,15 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING"/>
     <!-- Calls (Audio.kt): the service uses the microphone while one is up,
          the phone goes into communication mode, the screen goes dark at
-         the ear, and a call coming in may fill the screen (not over the lock
-         screen: the activity would show the chats there too). -->
+         the ear. A call coming in rings with the phone's ringtone and
+         vibration and may fill the screen with the call window
+         (CallRing.kt, CallActivity.kt), over the lock screen: that window
+         shows the call alone, never the chats. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE"/>
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT"/>
+    <uses-permission android:name="android.permission.VIBRATE"/>
     <!-- Asked for when first needed (lib/src/permissions.dart). -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <uses-permission android:name="android.permission.RECORD_AUDIO"/>
@@ -48,6 +51,27 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+        <!-- The call window: over the lock screen, in a task of its own,
+             never in the recent apps. -->
+        <activity
+            android:name=".CallActivity"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:taskAffinity="org.thistleos.thistle_chat.call"
+            android:excludeFromRecents="true"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:theme="@style/LaunchTheme"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:hardwareAccelerated="true">
+            <meta-data
+              android:name="io.flutter.embedding.android.NormalTheme"
+              android:resource="@style/NormalTheme"
+              />
+        </activity>
+        <receiver
+            android:name=".DeclineReceiver"
+            android:exported="false"/>
         <service
             android:name=".ListenService"
             android:exported="false"

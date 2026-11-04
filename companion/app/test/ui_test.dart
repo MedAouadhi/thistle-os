@@ -34,6 +34,7 @@ void main() {
     WidgetTester tester, {
     FakePermissions? permissions,
     FakeService? service,
+    TestCallWindow? callWindow,
     bool phone = false,
   }) async {
     tester.view.physicalSize = phone ? const Size(390, 844) : const Size(1000, 800);
@@ -51,7 +52,7 @@ void main() {
       await device.start();
       await app.start();
     });
-    await tester.pumpWidget(ThistleChatApp(model: app));
+    await tester.pumpWidget(ThistleChatApp(model: app, callWindow: callWindow));
     await tester.pump();
   }
 
@@ -397,6 +398,26 @@ void main() {
     await finish(tester);
   });
 
+  testWidgets('Android: Settings says when calls cannot fill the screen, with the way to allow it', (tester) async {
+    final permissions = FakePermissions()..fillScreen = false;
+    await launch(tester, permissions: permissions, phone: true);
+    await tester.tap(find.byTooltip('Settings'));
+    await tester.pumpAndSettle();
+    expect(find.text("Calls can't fill the screen"), findsOneWidget);
+    await tester.tap(find.text('Allow'));
+    await tester.pump();
+    expect(permissions.fillScreenOpened, 1);
+    await finish(tester);
+  });
+
+  testWidgets('Settings says nothing of the full screen where calls may fill it', (tester) async {
+    await launch(tester, permissions: FakePermissions(), phone: true);
+    await tester.tap(find.byTooltip('Settings'));
+    await tester.pumpAndSettle();
+    expect(find.text("Calls can't fill the screen"), findsNothing);
+    await finish(tester);
+  });
+
   /// Open the conversation with the device.
   Future<void> openDevice(WidgetTester tester) async {
     await tester.tap(find.text('Conversations'));
@@ -459,6 +480,30 @@ void main() {
     await until(tester, () => device.calls[id]!.state == 'connected');
     await tester.runAsync(() async => device.endCall(id));
     await until(tester, () => find.text('Call ended').evaluate().isNotEmpty);
+    await finish(tester);
+  });
+
+  testWidgets('Android: the call window shows the call alone; ended, it finishes', (tester) async {
+    final window = TestCallWindow();
+    await launch(tester, callWindow: window, phone: true);
+    await befriend(tester);
+    expect(find.text('thistle-46cf20'), findsOneWidget, reason: 'the chats, before');
+    late String id;
+    await tester.runAsync(() async => id = await device.call('laptop'));
+    await until(tester, () => app.talk.call?.state == 'ringing');
+    window.show();
+    await until(tester, () => find.byKey(const Key('call-answer')).evaluate().isNotEmpty);
+    expect(find.text('hello from the device'), findsNothing);
+    expect(find.byTooltip('Settings'), findsNothing);
+    await tester.tap(find.byKey(const Key('call-answer')));
+    await until(tester, () => device.calls[id]!.state == 'connected');
+    await tester.runAsync(() async => device.endCall(id));
+    await until(tester, () => find.text('Call ended').evaluate().isNotEmpty);
+    expect(window.finished, 0);
+    await tester.pump(const Duration(seconds: 4));
+    expect(window.finished, 1);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('call-status')), findsNothing, reason: 'the chats again, once unlocked');
     await finish(tester);
   });
 }

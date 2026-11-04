@@ -21,7 +21,8 @@ platform glue:
   the settings.
 - `lib/src/notifier.dart`: notifications (`flutter_local_notifications`: the
   freedesktop service over D-Bus, Android's notification manager); a call
-  coming in rings with Answer and Decline buttons.
+  coming in rings with Answer and Decline buttons, and on Android the phone
+  rings itself (`CallRinger`, below).
 - `lib/src/talk.dart`: voice messages and calls: recording (two minutes at
   most) and playing, the call in progress, its ring and notifications,
   mute and volume. The codec, the Ogg/Opus files, the jitter buffer and a
@@ -178,10 +179,30 @@ contact that asks with what `tailscale status --json` shows online.
   screen, so the call keeps its audio with the app in the background;
   Android 14 allows that type to start only with the app in front. With
   listening switched off, the service runs for the call alone.
-- **A call coming in** in the background rings (the ringtone stream) and
-  notifies on the `calls` channel, full screen where Android allows it;
-  Answer and Decline both open the app, as the peer with the call lives in
-  its window's engine.
+- **A call coming in rings like a phone call** (`CallRing.kt`), whoever
+  calls: the phone's default ringtone, looping on the ringtone stream, with
+  a vibration a second on and a second off, until the answer, the decline,
+  the caller's end or 45 s. Both follow the ringer mode (vibrate: no sound;
+  silent: neither; ring: vibration as "vibrate when ringing" says) and Do
+  Not Disturb, which lets a call through only when it allows calls from
+  anyone. The app's own two-tone ring is Linux's alone. With the app out of
+  sight it also shows Android's call-style notification with Answer and
+  Decline, silent itself, on the `incoming_calls` channel (the old `calls`
+  channel had a sound of its own, which Android keeps, and is deleted).
+- **The call window** (`CallActivity.kt`), which that notification opens
+  full screen: over the lock screen, turning the screen on, in a task of
+  its own, on the same engine. While it is attached the app draws the call
+  screen and nothing else (`CallWindowed` in `call_page.dart`); answering
+  needs no unlock, and when the call screen closes the window finishes,
+  so a locked phone is back at its lock screen. The main window stays off
+  the lock screen, and makes itself anew when it next shows, as the call
+  window took the engine from it. The notification's Answer opens the
+  window and answers; its Decline answers through a receiver, no window.
+- **Calls filling the screen**: Android 14 and later allow it only to
+  calling apps unless the user allows it. The app checks at start, when a
+  call comes and when it comes to the front; without it Settings says
+  "Calls can't fill the screen", with Allow opening Android's page, and a
+  call rings as its notification alone.
 - Nothing is backed up (`allowBackup="false"`, `data_extraction_rules.xml`):
   the sealed seed is useless without this phone's Keystore key.
 

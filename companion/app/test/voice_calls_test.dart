@@ -164,6 +164,84 @@ void main() {
       app.talk.hangUp();
     });
 
+    group('on Android, where the phone rings', () {
+      setUp(() async {
+        await app.close();
+        await other.stop();
+        notifier = RecordingNotifier(ringsItself: true);
+        app = testModel(tailnet, notifier, audio: audio);
+        other = await otherPeer();
+        await app.start();
+        await befriend();
+      });
+
+      test('a call in the background asks the phone to ring with the caller, and the app plays no ring', () async {
+        app.foreground = false;
+        await other.call('laptop');
+        await eventually(() => notifier.rang.isNotEmpty);
+        expect(notifier.rang.single, 'thistle-46cf20');
+        expect(notifier.rangInFront.single, isFalse);
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+        expect(audio.rings, 0);
+      });
+
+      test('with the app in front, the phone rings and the call screen is the notification', () async {
+        await other.call('laptop');
+        await eventually(() => notifier.rang.isNotEmpty);
+        expect(notifier.rangInFront.single, isTrue);
+      });
+
+      Future<String> ringing() async {
+        app.foreground = false;
+        final id = await other.call('laptop');
+        await eventually(() => notifier.rang.isNotEmpty);
+        expect(notifier.stoppedRinging, isEmpty);
+        return id;
+      }
+
+      test('answered, the ring stops', () async {
+        final id = await ringing();
+        await app.talk.answer();
+        await eventually(() => notifier.stoppedRinging.contains(id));
+        app.talk.hangUp();
+      });
+
+      test('declined, the ring stops', () async {
+        final id = await ringing();
+        app.talk.decline();
+        await eventually(() => notifier.stoppedRinging.contains(id));
+      });
+
+      test('ended by the caller, the ring stops', () async {
+        final id = await ringing();
+        other.endCall(id);
+        await eventually(() => notifier.stoppedRinging.contains(id));
+      });
+
+      test('unanswered for 45 s, the ring stops', () async {
+        final id = await ringing();
+        app.peer.calls[id]!.since = DateTime.now().subtract(const Duration(seconds: 46));
+        await eventually(() => notifier.stoppedRinging.contains(id));
+        expect(app.talk.call?.state, 'ended:timeout');
+        expect(notifier.stoppedRinging, [id], reason: 'stopped once');
+      });
+    });
+
+    test('Android: whether calls may fill the screen is checked at start and when a call comes', () async {
+      final perms = FakePermissions();
+      await app.close();
+      await other.stop();
+      app = testModel(tailnet, notifier, audio: audio, permissions: perms);
+      other = await otherPeer();
+      await app.start();
+      await eventually(() => perms.fillScreenChecks == 1);
+      await befriend();
+      perms.fillScreen = false;
+      await other.call('laptop');
+      await eventually(() => perms.fillScreenChecks == 2);
+      expect(app.permissions!.callsFillScreen, isFalse);
+    });
+
     test('declined, the caller hears `declined`', () async {
       final id = await other.call('laptop');
       await eventually(() => app.talk.call?.state == 'ringing');
