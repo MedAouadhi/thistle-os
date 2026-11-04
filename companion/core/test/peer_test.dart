@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:sqlite3/sqlite3.dart' show sqlite3;
 import 'package:tailnet_chat_core/tailnet_chat_core.dart';
 import 'package:test/test.dart';
 
@@ -273,6 +274,48 @@ void main() {
       expect(bob.videoCapable(alice.identity.keyHex), isTrue);
       expect(alice.videoCapable(tdeck.identity.keyHex), isFalse, reason: 'the T-Deck announces no call:webrtc');
       expect(tdeck.videoCapable(alice.identity.keyHex), isFalse, reason: 'nor does it take part');
+    });
+
+    test('a contact stays video-capable across a restart, from its last hello, until one says otherwise', () async {
+      await alice.stop();
+      await bob.stop();
+      final db = '${tmp.path}/alice.db', identity = Identity.generate();
+      alice = await startPeer('alice', caps: video, db: db, identity: identity);
+      bob = await startPeer('bob', caps: video);
+      await befriend(alice, bob);
+      final key = bob.identity.keyHex;
+      expect(alice.videoCapable(key), isTrue);
+      await alice.stop();
+      alice = await startPeer('alice', caps: video, db: db, identity: identity);
+      expect(alice.videoCapable(key), isTrue, reason: 'nothing heard yet this run: the stored hello says');
+      // Bob's app goes back to a build without video: its next hello says so.
+      await bob.stop();
+      bob = await startPeer('bob', identity: bob.identity, port: bob.address.port);
+      alice.sendText(key, 'still there?');
+      await eventually(() => !alice.videoCapable(key), what: "bob's new hello");
+      await alice.stop();
+      alice = await startPeer('alice', caps: video, db: db, identity: identity);
+      expect(alice.videoCapable(key), isFalse);
+    });
+
+    test("a database from before video keeps its contacts, none of them video-capable until it hears them", () {
+      final path = '${tmp.path}/v1.db';
+      sqlite3.open(path)
+        ..execute('''
+          CREATE TABLE contacts (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, key TEXT UNIQUE,
+            host TEXT, port INTEGER, tailnet_name TEXT, flagged_key TEXT, accepted_by_them INTEGER,
+            declined_by_them INTEGER NOT NULL DEFAULT 0);
+          INSERT INTO contacts (name, key) VALUES ('bob', '${'b' * 64}');
+          PRAGMA user_version = 1;
+        ''')
+        ..close();
+      final store = Store.open(path);
+      addTearDown(store.close);
+      final bob = store.contactByKey('b' * 64)!;
+      expect(bob.name, 'bob');
+      expect(bob.webrtc, isFalse);
+      store.setWebrtc(bob.id, true);
+      expect(store.contactByKey('b' * 64)!.webrtc, isTrue);
     });
 
     test('a peer without call:webrtc (the T-Deck) is offered ws-opus alone and takes it', () async {

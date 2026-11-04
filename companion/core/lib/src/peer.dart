@@ -223,8 +223,12 @@ class ChatPeer {
   final Map<String, List<String>> _heardCaps = {};
 
   /// Whether a call with `key` may carry video: its last hello announced
-  /// `call:webrtc` and ours does. False until it has been heard from.
-  bool videoCapable(String key) => mayUse(capWebrtc, caps, _heardCaps[key] ?? const []);
+  /// `call:webrtc` and ours does. A contact's last hello is kept with it, so
+  /// this survives a restart; anyone else is not until heard from.
+  bool videoCapable(String key) {
+    final theirs = _heardCaps[key] ?? [if (store.contactByKey(key)?.webrtc ?? false) capWebrtc];
+    return mayUse(capWebrtc, caps, theirs);
+  }
 
   /// The tailnet peers the platform shows online, shared with a contact
   /// that asks (protocol section 4.10): Linux's `tailscale status`; none
@@ -334,6 +338,7 @@ class ChatPeer {
   Contact accept(String key) {
     if (store.request(key) == null) throw ArgumentError('no request from $key');
     final c = store.acceptRequest(key);
+    if (_heardCaps[key] case final heard?) store.setWebrtc(c.id, heard.contains(capWebrtc));
     store.queue(key, {'type': 'contact', 'id': newId(), 'state': 'accepted'});
     _emit(ChatEvent('contact', key: key, detail: 'accepted'));
     _flushSoon(key);
@@ -942,10 +947,12 @@ class ChatPeer {
         _emit(ChatEvent('contact', key: key, detail: 'pinned ${c.name} as ${fingerprintOf(conn.peerKey!)}'));
         who = 'contact ${c.name}';
         if (c.tailnetName == null) store.setTailnetName(c.id, conn.peerName);
+        store.setWebrtc(c.id, conn.peerCaps.contains(capWebrtc));
       case KnownContact(:final contact):
         final c = store.contactById(contact)!;
         who = 'contact ${c.name}';
         if (c.tailnetName == null) store.setTailnetName(c.id, conn.peerName);
+        store.setWebrtc(c.id, conn.peerCaps.contains(capWebrtc));
       case Stranger():
         break;
     }

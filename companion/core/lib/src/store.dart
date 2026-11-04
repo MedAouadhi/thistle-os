@@ -13,7 +13,7 @@ import 'package:sqlite3/sqlite3.dart';
 
 import 'policy.dart' show PeerAddress;
 
-const int schemaVersion = 1;
+const int schemaVersion = 2;
 
 const String _schema = '''
 CREATE TABLE IF NOT EXISTS contacts (
@@ -25,7 +25,8 @@ CREATE TABLE IF NOT EXISTS contacts (
   tailnet_name TEXT,
   flagged_key TEXT,
   accepted_by_them INTEGER,
-  declined_by_them INTEGER NOT NULL DEFAULT 0
+  declined_by_them INTEGER NOT NULL DEFAULT 0,
+  webrtc INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS requests (
   key TEXT PRIMARY KEY,
@@ -82,6 +83,7 @@ class Contact {
     this.flaggedKey,
     this.acceptedByThem,
     this.declinedByThem = false,
+    this.webrtc = false,
   });
   final int id;
   final String name;
@@ -91,6 +93,10 @@ class Contact {
   final String? flaggedKey;
   final bool? acceptedByThem;
   final bool declinedByThem;
+
+  /// Whether its last hello announced `call:webrtc`: video-capable, if ours
+  /// does too, until a hello says otherwise.
+  final bool webrtc;
 
   String get box => key ?? 'contact:$id';
 }
@@ -150,7 +156,10 @@ class OutboxEntry {
 
 class Store {
   Store._(this.db) {
+    final was = db.select('PRAGMA user_version').first.values.first as int;
     db.execute(_schema);
+    // Version 1 knew nothing of a contact's call:webrtc.
+    if (was == 1) db.execute('ALTER TABLE contacts ADD COLUMN webrtc INTEGER NOT NULL DEFAULT 0');
     db.execute('PRAGMA user_version = $schemaVersion');
   }
 
@@ -200,6 +209,7 @@ class Store {
     flaggedKey: r['flagged_key'] as String?,
     acceptedByThem: r['accepted_by_them'] == null ? null : r['accepted_by_them'] == 1,
     declinedByThem: r['declined_by_them'] == 1,
+    webrtc: r['webrtc'] == 1,
   );
 
   List<Contact> contacts() => db.select('SELECT * FROM contacts ORDER BY id').map(_contact).toList();
@@ -224,6 +234,9 @@ class Store {
 
   void setTailnetName(int id, String? name) =>
       db.execute('UPDATE contacts SET tailnet_name = ? WHERE id = ?', [name, id]);
+
+  /// What the contact's last hello said of `call:webrtc`.
+  void setWebrtc(int id, bool on) => db.execute('UPDATE contacts SET webrtc = ? WHERE id = ?', [on ? 1 : 0, id]);
 
   void flagKey(int id, String key) => db.execute('UPDATE contacts SET flagged_key = ? WHERE id = ?', [key, id]);
 
