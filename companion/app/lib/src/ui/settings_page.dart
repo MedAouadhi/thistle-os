@@ -45,6 +45,31 @@ class SettingsPage extends StatelessWidget {
             ),
           ),
         ),
+        if (model.permissions case final permissions? when !permissions.callsFillScreen)
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(18, 14, 8, 14),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text("Calls can't fill the screen", style: display(16, color: k.ink)),
+                        const SizedBox(height: 4),
+                        Text(
+                          'Android lets calls ring only as a notification, not over the lock screen. '
+                          'Allow Thistle Chat to show full-screen notifications.',
+                          style: TextStyle(color: k.muted),
+                        ),
+                      ],
+                    ),
+                  ),
+                  TextButton(onPressed: permissions.openFillScreenSettings, child: const Text('Allow')),
+                ],
+              ),
+            ),
+          ),
         const SectionLabel('Privacy and reach'),
         Card(
           clipBehavior: Clip.antiAlias,

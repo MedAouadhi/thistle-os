@@ -12,10 +12,13 @@ import 'theme.dart';
 import 'widgets.dart';
 
 class ThistleChatApp extends StatelessWidget {
-  const ThistleChatApp({super.key, required this.model, this.navigatorKey});
+  const ThistleChatApp({super.key, required this.model, this.navigatorKey, this.callWindow});
 
   final ChatModel model;
   final GlobalKey<NavigatorState>? navigatorKey;
+
+  /// Android's call window over the lock screen; null on Linux.
+  final CallWindow? callWindow;
 
   @override
   Widget build(BuildContext context) => MaterialApp(
@@ -25,6 +28,9 @@ class ThistleChatApp extends StatelessWidget {
     theme: inkTheme(Brightness.light),
     darkTheme: inkTheme(Brightness.dark),
     home: HomePage(model: model),
+    builder: callWindow == null
+        ? null
+        : (context, child) => CallWindowed(model: model, window: callWindow!, child: child!),
   );
 }
 
@@ -260,7 +266,7 @@ void _pushPage(BuildContext context, ChatModel model, Widget Function() page) =>
         child: SafeArea(
           bottom: false,
           child: ListenableBuilder(
-            listenable: model,
+            listenable: Listenable.merge([model, ?model.permissions]),
             builder: (_, _) => Column(
               children: [
                 if (model.problem != null) _ProblemBanner(model.problem!),

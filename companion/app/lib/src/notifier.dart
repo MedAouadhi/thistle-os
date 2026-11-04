@@ -3,6 +3,11 @@
 /// freedesktop notification service over D-Bus on Linux, and to Android's
 /// notification manager on Android, on the channel `messages`;
 /// there notifications are a runtime permission (permissions.dart).
+///
+/// A call on Android rings like a phone call instead (tailnet-video spec, A
+/// call to a locked phone): the [CallRinger] the app's channel gives
+/// (android.dart, CallRing.kt) plays the phone's ringtone and shows the
+/// call-style notification and the call window over the lock screen.
 library;
 
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
@@ -11,13 +16,26 @@ abstract interface class Notifier {
   /// Show a notification; `conversation` is the contact's key it opens.
   Future<void> show(String title, String body, {String? conversation});
 
-  /// A call coming in, with Answer and Decline, until [stopRinging].
-  Future<void> ringing(String caller, String callId);
+  /// Whether [ringing] rings itself (Android: the phone's ringtone); if
+  /// not, the app plays its own ring.
+  bool get ringsItself;
+
+  /// A call coming in, until [stopRinging]: with the app out of sight
+  /// ([inFront] false), a notification with Answer and Decline.
+  Future<void> ringing(String caller, String callId, {bool inFront = false});
   Future<void> stopRinging(String callId);
 }
 
+/// The phone's own ring for a call: its ringtone, and unless [notify] is
+/// false the call-style notification, which opens the call window on a
+/// locked phone. Android's (android.dart).
+abstract interface class CallRinger {
+  Future<void> ring(String caller, String callId, {required bool notify});
+  Future<void> stop(String callId);
+}
+
 class SystemNotifier implements Notifier {
-  SystemNotifier({this.onOpen, this.onCall});
+  SystemNotifier({this.onOpen, this.onCall, this.ringer});
 
   /// Called with a notification's conversation when the user clicks it.
   final void Function(String? conversation)? onOpen;
@@ -25,6 +43,10 @@ class SystemNotifier implements Notifier {
   /// A ringing notification's button: answer (true) or decline (false);
   /// a click elsewhere on it is null, which shows the call.
   final void Function(String callId, bool? answer)? onCall;
+
+  /// Android's ring; Linux has none, and rings with a notification while
+  /// the app plays its two-tone ring.
+  final CallRinger? ringer;
   final Map<String, int> _ringing = {};
   final _plugin = FlutterLocalNotificationsPlugin();
   bool _ready = false;
@@ -74,8 +96,13 @@ class SystemNotifier implements Notifier {
   }
 
   @override
-  Future<void> ringing(String caller, String callId) async {
-    if (!_ready) return;
+  bool get ringsItself => ringer != null;
+
+  @override
+  Future<void> ringing(String caller, String callId, {bool inFront = false}) async {
+    final phone = ringer;
+    if (phone != null) return phone.ring(caller, callId, notify: !inFront);
+    if (!_ready || inFront) return;
     final id = _ringing[callId] = _next++ & 0x7fffffff;
     await _plugin.show(
       id: id,
@@ -92,26 +119,13 @@ class SystemNotifier implements Notifier {
             LinuxNotificationAction(key: 'decline', label: 'Decline'),
           ],
         ),
-        android: AndroidNotificationDetails(
-          'calls',
-          'Calls',
-          importance: Importance.max,
-          category: AndroidNotificationCategory.call,
-          fullScreenIntent: true,
-          actions: [
-            AndroidNotificationAction('answer', 'Answer', showsUserInterface: true),
-            // Through the window too: an action with none would run in a
-            // background isolate of the plugin's, not the one whose peer
-            // has the call.
-            AndroidNotificationAction('decline', 'Decline', showsUserInterface: true, cancelNotification: true),
-          ],
-        ),
       ),
     );
   }
 
   @override
   Future<void> stopRinging(String callId) async {
+    await ringer?.stop(callId);
     final id = _ringing.remove(callId);
     if (id != null && _ready) await _plugin.cancel(id: id);
   }

@@ -59,7 +59,11 @@ Future<void> main(List<String> args) async {
   final status = await readStatus();
   final navigator = GlobalKey<NavigatorState>();
   late final ChatModel model;
+  // On Android the phone rings for a call, with a call window over the
+  // lock screen; the notification's Answer and Decline come back here.
+  android?.onCall = (id, answer) => answer ? unawaited(model.talk.answer(id)) : model.talk.decline(id);
   final notifier = SystemNotifier(
+    ringer: android,
     onOpen: (box) {
       final nav = navigator.currentState;
       if (box != null && nav != null) openConversation(nav, model, box);
@@ -101,7 +105,7 @@ Future<void> main(List<String> args) async {
     // is no window: messages notify until one shows.
     model.foreground = WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
   }
-  runApp(ThistleChatApp(model: model, navigatorKey: navigator));
+  runApp(ThistleChatApp(model: model, navigatorKey: navigator, callWindow: android?.callWindow));
 }
 
 class _Failed extends StatelessWidget {

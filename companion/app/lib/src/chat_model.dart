@@ -152,6 +152,7 @@ class ChatModel extends ChangeNotifier {
     await refresh();
     // Not awaited: the notification prompt waits on the user, the screens do not.
     unawaited(_applyBackground());
+    unawaited(permissions?.checkFillScreen());
     if (refreshEvery > Duration.zero) _refresh = Timer.periodic(refreshEvery, (_) => refresh());
     _tick = Timer.periodic(const Duration(seconds: 1), (_) => _typingLapse());
   }
@@ -220,6 +221,8 @@ class ChatModel extends ChangeNotifier {
     // Without a peer list, coming to the front is when to look for the
     // contacts again: a message held for us while we were away comes now.
     if (back && _started && !status.hasPeerList) unawaited(_peer.seenOnline(_knownNames));
+    // Back from Android's page that allows calls to fill the screen, maybe.
+    if (back) unawaited(permissions?.checkFillScreen());
   }
 
   String? get openConversationBox => _open;
@@ -487,9 +490,11 @@ class ChatModel extends ChangeNotifier {
 
 class _Silent implements Notifier {
   @override
+  bool get ringsItself => false;
+  @override
   Future<void> show(String title, String body, {String? conversation}) async {}
   @override
-  Future<void> ringing(String caller, String callId) async {}
+  Future<void> ringing(String caller, String callId, {bool inFront = false}) async {}
   @override
   Future<void> stopRinging(String callId) async {}
 }

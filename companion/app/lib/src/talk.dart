@@ -174,6 +174,9 @@ class Talk {
   AudioOut? _ring;
   Timer? _ringTimer;
 
+  /// The call ringing now, if one is.
+  String? _ringing;
+
   Call? get call => callId == null ? null : peer().calls[callId];
   bool get _callLive => call?.live ?? false;
 
@@ -271,8 +274,7 @@ class Talk {
     }
     callId = id;
     if (c.state == 'ringing' && !c.mine) {
-      _startRing();
-      if (!foreground()) unawaited(notifier.ringing(nameOf(c.peer), id));
+      _ringFor(id, c);
     } else {
       _stopRing(id);
     }
@@ -323,6 +325,16 @@ class Talk {
     await devices?.close();
   }
 
+  /// Ring for a call coming in, once: the notifier with the app out of
+  /// sight, and the phone's ringtone or else the app's own ring.
+  void _ringFor(String id, Call c) {
+    if (_ringing == id) return;
+    _ringing = id;
+    if (!notifier.ringsItself) _startRing();
+    unawaited(notifier.ringing(nameOf(c.peer), id, inFront: foreground()));
+    unawaited(permissions?.checkFillScreen());
+  }
+
   /// A two-tone ring: 0.4 s on, 0.2 s off, 0.4 s on, 2 s off.
   void _startRing() {
     if (_ringTimer != null) return;
@@ -350,7 +362,8 @@ class Talk {
   }
 
   void _stopRing(String id) {
-    if (_ringTimer == null) return;
+    if (_ringing != id) return;
+    _ringing = null;
     _ringTimer?.cancel();
     _ringTimer = null;
     final r = _ring;
