@@ -98,11 +98,12 @@ Future<void> main(List<String> args) async {
     permissions: android == null ? null : Permissions(android),
     audio: audio,
     children: children,
-    // Calls with another companion app on WebRTC, on Linux for now; Android
-    // announces no call:webrtc until ticket 05 of .scratch/tailnet-video.
-    callEngine: Platform.isLinux && options.webrtc
-        ? WebrtcCallEngine(log: options.verbose ? stderr.writeln : null)
-        : null,
+    // Calls with another companion app on WebRTC. On Android the sound
+    // follows the video (loudspeaker or earpiece), and the camera pauses
+    // while the app is away; the call lives on in the listening service.
+    callEngine: options.webrtc ? WebrtcCallEngine(log: options.verbose ? stderr.writeln : null) : null,
+    callRoute: android != null ? AndroidCallRoute(log: options.verbose ? stderr.writeln : null) : null,
+    cameraPausesAway: android != null,
     notifier: notifier,
     listenHost: options.listenHost,
     port: options.port,

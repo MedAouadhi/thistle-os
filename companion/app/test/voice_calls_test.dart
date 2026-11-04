@@ -267,6 +267,12 @@ void main() {
       late RecordingNotifier friendNotifier;
       late String friendBox;
 
+      /// The other app is Android's: its permission prompts (the
+      /// microphone allowed, the camera allowed unless a test says), its
+      /// call route, and its camera paused while it is away.
+      late FakePermissions permissions;
+      late FakeCallRoute route;
+
       setUp(() async {
         await app.close();
         await other.stop();
@@ -274,12 +280,22 @@ void main() {
         theirs = FakeCallEngine();
         friendAudio = FakeAudio();
         app = testModel(tailnet, notifier, audio: audio, callEngine: mine);
-        friendNotifier = RecordingNotifier();
-        friend = testModel(tailnet, friendNotifier, audio: friendAudio, callEngine: theirs);
         other = await otherPeer(); // the T-Deck, for the ws-opus case
         await app.start();
-        await friend.start();
         await befriend(); // with the T-Deck
+        permissions = FakePermissions()..state[AppPermission.microphone] = PermissionAnswer.granted;
+        route = FakeCallRoute();
+        friendNotifier = RecordingNotifier();
+        friend = testModel(
+          tailnet,
+          friendNotifier,
+          audio: friendAudio,
+          callEngine: theirs,
+          permissions: permissions,
+          callRoute: route,
+          cameraPausesAway: true,
+        );
+        await friend.start();
         friend.peer.addContact(app.listening!, name: 'desk');
         friend.peer.sendText('desk', 'hi');
         await eventually(() => app.requests.isNotEmpty);
@@ -537,6 +553,73 @@ void main() {
           await app.talk.setCameraOn(false);
           await app.refresh();
           expect(tailnet.reads, reads + 1);
+        });
+      });
+
+      group('the other app on Android', () {
+        test('the camera is asked for when first switched on; refused, the other side is told none and the call '
+            'goes on', () async {
+          permissions.answer = PermissionAnswer.denied;
+          final id = (await app.talk.startCall(friendBox, video: true))!;
+          await eventually(() => friend.talk.call?.state == 'ringing');
+          expect(permissions.asked, isEmpty, reason: 'not before the camera is switched on');
+          await friend.talk.answer(video: true);
+          await eventually(() => app.peer.calls[id]!.remoteCamera == CameraState.none);
+          expect(permissions.asked, [AppPermission.camera]);
+          expect(theirs.session.cameraLog, isEmpty, reason: 'never opened');
+          expect(friend.talk.cameraOn, isFalse);
+          expect(friend.talk.cameraProblem, contains('not allowed'));
+          expect(friend.talk.call?.state, 'connected');
+          expect(friend.talk.remoteVideoShown, isTrue, reason: "the other side's picture still shows");
+          // Allowed on a second try, from the camera switch.
+          permissions.answer = PermissionAnswer.granted;
+          await friend.talk.setCameraOn(true);
+          await eventually(() => app.peer.calls[id]!.remoteCamera == CameraState.on);
+          expect(theirs.session.camera, 'Integrated Webcam');
+        });
+
+        test('leaving the app pauses the camera and keeps the call; back, the camera comes on again', () async {
+          final id = (await app.talk.startCall(friendBox))!;
+          await eventually(() => friend.talk.call?.state == 'ringing');
+          await friend.talk.answer(video: true);
+          await eventually(() => app.peer.calls[id]!.remoteCamera == CameraState.on);
+          friend.away = true;
+          await eventually(() => app.peer.calls[id]!.remoteCamera == CameraState.paused);
+          expect(theirs.session.camera, isNull, reason: 'the camera let go');
+          expect(theirs.session.closed, isFalse, reason: 'the voice goes on');
+          expect(friend.talk.call?.state, 'connected');
+          friend.away = false;
+          await eventually(() => app.peer.calls[id]!.remoteCamera == CameraState.on);
+          expect(theirs.session.camera, 'Integrated Webcam');
+          expect(theirs.sessions, hasLength(1));
+        });
+
+        test('the sound follows the video: the earpiece, the loudspeaker while either camera is on, the earpiece '
+            'again', () async {
+          final id = await connected();
+          await eventually(() => app.peer.calls[id]!.remoteCamera == CameraState.off && route.now == 'earpiece');
+          expect(route.log.first, 'begin');
+          await app.talk.setCameraOn(true); // theirs on our screen
+          await eventually(() => route.now == 'loudspeaker');
+          await app.talk.setCameraOn(false);
+          await eventually(() => route.now == 'earpiece');
+          await friend.talk.setCameraOn(true); // ours
+          expect(route.now, 'loudspeaker');
+          await friend.talk.setCameraOn(false);
+          expect(route.now, 'earpiece');
+          app.talk.hangUp();
+          await eventually(() => route.log.last == 'end');
+          expect(route.log, ['begin', 'earpiece', 'loudspeaker', 'earpiece', 'loudspeaker', 'earpiece', 'end']);
+        });
+
+        test('leaving the app with the camera off sends nothing, and back it stays off', () async {
+          final id = await connected();
+          await eventually(() => app.peer.calls[id]!.remoteCamera == CameraState.off);
+          friend.away = true;
+          friend.away = false;
+          await Future<void>.delayed(const Duration(milliseconds: 200));
+          expect(app.peer.calls[id]!.remoteCamera, CameraState.off);
+          expect(theirs.session.cameraLog, isEmpty);
         });
       });
 

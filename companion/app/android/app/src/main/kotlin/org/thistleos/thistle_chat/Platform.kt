@@ -42,6 +42,10 @@ class Platform private constructor(private val context: Context, engine: Flutter
     }
 
     var activity: Activity? = null
+        set(value) {
+            field = value
+            audio.window = value // a video call keeps the screen on in whichever window shows
+        }
 
     /** The call window over the lock screen, while it is attached. */
     var callWindow: Activity? = null
@@ -85,6 +89,7 @@ class Platform private constructor(private val context: Context, engine: Flutter
                         call.argument<String>("caller")!!,
                         call.argument<String>("id")!!,
                         call.argument<Boolean>("notify") == true,
+                        call.argument<Boolean>("video") == true,
                     )
                     result.success(null)
                 }
@@ -132,6 +137,7 @@ class Platform private constructor(private val context: Context, engine: Flutter
     private fun permission(name: String): String? = when (name) {
         "notifications" -> if (Build.VERSION.SDK_INT >= 33) Manifest.permission.POST_NOTIFICATIONS else null
         "microphone" -> Manifest.permission.RECORD_AUDIO
+        "camera" -> Manifest.permission.CAMERA
         else -> throw IllegalArgumentException("no permission $name")
     }
 

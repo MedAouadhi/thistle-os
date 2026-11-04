@@ -59,14 +59,14 @@ object CallRing {
     }
 
     @Synchronized
-    fun start(context: Context, caller: String, id: String, notify: Boolean) {
+    fun start(context: Context, caller: String, id: String, notify: Boolean, video: Boolean = false) {
         if (ringing == id) return
         ringing?.let { stop(context, it) }
         ringing = id
         val (sound, vibrate) = alerts(context)
         if (sound) playRingtone(context)
         if (vibrate) vibrate(context)
-        if (notify) notify(context, caller, id)
+        if (notify) notify(context, caller, id, video)
         Log.i("ThistleChat", "ringing for a call: ringtone $sound, vibration $vibrate, notification $notify")
     }
 
@@ -156,7 +156,8 @@ object CallRing {
         }
     }
 
-    private fun notify(context: Context, caller: String, id: String) {
+    /** A video call says so; its window offers Answer with video (call_page.dart). */
+    private fun notify(context: Context, caller: String, id: String, video: Boolean) {
         val notifications = context.getSystemService(NotificationManager::class.java)
         if (Build.VERSION.SDK_INT >= 26) {
             notifications.deleteNotificationChannel(OLD_CHANNEL)
@@ -185,7 +186,7 @@ object CallRing {
         builder
             .setSmallIcon(R.drawable.ic_stat_chat)
             .setContentTitle(caller)
-            .setContentText("Tailnet call")
+            .setContentText(if (video) "Tailnet video call" else "Tailnet call")
             .setCategory(Notification.CATEGORY_CALL)
             .setVisibility(Notification.VISIBILITY_PUBLIC)
             .setOngoing(true)
@@ -195,7 +196,7 @@ object CallRing {
             .setFullScreenIntent(show, true)
         if (Build.VERSION.SDK_INT >= 31) {
             val person = Person.Builder().setName(caller).setImportant(true).build()
-            builder.setStyle(Notification.CallStyle.forIncomingCall(person, decline, answer))
+            builder.setStyle(Notification.CallStyle.forIncomingCall(person, decline, answer).setIsVideo(video))
         } else {
             @Suppress("DEPRECATION")
             builder.setPriority(Notification.PRIORITY_MAX)

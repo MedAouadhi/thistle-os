@@ -105,9 +105,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   /// In front only while resumed: a message to a hidden window notifies.
+  /// Away once hidden, and back once resumed: a prompt or the notification
+  /// shade over the window (inactive) leaves a call's camera on.
   @override
-  void didChangeAppLifecycleState(AppLifecycleState state) =>
-      widget.model.foreground = state == AppLifecycleState.resumed;
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final model = widget.model;
+    model.foreground = state == AppLifecycleState.resumed;
+    if (state == AppLifecycleState.resumed) {
+      model.away = false;
+    } else if (state != AppLifecycleState.inactive && !model.away) {
+      model.away = true;
+    }
+  }
 
   void _go(int tab) => setState(() => _tab = tab);
 
@@ -559,7 +568,11 @@ class _RefusalBanner extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => _Strip(
-    icon: permission == AppPermission.microphone ? Icons.mic_off_rounded : Icons.notifications_off_outlined,
+    icon: switch (permission) {
+      AppPermission.microphone => Icons.mic_off_rounded,
+      AppPermission.camera => Icons.videocam_off_rounded,
+      AppPermission.notifications => Icons.notifications_off_outlined,
+    },
     text: permissions.refusal(permission) ?? '',
     actions: [
       TextButton(onPressed: permissions.openSettings, child: const Text('Open settings')),

@@ -324,6 +324,7 @@ class _CallPageState extends State<CallPage> {
           ),
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+          crossAxisAlignment: CrossAxisAlignment.start, // the circles in line, whatever their labels
           children: [
             if (ringing) ...[
               _RoundButton(
@@ -429,13 +430,22 @@ class _RoundButton extends StatelessWidget {
         child: SizedBox(width: 72, height: 72, child: Icon(icon, color: foreground, size: 30)),
       ),
     );
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        tooltip == null ? button : Tooltip(message: tooltip, child: button),
-        const SizedBox(height: 10),
-        Text(label, style: mono(11.5, color: k.muted)),
-      ],
+    // As wide as four fit on a phone; a long label takes two lines.
+    return SizedBox(
+      width: 80,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          tooltip == null ? button : Tooltip(message: tooltip, child: button),
+          const SizedBox(height: 10),
+          Text(
+            label,
+            style: mono(11.5, color: k.muted),
+            textAlign: TextAlign.center,
+            maxLines: 2,
+          ),
+        ],
+      ),
     );
   }
 }

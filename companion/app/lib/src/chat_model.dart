@@ -56,6 +56,8 @@ class ChatModel extends ChangeNotifier {
     this.permissions,
     AudioDevices? audio,
     this.callEngine,
+    this.callRoute,
+    this.cameraPausesAway = false,
     ChildProcesses? children,
     Future<ProbeResult?> Function(PeerAddress address)? probe,
   }) : _probe = probe,
@@ -93,6 +95,13 @@ class ChatModel extends ChangeNotifier {
   /// calls another such app over WebRTC. Null: `ws-opus` only.
   final CallEngine? callEngine;
 
+  /// A WebRTC call's loudspeaker or earpiece, and the screen; Android's.
+  final CallRoute? callRoute;
+
+  /// Whether our camera pauses while the app is away (Android: no camera
+  /// in the background, nor picture-in-picture).
+  final bool cameraPausesAway;
+
   /// The app's child processes, none started while a camera is on.
   final ChildProcesses children;
 
@@ -104,6 +113,8 @@ class ChatModel extends ChangeNotifier {
     peer: () => _peer,
     audio: audio,
     engine: callEngine,
+    route: callRoute,
+    cameraPausesAway: cameraPausesAway,
     notifier: notifier,
     foreground: () => _foreground,
     changed: () {
@@ -255,6 +266,17 @@ class ChatModel extends ChangeNotifier {
     // Back from Android's page that allows calls to fill the screen, maybe.
     if (back) unawaited(permissions?.checkFillScreen());
   }
+
+  /// Whether the window is out of sight: hidden or paused, not merely
+  /// inactive behind a prompt or the notification shade. A WebRTC call's
+  /// camera pauses meanwhile where [cameraPausesAway].
+  bool get away => _away;
+  set away(bool on) {
+    _away = on;
+    unawaited(talk.setAway(on));
+  }
+
+  bool _away = false;
 
   String? get openConversationBox => _open;
 

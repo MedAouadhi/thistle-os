@@ -48,8 +48,16 @@ class WebrtcCallEngine implements CallEngine {
         if (d.kind == 'videoinput') d,
     ];
     log?.call('cameras: ${found.isEmpty ? 'none' : found.map((d) => d.label).join(', ')}');
-    return [for (final d in found) d.deviceId];
+    _labels
+      ..clear()
+      ..addAll({for (final d in found) d.deviceId: d.label});
+    return frontFirst([for (final d in found) (d.deviceId, d.label)]);
   }
+
+  /// Each camera's label, from the last [cameras]: whether its picture is
+  /// mirrored.
+  final Map<String, String> _labels = {};
+  bool _mirror(String? camera) => mirrored(_labels[camera] ?? '');
 
   @override
   Future<CameraPreview> preview(String camera) async {
@@ -57,7 +65,7 @@ class WebrtcCallEngine implements CallEngine {
     await view.initialize();
     try {
       final stream = await _openCamera(camera, view, log);
-      return _Preview(camera, stream, view);
+      return _Preview(camera, stream, view, mirror: _mirror(camera));
     } on Object {
       await view.dispose();
       rethrow;
@@ -92,7 +100,7 @@ class WebrtcCallEngine implements CallEngine {
       await preview?._close();
       rethrow;
     }
-    final s = _Session(pc, mic, send, onState, log, preview);
+    final s = _Session(pc, mic, send, onState, log, preview, _mirror);
     try {
       await s._open(offerer);
     } on Object {
@@ -161,15 +169,16 @@ Future<MediaStream> _openCamera(String camera, RTCVideoRenderer into, void Funct
 /// A camera open while a call rings, with what draws it; the session that
 /// starts with it takes both.
 class _Preview implements CameraPreview {
-  _Preview(this.camera, this.stream, this.renderer);
+  _Preview(this.camera, this.stream, this.renderer, {required this.mirror});
   @override
   final String camera;
+  final bool mirror;
   final MediaStream stream;
   final RTCVideoRenderer renderer;
   bool _taken = false, _closed = false;
 
   @override
-  Widget view() => RTCVideoView(renderer, objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover, mirror: true);
+  Widget view() => RTCVideoView(renderer, objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover, mirror: mirror);
 
   @override
   Future<void> close() async {
@@ -186,15 +195,20 @@ class _Preview implements CameraPreview {
 }
 
 class _Session implements CallSession {
-  _Session(this.pc, this.mic, this._send, this._onState, this.log, _Preview? preview)
+  _Session(this.pc, this.mic, this._send, this._onState, this.log, _Preview? preview, this._mirror)
     : _local = preview?.renderer ?? RTCVideoRenderer(),
       _localReady = preview != null,
-      _camera = preview?.stream;
+      _camera = preview?.stream,
+      _cameraId = preview?.camera;
   final RTCPeerConnection pc;
   final MediaStream mic;
   final SendRtc _send;
   final void Function(MediaState) _onState;
   final void Function(String)? log;
+  final bool Function(String? camera) _mirror;
+
+  /// Which camera is sending, for whether its picture is mirrored.
+  String? _cameraId;
 
   /// Our candidates wait until our SDP has gone, and theirs until theirs is
   /// set: either may otherwise reach a connection with no description.
@@ -372,6 +386,7 @@ class _Session implements CallSession {
       await _stop(old);
     }
     final stream = await _openCamera(camera, _local, log);
+    _cameraId = camera;
     if (_closed) {
       _local.srcObject = null;
       await _stop(stream);
@@ -434,7 +449,7 @@ class _Session implements CallSession {
 
   @override
   Widget localVideo() =>
-      RTCVideoView(_local, objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover, mirror: true);
+      RTCVideoView(_local, objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover, mirror: _mirror(_cameraId));
 
   @override
   Future<CallPath?> selectedPath() async {

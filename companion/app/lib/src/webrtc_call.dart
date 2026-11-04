@@ -22,6 +22,8 @@ class WebrtcCall {
     required this.children,
     required this.changed,
     bool camera = false,
+    this.cameraAllowed,
+    this.route,
     this.log,
   }) : _wantCamera = camera {
     _previewFollows();
@@ -36,6 +38,13 @@ class WebrtcCall {
 
   /// Something on screen may have changed.
   final void Function() changed;
+
+  /// Whether the camera may be used, asked before it first opens (Android's
+  /// permission); refused, the other side is told none and the call goes on.
+  final Future<bool> Function()? cameraAllowed;
+
+  /// The phone's loudspeaker or earpiece, following the video; Android's.
+  final CallRoute? route;
   final void Function(String)? log;
 
   /// The media, once started; the other side's SDP and candidates wait in
@@ -90,6 +99,9 @@ class WebrtcCall {
     await _previewing;
     final preview = _preview;
     _preview = null;
+    // The listening service takes the microphone before it opens.
+    _routed = route != null;
+    await route?.begin();
     final CallSession session;
     try {
       session = await engine.start(
@@ -104,6 +116,7 @@ class WebrtcCall {
         await preview.close();
         children.cameraClosed();
       }
+      await _unroute();
       audioProblem = 'The call has no audio: $e';
       log?.call('${callLabel(id)}: WebRTC did not start: $e');
       if (_live) peer().endCall(id, reason: 'error', fault: CallFault.webrtcFailed);
@@ -113,6 +126,7 @@ class WebrtcCall {
     _starting = false;
     if (!_live) {
       await session.close();
+      await _unroute();
       return;
     }
     _session = session
@@ -138,11 +152,14 @@ class WebrtcCall {
       peer().setCamera(id, CameraState.on);
     } else if (found.isEmpty || _noPicture) {
       peer().setCamera(id, CameraState.none);
+    } else if (_away && _resume) {
+      peer().setCamera(id, CameraState.paused);
     } else if (_wantCamera) {
       await _applyCamera(session, on: true);
     } else {
       peer().setCamera(id, CameraState.off);
     }
+    followRoute();
     changed();
   }
 
@@ -211,12 +228,75 @@ class WebrtcCall {
     changed();
   }
 
+  /// Where the sound goes: the loudspeaker while a picture is on screen,
+  /// ours or theirs, else the earpiece; told only as it changes, once the
+  /// media has started.
+  void followRoute() {
+    final route = this.route;
+    if (route == null || _session == null || _closed) return;
+    final shown = cameraOn || _call?.remoteCamera == CameraState.on;
+    if (shown == _videoShown) return;
+    _videoShown = shown;
+    log?.call('${callLabel(id)}: sound to the ${shown ? 'loudspeaker' : 'earpiece'}');
+    unawaited(route.video(shown));
+  }
+
+  bool _routed = false;
+  bool? _videoShown;
+
+  /// The app is away (Android: no camera in the background), or back.
+  /// Away, a camera that is on is let go and told as paused, the voice
+  /// going on; back, it opens again and is told as on. One asked for
+  /// while a call we placed rings is let go and opened again the same way.
+  Future<void> setAway(bool away) async {
+    if (away == _away || _closed) return;
+    _away = away;
+    final session = _session;
+    if (away) {
+      if (session == null) {
+        _resume = _wantCamera;
+        _wantCamera = false;
+        _previewFollows();
+        await _previewing;
+      } else if (cameraOn) {
+        _resume = true;
+        await session.setCamera(null);
+        cameraOn = false;
+        children.cameraClosed();
+        log?.call('${callLabel(id)}: our camera paused, the app away');
+        peer().setCamera(id, CameraState.paused);
+      }
+    } else if (_resume) {
+      _resume = false;
+      if (session == null) {
+        _wantCamera = true;
+        _previewFollows();
+        await _previewing;
+      } else {
+        await _applyCamera(session, on: true);
+      }
+    }
+    followRoute();
+    changed();
+  }
+
+  bool _away = false;
+
+  /// Our camera was on when the app went away: it comes back with it.
+  bool _resume = false;
+
   /// No child process starts while the camera is on, and the camera waits
   /// for those running (child_processes.dart); a camera that gives no
   /// picture is turned off, said so, and told as none: the other side's
   /// tile reads No camera, not Camera off.
   Future<void> _applyCamera(CallSession session, {required bool on}) async {
     final camera = on ? cameras![_cameraAt] : null;
+    if (on && !await _allowed()) {
+      cameraOn = false;
+      if (!_closed) peer().setCamera(id, CameraState.none);
+      followRoute();
+      return;
+    }
     if (on) await children.cameraOpening();
     var state = on ? CameraState.on : CameraState.off;
     try {
@@ -232,6 +312,7 @@ class WebrtcCall {
     if (_closed) return;
     log?.call('${callLabel(id)}: our camera ${cameraOn ? 'on, $camera' : state.wire}');
     peer().setCamera(id, state);
+    followRoute();
   }
 
   /// While a call we placed rings, our camera follows the switch: opened
@@ -271,6 +352,11 @@ class WebrtcCall {
     cameras = found;
     if (found.isEmpty || !_wantCamera || !_ringingOut) return changed();
     final camera = found[_cameraAt];
+    if (!await _allowed()) {
+      _wantCamera = false;
+      _noPicture = true;
+      return changed();
+    }
     await children.cameraOpening();
     try {
       final preview = await engine.preview(camera);
@@ -289,6 +375,14 @@ class WebrtcCall {
       changed();
     }
     children.cameraClosed();
+  }
+
+  /// Whether the camera may open; refused, the screen says so.
+  Future<bool> _allowed() async {
+    if (cameraAllowed == null || await cameraAllowed!()) return true;
+    cameraProblem = 'The camera is not allowed, so the other side sees No camera.';
+    log?.call('${callLabel(id)}: the camera is not allowed');
+    return false;
   }
 
   // -- the connection -------------------------------------------------------------
@@ -349,5 +443,13 @@ class WebrtcCall {
       await session.close();
     }
     children.cameraClosed();
+    await _unroute();
+  }
+
+  /// The call route undone, once.
+  Future<void> _unroute() async {
+    if (!_routed) return;
+    _routed = false;
+    await route?.end();
   }
 }

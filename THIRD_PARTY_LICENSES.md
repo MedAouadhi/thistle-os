@@ -860,8 +860,12 @@ FFmpeg is LGPL-2.1: the app links it dynamically, inside `libwebrtc.so`,
 which a user may replace with another build of the same release; its
 source is Chromium's `third_party/ffmpeg` at the WebRTC revision the
 release names. No GPL. The Android build's WebRTC comes from Maven
-(`io.github.webrtc-sdk:android`) and has no software H.264; its
-pinning is ticket 05 of `.scratch/tailnet-video`.
+(`io.github.webrtc-sdk:android` 150.7871.04, the same Chromium WebRTC and
+its BSD-3-Clause third-party code) and has no software H.264; with it
+comes flutter_webrtc's audio switch, `com.github.davidliu:audioswitch`
+(a fork of Twilio's AudioSwitch, Apache-2.0), from JitPack. Both, like
+every artifact the Android build fetches, are checked against the
+SHA-256 in `companion/app/android/gradle/verification-metadata.xml`.
 
 The app bundles three fonts, each with its licence beside it in
 `companion/app/assets/fonts/`, from github.com/google/fonts (`ofl/`):

@@ -514,6 +514,25 @@ void main() {
     await finish(tester);
   });
 
+  testWidgets('the app is away once hidden, not while a prompt or the shade is over it', (tester) async {
+    await launch(tester);
+    expect(app.away, isFalse);
+    for (final (state, away) in [
+      (AppLifecycleState.inactive, false), // a permission prompt, the notification shade
+      (AppLifecycleState.resumed, false),
+      (AppLifecycleState.inactive, false),
+      (AppLifecycleState.hidden, true),
+      (AppLifecycleState.paused, true),
+      (AppLifecycleState.hidden, true),
+      (AppLifecycleState.inactive, true), // on its way back
+      (AppLifecycleState.resumed, false),
+    ]) {
+      tester.binding.handleAppLifecycleStateChanged(state);
+      expect(app.away, away, reason: '$state');
+    }
+    await finish(tester);
+  });
+
   testWidgets('Android: the call window shows the call alone; ended, it finishes', (tester) async {
     final window = TestCallWindow();
     await launch(tester, callWindow: window, phone: true);
@@ -668,12 +687,37 @@ void main() {
       await finish(tester);
     });
 
+    testWidgets('Android: the call window over the lock screen offers Answer with video for a video call', (
+      tester,
+    ) async {
+      final window = TestCallWindow();
+      await launch(tester, videoCapable: true, callWindow: window, phone: true);
+      await befriend(tester);
+      late String id;
+      await tester.runAsync(() async => id = await device.call('laptop', video: true));
+      await until(tester, () => app.talk.call?.state == 'ringing');
+      window.show();
+      await until(tester, () => find.byKey(const Key('call-answer-video')).evaluate().isNotEmpty);
+      expect(find.text('Video call'), findsOneWidget);
+      expect(find.byKey(const Key('call-answer')), findsOneWidget);
+      expect(find.byKey(const Key('call-decline')), findsOneWidget);
+      expect(find.text('hello from the device'), findsNothing, reason: 'the call alone');
+      await tester.tap(find.byKey(const Key('call-answer-video')));
+      await until(tester, () => device.calls[id]!.remoteCamera == CameraState.on);
+      await tester.tap(find.byKey(const Key('call-hangup')));
+      await until(tester, () => find.text('Call ended').evaluate().isNotEmpty);
+      await tester.pump(const Duration(seconds: 4));
+      expect(window.finished, 1);
+      await finish(tester);
+    });
+
     testWidgets('Answer with video turns the camera on', (tester) async {
       await launch(tester, videoCapable: true);
       await befriend(tester);
       late String id;
       await tester.runAsync(() async => id = await device.call('laptop', video: true));
       await until(tester, () => find.byKey(const Key('call-answer-video')).evaluate().isNotEmpty);
+      await tester.pump(const Duration(seconds: 1)); // the call screen has slid in
       await tester.tap(find.byKey(const Key('call-answer-video')));
       await until(tester, () => device.calls[id]!.remoteCamera == CameraState.on);
       await hangUp(tester);

@@ -362,7 +362,13 @@ tailnet removed.
   every **5 s** after; if either end is outside the ranges above it SHOULD
   end the call with `call_end` `error`. Between two machines a packet
   from a LAN socket to a tailnet address should not cross WireGuard at
-  all; that is yet to be watched on hardware.
+  all; that is yet to be watched on hardware. A peer-reflexive end whose
+  address is in the ranges passes: the companion app on Android gathers
+  no candidate on the Tailscale app's interface (libwebrtc's, which
+  flutter_webrtc gives no way to change), so it signals none, and its
+  checks reach the other side's tailnet address through the VPN; both
+  sides then see a peer-reflexive tailnet address at the phone's end. Two such sides have no candidate between them and do not
+  connect: the call ends with `call_end` `timeout` 15 s after the answer.
 - **Codecs.** VP8 SHOULD be first in the video codec preferences and Opus
   in the audio ones; H.264 SHOULD NOT be offered. The media is WebRTC's,
   not this protocol's binary frames; kind `02` stays `ws-opus`'s.

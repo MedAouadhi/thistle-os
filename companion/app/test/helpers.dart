@@ -311,6 +311,22 @@ class FakeCameraPreview implements CameraPreview {
   Future<void> close() async => closed = true;
 }
 
+/// A phone's call route, as Android's would follow it: what it was told,
+/// in order (`begin`, `loudspeaker`, `earpiece`, `end`).
+class FakeCallRoute implements CallRoute {
+  final List<String> log = [];
+
+  /// Where the sound goes now, the last of `loudspeaker` or `earpiece`.
+  String? get now => log.lastWhere((e) => e == 'loudspeaker' || e == 'earpiece', orElse: () => '');
+
+  @override
+  Future<void> begin() async => log.add('begin');
+  @override
+  Future<void> video(bool shown) async => log.add(shown ? 'loudspeaker' : 'earpiece');
+  @override
+  Future<void> end() async => log.add('end');
+}
+
 /// A model listening on loopback, with the tailnet `tailnet` says.
 ChatModel testModel(
   TestTailnet tailnet,
@@ -321,10 +337,14 @@ ChatModel testModel(
   String store = ':memory:',
   AudioDevices? audio,
   CallEngine? callEngine,
+  CallRoute? callRoute,
+  bool cameraPausesAway = false,
   Future<ProbeResult?> Function(PeerAddress address)? probe,
 }) => ChatModel(
   probe: probe,
   callEngine: callEngine,
+  callRoute: callRoute,
+  cameraPausesAway: cameraPausesAway,
   audio: audio ?? FakeAudio(),
   identity: Identity.generate(),
   openStore: () => Store.open(store),

@@ -6,14 +6,21 @@
 /// channel. A call also puts the phone in communication mode and the
 /// listening service in the foreground as using the microphone, which
 /// Android 14 requires to record with the app in the background.
+///
+/// A WebRTC call records and plays through libwebrtc instead, whose audio
+/// switch (flutter_webrtc's) puts the phone in communication mode and picks
+/// the output; [AndroidCallRoute] tells it which, and has Audio.kt keep the
+/// listening service, the proximity lock and the screen to match.
 library;
 
 import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter/services.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart' show Helper;
 import 'package:tailnet_chat_core/tailnet_chat_core.dart' show AudioOut;
 
+import '../call_engine.dart';
 import 'devices.dart';
 
 class AndroidAudioDevices implements AudioDevices {
@@ -119,6 +126,48 @@ class _AndroidSpeaker implements AudioOut {
       await AndroidAudioDevices.control.invokeMethod<void>('speaker.close', {'id': _id});
     } on PlatformException {
       // already gone
+    }
+  }
+}
+
+/// A WebRTC call's route on Android: the earpiece and the screen dark at
+/// the ear, or with video the loudspeaker (a headset still first) and the
+/// screen kept on. Audio.kt's `rtc.*` keep the listening service as using
+/// the microphone, the proximity lock and the window's keep-screen-on;
+/// flutter_webrtc's audio switch, the output. Neither failing stops a call:
+/// it is logged.
+class AndroidCallRoute implements CallRoute {
+  AndroidCallRoute({this.log});
+  final void Function(String)? log;
+
+  @override
+  Future<void> begin() async {
+    await _platform('rtc.begin');
+    await _output(() => Helper.setSpeakerphoneOn(false));
+  }
+
+  @override
+  Future<void> video(bool shown) async {
+    await _platform('rtc.video', {'shown': shown});
+    await _output(shown ? Helper.setSpeakerphoneOnButPreferBluetooth : () => Helper.setSpeakerphoneOn(false));
+  }
+
+  @override
+  Future<void> end() => _platform('rtc.end');
+
+  Future<void> _platform(String method, [Object? args]) async {
+    try {
+      await AndroidAudioDevices.control.invokeMethod<void>(method, args);
+    } on PlatformException catch (e) {
+      log?.call('call route: $method refused: ${e.message ?? e.code}');
+    }
+  }
+
+  Future<void> _output(Future<void> Function() pick) async {
+    try {
+      await pick();
+    } on Object catch (e) {
+      log?.call('call route: the output not chosen: $e');
     }
   }
 }

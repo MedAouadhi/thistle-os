@@ -1,6 +1,7 @@
 /// Android's runtime permissions, asked when first needed: notifications
 /// when the background service starts or a contact is added, the
-/// microphone when a voice message or a call first needs it (ticket 10).
+/// microphone when a voice message or a call first needs it (ticket 10),
+/// the camera when it is first switched on in a call (tailnet-video).
 /// A refusal is explained where the user sees it, with what it stops.
 /// Linux asks for nothing: the model is given no [Permissions] there.
 ///
@@ -12,7 +13,7 @@ library;
 
 import 'package:flutter/foundation.dart';
 
-enum AppPermission { notifications, microphone }
+enum AppPermission { notifications, microphone, camera }
 
 enum PermissionAnswer {
   granted,
@@ -79,6 +80,7 @@ class Permissions extends ChangeNotifier {
         'Notifications are not allowed, so messages and calls that come while the app is in the background '
             'go unnoticed, and the notification that keeps it listening is hidden. $how',
       AppPermission.microphone => 'The microphone is not allowed, so voice messages and calls cannot be recorded. $how',
+      AppPermission.camera => 'The camera is not allowed, so the other side of a call sees No camera. $how',
     };
   }
 

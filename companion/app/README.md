@@ -105,11 +105,11 @@ without feedback, and what each heard can be checked.
 
 ### Calls between companion apps: WebRTC
 
-On Linux the app announces `call:webrtc` (protocol section 4.11, ADR-0016),
-and a call with another companion app that does runs on WebRTC through
-flutter_webrtc and its prebuilt libwebrtc, camera or not; a call with the
-T-Deck, or with an app that does not announce it (Android until ticket 05
-of `.scratch/tailnet-video`, or `--no-webrtc`), stays `ws-opus`. The
+On Linux and Android the app announces `call:webrtc` (protocol section
+4.11, ADR-0016), and a call with another companion app that does runs on
+WebRTC through flutter_webrtc and its prebuilt libwebrtc, camera or not; a
+call with the T-Deck, or with an app that does not announce it (an older
+build, or `--no-webrtc` on Linux), stays `ws-opus`. The
 caller makes the SDP offer; one audio and one video track are negotiated
 from the start, so a camera switched on, off or to another replaces the
 track and never renegotiates. There is no STUN or
@@ -146,8 +146,10 @@ video, Answer (the camera stays off) and Decline; missed, it is "Missed
 video call". The camera is never on without a tap.
 
 During a WebRTC call the call screen has the camera switch, and Switch
-camera while the camera is on and the machine has more than one (in the
-order flutter_webrtc lists them, the first to start with). The other
+camera while the camera is on and the machine has more than one (a phone's
+front camera first, to start with, else the order flutter_webrtc lists
+them; `frontFirst` in `call_engine.dart`). Our own picture is drawn as in
+a mirror unless the camera faces away. The other
 side's video fills the screen while its `call_camera` is `on`; otherwise
 a tile says Camera off, Camera paused or No camera. Ours is in the top
 right corner. A machine with no camera says `none`, its switch says No
@@ -255,8 +257,11 @@ contact that asks with what `tailscale status --json` shows online.
   attaches to it, and Android restarting the service restarts it.
 - **Permissions, when first needed**: notifications when the service starts
   or a contact is added or accepted, the microphone when a recording or a
-  call first needs it (`model.permissions?.need(AppPermission.microphone)`).
-  A refusal shows a banner saying what it stops, with Open settings.
+  call first needs it (`model.permissions?.need(AppPermission.microphone)`),
+  the camera the first time it is switched on in a call (Video call,
+  Answer with video, the camera switch). A refusal shows a banner saying
+  what it stops, with Open settings; a camera refused in a call is told to
+  the other side as `none` (No camera) and the call goes on.
 - **Voice messages and calls**: Opus is the repository's own libopus
   (`components/opus/`, 1.5.2), built for each ABI by the app's CMake
   (`android/app/src/main/cpp/CMakeLists.txt`) as `libopus.so`, which the
@@ -290,6 +295,34 @@ contact that asks with what `tailscale status --json` shows online.
   the lock screen, and makes itself anew when it next shows, as the call
   window took the engine from it. The notification's Answer opens the
   window and answers; its Decline answers through a receiver, no window.
+- **WebRTC calls** (with another companion app; the T-Deck stays
+  `ws-opus`): libwebrtc records and plays, and flutter_webrtc's audio
+  switch sets communication mode. The call route
+  (`AndroidCallRoute` in `android_audio.dart`, `rtc.*` in `Audio.kt`)
+  follows the video: while either side's camera is on, the loudspeaker (a
+  headset first), the screen kept on in whichever window shows and no
+  proximity screen-off; with both off, the earpiece and the screen dark at
+  the ear. The listening service is in the foreground as using the
+  microphone for the call, as for a voice call, and has no camera type:
+  leaving the app (hidden or paused, not a prompt or the notification
+  shade over it) lets the camera go and tells the other side `paused`, the
+  voice going on in the service; coming back opens it again and says `on`.
+  No picture-in-picture. The call window over the lock screen offers
+  Answer with video for a call offered with `video`, and the call-style
+  notification says "Tailnet video call". The camera starts on the front
+  one.
+- **No tailnet candidate of its own.** libwebrtc on Android gathers no
+  candidate on the Tailscale app's interface (`tun1`; ticket 02's phone
+  run), and flutter_webrtc 1.6.3 has no setting that changes it: its only
+  network option, `networkIgnoreMask`, ignores nothing by default, and the
+  field trials of libwebrtc's network monitor are not reachable through it.
+  The phone signals no candidate at all (every one it gathers is outside
+  the tailnet), and a call connects from the other side's: the phone's
+  checks reach a laptop's tailnet address through the VPN, which nothing
+  bypasses, and both ends then see a peer-reflexive pair on tailnet
+  addresses, which passes the off-tailnet check. A call between two phones,
+  where neither side has a tailnet candidate to signal, is not expected to
+  connect: it ends as "it could not connect" after 15 s.
 - **Calls filling the screen**: Android 14 and later allow it only to
   calling apps unless the user allows it. The app checks at start, when a
   call comes and when it comes to the front; without it Settings says
@@ -314,6 +347,31 @@ adb install -r build/app/outputs/flutter-apk/app-release.apk
 
 The APK is signed with the debug key, for installing by hand; CI keeps the
 one it builds as the artifact `thistle-chat-apk`.
+
+Every artifact the Android build fetches, flutter_webrtc's libwebrtc
+(`io.github.webrtc-sdk:android`) and audio switch
+(`com.github.davidliu:audioswitch`, from JitPack) among them, is checked
+against the SHA-256 in `android/gradle/verification-metadata.xml` (Gradle's
+dependency verification); another hash fails the build. A changed
+dependency (flutter_webrtc, a plugin, Flutter itself, the Android Gradle
+plugin) needs the file written again, and the diff read before it is
+committed. Write it with an empty Gradle cache, as CI has, and with the
+properties `flutter build apk` passes Gradle (`flutter build apk -v` shows
+them): written without them, the file lacked a Kotlin BOM (2.2.20) that
+Flutter's own Gradle plugin fetches in CI.
+
+```sh
+flutter build apk --release   # once, to configure the plugins
+cd android
+GRADLE_USER_HOME=$(mktemp -d) ./gradlew --write-verification-metadata sha256 \
+  -Ptarget-platform=android-arm,android-arm64,android-x64 -Ptarget=lib/main.dart \
+  -Pbase-application-name=android.app.Application -Pdart-obfuscation=false \
+  -Ptrack-widget-creation=true -Ptree-shake-icons=true \
+  -Pflutter.androidSdkRoot=$HOME/Android/Sdk \
+  -Pflutter.installedNdkVersions=28.2.13676358 \
+  -Pflutter.sdkManagerPath=$HOME/Android/Sdk/cmdline-tools/latest/bin/sdkmanager \
+  assembleRelease assembleDebug
+```
 
 ## Tests
 
@@ -357,9 +415,16 @@ one it builds as the artifact `thistle-chat-apk`.
   tone recorded, and received ones play whole only when asked; calls placed
   and answered carry the microphone both ways, mute sends silence, a call
   in the background rings with a notification, decline, a missed call,
-  unreachable; a refused microphone on Android.
+  unreachable; a refused microphone on Android. With another companion
+  app on WebRTC, through the fake call engine: the camera's states, and
+  the other app on Android: a refused camera told as `none`, leaving the
+  app sending `paused` and coming back `on`, the call route following the
+  video.
+- `test/call_engine_test.dart`: a phone's front camera first, and which
+  pictures are mirrored.
 - `test/android_audio_test.dart`: the Android audio devices against a fake
   of `Audio.kt`'s channels: a recording's frames, a refused microphone, a
   voice message's PCM to the speaker and drained, the ring, a call's
   begin, echo canceller and end (and a phone with none), a call whose
-  microphone or speaker will not open undone.
+  microphone or speaker will not open undone; a WebRTC call's route to the
+  earpiece and the loudspeaker.

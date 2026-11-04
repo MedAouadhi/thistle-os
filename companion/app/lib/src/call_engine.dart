@@ -37,6 +37,22 @@ class CameraUnavailable implements Exception {
 /// Quality); WebRTC's congestion control does the rest.
 const maxVideoWidth = 1280, maxVideoHeight = 720, maxVideoFps = 30;
 
+/// Cameras, as `(id, label)`, in the order Switch camera goes round: a
+/// phone's front camera first, so a call starts on it, else the order they
+/// came in. flutter_webrtc labels Android's `Camera 1, Facing front, ...`.
+List<String> frontFirst(List<(String, String)> cameras) => [
+  for (final (id, label) in cameras)
+    if (_facing(label) == 'front') id,
+  for (final (id, label) in cameras)
+    if (_facing(label) != 'front') id,
+];
+
+/// Whether our own picture from a camera is drawn as in a mirror: one
+/// facing us, which a camera that says nothing of facing (a laptop's) is.
+bool mirrored(String label) => _facing(label) != 'back';
+
+String? _facing(String label) => RegExp(r'Facing (\w+)').firstMatch(label)?.group(1);
+
 /// What a call's video has done so far, for the log.
 class VideoStats {
   const VideoStats({
@@ -127,4 +143,23 @@ abstract interface class CallSession {
 
   /// Hang up the media: the microphone, the camera and the connection.
   Future<void> close();
+}
+
+/// Where a WebRTC call's sound goes on a phone, and what the screen does
+/// (tailnet-video spec, Android): while either side's video is on screen,
+/// the loudspeaker, the screen kept on and no proximity screen-off; with
+/// both cameras off, the earpiece and the screen dark at the ear. Talk
+/// tells it as the video comes and goes; Android's is over the app's audio
+/// channel and flutter_webrtc's audio switch (android_audio.dart). Linux
+/// has none.
+abstract interface class CallRoute {
+  /// The call's media starts: the listening service keeps the microphone
+  /// with the app away, and the sound goes to the earpiece.
+  Future<void> begin();
+
+  /// Whether a picture is on screen: ours, or the other side's.
+  Future<void> video(bool shown);
+
+  /// The call's media ended: all of it undone.
+  Future<void> end();
 }

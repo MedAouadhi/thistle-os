@@ -24,6 +24,8 @@ class Talk {
     required this.peer,
     required this.audio,
     this.engine,
+    this.route,
+    this.cameraPausesAway = false,
     required this.notifier,
     required this.foreground,
     required this.changed,
@@ -39,6 +41,12 @@ class Talk {
 
   /// WebRTC calls' media; null where the app announces no `call:webrtc`.
   final CallEngine? engine;
+
+  /// A WebRTC call's loudspeaker or earpiece, and the screen; Android's.
+  final CallRoute? route;
+
+  /// Whether our camera pauses while the app is away (Android).
+  final bool cameraPausesAway;
   final Notifier notifier;
   final bool Function() foreground;
 
@@ -66,6 +74,9 @@ class Talk {
   int get recordingMs => _recorder?.ms ?? 0;
 
   Future<bool> _microphone() async => permissions == null || await permissions!.need(AppPermission.microphone);
+
+  /// Asked the first time the camera is switched on in a call.
+  Future<bool> _camera() async => permissions == null || await permissions!.need(AppPermission.camera);
 
   /// Start recording a voice message for `box`; why not, or null.
   Future<String?> startRecording(String box) async {
@@ -275,9 +286,20 @@ class Talk {
     if (_webrtc?.id == id) return;
     unawaited(_webrtc?.close());
     _webrtc =
-        WebrtcCall(id: id, engine: engine, peer: peer, children: children, changed: changed, camera: camera, log: log)
+        WebrtcCall(
+            id: id,
+            engine: engine,
+            peer: peer,
+            children: children,
+            changed: changed,
+            camera: camera,
+            cameraAllowed: _camera,
+            route: route,
+            log: log,
+          )
           ..muted = _muted
           ..volume = _volume;
+    if (cameraPausesAway && _away) unawaited(_webrtc!.setAway(true));
   }
 
   void decline([String? id]) {
@@ -312,6 +334,7 @@ class Talk {
       return;
     }
     callId = id;
+    _webrtc?.followRoute(); // their camera may have come or gone
     if (c.state == 'ringing' && !c.mine) {
       _ringFor(id, c);
     } else {
@@ -420,6 +443,15 @@ class Talk {
 
   /// Our camera on or off: before the call's media starts, as it starts.
   Future<void> setCameraOn(bool on) async => _webrtc?.setCameraOn(on);
+
+  /// The app went out of sight, or came back: on Android our camera pauses
+  /// meanwhile, the call going on in the listening service.
+  Future<void> setAway(bool away) async {
+    _away = away;
+    if (cameraPausesAway) await _webrtc?.setAway(away);
+  }
+
+  bool _away = false;
 
   /// The next camera, round and back to the first.
   Future<void> switchCamera() async => _webrtc?.switchCamera();
