@@ -10,6 +10,8 @@
 /// the camera's track replaces nothing, or another camera's, and is
 /// replaced by nothing when it goes off. A camera that opens without error
 /// can still give no frame (issue 2225), so its first frame is waited for.
+/// A caller's camera opened while it rings (a preview) becomes the
+/// session's when the media starts, never opened twice.
 library;
 
 import 'dart:async';
@@ -50,24 +52,47 @@ class WebrtcCallEngine implements CallEngine {
   }
 
   @override
+  Future<CameraPreview> preview(String camera) async {
+    final view = RTCVideoRenderer();
+    await view.initialize();
+    try {
+      final stream = await _openCamera(camera, view, log);
+      return _Preview(camera, stream, view);
+    } on Object {
+      await view.dispose();
+      rethrow;
+    }
+  }
+
+  @override
   Future<CallSession> start({
     required bool offerer,
     required SendRtc send,
     required void Function(MediaState state) onState,
+    CameraPreview? camera,
   }) async {
+    final preview = camera as _Preview?;
+    preview?._taken = true;
     // getUserMedia holds the UI thread for about a second on Linux (ticket
     // 02): let the call screen draw first, so the stall lands on no tap.
     // Without frames (no window yet, a test) it goes on after a moment.
     await _drawn();
-    final mic = await navigator.mediaDevices.getUserMedia({'audio': true, 'video': false});
+    final MediaStream mic;
     final RTCPeerConnection pc;
+    try {
+      mic = await navigator.mediaDevices.getUserMedia({'audio': true, 'video': false});
+    } on Object {
+      await preview?._close();
+      rethrow;
+    }
     try {
       pc = await createPeerConnection(configuration);
     } on Object {
       await _stop(mic);
+      await preview?._close();
       rethrow;
     }
-    final s = _Session(pc, mic, send, onState, log);
+    final s = _Session(pc, mic, send, onState, log, preview);
     try {
       await s._open(offerer);
     } on Object {
@@ -88,8 +113,83 @@ Future<void> _stop(MediaStream stream) async {
   await stream.dispose();
 }
 
+/// Open `camera` and show it in `into`, once a frame has been drawn: at most
+/// 1280x720 at 30 fps, and its first frame waited for, as getUserMedia
+/// succeeds on a camera another process holds, which then gives nothing.
+/// Throws [CameraUnavailable], `into` left empty.
+Future<MediaStream> _openCamera(String camera, RTCVideoRenderer into, void Function(String)? log) async {
+  await _drawn();
+  final MediaStream stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      'audio': false,
+      'video': {
+        'deviceId': camera,
+        'optional': [
+          {'sourceId': camera},
+        ],
+        'width': {'ideal': maxVideoWidth, 'max': maxVideoWidth},
+        'height': {'ideal': maxVideoHeight, 'max': maxVideoHeight},
+        'frameRate': {'ideal': maxVideoFps, 'max': maxVideoFps},
+      },
+    });
+  } on Object catch (e) {
+    throw CameraUnavailable('it did not open: $e');
+  }
+  final track = stream.getVideoTracks().firstOrNull;
+  if (track == null) {
+    await _stop(stream);
+    throw const CameraUnavailable('it did not open');
+  }
+  final frame = Completer<void>();
+  into.onFirstFrameRendered = () {
+    if (!frame.isCompleted) frame.complete();
+  };
+  into.srcObject = stream;
+  final got = await frame.future.then((_) => true).timeout(WebrtcCallEngine.firstFrame, onTimeout: () => false);
+  into.onFirstFrameRendered = null;
+  if (!got) {
+    into.srcObject = null;
+    await _stop(stream);
+    throw const CameraUnavailable('no picture came from it');
+  }
+  final s = track.getSettings();
+  log?.call('camera on: ${s['width']}x${s['height']} at ${s['frameRate']} fps');
+  return stream;
+}
+
+/// A camera open while a call rings, with what draws it; the session that
+/// starts with it takes both.
+class _Preview implements CameraPreview {
+  _Preview(this.camera, this.stream, this.renderer);
+  @override
+  final String camera;
+  final MediaStream stream;
+  final RTCVideoRenderer renderer;
+  bool _taken = false, _closed = false;
+
+  @override
+  Widget view() => RTCVideoView(renderer, objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover, mirror: true);
+
+  @override
+  Future<void> close() async {
+    if (!_taken) await _close();
+  }
+
+  Future<void> _close() async {
+    if (_closed) return;
+    _closed = true;
+    renderer.srcObject = null;
+    await _stop(stream);
+    await renderer.dispose();
+  }
+}
+
 class _Session implements CallSession {
-  _Session(this.pc, this.mic, this._send, this._onState, this.log);
+  _Session(this.pc, this.mic, this._send, this._onState, this.log, _Preview? preview)
+    : _local = preview?.renderer ?? RTCVideoRenderer(),
+      _localReady = preview != null,
+      _camera = preview?.stream;
   final RTCPeerConnection pc;
   final MediaStream mic;
   final SendRtc _send;
@@ -103,16 +203,18 @@ class _Session implements CallSession {
   MediaStreamTrack? _remoteAudio;
   double _volume = 1;
 
-  /// The video transceiver's sender, the camera's stream on it, and what
-  /// draws each side's picture.
+  /// The video transceiver's sender, the camera's stream on it (a preview's
+  /// from the start), and what draws each side's picture.
   RTCRtpSender? _video;
   MediaStream? _camera;
-  final _remote = RTCVideoRenderer(), _local = RTCVideoRenderer();
+  final _remote = RTCVideoRenderer();
+  final RTCVideoRenderer _local;
+  final bool _localReady;
   MediaStream? _remoteStream;
 
   Future<void> _open(bool offerer) async {
     await _remote.initialize();
-    await _local.initialize();
+    if (!_localReady) await _local.initialize();
     pc.onIceCandidate = (c) {
       if ((c.candidate ?? '').isEmpty) return; // the end of gathering
       _localSent ? _sendCandidate(c) : _ours.add(c);
@@ -147,6 +249,7 @@ class _Session implements CallSession {
       init: RTCRtpTransceiverInit(direction: TransceiverDirection.SendRecv),
     );
     _video = video.sender;
+    await _sendCamera();
     await _preferCodecs();
     final offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
@@ -216,6 +319,7 @@ class _Session implements CallSession {
           await t.setDirection(TransceiverDirection.SendRecv);
           _video = t.sender;
         }
+        await _sendCamera();
         await _preferCodecs();
         final answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
@@ -267,50 +371,23 @@ class _Session implements CallSession {
       await sender.replaceTrack(null);
       await _stop(old);
     }
-    await _drawn();
-    final MediaStream stream;
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({
-        'audio': false,
-        'video': {
-          'deviceId': camera,
-          'optional': [
-            {'sourceId': camera},
-          ],
-          'width': {'ideal': maxVideoWidth, 'max': maxVideoWidth},
-          'height': {'ideal': maxVideoHeight, 'max': maxVideoHeight},
-          'frameRate': {'ideal': maxVideoFps, 'max': maxVideoFps},
-        },
-      });
-    } on Object catch (e) {
-      throw CameraUnavailable('it did not open: $e');
-    }
-    final track = stream.getVideoTracks().firstOrNull;
-    if (track == null || _closed) {
-      await _stop(stream);
-      if (track == null) throw const CameraUnavailable('it did not open');
-      return;
-    }
-    // getUserMedia succeeds on a camera another process holds, which then
-    // gives nothing: its first frame, drawn into our own picture, tells.
-    final frame = Completer<void>();
-    _local.onFirstFrameRendered = () {
-      if (!frame.isCompleted) frame.complete();
-    };
-    _local.srcObject = stream;
-    final got = await frame.future.then((_) => true).timeout(WebrtcCallEngine.firstFrame, onTimeout: () => false);
-    _local.onFirstFrameRendered = null;
-    if (!got || _closed) {
+    final stream = await _openCamera(camera, _local, log);
+    if (_closed) {
       _local.srcObject = null;
       await _stop(stream);
-      if (!got) throw const CameraUnavailable('no picture came from it');
       return;
     }
-    await sender.replaceTrack(track);
     _camera = stream;
+    await _sendCamera();
+  }
+
+  /// The camera's track on the video sender, once there is one: sent once
+  /// the media connects.
+  Future<void> _sendCamera() async {
+    final sender = _video, track = _camera?.getVideoTracks().firstOrNull;
+    if (sender == null || track == null) return;
+    await sender.replaceTrack(track);
     await _capSending(sender);
-    final s = track.getSettings();
-    log?.call('camera on: ${s['width']}x${s['height']} at ${s['frameRate']} fps');
   }
 
   /// At most [maxVideoFps] frames a second sent; the size is the capture's,

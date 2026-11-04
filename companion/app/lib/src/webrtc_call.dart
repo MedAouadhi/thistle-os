@@ -23,7 +23,9 @@ class WebrtcCall {
     required this.changed,
     bool camera = false,
     this.log,
-  }) : _wantCamera = camera;
+  }) : _wantCamera = camera {
+    _previewFollows();
+  }
 
   final String id;
   final CallEngine engine;
@@ -83,15 +85,25 @@ class WebrtcCall {
     if (_session != null || _starting || c == null) return;
     _starting = true;
     log?.call('${callLabel(id)} over $transportWebrtc');
+    // The camera open since the ring goes to the session, which sends it
+    // once the media connects.
+    await _previewing;
+    final preview = _preview;
+    _preview = null;
     final CallSession session;
     try {
       session = await engine.start(
         offerer: c.mine,
         send: (payload) => peer().sendRtc(id, payload),
         onState: _onMediaState,
+        camera: preview,
       );
     } on Object catch (e) {
       _starting = false;
+      if (preview != null) {
+        await preview.close();
+        children.cameraClosed();
+      }
       audioProblem = 'The call has no audio: $e';
       log?.call('${callLabel(id)}: WebRTC did not start: $e');
       if (_live) peer().endCall(id, reason: 'error');
@@ -120,7 +132,11 @@ class WebrtcCall {
     if (_closed) return;
     cameras = found;
     // Said at the answer, as every change will be.
-    if (found.isEmpty) {
+    if (preview != null) {
+      cameraOn = true;
+      log?.call('${callLabel(id)}: our camera on, ${preview.camera}, since the ring');
+      peer().setCamera(id, CameraState.on);
+    } else if (found.isEmpty || _noPicture) {
       peer().setCamera(id, CameraState.none);
     } else if (_wantCamera) {
       await _applyCamera(session, on: true);
@@ -135,7 +151,16 @@ class WebrtcCall {
   /// What our camera should be until the media starts.
   bool _wantCamera;
 
-  /// This machine's cameras, once the media has started; empty with none.
+  /// The caller's camera, open while it rings: our picture before the
+  /// media starts. Opened and let go one after another, in `_previewing`.
+  CameraPreview? _preview;
+  Future<void> _previewing = Future.value();
+
+  /// The camera asked for as it rang gave no picture: told as none.
+  bool _noPicture = false;
+
+  /// This machine's cameras, once the camera was asked for as it rang or
+  /// the media has started; empty with none.
   List<String>? cameras;
   int _cameraAt = 0;
 
@@ -155,7 +180,7 @@ class WebrtcCall {
   bool get remoteVideoShown => _session != null && _call?.remoteCamera == CameraState.on;
 
   Widget? remoteVideo() => _session?.remoteVideo();
-  Widget? localVideo() => cameraOn ? _session?.localVideo() : null;
+  Widget? localVideo() => _session == null ? _preview?.view() : (cameraOn ? _session!.localVideo() : null);
 
   /// The video's frames so far.
   Future<VideoStats?> videoStats() async => _session?.videoStats();
@@ -166,7 +191,10 @@ class WebrtcCall {
     cameraProblem = null;
     if (session == null) {
       _wantCamera = on;
+      _noPicture = false;
+      _previewFollows();
       changed();
+      await _previewing;
       return;
     }
     if (on == cameraOn || (on && (cameras ?? const []).isEmpty)) return;
@@ -204,6 +232,63 @@ class WebrtcCall {
     if (_closed) return;
     log?.call('${callLabel(id)}: our camera ${cameraOn ? 'on, $camera' : state.wire}');
     peer().setCamera(id, state);
+  }
+
+  /// While a call we placed rings, our camera follows the switch: opened
+  /// to show our picture, let go when switched off. Nothing opens before
+  /// a call coming in is answered, nor once the media is starting. The
+  /// engine lets the call screen draw before it opens the camera, as
+  /// getUserMedia holds the UI thread for about a second on Linux.
+  void _previewFollows() {
+    _previewing = _previewing.then((_) async {
+      final preview = _preview;
+      if (_wantCamera && preview == null) {
+        await _openPreview();
+      } else if (!_wantCamera && preview != null) {
+        _preview = null;
+        await preview.close();
+        children.cameraClosed();
+        log?.call('${callLabel(id)}: our camera off while it rings');
+        changed();
+      }
+    });
+  }
+
+  bool get _ringingOut {
+    final c = _call;
+    return !_closed && !_starting && _session == null && c != null && c.mine && c.state == 'offered';
+  }
+
+  Future<void> _openPreview() async {
+    if (!_ringingOut) return;
+    List<String> found;
+    try {
+      found = await engine.cameras();
+    } on Object catch (e) {
+      log?.call('${callLabel(id)}: no camera found: $e');
+      found = const [];
+    }
+    cameras = found;
+    if (found.isEmpty || !_wantCamera || !_ringingOut) return changed();
+    final camera = found[_cameraAt];
+    await children.cameraOpening();
+    try {
+      final preview = await engine.preview(camera);
+      if (_wantCamera && !_closed && _session == null) {
+        _preview = preview;
+        log?.call('${callLabel(id)}: our camera on while it rings, $camera');
+        changed();
+        return;
+      }
+      await preview.close();
+    } on CameraUnavailable catch (e) {
+      _wantCamera = false;
+      _noPicture = true;
+      cameraProblem = 'The camera is off: $e. Another program may be using it.';
+      log?.call('${callLabel(id)}: camera $camera gave no picture: $e');
+      changed();
+    }
+    children.cameraClosed();
   }
 
   // -- the connection -------------------------------------------------------------
@@ -252,10 +337,12 @@ class WebrtcCall {
   Future<void> close() async {
     if (_closed) return;
     _closed = true;
-    final session = _session;
+    final session = _session, preview = _preview;
     _session = null;
+    _preview = null;
     _waiting.clear();
     cameraOn = false;
+    await preview?.close();
     if (session != null) {
       final video = await session.videoStats().catchError((Object _) => null);
       if (video != null) log?.call('${callLabel(id)}: video $video');

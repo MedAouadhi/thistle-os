@@ -186,18 +186,32 @@ class FakeCallEngine implements CallEngine {
   bool picture = true;
   final List<FakeCallSession> sessions = [];
 
+  /// Cameras opened before a call's media, while it rings.
+  final List<FakeCameraPreview> previews = [];
+
   FakeCallSession get session => sessions.last;
 
   @override
   Future<List<String>> cameras() async => cameraList;
 
   @override
+  Future<CameraPreview> preview(String camera) async {
+    if (!picture) throw const CameraUnavailable('no picture came from it');
+    final p = FakeCameraPreview(camera);
+    previews.add(p);
+    return p;
+  }
+
+  @override
   Future<CallSession> start({
     required bool offerer,
     required SendRtc send,
     required void Function(MediaState state) onState,
+    CameraPreview? camera,
   }) async {
-    final s = FakeCallSession(this, offerer, send, onState);
+    final s = FakeCallSession(this, offerer, send, onState)
+      ..adopted = camera
+      ..camera = camera?.camera;
     sessions.add(s);
     if (offerer) send(const RtcSdp('offer', 'v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\n'));
     for (final c in candidates) {
@@ -250,6 +264,9 @@ class FakeCallSession implements CallSession {
   String? camera;
   final List<String?> cameraLog = [];
 
+  /// The camera it was started with, open since the ring.
+  CameraPreview? adopted;
+
   @override
   Future<void> setCamera(String? camera) async {
     cameraLog.add(camera);
@@ -273,7 +290,21 @@ class FakeCallSession implements CallSession {
   Future<void> close() async {
     camera = null;
     closed = true;
+    await adopted?.close();
   }
+}
+
+class FakeCameraPreview implements CameraPreview {
+  FakeCameraPreview(this.camera);
+  @override
+  final String camera;
+  bool closed = false;
+
+  @override
+  Widget view() => const SizedBox.expand(key: Key('fake-local-video'));
+
+  @override
+  Future<void> close() async => closed = true;
 }
 
 /// A model listening on loopback, with the tailnet `tailnet` says.

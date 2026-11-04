@@ -377,24 +377,60 @@ void main() {
       });
 
       group('video', () {
-        test('a call started with video rings with `video`, and the caller\'s camera is on from the answer', () async {
-          final id = (await app.talk.startCall(friendBox, video: true))!;
-          await eventually(() => friend.talk.call?.state == 'ringing');
-          expect(friend.peer.calls[id]!.video, isTrue);
-          await friend.talk.answer();
-          await eventually(() => friend.peer.calls[id]!.remoteCamera == CameraState.on);
-          expect(mine.session.camera, 'Integrated Webcam');
-          expect(app.talk.cameraOn, isTrue);
-        });
+        test(
+          'a call started with video shows the caller its camera while it rings, and sends it once connected',
+          () async {
+            final id = (await app.talk.startCall(friendBox, video: true))!;
+            await eventually(() => friend.talk.call?.state == 'ringing');
+            expect(friend.peer.calls[id]!.video, isTrue);
+            await eventually(() => app.talk.localVideo() != null);
+            expect(mine.previews.single.camera, 'Integrated Webcam');
+            expect(mine.sessions, isEmpty, reason: 'no media before the answer');
+            await friend.talk.answer();
+            await eventually(() => friend.peer.calls[id]!.remoteCamera == CameraState.on);
+            expect(mine.session.camera, 'Integrated Webcam');
+            expect(
+              mine.session.adopted,
+              same(mine.previews.single),
+              reason: 'the camera open since the ring, not again',
+            );
+            expect(app.talk.cameraOn, isTrue);
+            app.talk.hangUp();
+            await eventually(() => mine.previews.single.closed);
+          },
+        );
 
-        test('the caller\'s camera switched on while it rings is on from the answer', () async {
+        test('the caller\'s camera switched on while it rings shows at once and is on from the answer', () async {
           final id = (await app.talk.startCall(friendBox))!;
           await eventually(() => friend.talk.call?.state == 'ringing');
+          expect(app.talk.localVideo(), isNull);
           await app.talk.setCameraOn(true);
           expect(app.talk.cameraSwitchOn, isTrue);
+          await eventually(() => app.talk.localVideo() != null);
           await friend.talk.answer();
           await eventually(() => friend.peer.calls[id]!.remoteCamera == CameraState.on);
           expect(mine.session.camera, 'Integrated Webcam');
+        });
+
+        test('the caller\'s camera switched off while it rings is let go, and the call starts with it off', () async {
+          final id = (await app.talk.startCall(friendBox, video: true))!;
+          await eventually(() => app.talk.localVideo() != null);
+          await app.talk.setCameraOn(false);
+          expect(app.talk.localVideo(), isNull);
+          expect(mine.previews.single.closed, isTrue);
+          await friend.talk.answer();
+          await eventually(() => friend.peer.calls[id]!.remoteCamera == CameraState.off);
+          expect(mine.session.cameraLog, isEmpty);
+        });
+
+        test('a camera that gives no picture as it rings is told as none once connected', () async {
+          mine.picture = false;
+          final id = (await app.talk.startCall(friendBox, video: true))!;
+          await eventually(() => app.talk.cameraProblem != null);
+          expect(app.talk.localVideo(), isNull);
+          await friend.talk.answer();
+          await eventually(() => friend.peer.calls[id]!.remoteCamera == CameraState.none);
+          expect(app.talk.cameraOn, isFalse);
         });
 
         test('a plain Answer leaves the camera off; the other side is told off', () async {

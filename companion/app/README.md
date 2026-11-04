@@ -128,9 +128,14 @@ end, and why the call ended.
 
 A conversation with a contact whose app announced `call:webrtc` has a
 Video call button beside Call; the T-Deck and older apps have none
-(`ChatPeer.videoCapable`, from the contact's last hello this run, so the
-button shows once the app has been connected to it). Video call offers
-with `video` and our camera on from the answer. A call offered with
+(`ChatPeer.videoCapable`, from the contact's last hello, kept with the
+contact so the button survives a restart and refreshed at every hello).
+Video call offers with `video` and opens our camera while it rings, our
+own picture in the corner from the first ring; the session takes that
+camera when the media starts and sends it once connected. The camera
+opens after the call screen has drawn (`getUserMedia` holds the UI thread
+for about a second on Linux), and the switch, while it rings, opens and
+lets go of it the same way. A call offered with
 `video` rings as "Video call", in the notification too, with Answer with
 video, Answer (the camera stays off) and Decline; missed, it is "Missed
 video call". The camera is never on without a tap.
@@ -163,8 +168,8 @@ for another libwebrtc fails there too until the pin follows it.
 
 `tool/webrtc_call_check.dart` calls between two of the app's models in
 one process with the real libwebrtc, twice, over this machine's tailnet
-address, then makes a video call on this machine's camera (the caller's
-camera on, off, then the callee's, never both: one camera opens once),
+address, then a third on this machine's camera (the caller's on from the
+first ring, then off, then the callee's, never both: one camera opens once),
 reading each side's frames and their size from WebRTC's statistics, and
 prints PASS or FAIL; it needs Tailscale up, a sound server, a camera and
 a display, so CI does not run it. Built in place of the app (build

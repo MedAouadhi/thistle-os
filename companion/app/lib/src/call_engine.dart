@@ -69,15 +69,33 @@ abstract interface class CallEngine {
   /// Empty without one.
   Future<List<String>> cameras();
 
-  /// Start a call's media: the microphone, the camera off, one audio and one
-  /// video track negotiated both ways, no ICE server. The caller (`offerer`)
-  /// makes the SDP offer. `send` takes what is to go to the other side,
-  /// `onState` the connection's state as it changes.
+  /// Open `camera`, one of [cameras], before a call's media starts: the
+  /// caller's own picture while it rings. Throws [CameraUnavailable] if it
+  /// gives no picture.
+  Future<CameraPreview> preview(String camera);
+
+  /// Start a call's media: the microphone, the camera off unless `camera`
+  /// is given, one audio and one video track negotiated both ways, no ICE
+  /// server. The caller (`offerer`) makes the SDP offer. `send` takes what
+  /// is to go to the other side, `onState` the connection's state as it
+  /// changes. A `camera` opened by [preview] becomes the session's, its
+  /// picture sent once the media connects; closing the session closes it.
   Future<CallSession> start({
     required bool offerer,
     required SendRtc send,
     required void Function(MediaState state) onState,
+    CameraPreview? camera,
   });
+}
+
+/// A camera opened while a call rings, before its media: our own picture.
+abstract interface class CameraPreview {
+  /// Which of [CallEngine.cameras] it is.
+  String get camera;
+  Widget view();
+
+  /// Let the camera go; once given to [CallEngine.start], the session does.
+  Future<void> close();
 }
 
 abstract interface class CallSession {
