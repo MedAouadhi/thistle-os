@@ -6,7 +6,7 @@ Tailnet chat's calls are `ws-opus`: Opus frames on the chat WebSocket, which the
 
 **Media goes over the tailnet alone.** No STUN or TURN; each side sends and accepts only candidates in 100.64.0.0/10 and fd7a:115c:a1e0::/48, so a call is admitted and encrypted by WireGuard as every chat frame is (ADR-0015). WebRTC's own DTLS-SRTP runs inside it and is not relied on.
 
-**VP8 is preferred and H.264 never.** The prebuilt Linux libwebrtc has OpenH264 (BSD-2) and Chromium's FFmpeg (LGPL-2.1) built in; Android's has no software H.264. No GPL. The binary is fetched at a pinned release and checked against a committed SHA-256, and the Android artifacts by Gradle's dependency verification.
+**VP8 is preferred and H.264 never.** The prebuilt Linux libwebrtc has OpenH264 (BSD-2) and Chromium's FFmpeg (LGPL-2.1) built in; Android's has no software H.264. No GPL. The binary is fetched at a pinned release and checked against a committed SHA-256. The Android artifacts are to be pinned by Gradle's dependency verification, which arrives with the Android build of WebRTC calls (ticket 05 of `.scratch/tailnet-video`); until then the Android build fetches flutter_webrtc's artifacts unverified, and the Android app announces no `call:webrtc`.
 
 ## Considered Options
 

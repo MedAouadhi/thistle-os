@@ -237,7 +237,13 @@ is answered, declined or given up.
   candidates whose address is in 100.64.0.0/10 or fd7a:115c:a1e0::/48, and
   ignores any other it receives, in `call_rtc` or inside an SDP. Media goes
   over WireGuard like every other frame; WebRTC's own DTLS-SRTP inside it
-  cannot be turned off and is not relied on.
+  cannot be turned off and is not relied on. libwebrtc binds every
+  interface and may still select a pair from an address it never sent
+  (tickets 02 and 03), so while the media is connected the app reads the
+  selected pair from WebRTC's statistics, 2 s after it first connects (on
+  one machine the first pair is a peer-reflexive LAN address, gone within
+  half a second) and every 5 s after, and ends the call with `call_end`
+  `error` if either end is outside those ranges.
 - **Ends.** The 45 s ring and `busy` rules are unchanged. A WebRTC call
   that is not connected 15 s after the answer, or that stays disconnected
   for 10 s, is ended by either side with `call_end` `error` (connected) or

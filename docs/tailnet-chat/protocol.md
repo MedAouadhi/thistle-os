@@ -348,18 +348,29 @@ tailnet removed.
   `100.64.0.0/10` or `fd7a:115c:a1e0::/48` (an mDNS name is not an
   address), and MUST ignore any other it receives, in a `call_rtc` frame or
   as an `a=candidate` line of an SDP, which it removes before taking the
-  SDP. A side SHOULD gather no TCP candidates at all, and SHOULD end the
-  call with `call_end` `error` if the candidate pair its WebRTC selects has
-  either end outside those ranges. The media goes over WireGuard like
-  every other frame; WebRTC's own DTLS-SRTP inside it cannot be turned off
-  and is not relied on.
+  SDP. A side SHOULD gather no TCP candidates at all. The media goes over
+  WireGuard like every other frame; WebRTC's own DTLS-SRTP inside it cannot
+  be turned off and is not relied on.
+- **The selected pair.** Filtering what is signalled does not stop a
+  WebRTC stack that binds every interface from checking, and nominating, a
+  pair from a local address it never sent: on one machine, libwebrtc's
+  first selected pair is a peer-reflexive LAN address to the other side's
+  tailnet one, and within half a second it moves to a pair with tailnet
+  addresses at both ends. So while a call's media is connected, a side
+  SHOULD read the candidate pair its WebRTC has selected, both ends'
+  addresses, once ICE has settled, **2 s** after it first connects, and
+  every **5 s** after; if either end is outside the ranges above it SHOULD
+  end the call with `call_end` `error`. Between two machines a packet
+  from a LAN socket to a tailnet address should not cross WireGuard at
+  all; that is yet to be watched on hardware.
 - **Codecs.** VP8 SHOULD be first in the video codec preferences and Opus
   in the audio ones; H.264 SHOULD NOT be offered. The media is WebRTC's,
   not this protocol's binary frames; kind `02` stays `ws-opus`'s.
 - **`call_camera`** says what the sender's camera is doing: `on`, `off`,
   `paused` (its app left the foreground) or `none` (no camera, no
-  permission, or one that opened and gave no picture). Each side sends it once the call is answered and at every
-  change; the other side's tile follows it.
+  permission, or one that opened and gave no picture). Each side sends it
+  once the call is answered and at every change; the other side's tile
+  follows it.
 - **Ends.** The 45 s ring and `busy` rules of section 4.8 hold. A side whose
   WebRTC connection has not connected **15 s** after the answer MUST end
   the call with `call_end` `timeout`; one whose connection, once connected,
