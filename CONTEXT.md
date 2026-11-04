@@ -124,7 +124,7 @@ A device that a phone's WhatsApp account has linked as one of its companions, by
 _Avoid_: WhatsApp account, session, login
 
 **Tailnet chat**:
-Messaging and voice between installs that speak its protocol over the user's tailnet: the T-Deck's own app, and the companion app on Linux and phones. Peers connect to each other directly; there is no server. A message to a peer that is away waits with its sender until it is delivered.
+Messaging, voice and video between installs that speak its protocol over the user's tailnet: the T-Deck's own app, and the companion app on Linux and phones. Peers connect to each other directly; there is no server. A message to a peer that is away waits with its sender until it is delivered.
 _Avoid_: tailnet messenger, Tailscale chat, P2P chat
 
 **Chat peer**:
@@ -142,3 +142,11 @@ _Avoid_: friend, buddy, chat peer (for an accepted one)
 **Contact request**:
 What a chat peer that is not yet a contact sends, with or without messages. It waits, with its tailnet name and key fingerprint, until the user accepts it, which makes the sender a contact and delivers its messages, or declines it, which drops them.
 _Avoid_: invite, friend request
+
+**Call** (Tailnet chat):
+A live conversation between two chat peers: always voice, and video while either side has its camera on. Between two video-capable chat peers, either side may switch its camera on or off at any time, from the first ring on. There is one kind of call; one with a camera on is not a different call.
+_Avoid_: video call, voice call (as two kinds of call)
+
+**Video-capable** (chat peer):
+A chat peer that says it can take part in video, whether or not it has a camera: one without a camera still sees the other side's. A chat peer is video-capable by what it announces, never by the machine it runs on; the T-Deck is not, nor is an older companion app.
+_Avoid_: supported device, video device

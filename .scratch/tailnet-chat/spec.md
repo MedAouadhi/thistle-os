@@ -392,7 +392,8 @@ and call each other directly.
 ## Out of Scope
 
 - Video calls, and file and media transfer other than voice messages: the
-  protocol leaves room, nothing is built.
+  protocol leaves room, nothing is built. Video between companion apps is
+  `.scratch/tailnet-video/spec.md`.
 - Group chats, and calls of more than two.
 - Editing a message and deleting it for everyone.
 - iOS. Nothing in the protocol rules it out, but without a push server an
