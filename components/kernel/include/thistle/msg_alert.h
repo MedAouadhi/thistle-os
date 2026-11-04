@@ -14,10 +14,11 @@
 
 #define MSG_ALERT_SMS   0
 #define MSG_ALERT_MESH  1
+#define MSG_ALERT_TAILNET 2   /* Tailnet chat: the conversation is the peer key's fingerprint id */
 
 typedef struct {
     uint32_t count;      /* messages since the last pop-up, this one included */
-    uint8_t  transport;  /* MSG_ALERT_SMS or MSG_ALERT_MESH */
+    uint8_t  transport;  /* MSG_ALERT_SMS, _MESH or _TAILNET */
     char     from[33];   /* a contact's name, a number, or "Bob in Public" */
     char     text[73];   /* on one line, cut with "..." */
 } msg_alert_t;

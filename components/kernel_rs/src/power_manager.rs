@@ -601,6 +601,9 @@ impl Runtime {
             user_waiting: asleep && (key_down || self.any_active(&self.board.user_pins())),
             battery_critical: asleep && self.battery_critical(now),
             radio_busy: asleep && crate::mesh_manager::outbound_pending(),
+            next_check: if asleep { crate::background_check::next_wake(now) } else { None },
+            checks_busy: asleep && crate::background_check::busy(now),
+            network_rested: net_coordinator::rested(self.rest),
         };
         let action = self.policy.decide(&facts);
         self.act(action, now);
@@ -621,6 +624,15 @@ impl Runtime {
             }
             Action::FallAsleep => self.fall_asleep(),
             Action::LightSleep { until } => self.light_sleep(until, now),
+            Action::RaiseNetwork => {
+                // Only the network: the screen and the drivers sleep on.
+                log!(ESP_LOG_INFO, b"up for a background check\0");
+                net_coordinator::rest(Rest::Normal);
+            }
+            Action::RestNetwork => {
+                log!(ESP_LOG_INFO, b"background checks over; sleeping again\0");
+                net_coordinator::rest(self.rest);
+            }
             Action::DeepSleep => self.deep_sleep(),
             Action::PowerOff => self.power_off(),
             Action::Wake => {
@@ -803,7 +815,9 @@ impl Runtime {
     /// network rested as `rest`, the lights, the drivers and the profile's
     /// `deep_sleep_off` rails.
     fn wind_down(&mut self, rest: Rest) {
-        if self.rest != rest {
+        // Not rested yet: a background check may have brought the network
+        // back during a light sleep.
+        if self.rest != rest || !net_coordinator::rested(rest) {
             self.rest = rest;
             net_coordinator::rest(rest);
         }

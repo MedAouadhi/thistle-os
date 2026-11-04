@@ -481,7 +481,9 @@ public:
     }
 
     // The node's keypair, made once and kept: a new one would make it a
-    // stranger to every peer that knows it.
+    // stranger to every peer that knows it. The kernel makes it at boot
+    // (kernel_rs/src/mesh_identity.rs), as Tailnet chat proves it too, so
+    // this finds one; making one here is only a fallback.
     bool load_identity() {
         char path[MESHCORE_PATH_MAX + 16];
         path_of(path, sizeof(path), IDENTITY_FILE);

@@ -1,6 +1,6 @@
 # Third-Party Licenses
 
-ThistleOS is BSD 3-Clause licensed and depends exclusively on Apache-2.0, MIT, BSD and zlib licensed components, and on DejaVu fonts under the permissive Bitstream Vera license. No GPL or LGPL code is used.
+ThistleOS is BSD 3-Clause licensed and depends exclusively on Apache-2.0, MIT, BSD and zlib licensed components, on DejaVu fonts under the permissive Bitstream Vera license, and on Noto Emoji under the SIL Open Font License. No GPL or LGPL code is used.
 
 ---
 
@@ -585,6 +585,16 @@ Full text: https://github.com/lieff/minimp3/blob/master/LICENSE
 
 ---
 
+## libopus
+
+**License:** BSD-3-Clause (Xiph.Org Foundation, Skype Limited, Octasic, Jean-Marc Valin, Timothy B. Terriberry, CSIRO, Gregory Maxwell, Mark Borgerding, Erik de Castro Lopo, Mozilla, Amazon)
+**Source:** https://downloads.xiph.org/releases/opus/opus-1.5.2.tar.gz, SHA-256 `65c1d2f78b9f2fb20082c38cbe47c951ad5839345876e46941612ee87f9a7ce1`
+**Used for:** Opus at 16 kHz mono for Tailnet chat's calls and voice messages. Vendored unchanged in `components/opus/opus-1.5.2/` with its `COPYING`, less the DNN, the float SILK, the ARM, x86 and MIPS code, the tests and the demos (`components/opus/opus.cmake`).
+
+Full text: `components/opus/opus-1.5.2/COPYING`
+
+---
+
 ## DejaVu fonts
 
 **License:** Bitstream Vera Fonts license; DejaVu changes are in the public domain
@@ -636,6 +646,110 @@ otherwise to promote the sale, use or other dealings in this Font Software
 without prior written authorization from the Gnome Foundation or Bitstream
 Inc., respectively. For further information, contact: fonts at gnome dot
 org.
+```
+
+---
+
+## Noto Emoji
+
+**License:** SIL Open Font License 1.1 (no Reserved Font Name)
+**Source:** https://github.com/google/fonts/tree/2fe1e8c6b137fb13041a7cfca6fdcd8a910ea4dc/ofl/notoemoji (`NotoEmoji[wght].ttf`, SHA-256 `de6c18832938afc99caf132b39d6a30a19bac7f2e812e28db2535b4608d27551`)
+**Used for:** `apps/tailchat/tailchat/tailchat_emoji_{14,20}.c` and their `_mono` cuts, the emoji the Chat app draws in messages and reactions: about a hundred and ten glyphs cut from the font and turned into bitmaps by `apps/tailchat/tools/gen_emoji_font.sh` (lv_font_conv), a Modified Version under the licence below. They are compiled into the firmware with the app and never sold alone.
+
+```
+Copyright 2013 Google LLC
+
+This Font Software is licensed under the SIL Open Font License, Version 1.1.
+This license is copied below, and is also available with a FAQ at:
+https://scripts.sil.org/OFL
+
+
+-----------------------------------------------------------
+SIL OPEN FONT LICENSE Version 1.1 - 26 February 2007
+-----------------------------------------------------------
+
+PREAMBLE
+The goals of the Open Font License (OFL) are to stimulate worldwide
+development of collaborative font projects, to support the font creation
+efforts of academic and linguistic communities, and to provide a free and
+open framework in which fonts may be shared and improved in partnership
+with others.
+
+The OFL allows the licensed fonts to be used, studied, modified and
+redistributed freely as long as they are not sold by themselves. The
+fonts, including any derivative works, can be bundled, embedded, 
+redistributed and/or sold with any software provided that any reserved
+names are not used by derivative works. The fonts and derivatives,
+however, cannot be released under any other type of license. The
+requirement for fonts to remain under this license does not apply
+to any document created using the fonts or their derivatives.
+
+DEFINITIONS
+"Font Software" refers to the set of files released by the Copyright
+Holder(s) under this license and clearly marked as such. This may
+include source files, build scripts and documentation.
+
+"Reserved Font Name" refers to any names specified as such after the
+copyright statement(s).
+
+"Original Version" refers to the collection of Font Software components as
+distributed by the Copyright Holder(s).
+
+"Modified Version" refers to any derivative made by adding to, deleting,
+or substituting -- in part or in whole -- any of the components of the
+Original Version, by changing formats or by porting the Font Software to a
+new environment.
+
+"Author" refers to any designer, engineer, programmer, technical
+writer or other person who contributed to the Font Software.
+
+PERMISSION & CONDITIONS
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of the Font Software, to use, study, copy, merge, embed, modify,
+redistribute, and sell modified and unmodified copies of the Font
+Software, subject to the following conditions:
+
+1) Neither the Font Software nor any of its individual components,
+in Original or Modified Versions, may be sold by itself.
+
+2) Original or Modified Versions of the Font Software may be bundled,
+redistributed and/or sold with any software, provided that each copy
+contains the above copyright notice and this license. These can be
+included either as stand-alone text files, human-readable headers or
+in the appropriate machine-readable metadata fields within text or
+binary files as long as those fields can be easily viewed by the user.
+
+3) No Modified Version of the Font Software may use the Reserved Font
+Name(s) unless explicit written permission is granted by the corresponding
+Copyright Holder. This restriction only applies to the primary font name as
+presented to the users.
+
+4) The name(s) of the Copyright Holder(s) or the Author(s) of the Font
+Software shall not be used to promote, endorse or advertise any
+Modified Version, except to acknowledge the contribution(s) of the
+Copyright Holder(s) and the Author(s) or with their explicit written
+permission.
+
+5) The Font Software, modified or unmodified, in part or in whole,
+must be distributed entirely under this license, and must not be
+distributed under any other license. The requirement for fonts to
+remain under this license does not apply to any document created
+using the Font Software.
+
+TERMINATION
+This license becomes null and void if any of the above conditions are
+not met.
+
+DISCLAIMER
+THE FONT SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT
+OF COPYRIGHT, PATENT, TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL THE
+COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+INCLUDING ANY GENERAL, SPECIAL, INDIRECT, INCIDENTAL, OR CONSEQUENTIAL
+DAMAGES, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM
+OTHER DEALINGS IN THE FONT SOFTWARE.
 ```
 
 ---
@@ -709,19 +823,53 @@ Full text: `apps/hermes/third_party/md4c/LICENSE.md`
 
 ---
 
+## The Tailnet chat companion app (`companion/`)
+
+The companion app is a separate program, built with Dart and Flutter for
+Linux and Android; nothing of it is in the firmware. Its own code is BSD
+3-Clause. Most of its pub.dev dependencies are BSD-3-Clause (Flutter,
+`ffi`, `crypto`, `path_provider`, `flutter_local_notifications`, and the
+transitive ones in `companion/app/pubspec.lock` and
+`companion/core/pubspec.lock`). These are not:
+
+| Package | Version | License | Used for |
+|---------|---------|---------|----------|
+| `dbus` (https://pub.dev/packages/dbus) | 0.8.0 | **MPL-2.0** | Linux: the identity key kept in the Secret Service (GNOME Keyring, KWallet), over D-Bus (`companion/app`) |
+| `ed25519_edwards` (https://pub.dev/packages/ed25519_edwards) | 0.3.2 | Apache-2.0 | Ed25519 signatures for the handshake (`companion/core`) |
+| `sqlite3` (https://pub.dev/packages/sqlite3) | 3.8.0 | MIT | The message store (`companion/core`); the SQLite library it loads is public domain |
+
+The app bundles three fonts, each with its licence beside it in
+`companion/app/assets/fonts/`, from github.com/google/fonts (`ofl/`):
+
+| Font | License | Used for |
+|------|---------|----------|
+| Fraunces (variable) | SIL OFL 1.1 | Names and titles |
+| Instrument Sans (variable) | SIL OFL 1.1 | Text |
+| JetBrains Mono (variable) | SIL OFL 1.1 | Fingerprints, addresses, times |
+
+MPL-2.0 is a file-level copyleft: the `dbus` package's own files stay
+under MPL-2.0, and changes to them would have to be published under it;
+the app that uses them, unchanged, may stay BSD 3-Clause. The Android
+build also pulls AndroidX and Kotlin libraries through Gradle, under
+Apache-2.0. Re-check this table when a companion `pubspec.yaml` changes.
+
+---
+
 ## License Compatibility Summary
 
 All dependencies are compatible with the ThistleOS BSD 3-Clause license:
 
 | License | Compatible with BSD 3-Clause | Components |
 |---------|------------------------------|------------|
-| Apache-2.0 | Yes | ESP-IDF, esp_modem, esp_codec_dev, elf_loader, NimBLE, mbedTLS |
-| MIT | Yes | LVGL, FreeRTOS, RadioLib, libcurl, Unity, esp-rs crates, Expat, CrossPoint Reader, diy-esp32-epub-reader, MicroLink, cJSON, md4c |
+| Apache-2.0 | Yes | ESP-IDF, esp_modem, esp_codec_dev, elf_loader, NimBLE, mbedTLS, ed25519_edwards (companion app) |
+| MIT | Yes | LVGL, FreeRTOS, RadioLib, libcurl, Unity, esp-rs crates, Expat, CrossPoint Reader, diy-esp32-epub-reader, MicroLink, cJSON, md4c, sqlite3 (companion app) |
 | BSD-3-Clause | Yes | Bosch BHI260AP firmware and BHY2 SensorAPI, wireguard-lwip |
 | BSD-2-Clause | Yes | Monocypher |
 | zlib | Yes | SDL2, uzlib |
 | CC0-1.0 | Yes | minimp3 |
 | Bitstream Vera | Yes | DejaVu fonts (the Reader's font) |
 | MIT OR Apache-2.0 | Yes | argon2, serde_json, esp-idf-hal, esp-idf-svc, esp-idf-sys |
+| MPL-2.0 (file-level copyleft) | Yes, used unmodified | dbus (companion app only) |
+| SIL OFL 1.1 | Yes, not sold alone | Fraunces, Instrument Sans, JetBrains Mono (companion app, unmodified); Noto Emoji (the Chat app's emoji, cut to bitmaps) |
 
-No GPL, LGPL, AGPL, or other copyleft licenses are present in this project.
+No GPL, LGPL or AGPL code is in the firmware. The one copyleft dependency elsewhere is the companion app's `dbus`, MPL-2.0, above.

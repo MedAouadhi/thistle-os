@@ -2,7 +2,7 @@
 //! Alerts for messages as they arrive: the motor buzzes, and the message
 //! waits here for the status bar to show as a pop-up.
 //!
-//! Every SMS and MeshCore message the kernel receives comes through
+//! Every SMS, MeshCore and Tailnet chat message the kernel receives comes through
 //! `arrived()`, Messenger open or not. There is no alert when alerts are
 //! switched off (`thistle_os.messenger.alerts`, on unless switched off, in
 //! the Messenger's settings), nor for a message in the conversation the
@@ -31,12 +31,14 @@ const BUZZ_GAP: Duration = Duration::from_secs(5);
 /// The longest message text a pop-up shows, in bytes, before "...".
 const PREVIEW_MAX: usize = 72;
 
-/// msg_alert.h: MSG_ALERT_SMS, MSG_ALERT_MESH.
+/// msg_alert.h: MSG_ALERT_SMS, MSG_ALERT_MESH, MSG_ALERT_TAILNET.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(u8)]
 pub(crate) enum Transport {
     Sms = 0,
     Mesh = 1,
+    /// Tailnet chat; a conversation is its peer's key's fingerprint.
+    Tailnet = 2,
 }
 
 impl Transport {
@@ -44,6 +46,7 @@ impl Transport {
         match value {
             0 => Some(Transport::Sms),
             1 => Some(Transport::Mesh),
+            2 => Some(Transport::Tailnet),
             _ => None,
         }
     }
@@ -319,6 +322,20 @@ mod tests {
     }
 
     #[test]
+    fn a_tailnet_chat_message_is_the_third_kind() {
+        fresh();
+        let t0 = Instant::now();
+        let fp = std::ffi::CString::new("630dcd2966c433669112").unwrap();
+        unsafe { rs_msg_alert_set_viewing(2, fp.as_ptr()) };
+        assert!(!arrived_at(Transport::Tailnet, "630dcd2966c433669112", "laptop", "hi", t0),
+                "its conversation is on screen");
+        assert!(arrived_at(Transport::Tailnet, "0000dcd2966c43366911", "phone", "hello", t0));
+        assert_eq!(take(), Some((1, 2, "phone".into(), "hello".into())));
+        unsafe { rs_msg_alert_set_viewing(-1, std::ptr::null()) };
+        fresh();
+    }
+
+    #[test]
     fn a_burst_buzzes_once() {
         fresh();
         let t0 = Instant::now();
@@ -357,5 +374,20 @@ mod tests {
         assert_eq!(std::mem::offset_of!(CMsgAlert, from), 5);
         assert_eq!(std::mem::offset_of!(CMsgAlert, text), 38);
         assert_eq!(std::mem::size_of::<CMsgAlert>(), 112);
+    }
+
+    #[test]
+    fn the_transports_are_msg_alert_h_s() {
+        let header = include_str!("../../kernel/include/thistle/msg_alert.h");
+        let defined = |name: &str| -> i32 {
+            let line = header.lines().find(|l| l.starts_with(&format!("#define {name} "))).unwrap_or_else(|| panic!("no {name}"));
+            line.split_whitespace().nth(2).unwrap().parse().unwrap()
+        };
+        for (name, t) in [("MSG_ALERT_SMS", Transport::Sms), ("MSG_ALERT_MESH", Transport::Mesh),
+                          ("MSG_ALERT_TAILNET", Transport::Tailnet)] {
+            assert_eq!(defined(name), t as i32, "{name}");
+            assert_eq!(Transport::from_c(defined(name)), Some(t), "{name}");
+        }
+        assert_eq!(Transport::from_c(3), None);
     }
 }

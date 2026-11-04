@@ -214,6 +214,11 @@ pub extern "C" fn kernel_init() -> i32 {
     // internal one, and nothing has transmitted yet.
     crate::radio_antenna::radio_antenna_restore();
 
+    // The device's identity key, the MeshCore node's, which Tailnet chat
+    // proves too: made now if the mesh never made it, whether or not the
+    // mesh is on or the board has a radio (mesh_identity.rs).
+    crate::mesh_identity::ensure();
+
     // The MeshCore node, on whichever antenna that left selected. It runs from
     // boot so messages arrive whether or not an app is open; system.json can
     // switch it off. A board with no radio skips it.
@@ -302,6 +307,10 @@ pub extern "C" fn kernel_init() -> i32 {
     // there is a network and the clock is set (tailnet_manager.rs).
     crate::tailnet_manager::start();
 
+    // Tailnet chat: while the tailnet is connected, a kernel worker job
+    // polls a listener for chat peers (tailnet_chat.rs).
+    crate::tailnet_chat::start();
+
     // AssistNow: orbits fetched once a day and handed to a u-blox receiver
     // as it starts, if a token has been given (gps_assist.rs).
     crate::gps_assist::start();
@@ -309,6 +318,10 @@ pub extern "C" fn kernel_init() -> i32 {
     // System updates: a kernel worker job checks the catalog once a day
     // when a network is up, on a task made for the check (update_manager.rs).
     crate::update_manager::start_checks();
+
+    // Background checks: a kernel worker job runs the checks kernel modules
+    // register, each on a task made for it (background_check.rs).
+    crate::background_check::start();
 
     // Publish SYSTEM_BOOT event
     crate::event::event_publish_simple(0); // EVENT_SYSTEM_BOOT = 0

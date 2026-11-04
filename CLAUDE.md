@@ -328,6 +328,39 @@ running of them in `power_manager.rs`; every ESP-IDF sleep call in
   still deep-sleeps, and a sleeping board on USB deep-sleeps instead.
 - **The log's timestamps stop during light sleep**; they count FreeRTOS ticks.
 
+### Background checks
+
+A kernel module that wants to look for news while nothing in front asks,
+Tailnet chat's messages say, registers a **background check** (ADR-0014):
+`background_check::register(name, every, ram_needed, stack, || Outcome)`,
+or `background_check_register()` from C (`thistle/background_check.h`).
+Decisions are in `background_check_policy.rs`, host-tested; the running of
+them in `background_check.rs`. Packaged apps cannot register one: there is
+no syscall.
+
+- **A kernel worker job looks once a second.** A check is due an interval
+  after it last ended (first, an interval after registering); 0 is off.
+  A due check waits up to 90 s for a network and the clock, then is
+  skipped; one that finds less internal RAM free than it declared is
+  skipped at once. Skipped or failed, it is tried again an interval later,
+  never sooner. `set_interval`, `set_paused` (while its module holds a
+  live connection); a check that returns `StoppedUntil(t)` runs no more
+  before `t`.
+- **It runs on a task made for it**, `check` (`kernel_task::spawn`, its
+  stack in internal RAM), gone after, and holds the device awake meanwhile
+  under its name. The log says `check sim: done (nothing new) in 0.2 s;
+  internal RAM 120 KB free before, 119 KB after`, or `check sim: skipped:
+  no network`.
+- **Light sleep wakes on a timer for it.** The power manager sleeps until
+  the earlier of deep sleep and the next check; woken with one due, it
+  brings back only the network (`up for a background check`), leaving the
+  screen and the drivers asleep, rests it again once the checks are over
+  (`background checks over; sleeping again`), and sleeps. At most 5
+  minutes (`power_policy::CHECK_WAKE_MAX`). Deep sleep runs none.
+- The simulator's board does not sleep. `THISTLE_SIM_BACKGROUND_CHECK=
+  SECONDS[:done|failed|skipped|stopped|lowram]` registers a check named
+  `sim`; `simulator/tests/test_background_check.py`.
+
 ### SMS and the message history
 
 The kernel, not an app, receives SMS: the network coordinator fetches them
@@ -383,6 +416,45 @@ switch (`AUDIO_SEL`, XL9555 P12, HIGH = modem). ADR-0008 has the reasons,
 - The simulator's fake modem: `--call NUMBER` rings, `--call-hangup S`,
   `--call-preview STATE`, and `--tap dial:N` / `compose:N`;
   `simulator/tests/test_calls.py` and `test_phone_app.py`.
+- **Tailnet chat calls use the same screen and API** (ticket 09 of
+  `.scratch/tailnet-chat/`): while no cellular call is up, `call.h` shows
+  and controls a `ws-opus` call (`call_status_t.tailnet`), and the call log
+  has it as `tailnet:<fingerprint id>`, which `rs_call_dial()` calls back.
+  The rules are `tailnet_call_policy.rs` (one call, busy, a cellular call
+  ends it, SMS wait out one over LTE, 10 s without a frame ends it), the
+  jitter buffer and echo suppression `tailnet_call_media.rs`, the call's
+  own task (20 KB internal stack, Opus) `tailnet_call.rs`. The simulator's
+  `THISTLE_SIM_SPEAKER=FILE.wav` gets everything played;
+  `test_tailchat.py --only calls`.
+- **The Chat app looks for chat peers only when asked** (ticket 13 of
+  `.scratch/tailnet-chat/`): Contacts → Look for chat peers probes each
+  online peer of the tailnet's list the kernel keeps
+  (`tailnet_manager::peers()`), less this device, at most 24, on the chat
+  port with a hello, and lists those that answer, less this device and
+  the contacts (`tailnet_chat_policy::to_probe`, `to_show`). A probe is a
+  dial, a hello each way and a close, with no `auth`, so the side probed
+  holds nothing. The probes go one after another, 3 s at most for each
+  connect and each hello, on a task of their own (`chat_look`, 8 KB
+  internal stack, `tailnet_chat_discovery.rs`), the device held awake
+  meanwhile. Add adds one as Add contact does, by the address it answered
+  on, its key pinned at the first handshake. The simulator's
+  `THISTLE_SIM_TAILNET_PEERS=NAME=IP,...` lists its pretend peers, such as
+  reference chat peers on 127.0.0.2 and 127.0.0.3;
+  `test_tailchat.py --only app-discovery`.
+- **The Chat app's lists and bubbles are drawn, not built**
+  (`apps/tailchat/tailchat/tailchat_ui.c`): each list and conversation is
+  one `lv_table` holding a few characters a row, enough for its height
+  (a bubble's text, as it wraps), and `draw_list_row()` / `draw_bubble()`
+  draw the monograms, ticks, bubbles and reactions from rows kept in
+  PSRAM, in `LV_EVENT_DRAW_TASK_ADDED`. Text a draw task shows is read
+  after the event returns, so it lives in those rows, never on the
+  stack; a cell's own text is hidden by its opacity alone, as Arabic
+  there is a copy the task frees. A list is redrawn only when a row
+  changed. Its emoji are Noto Emoji (OFL) cut by
+  `apps/tailchat/tools/gen_emoji_font.sh`, its pictures drawn by
+  `gen_icons.py`, chained after Montserrat as `lv_font_t.fallback`.
+  Leaving a conversation asks the e-paper panel for a full refresh, for
+  the black bubbles' ghost.
 
 ### The clock
 
@@ -572,7 +644,9 @@ app, Hermes or the tailnet. `.scratch/dictation/spec.md` has the rules.
   Listening only once audio arrives.
 - `simulator/tests/test_dictation.py` runs it against a fake Cohere;
   `THISTLE_SIM_MIC=FILE.wav` is what the simulator's microphone hears, and
-  `--tap mic:MS` holds the key.
+  `--tap mic:MS` holds the key. `THISTLE_SIM_SPEAKER=FILE.wav` is what its
+  speaker played since the format was last set, kept up to date as it
+  plays; `--tap X,Y:MS` holds a touch.
 
 ### Arabic text
 
@@ -672,7 +746,7 @@ client.
 
 - **The client is MicroLink**, from `MedAouadhi/microlink` branch
   `thistle`, pinned by commit in `components/kernel/idf_component.yml`, S3
-  only. The fork is the one hermes_esp32 pins plus eleven commits; read them
+  only. The fork is the one hermes_esp32 pins plus thirteen commits; read them
   before moving the pin, and delete `dependencies.lock` when you do (which
   also lets other components move: put back what you did not mean to).
   Decisions are in `tailnet_policy.rs`, the running of them in
@@ -690,7 +764,12 @@ client.
   connect to a peer takes a TCP retransmit, about a second.
 - **Data goes through DERP until a direct path is proven**, by a DISCO pong
   or a packet that came straight from the peer; over mobile data, behind
-  the carrier's NAT, it always does. The WireGuard netif's link stays up
+  the carrier's NAT, it always does. A packet for a peer homed in another
+  DERP region goes through that region's relay, over a connection
+  MicroLink opens for it and closes after a minute unused (two at most
+  besides the home one), as Tailscale's client does: a relay delivers
+  only to clients connected to it. Before, the device could start a
+  session only with peers homed in its own region. The WireGuard netif's link stays up
   with no session: wireguard-lwip took it down, and lwIP then sent tailnet
   packets out of the modem or WiFi, unencrypted, where nothing started a
   session: over mobile data no peer could be reached unless it had
@@ -734,8 +813,17 @@ client.
 - The simulator's client is pretend (`THISTLE_SIM_TAILNET` = `login`,
   `approval` or `refuse`; `THISTLE_SIM_TAILNET_LOGIN_S`;
   `THISTLE_SIM_TAILNET_PEERS=host` takes the host's own peers from
-  `tailscale status --json`); whether it has joined is a file in
-  `THISTLE_SIM_SPIFFS`. `simulator/tests/test_tailscale.py`.
+  `tailscale status --json`, `NAME=IP[:offline],...` lists them); whether
+  it has joined is a file in `THISTLE_SIM_SPIFFS`.
+  `simulator/tests/test_tailscale.py`.
+- **Tailnet chat shares this peer list with a contact that asks**
+  (`peers_ask`, protocol.md section 4.10, ticket 14 of
+  `.scratch/tailnet-chat/`): the online peers the kernel keeps, by the
+  first label of their names, less the asker, IPv4 only, 64 at most
+  (`tailnet_chat_policy::shared_peers`); a stranger is told none. The
+  device never asks. The Android companion app, which has no peer list,
+  looks for chat peers among what its contacts share, probing only
+  addresses inside the tailnet's ranges and taking nothing else from it.
 
 ### Hermes
 

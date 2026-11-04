@@ -96,3 +96,53 @@ _Avoid_: anti-rollback version, secure version
 **Security floor**:
 The highest security version a device has installed. A firmware below it is never installed or booted again, so a fixed hole cannot be reopened by going back.
 _Avoid_: rollback counter, minimum version
+
+### Credentials
+
+**Service**:
+An outside provider a device authenticates to, such as PodcastIndex, Cohere, Anthropic or Thingstream. Credentials are kept per service, not per app.
+_Avoid_: provider, account, API
+
+**Credential**:
+What a device presents to one service to prove it may use it: an API key, a token, or a key and secret pair. Never a setting with a sensible default, such as an address or a model name.
+_Avoid_: secret, token, API key (as the general term), config
+
+**Credential requirement**:
+A consumer's declaration that it uses a service's credential. An app, a system feature or a kernel service may read only the credentials it has declared, and one entry serves every consumer that declares its service.
+_Avoid_: credential permission, secret request
+
+### Background work
+
+**Background check**:
+A short, periodic piece of work a kernel module registers to look for news while nothing in front asks for it, such as collecting the Tailnet chat messages waiting for the device since the last one. It runs at an interval, only with a network up, may wake the device from light sleep, and finishes on its own; it is paused while the module's app holds a live connection.
+_Avoid_: poll, sync, background job, push
+
+### Messaging
+
+**Tailnet chat**:
+Messaging, voice and video between installs that speak its protocol over the user's tailnet: the T-Deck's own app, and the companion app on Linux and phones. Peers connect to each other directly; there is no server. A message to a peer that is away waits with its sender until it is delivered.
+_Avoid_: tailnet messenger, Tailscale chat, P2P chat
+
+**Chat peer**:
+An install that answers Tailnet chat's hello: the T-Deck's app or a companion app. A tailnet peer is any node on the tailnet, Tailscale's meaning, whether or not it speaks Tailnet chat.
+_Avoid_: peer (unqualified, in Tailnet chat), node, client
+
+**Identity key**:
+The key a chat peer proves at every connection. It, not the tailnet name or address, is who a contact is. A companion app makes its own on first start; the T-Deck uses its MeshCore identity, so a device is one key on LoRa and on the tailnet.
+_Avoid_: node key, device key, account
+
+**Contact** (Tailnet chat):
+A chat peer whose identity key the user has accepted. The first acceptance trusts the tailnet alone; from then on a chat peer under that contact's name or address with another key is refused and flagged, until the user accepts the new key in its place.
+_Avoid_: friend, buddy, chat peer (for an accepted one)
+
+**Contact request**:
+What a chat peer that is not yet a contact sends, with or without messages. It waits, with its tailnet name and key fingerprint, until the user accepts it, which makes the sender a contact and delivers its messages, or declines it, which drops them.
+_Avoid_: invite, friend request
+
+**Call** (Tailnet chat):
+A live conversation between two chat peers: always voice, and video while either side has its camera on. Between two video-capable chat peers, either side may switch its camera on or off at any time, from the first ring on. There is one kind of call; one with a camera on is not a different call.
+_Avoid_: video call, voice call (as two kinds of call)
+
+**Video-capable** (chat peer):
+A chat peer that says it can take part in video, whether or not it has a camera: one without a camera still sees the other side's. A chat peer is video-capable by what it announces, never by the machine it runs on; the T-Deck is not, nor is an older companion app.
+_Avoid_: supported device, video device

@@ -200,6 +200,9 @@ jobs:
       - name: Test the To-do app's list and checklist file under sanitizers
         run: apps/todo/tests/run_tests.sh
 
+      - name: Test the Chat app's text under sanitizers
+        run: apps/tailchat/tests/run_tests.sh
+
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
@@ -230,6 +233,11 @@ jobs:
 
       - name: Test board profile validation
         run: python3 tools/test_validate_board_catalog.py
+
+      - name: Test Tailnet chat's reference peer against its vectors and the conformance suite
+        run: |
+          python3 tools/tailnet_chat/make_vectors.py --check
+          python3 tools/test_tailnet_chat.py
 
       - name: Test transactional recovery bundle activation
         run: |
@@ -273,6 +281,131 @@ jobs:
           /tmp/test_anti_rollback
           grep -q "advance_security_version_and_select" recovery/src/recovery_ota.rs
           grep -q "EspDefaultNvsPartition::take_with(false)" recovery/src/main.rs
+
+  companion-core:
+    name: Companion Core (Dart, headless, conformance)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: companion/core
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dart-lang/setup-dart@v1.7.1
+        with:
+          sdk: 3.13.7
+
+      # Voice messages and call audio load the system's libopus by FFI.
+      - name: Install libopus
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libopus0
+
+      - name: Fetch the core's packages, as locked
+        run: dart pub get --enforce-lockfile
+
+      - name: Analyze the core
+        run: |
+          dart format --output=none --set-exit-if-changed .
+          dart analyze --fatal-infos
+
+      - name: Test the core against the protocol's vectors, its policy and two peers
+        run: dart test
+
+      - name: Build the headless core
+        run: dart build cli
+
+      - name: Run Tailnet chat's conformance suite against the headless core
+        working-directory: .
+        run: |
+          python3 tools/tailnet_chat/conformance.py \
+            --control 'companion/core/build/cli/linux_x64/bundle/bin/tailnet_chat_core --listen 127.0.0.1:0 --loopback'
+
+  companion-app:
+    name: Companion App (Flutter, Linux)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: companion/app
+    env:
+      FLUTTER_VERSION: 3.47.9
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install the Linux desktop build's packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev libopus0 libpulse0
+
+      # Flutter at its release tag: no third-party action to pin.
+      - name: Install Flutter
+        working-directory: .
+        run: |
+          git clone --depth 1 --branch "$FLUTTER_VERSION" https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
+          echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+
+      - name: Fetch the app's packages, as locked
+        run: |
+          flutter config --no-analytics --enable-linux-desktop
+          flutter --version
+          flutter pub get --enforce-lockfile
+
+      - name: Analyze the app
+        run: |
+          dart format --output=none --set-exit-if-changed lib test
+          flutter analyze --fatal-infos
+
+      # Discovery from a tailscale status fixture, the identity vault, the
+      # model and the screens against a real chat peer on loopback. The
+      # Secret Service test needs a desktop session and is skipped here.
+      - name: Test the app
+        run: flutter test
+
+      - name: Build the Linux app
+        run: flutter build linux --release
+
+  # The same app for Android: the hosted runner's Android SDK and JDK 17,
+  # the platform glue (Keystore vault, listening service, permissions) in
+  # Kotlin under android/. The Dart tests run in the Linux job above.
+  companion-android:
+    name: Companion App (Flutter, Android APK)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: companion/app
+    env:
+      FLUTTER_VERSION: 3.47.9
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Flutter
+        working-directory: .
+        run: |
+          git clone --depth 1 --branch "$FLUTTER_VERSION" https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
+          echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+
+      - name: Fetch the app's packages, as locked
+        run: |
+          flutter config --no-analytics --android-sdk "$ANDROID_HOME" --jdk-dir "$JAVA_HOME_17_X64"
+          flutter --version
+          flutter pub get --enforce-lockfile
+
+      # libopus.so is built for each ABI from components/opus
+      # (android/app/src/main/cpp): the NDK Flutter names (ndkVersion) and
+      # the CMake build.gradle.kts names.
+      - name: Install the NDK and CMake
+        run: |
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;28.2.13676358" "cmake;3.22.1" > /dev/null
+
+      - name: Build the APK
+        run: flutter build apk --release
+
+      - name: Keep the APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: thistle-chat-apk
+          path: companion/app/build/app/outputs/flutter-apk/app-release.apk
+          retention-days: 14
 
   simulator-boot:
     name: Simulator Boot Test
@@ -439,6 +572,10 @@ jobs:
         working-directory: simulator
         run: python3 tests/test_tailscale.py --sim build/thistle_sim
 
+      - name: Run background check tests
+        working-directory: simulator
+        run: python3 tests/test_background_check.py --sim build/thistle_sim
+
       - name: Run Dictation tests against a fake Cohere
         working-directory: simulator
         run: python3 tests/test_dictation.py --sim build/thistle_sim
@@ -450,6 +587,10 @@ jobs:
       - name: Run To-do add, tick, remove and clear tests
         working-directory: simulator
         run: python3 tests/test_todo.py --sim build/thistle_sim
+
+      - name: Run Tailnet chat conformance, messages, card, restart and app tests
+        working-directory: simulator
+        run: python3 tests/test_tailchat.py --sim build/thistle_sim
 
       - name: Run App Store list, refresh, install and remove tests
         working-directory: simulator

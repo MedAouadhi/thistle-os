@@ -126,8 +126,20 @@ pub(crate) struct Polled {
     pub error_text: String,
     pub ip: u32,
     pub auth_url: String,
-    /// (address, name, reached directly)
-    pub peers: Vec<(u32, String, bool)>,
+    pub peers: Vec<Peer>,
+}
+
+/// A tailnet peer, as the client last saw it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Peer {
+    /// Its tailnet address, 100.x.y.z, in host byte order
+    pub ip: u32,
+    /// "homelab.tail1234.ts.net"
+    pub name: String,
+    /// Reached directly rather than by a DERP relay
+    pub direct: bool,
+    /// Online, as the client says (tailnet_platform.c has what that means)
+    pub online: bool,
 }
 
 /// What a poll found.
@@ -145,6 +157,16 @@ impl State {
 }
 
 static STATE: Mutex<Option<State>> = Mutex::new(None);
+
+/// How many times the client has connected since boot: a module that
+/// wants to act on every (re)join, after a sleep or a change of network,
+/// watches it change.
+static JOINS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// How many times the tailnet has connected since boot.
+pub(crate) fn joins() -> u32 {
+    JOINS.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 fn lock() -> MutexGuard<'static, Option<State>> {
     STATE.lock().unwrap_or_else(PoisonError::into_inner)
@@ -370,6 +392,7 @@ unsafe extern "C" fn tick(_arg: *mut c_void) {
     let shown = policy::shown(platform::available(), &inputs, s.failures > 0);
     if shown != s.shown {
         if shown == Shown::Connected {
+            JOINS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             // What the client's tasks and sockets cost is worth knowing.
             #[cfg(not(test))]
             let free_kb = unsafe { crate::app_manager::get_free_memory() } / 1024;
@@ -499,6 +522,24 @@ pub struct CTailnetPeer {
     pub ip: [u8; 16],
     pub name: [u8; 64],
     pub direct: bool,
+    pub online: bool,
+}
+
+fn fill_c_peer(peer: &Peer, out: &mut CTailnetPeer) {
+    copy_str(&mut out.ip, &ip_text(peer.ip));
+    copy_str(&mut out.name, &peer.name);
+    out.direct = peer.direct;
+    out.online = peer.online;
+}
+
+/// A line of the Terminal's `tailscale peers`.
+fn peer_line(peer: &Peer) -> String {
+    let notes: Vec<&str> = [(!peer.direct).then_some("relay"), (!peer.online).then_some("offline")]
+        .into_iter()
+        .flatten()
+        .collect();
+    let notes = if notes.is_empty() { String::new() } else { format!(" ({})", notes.join(", ")) };
+    format!("{:15} {}{}", ip_text(peer.ip), peer.name, notes)
 }
 
 fn copy_str(dst: &mut [u8], src: &str) {
@@ -556,12 +597,32 @@ pub extern "C" fn tailnet_is_connected() -> bool {
 }
 
 /// The peers last seen, while connected.
-fn peers() -> Vec<(u32, String, bool)> {
+pub(crate) fn peers() -> Vec<Peer> {
     with(|s| match &s.polled {
         Some(p) if s.running_on.is_some() && p.client == Client::Connected => p.peers.clone(),
         _ => Vec::new(),
     })
     .unwrap_or_default()
+}
+
+/// The address of the tailnet peer called `name`, from the tailnet's map,
+/// never DNS; None while not connected or for no such peer.
+pub(crate) fn resolve_peer(name: &str) -> Option<std::net::Ipv4Addr> {
+    match platform::resolve(name) {
+        0 => None,
+        ip => Some(std::net::Ipv4Addr::from(ip)),
+    }
+}
+
+/// The tailnet hostname of the peer at `ip`, its first label ("homelab"),
+/// while connected and the peer is in the list last seen.
+pub(crate) fn peer_name(ip: std::net::Ipv4Addr) -> Option<String> {
+    let ip = u32::from(ip);
+    peers()
+        .into_iter()
+        .find(|p| p.ip == ip)
+        .map(|p| p.name.split('.').next().unwrap_or("").to_string())
+        .filter(|n| !n.is_empty())
 }
 
 /// # Safety
@@ -610,12 +671,10 @@ pub unsafe extern "C" fn tailnet_get_peer(index: i32, out: *mut CTailnetPeer) ->
     let Some(out) = (unsafe { out.as_mut() }) else {
         return ESP_ERR_INVALID_ARG;
     };
-    let Some((ip, name, direct)) = usize::try_from(index).ok().and_then(|i| peers().into_iter().nth(i)) else {
+    let Some(peer) = usize::try_from(index).ok().and_then(|i| peers().into_iter().nth(i)) else {
         return ESP_ERR_INVALID_ARG;
     };
-    copy_str(&mut out.ip, &ip_text(ip));
-    copy_str(&mut out.name, &name);
-    out.direct = direct;
+    fill_c_peer(&peer, out);
     ESP_OK
 }
 
@@ -725,12 +784,7 @@ pub(crate) fn shell(args: &[&str]) -> (i32, Vec<String>) {
             if peers.is_empty() {
                 return (0, vec!["No peers (not connected?)".into()]);
             }
-            let lines = peers
-                .into_iter()
-                .map(|(ip, name, direct)| {
-                    format!("{:15} {}{}", ip_text(ip), name, if direct { "" } else { " (relay)" })
-                })
-                .collect();
+            let lines = peers.iter().map(peer_line).collect();
             (0, lines)
         }
         "up" | "down" => {
@@ -799,6 +853,7 @@ mod platform {
         ip: u32,
         name: [u8; 64],
         direct: bool,
+        online: bool,
     }
 
     /// tailnet_platform_poll_t
@@ -847,7 +902,7 @@ mod platform {
     }
     pub(super) fn poll() -> super::Poll {
         // About 1.2 KB, on the kernel worker's 16 KB stack
-        let mut peers: [Peer; MAX_PEERS] = std::array::from_fn(|_| Peer { ip: 0, name: [0; 64], direct: false });
+        let mut peers: [Peer; MAX_PEERS] = std::array::from_fn(|_| Peer { ip: 0, name: [0; 64], direct: false, online: false });
         let mut out = PollOut { state: 0, error: 0, registered: false, ip: 0, peer_count: 0,
                                 auth_url: [0; 192], error_text: [0; 128] };
         match unsafe { tailnet_platform_poll(&mut out, peers.as_mut_ptr(), MAX_PEERS as i32) } {
@@ -862,7 +917,12 @@ mod platform {
             error_text: text(&out.error_text),
             ip: out.ip,
             auth_url: text(&out.auth_url),
-            peers: peers.iter().take(n).filter(|p| p.ip != 0).map(|p| (p.ip, text(&p.name), p.direct)).collect(),
+            peers: peers
+                .iter()
+                .take(n)
+                .filter(|p| p.ip != 0)
+                .map(|p| super::Peer { ip: p.ip, name: text(&p.name), direct: p.direct, online: p.online })
+                .collect(),
         })
     }
     pub(super) fn joined() -> bool {
@@ -889,8 +949,9 @@ mod platform {
 /// - `approval`: as `login`, then waiting as long again for an admin;
 /// - `refuse`: the registration is refused.
 ///
-/// The peers are two made up, or the host's own with
-/// THISTLE_SIM_TAILNET_PEERS=host, from `tailscale status --json`. Whether
+/// The peers are two made up, the host's own with
+/// THISTLE_SIM_TAILNET_PEERS=host, from `tailscale status --json`, or a
+/// list, THISTLE_SIM_TAILNET_PEERS=NAME=IP[:offline],... (peers_in_list). Whether
 /// the device has joined is a file in the simulator's SPIFFS, so that it
 /// survives a restart.
 #[cfg(not(target_os = "espidf"))]
@@ -1022,21 +1083,57 @@ mod platform {
         let want = name.to_ascii_lowercase();
         peers()
             .into_iter()
-            .find(|(_, n, _)| {
-                let n = n.to_ascii_lowercase();
+            .find(|p| {
+                let n = p.name.to_ascii_lowercase();
                 n == want || n.split('.').next() == Some(want.as_str())
             })
-            .map_or(0, |(ip, _, _)| ip)
+            .map_or(0, |p| p.ip)
     }
 
-    fn peers() -> Vec<(u32, String, bool)> {
-        if env("THISTLE_SIM_TAILNET_PEERS") == "host" {
+    fn peers() -> Vec<super::Peer> {
+        let list = env("THISTLE_SIM_TAILNET_PEERS");
+        if list == "host" {
             return host_peers().map(|(_, p)| p).unwrap_or_default();
         }
-        vec![
-            (0x6440_0002, "homelab.tail-sim.ts.net".to_string(), true),
-            (0x6440_0003, "laptop.tail-sim.ts.net".to_string(), false),
-        ]
+        if list.contains('=') {
+            return peers_in_list(&list);
+        }
+        let peer = |ip, name: &str, direct| super::Peer { ip, name: name.to_string(), direct, online: true };
+        let mut list = vec![
+            peer(0x6440_0002, "homelab.tail-sim.ts.net", true),
+            peer(0x6440_0003, "laptop.tail-sim.ts.net", false),
+        ];
+        // THISTLE_SIM_TAILNET_LOOPBACK_PEER=NAME[:offline]: a peer at
+        // 127.0.0.1, where a test's chat peers listen, online or not.
+        let loopback = env("THISTLE_SIM_TAILNET_LOOPBACK_PEER");
+        if !loopback.is_empty() {
+            let (name, offline) = match loopback.strip_suffix(":offline") {
+                Some(n) => (n, true),
+                None => (loopback.as_str(), false),
+            };
+            let mut p = peer(0x7f00_0001, &format!("{name}.tail-sim.ts.net"), true);
+            p.online = !offline;
+            list.push(p);
+        }
+        list
+    }
+
+    /// THISTLE_SIM_TAILNET_PEERS=NAME=IP[:offline],...: these peers in
+    /// place of the two made up, such as test chat peers on loopback
+    /// addresses (127.0.0.2, 127.0.0.3). An entry it cannot read is left out.
+    pub(super) fn peers_in_list(list: &str) -> Vec<super::Peer> {
+        list.split(',')
+            .filter_map(|entry| {
+                let (name, at) = entry.trim().split_once('=')?;
+                let (at, online) = match at.strip_suffix(":offline") {
+                    Some(a) => (a, false),
+                    None => (at, true),
+                };
+                let name = name.trim();
+                (!name.is_empty()).then_some(())?;
+                Some(super::Peer { ip: parse_ip(at.trim())?, name: format!("{name}.tail-sim.ts.net"), direct: true, online })
+            })
+            .collect()
     }
 
     fn parse_ip(s: &str) -> Option<u32> {
@@ -1046,9 +1143,14 @@ mod platform {
     }
 
     /// The host's own tailnet address and peers.
-    fn host_peers() -> Option<(u32, Vec<(u32, String, bool)>)> {
+    fn host_peers() -> Option<(u32, Vec<super::Peer>)> {
         let out = std::process::Command::new("tailscale").args(["status", "--json"]).output().ok()?;
-        let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+        peers_in_status(std::str::from_utf8(&out.stdout).ok()?)
+    }
+
+    /// This node's address and its peers, from `tailscale status --json`.
+    pub(super) fn peers_in_status(json: &str) -> Option<(u32, Vec<super::Peer>)> {
+        let v: serde_json::Value = serde_json::from_str(json).ok()?;
         let ipv4 = |node: &serde_json::Value| {
             node.get("TailscaleIPs")?.as_array()?.iter().filter_map(|i| i.as_str()).find_map(parse_ip)
         };
@@ -1061,7 +1163,8 @@ mod platform {
                     .filter_map(|p| {
                         let name = p.get("DNSName")?.as_str()?.trim_end_matches('.').to_string();
                         let direct = p.get("CurAddr").and_then(|a| a.as_str()).is_some_and(|a| !a.is_empty());
-                        Some((ipv4(p)?, name, direct))
+                        let online = p.get("Online").and_then(|o| o.as_bool()).unwrap_or(false);
+                        Some(super::Peer { ip: ipv4(p)?, name, direct, online })
                     })
                     .collect()
             })
@@ -1103,6 +1206,64 @@ mod tests {
         assert_eq!(blank.hostname, "");
         assert_eq!(hostname_or_default(""), "thistle-sim");
         assert_eq!(hostname_or_default("mine"), "mine");
+    }
+
+    #[test]
+    fn a_peer_the_host_tailnet_has_offline_is_listed_offline() {
+        let status = r#"{
+            "Self": {"TailscaleIPs": ["100.91.111.54", "fd7a:115c:a1e0::1"]},
+            "Peer": {
+                "nodekey:aa": {"DNSName": "homelab.tail1234.ts.net.", "TailscaleIPs": ["100.125.204.43"],
+                               "Online": true, "CurAddr": "192.168.2.10:41641"},
+                "nodekey:bb": {"DNSName": "pixel-8.tail1234.ts.net.", "TailscaleIPs": ["100.92.9.101"],
+                               "Online": false, "CurAddr": ""}
+            }
+        }"#;
+        let (me, mut peers) = platform::peers_in_status(status).expect("a status");
+        peers.sort_by(|a, b| a.name.cmp(&b.name));
+        assert_eq!(me, 0x645b_6f36);
+        assert_eq!(
+            peers,
+            vec![
+                Peer { ip: 0x647d_cc2b, name: "homelab.tail1234.ts.net".into(), direct: true, online: true },
+                Peer { ip: 0x645c_0965, name: "pixel-8.tail1234.ts.net".into(), direct: false, online: false },
+            ]
+        );
+    }
+
+    #[test]
+    fn the_simulator_takes_its_peers_from_a_list() {
+        let peers = platform::peers_in_list("alice=127.0.0.2, bob=127.0.0.3:offline,printer=127.0.0.4,bad=1.2.3,=127.0.0.5");
+        assert_eq!(
+            peers,
+            vec![
+                Peer { ip: 0x7f00_0002, name: "alice.tail-sim.ts.net".into(), direct: true, online: true },
+                Peer { ip: 0x7f00_0003, name: "bob.tail-sim.ts.net".into(), direct: true, online: false },
+                Peer { ip: 0x7f00_0004, name: "printer.tail-sim.ts.net".into(), direct: true, online: true },
+            ]
+        );
+    }
+
+    #[test]
+    fn the_peer_list_says_whether_each_peer_is_online() {
+        let mut out: CTailnetPeer = unsafe { std::mem::zeroed() };
+        let away = Peer { ip: 0x645c_0965, name: "pixel-8.tail1234.ts.net".into(), direct: false, online: false };
+        fill_c_peer(&away, &mut out);
+        assert_eq!(c_text(&out.ip), "100.92.9.101");
+        assert_eq!(c_text(&out.name), "pixel-8.tail1234.ts.net");
+        assert!(!out.direct);
+        assert!(!out.online);
+        let here = Peer { online: true, direct: true, ..away };
+        fill_c_peer(&here, &mut out);
+        assert!(out.online && out.direct);
+    }
+
+    #[test]
+    fn the_terminal_marks_a_peer_that_is_offline() {
+        let away = Peer { ip: 0x645c_0965, name: "pixel-8".into(), direct: false, online: false };
+        assert_eq!(peer_line(&away), "100.92.9.101    pixel-8 (relay, offline)");
+        let here = Peer { ip: 0x647d_cc2b, name: "homelab".into(), direct: true, online: true };
+        assert_eq!(peer_line(&here), "100.125.204.43  homelab");
     }
 
     #[test]
