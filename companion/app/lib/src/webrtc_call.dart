@@ -185,22 +185,25 @@ class WebrtcCall {
 
   /// No child process starts while the camera is on, and the camera waits
   /// for those running (child_processes.dart); a camera that gives no
-  /// picture is turned off and said so.
+  /// picture is turned off, said so, and told as none: the other side's
+  /// tile reads No camera, not Camera off.
   Future<void> _applyCamera(CallSession session, {required bool on}) async {
     final camera = on ? cameras![_cameraAt] : null;
     if (on) await children.cameraOpening();
+    var state = on ? CameraState.on : CameraState.off;
     try {
       await session.setCamera(camera);
       cameraOn = on;
     } on CameraUnavailable catch (e) {
       cameraOn = false;
+      state = CameraState.none;
       cameraProblem = 'The camera is off: $e. Another program may be using it.';
       log?.call('${callLabel(id)}: camera $camera gave no picture: $e');
     }
     if (!cameraOn) children.cameraClosed();
     if (_closed) return;
-    log?.call('${callLabel(id)}: our camera ${cameraOn ? 'on, $camera' : 'off'}');
-    peer().setCamera(id, cameraOn ? CameraState.on : CameraState.off);
+    log?.call('${callLabel(id)}: our camera ${cameraOn ? 'on, $camera' : state.wire}');
+    peer().setCamera(id, state);
   }
 
   // -- the connection -------------------------------------------------------------

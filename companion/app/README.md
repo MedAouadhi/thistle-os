@@ -147,8 +147,9 @@ congestion control lowers both to fit the path.
 
 A camera that opens and gives no frame within 2.5 s (flutter_webrtc
 issue 2225: another process holds it) is turned off, the other side told
-`off`, and the call screen says so. libwebrtc opens the camera without
-close-on-exec, so a child process started while it is open keeps it and
+`none`, so its tile reads No camera, and the call screen says so.
+libwebrtc opens the camera without close-on-exec, so a child process
+started while it is open keeps it and
 the next call's camera gives nothing: `lib/src/child_processes.dart`
 starts no child (`tailscale status`, PipeWire's echo canceller) while a
 camera is on, and opens a camera only once those running have exited.

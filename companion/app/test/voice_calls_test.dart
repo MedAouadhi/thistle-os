@@ -453,16 +453,19 @@ void main() {
           expect(friend.talk.remoteVideoShown, isTrue);
         });
 
-        test('a camera that gives no picture is turned off, the other side told, and the screen says why', () async {
-          final id = await connected();
-          mine.picture = false;
-          await eventually(() => app.talk.cameras != null);
-          await app.talk.setCameraOn(true);
-          expect(app.talk.cameraOn, isFalse);
-          expect(app.talk.cameraProblem, contains('no picture'));
-          await Future<void>.delayed(const Duration(milliseconds: 200));
-          expect(friend.peer.calls[id]!.remoteCamera, CameraState.off);
-        });
+        test(
+          'a camera that gives no picture is turned off, the other side told it has none, and the screen says why',
+          () async {
+            final id = await connected();
+            mine.picture = false;
+            await eventually(() => app.talk.cameras != null && friend.peer.calls[id]!.remoteCamera == CameraState.off);
+            await app.talk.setCameraOn(true);
+            expect(app.talk.cameraOn, isFalse);
+            expect(app.talk.cameraProblem, contains('no picture'));
+            // Its tile reads No camera, not Camera off.
+            await eventually(() => friend.peer.calls[id]!.remoteCamera == CameraState.none);
+          },
+        );
 
         test('a video call rings as one, and unanswered is a missed video call', () async {
           friend.foreground = false;

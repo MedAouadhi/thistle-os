@@ -357,8 +357,8 @@ tailnet removed.
   in the audio ones; H.264 SHOULD NOT be offered. The media is WebRTC's,
   not this protocol's binary frames; kind `02` stays `ws-opus`'s.
 - **`call_camera`** says what the sender's camera is doing: `on`, `off`,
-  `paused` (its app left the foreground) or `none` (no camera, or no
-  permission). Each side sends it once the call is answered and at every
+  `paused` (its app left the foreground) or `none` (no camera, no
+  permission, or one that opened and gave no picture). Each side sends it once the call is answered and at every
   change; the other side's tile follows it.
 - **Ends.** The 45 s ring and `busy` rules of section 4.8 hold. A side whose
   WebRTC connection has not connected **15 s** after the answer MUST end
