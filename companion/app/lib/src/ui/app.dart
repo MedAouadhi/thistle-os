@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:tailnet_chat_core/tailnet_chat_core.dart';
 
 import '../chat_model.dart';
+import '../notifier.dart' show CallWindow;
 import '../permissions.dart';
 import 'call_page.dart';
 import 'contacts_page.dart';

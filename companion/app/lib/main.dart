@@ -63,7 +63,7 @@ Future<void> main(List<String> args) async {
   late final ChatModel model;
   // On Android the phone rings for a call, with a call window over the
   // lock screen; the notification's Answer and Decline come back here.
-  android?.onCall = (id, answer) => answer ? unawaited(model.talk.answer(id)) : model.talk.decline(id);
+  android?.onCall = (id, answer) => answer ? unawaited(model.talk.answer(id: id)) : model.talk.decline(id);
   final notifier = SystemNotifier(
     ringer: android,
     onOpen: (box) {
@@ -71,7 +71,7 @@ Future<void> main(List<String> args) async {
       if (box != null && nav != null) openConversation(nav, model, box);
     },
     onCall: (id, answer) {
-      if (answer == true) unawaited(model.talk.answer(id));
+      if (answer == true) unawaited(model.talk.answer(id: id));
       if (answer == false) model.talk.decline(id);
       final ctx = navigator.currentContext;
       if (answer != false && ctx != null) showCall(ctx, model);

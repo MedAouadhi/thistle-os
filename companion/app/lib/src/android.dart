@@ -13,7 +13,6 @@ import 'background.dart';
 import 'identity.dart';
 import 'notifier.dart';
 import 'permissions.dart';
-import 'ui/call_page.dart';
 
 class AndroidPlatform implements KeyVault, BackgroundService, PermissionPlatform, CallRinger {
   AndroidPlatform({this.profile = 'default'}) {

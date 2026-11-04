@@ -410,7 +410,7 @@ void main() {
           final id = (await app.talk.startCall(friendBox))!;
           await eventually(() => friend.talk.call?.state == 'ringing');
           expect(friend.peer.calls[id]!.video, isFalse);
-          await friend.talk.answer(null, true);
+          await friend.talk.answer(video: true);
           await eventually(() => app.peer.calls[id]!.remoteCamera == CameraState.on);
           expect(theirs.session.camera, 'Integrated Webcam');
           expect(mine.session.cameraLog, isEmpty, reason: 'the caller started with it off');
@@ -445,7 +445,7 @@ void main() {
           theirs.cameraList = [];
           final id = (await app.talk.startCall(friendBox, video: true))!;
           await eventually(() => friend.talk.call?.state == 'ringing');
-          await friend.talk.answer(null, true);
+          await friend.talk.answer(video: true);
           await eventually(() => app.peer.calls[id]!.remoteCamera == CameraState.none);
           await eventually(() => friend.peer.calls[id]!.remoteCamera == CameraState.on);
           expect(friend.talk.cameraOn, isFalse);

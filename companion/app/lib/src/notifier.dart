@@ -10,6 +10,7 @@
 /// call-style notification and the call window over the lock screen.
 library;
 
+import 'package:flutter/foundation.dart' show Listenable;
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 abstract interface class Notifier {
@@ -33,6 +34,15 @@ abstract interface class Notifier {
 abstract interface class CallRinger {
   Future<void> ring(String caller, String callId, {required bool notify, bool video = false});
   Future<void> stop(String callId);
+}
+
+/// Android's call window over the lock screen (CallActivity.kt), on the
+/// app's one engine: while it shows, the app draws the call screen and
+/// nothing of the chats, and closing the call screen finishes the window,
+/// so a locked phone is back at its lock screen.
+abstract interface class CallWindow implements Listenable {
+  bool get shown;
+  void finish();
 }
 
 class SystemNotifier implements Notifier {

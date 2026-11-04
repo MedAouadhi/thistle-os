@@ -11,7 +11,6 @@ import 'package:thistle_chat/src/call_engine.dart';
 import 'package:thistle_chat/src/notifier.dart';
 import 'package:thistle_chat/src/permissions.dart';
 import 'package:thistle_chat/src/tailnet.dart';
-import 'package:thistle_chat/src/ui/call_page.dart';
 
 class TestTailnet {
   TestTailnet(this.status);

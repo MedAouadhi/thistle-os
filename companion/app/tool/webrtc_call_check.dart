@@ -104,7 +104,7 @@ Future<bool> check() async {
     b.talk.dismissCall();
     await Future<void>.delayed(const Duration(seconds: 1));
   }
-  ok &= await videoCall(a, b);
+  ok &= await cameraOnFromTheRing(a, b);
   await a.close();
   await b.close();
   print(lines.where((l) => l.contains('call ') || l.contains('camera')).join('\n'));
@@ -114,11 +114,11 @@ Future<bool> check() async {
   return ok;
 }
 
-/// A video call: `a` calls with its camera on and `b` answers without; then
-/// `a` turns its camera off and `b` turns its own on. One process has one
-/// camera, so the two never send at once. Each side's frames come from
-/// getStats, and must be at most 1280x720.
-Future<bool> videoCall(ChatModel a, ChatModel b) async {
+/// A third call, with `a`'s camera on from the first ring and `b` answering
+/// without its own; then `a` turns its camera off and `b` turns its own on.
+/// One process has one camera, so the two never send at once. Each side's
+/// frames come from getStats, and must be at most 1280x720.
+Future<bool> cameraOnFromTheRing(ChatModel a, ChatModel b) async {
   var ok = true;
   final id = (await a.talk.startCall(b.identity.keyHex, video: true))!;
   await eventually(() => b.talk.call?.state == 'ringing');

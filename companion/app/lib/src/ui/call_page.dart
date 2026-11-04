@@ -4,20 +4,12 @@ import 'package:flutter/material.dart';
 import 'package:tailnet_chat_core/tailnet_chat_core.dart' show Call, CameraState, transportWebrtc;
 
 import '../chat_model.dart';
+import '../notifier.dart' show CallWindow;
 import 'theme.dart';
 import 'widgets.dart';
 
 /// The call screen showCall pushed, while it is up.
 Route<void>? _showing;
-
-/// Android's call window over the lock screen (CallActivity.kt), on the
-/// app's one engine: while it shows, the app draws the call screen and
-/// nothing of the chats, and closing the call screen finishes the window,
-/// so a locked phone is back at its lock screen.
-abstract interface class CallWindow implements Listenable {
-  bool get shown;
-  void finish();
-}
 
 /// What the app draws in its window: the screens, or while [window] shows,
 /// the call alone, the screens kept but neither drawn nor reachable.
@@ -350,7 +342,7 @@ class _CallPageState extends State<CallPage> {
                   label: 'Answer with video',
                   icon: Icons.videocam_rounded,
                   color: k.moss,
-                  onPressed: () => talk.answer(null, true),
+                  onPressed: () => talk.answer(video: true),
                 ),
             ] else if (call.live) ...[
               _RoundButton(
