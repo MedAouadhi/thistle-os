@@ -30,8 +30,13 @@ void main() {
     throw TestFailure('the screen never got there');
   }
 
-  Future<void> launch(WidgetTester tester, {FakePermissions? permissions, FakeService? service}) async {
-    tester.view.physicalSize = const Size(1000, 800);
+  Future<void> launch(
+    WidgetTester tester, {
+    FakePermissions? permissions,
+    FakeService? service,
+    bool phone = false,
+  }) async {
+    tester.view.physicalSize = phone ? const Size(390, 844) : const Size(1000, 800);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.reset);
     await tester.runAsync(() async {
@@ -289,6 +294,69 @@ void main() {
     await tester.tap(find.text('Listen in the background'));
     await tester.pump();
     expect(app.backgroundListening, isFalse);
+    await finish(tester);
+  });
+
+  testWidgets('on a phone the chats are home: a request waits in a row over them, Accept puts it in them', (
+    tester,
+  ) async {
+    await launch(tester, phone: true);
+    expect(find.text('Chats'), findsOneWidget);
+    expect(find.text('Find chat peers'), findsOneWidget);
+    expect(find.text('New chat'), findsNothing);
+    device.addContact(app.listening!, name: 'laptop');
+    device.sendText('laptop', 'hello from the device');
+    await until(tester, () => app.requests.isNotEmpty);
+
+    await tester.tap(find.text('thistle-46cf20 wants to chat'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining(device.identity.fingerprint), findsOneWidget);
+    await tester.tap(find.widgetWithText(FilledButton, 'Accept'));
+    await tester.pump();
+    expect(find.text('No contact requests.'), findsOneWidget);
+    await tester.tap(find.byType(BackButton));
+    await tester.pumpAndSettle();
+
+    expect(find.text('thistle-46cf20 wants to chat'), findsNothing);
+    expect(find.text('New chat'), findsOneWidget);
+    await tester.tap(find.text('thistle-46cf20'));
+    await tester.pumpAndSettle();
+    expect(find.text('hello from the device'), findsOneWidget);
+    await finish(tester);
+  });
+
+  testWidgets('on a phone New chat opens the contacts, and a contact its conversation in their place', (tester) async {
+    await launch(tester, phone: true);
+    await befriend(tester);
+    await tester.pumpAndSettle(); // New chat comes in with the first contact
+    await tester.tap(find.text('New chat'));
+    await tester.pumpAndSettle();
+    expect(find.byTooltip('Look for chat peers'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('About thistle-46cf20'));
+    await tester.pumpAndSettle();
+    expect(find.text('Rename'), findsOneWidget);
+    await tester.tap(find.byType(BackButton));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('thistle-46cf20'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('compose')), findsOneWidget);
+    await tester.tap(find.byType(BackButton));
+    await tester.pumpAndSettle();
+    expect(find.text('Chats'), findsOneWidget);
+    expect(find.byTooltip('Look for chat peers'), findsNothing);
+    await finish(tester);
+  });
+
+  testWidgets('on a phone you, at the top, open Settings', (tester) async {
+    await launch(tester, phone: true);
+    await tester.tap(find.byTooltip('Settings'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining(app.identity.fingerprint), findsOneWidget);
+    await tester.tap(find.byType(BackButton));
+    await tester.pumpAndSettle();
+    expect(find.text('Chats'), findsOneWidget);
     await finish(tester);
   });
 

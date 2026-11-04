@@ -236,6 +236,16 @@ ThemeData inkTheme(Brightness brightness) {
       style: TextButton.styleFrom(foregroundColor: k.signal, shape: const StadiumBorder(), textStyle: t(14, 620)),
     ),
     iconButtonTheme: IconButtonThemeData(style: IconButton.styleFrom(foregroundColor: k.ink)),
+    floatingActionButtonTheme: FloatingActionButtonThemeData(
+      backgroundColor: k.ink,
+      foregroundColor: k.paper,
+      elevation: 2,
+      focusElevation: 2,
+      hoverElevation: 3,
+      highlightElevation: 3,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+      extendedTextStyle: t(14.5, 600),
+    ),
     inputDecorationTheme: InputDecorationTheme(
       filled: true,
       fillColor: k.card,

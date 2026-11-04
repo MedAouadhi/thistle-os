@@ -51,9 +51,11 @@ platform glue:
   `widgets.dart` has the pieces the pages share: a contact's monogram on
   its key's tint, the paper's grain, the voice waveform. What moves for its
   own sake (an online dot breathing, a call's ripples) stops when the
-  platform asks for less motion, and under `flutter test`. A phone gets a
-  floating tab bar; a window 1100 px wide shows a conversation beside the
-  list.
+  platform asks for less motion, and under `flutter test`. A phone has no
+  tabs: its home is the chats, with your monogram for Settings, the
+  requests waiting as a row over them and New chat for the contacts, each
+  a page of its own. A window 600 px wide gets the sidebar instead, and one
+  1100 px wide a conversation beside the list.
 
 ## Building and running
 

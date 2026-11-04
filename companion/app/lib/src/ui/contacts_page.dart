@@ -14,8 +14,13 @@ String fingerprintOfHex(String key) => fingerprintOf(fromHex(key));
 /// Discovery (the chat peers among the online tailnet peers), a peer by
 /// name or address, and the contacts.
 class ContactsPage extends StatelessWidget {
-  const ContactsPage({super.key, required this.model});
+  const ContactsPage({super.key, required this.model, this.newChat = false});
   final ChatModel model;
+
+  /// Reached from a phone's New chat: a contact opens its conversation, in
+  /// this page's place, and its own page from the button at its right. One
+  /// whose key changed opens its own page, to check the key first.
+  final bool newChat;
 
   Future<void> _addByName(BuildContext context) async {
     final added = await showDialog<Contact>(
@@ -26,6 +31,12 @@ class ContactsPage extends StatelessWidget {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Added ${added.name}')));
     }
   }
+
+  void _openContact(BuildContext context, Contact c) => Navigator.of(context).push(
+    MaterialPageRoute<void>(
+      builder: (_) => ContactPage(model: model, contactId: c.id),
+    ),
+  );
 
   @override
   Widget build(BuildContext context) {
@@ -138,12 +149,20 @@ class ContactsPage extends StatelessWidget {
                     ? small
                     : mono(11.5, color: k.muted),
               ),
-              trailing: Icon(Icons.chevron_right_rounded, color: k.line),
-              onTap: () => Navigator.of(context).push(
-                MaterialPageRoute<void>(
-                  builder: (_) => ContactPage(model: model, contactId: c.id),
-                ),
-              ),
+              trailing: newChat
+                  ? IconButton(
+                      tooltip: 'About ${c.name}',
+                      icon: Icon(Icons.info_outline_rounded, color: k.muted),
+                      onPressed: () => _openContact(context, c),
+                    )
+                  : Icon(Icons.chevron_right_rounded, color: k.line),
+              onTap: () => newChat && c.flaggedKey == null
+                  ? Navigator.of(context).pushReplacement(
+                      MaterialPageRoute<void>(
+                        builder: (_) => ConversationPage(model: model, contactId: c.id),
+                      ),
+                    )
+                  : _openContact(context, c),
             ),
           ),
       ],
