@@ -28,7 +28,13 @@ platform glue:
   mute and volume. The codec, the Ogg/Opus files, the jitter buffer and a
   call's frames are the core's (`VoiceRecorder`, `decodeVoice`,
   `CallMedia`), Opus by FFI through the system's libopus on Linux and the
-  app's own `libopus.so` on Android.
+  app's own `libopus.so` on Android. A call with another companion app
+  runs on WebRTC instead (below), its media the call engine's.
+- `lib/src/call_engine.dart`: the call media engine, the seam to WebRTC:
+  start a call's media, take the other side's SDP and candidates, mute,
+  volume, the candidate pair in use, hang up. `lib/src/webrtc_engine.dart`
+  implements it over flutter_webrtc; the tests use a fake
+  (`FakeCallEngine` in `test/helpers.dart`).
 - `lib/src/audio/`: the microphone and the speaker: on Linux PulseAudio's
   simple API by FFI (`pulse.dart`; PipeWire answers it through
   pipewire-pulse), each stream in an isolate of its own; on Android
@@ -71,7 +77,7 @@ export PATH=$HOME/flutter/bin:$PATH
 cd companion/app
 flutter pub get --enforce-lockfile
 flutter analyze
-flutter test                    # about 80 tests, 10 s
+flutter test                    # about 110 tests, 15 s
 flutter build linux --release   # build/linux/x64/release/bundle/thistle_chat
 flutter run -d linux            # or: run the bundle
 ```
@@ -87,6 +93,7 @@ thistle_chat --profile second --port 4811        # its own key, database and por
 thistle_chat --listen 127.0.0.1 --loopback       # chat with the simulator on this machine
 thistle_chat --discovery-port 4811 --verbose     # probe another port; log the core's events
 thistle_chat --mic tone.wav --speaker heard/     # audio files instead of a sound card
+thistle_chat --no-webrtc                         # every call on ws-opus, as before WebRTC
 ```
 
 `--mic` is a 16 kHz mono 16-bit WAV file, played over and over as the
@@ -95,10 +102,47 @@ thing played, a voice message, the ring or a call, to a numbered WAV file
 there when it stops. Two instances on one machine can then call each other
 without feedback, and what each heard can be checked.
 
+### Calls between companion apps: WebRTC
+
+On Linux the app announces `call:webrtc` (protocol section 4.11, ADR-0016),
+and a call with another companion app that does runs on WebRTC through
+flutter_webrtc and its prebuilt libwebrtc, camera or not; a call with the
+T-Deck, or with an app that does not announce it (Android until ticket 05
+of `.scratch/tailnet-video`, or `--no-webrtc`), stays `ws-opus`. The
+caller makes the SDP offer; one audio and one video track are negotiated
+from the start, the camera off for now (ticket 04). There is no STUN or
+TURN server and no TCP candidate; the core sends and takes only UDP
+candidates in the tailnet's ranges, and the app reads the pair in use
+from WebRTC's statistics 2 s after it connects and every 5 s after,
+ending the call as an error if either end is outside the tailnet. A call
+whose media does not connect within 15 s of the answer ends as "it could
+not connect"; one disconnected for 10 s, as "the connection dropped".
+With `--verbose` the log says the transport, each candidate's kind and
+whether it went, the pair in use and why the call ended.
+
+The prebuilt libwebrtc (24 MB, in the bundle's `lib/`) is fetched by the
+Linux build at the release `linux/libwebrtc.cmake` names and checked
+against the SHA-256 there before flutter_webrtc's own build looks for it;
+another hash fails the build. Moving flutter_webrtc to a release that asks
+for another libwebrtc fails there too until the pin follows it.
+
+`tool/webrtc_call_check.dart` calls between two of the app's models in
+one process with the real libwebrtc, twice, over this machine's tailnet
+address, and prints PASS or FAIL; it needs Tailscale up, a sound server
+and a display, so CI does not run it. Built in place of the app (build
+the app again after):
+
+```sh
+flutter build linux --release -t tool/webrtc_call_check.dart --dart-define=TAILNET_IP=$(tailscale ip -4)
+xvfb-run -a build/linux/x64/release/bundle/thistle_chat
+```
+
 ### Echo cancellation
 
-A call asks the platform to keep the speaker out of the microphone; the
-call screen says which way it got:
+A WebRTC call uses libwebrtc's own echo canceller, in the app; no PipeWire
+canceller is started for it, and the call screen says "on (WebRTC's own
+canceller, in the app)". A `ws-opus` call asks the platform to keep the
+speaker out of the microphone; the call screen says which way it got:
 
 1. **PipeWire** (Ubuntu 22.10 and later, Fedora): for the length of a call
    the app runs `pipewire -c echo-cancel.conf`, a client of the running
@@ -246,6 +290,12 @@ one it builds as the artifact `thistle-chat-apk`.
   contacts there, and a
   refused permission's banner; a voice message's player and the recording
   bar; the call screen placing, answering, muting and hanging up.
+- `test/voice_calls_test.dart`, WebRTC: two models calling with the fake
+  call engine, the offer and answer and the tailnet's candidate alone
+  crossing, no PipeWire canceller, the camera said off; mute, volume and
+  hang up reaching the engine; the T-Deck still `ws-opus`; a pair outside
+  the tailnet, media that never connects, and media lost, each ending the
+  call.
 - `test/voice_calls_test.dart`: voice messages recorded from a (fake)
   microphone reach a core peer as Ogg/Opus of their length, decoding to the
   tone recorded, and received ones play whole only when asked; calls placed

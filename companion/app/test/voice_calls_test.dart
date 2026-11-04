@@ -4,9 +4,11 @@ import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tailnet_chat_core/tailnet_chat_core.dart';
+import 'package:thistle_chat/src/call_engine.dart';
 import 'package:thistle_chat/src/chat_model.dart';
 import 'package:thistle_chat/src/permissions.dart';
 import 'package:thistle_chat/src/tailnet.dart';
+import 'package:thistle_chat/src/ui/call_page.dart';
 
 import 'helpers.dart';
 
@@ -256,6 +258,124 @@ void main() {
       other.endCall(id);
       await eventually(() => notifier.shown.any((s) => s.title.contains('Missed call')));
       expect(notifier.shown.last.body, contains('thistle-46cf20'));
+    });
+
+    group('between two companion apps, on WebRTC', () {
+      late ChatModel friend;
+      late FakeCallEngine mine, theirs;
+      late FakeAudio friendAudio;
+      late String friendBox;
+
+      setUp(() async {
+        await app.close();
+        await other.stop();
+        mine = FakeCallEngine();
+        theirs = FakeCallEngine();
+        friendAudio = FakeAudio();
+        app = testModel(tailnet, notifier, audio: audio, callEngine: mine);
+        friend = testModel(tailnet, RecordingNotifier(), audio: friendAudio, callEngine: theirs);
+        other = await otherPeer(); // the T-Deck, for the ws-opus case
+        await app.start();
+        await friend.start();
+        await befriend(); // with the T-Deck
+        friend.peer.addContact(app.listening!, name: 'desk');
+        friend.peer.sendText('desk', 'hi');
+        await eventually(() => app.requests.isNotEmpty);
+        app.accept(friend.identity.keyHex);
+        await eventually(() => friend.peer.contact('desk')!.acceptedByThem == true);
+        friendBox = friend.identity.keyHex;
+      });
+
+      tearDown(() => friend.close());
+
+      Future<String> connected() async {
+        final id = (await app.talk.startCall(friendBox))!;
+        await eventually(() => friend.talk.call?.state == 'ringing');
+        await friend.talk.answer();
+        await eventually(() => app.talk.call?.state == 'connected' && friend.talk.call?.state == 'connected');
+        return id;
+      }
+
+      test('the call is WebRTC, voice both ways, with WebRTC\'s echo canceller and no PipeWire one', () async {
+        final id = await connected();
+        expect(app.peer.calls[id]!.transport, 'webrtc');
+        expect(friend.peer.calls[id]!.transports, ['webrtc', 'ws-opus']);
+        await eventually(() => mine.sessions.isNotEmpty && theirs.sessions.isNotEmpty);
+        expect(mine.session.offerer, isTrue);
+        expect(theirs.session.offerer, isFalse);
+        // The offer and the answer crossed, and the tailnet's candidate alone.
+        await eventually(() => theirs.session.sdps.isNotEmpty && mine.session.sdps.isNotEmpty);
+        expect(theirs.session.sdps.single['type'], 'offer');
+        expect(mine.session.sdps.single['type'], 'answer');
+        await eventually(() => mine.session.candidates.isNotEmpty && theirs.session.candidates.isNotEmpty);
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+        expect(theirs.session.candidates, [FakeCallEngine.tailnetCandidate]);
+        expect(mine.session.candidates, [FakeCallEngine.tailnetCandidate]);
+        await eventually(() => app.peer.calls[id]!.media == 'connected' && friend.peer.calls[id]!.media == 'connected');
+        expect(app.talk.echoCancellation, 'on (WebRTC, fake)');
+        expect(audio.callsOpened, 0, reason: 'no ws-opus devices, no PipeWire canceller');
+        expect(friendAudio.callsOpened, 0);
+        // Each side says its camera is off, at the answer.
+        await eventually(
+          () => app.peer.calls[id]!.remoteCamera == 'off' && friend.peer.calls[id]!.remoteCamera == 'off',
+        );
+      });
+
+      test('mute reaches the engine; a hangup ends the call and closes both sides\' media', () async {
+        final id = await connected();
+        await eventually(() => mine.sessions.isNotEmpty && theirs.sessions.isNotEmpty);
+        app.talk.muted = true;
+        expect(mine.session.muted, isTrue);
+        app.talk.volume = 1.5;
+        expect(mine.session.volume, 1.5);
+        app.talk.hangUp();
+        await eventually(() => friend.peer.calls[id]!.state == 'ended:hangup');
+        await eventually(() => mine.session.closed && theirs.session.closed);
+      });
+
+      test('a call with the T-Deck, which has no call:webrtc, is ws-opus as before', () async {
+        final id = (await app.talk.startCall(box))!;
+        await eventually(() => app.talk.call?.state == 'connected');
+        expect(app.peer.calls[id]!.transport, 'ws-opus');
+        await eventually(() => audio.callsOpened == 1);
+        expect(mine.sessions, isEmpty);
+        app.talk.hangUp();
+      });
+
+      test('a connection whose selected pair leaves the tailnet ends the call as an error', () async {
+        mine.path = const CallPath(
+          local: '192.168.2.131',
+          remote: '100.64.0.2',
+          localType: 'prflx',
+          remoteType: 'host',
+        );
+        final id = (await app.talk.startCall(friendBox))!;
+        await eventually(() => friend.talk.call?.state == 'ringing');
+        await friend.talk.answer();
+        await eventually(() => app.peer.calls[id]!.state == 'ended:error');
+        await eventually(() => friend.peer.calls[id]!.state == 'ended:error');
+        expect(callOutcome('ended:error', transport: 'webrtc'), 'Call ended: the connection dropped');
+      });
+
+      test('media that never connects ends the call as not connected, and the screen says so', () async {
+        mine.connects = false;
+        theirs.connects = false;
+        final id = await connected();
+        app.peer.calls[id]!.since = DateTime.now().subtract(const Duration(seconds: 16));
+        await eventually(() => app.peer.calls[id]!.state == 'ended:timeout');
+        await eventually(() => friend.peer.calls[id]!.state == 'ended:timeout');
+        await eventually(() => mine.session.closed);
+        expect(callOutcome('ended:timeout', transport: 'webrtc'), 'Call ended: it could not connect');
+        expect(callOutcome('ended:timeout', transport: 'ws-opus'), 'Call ended: no sound for 10 s');
+      });
+
+      test('media lost for 10 s ends the call as an error', () async {
+        final id = await connected();
+        await eventually(() => app.peer.calls[id]!.media == 'connected');
+        mine.session.state('disconnected');
+        app.peer.calls[id]!.mediaSince = DateTime.now().subtract(const Duration(seconds: 11));
+        await eventually(() => app.peer.calls[id]!.state == 'ended:error');
+      });
     });
 
     test('a call to a contact who is away fails at once as unreachable', () async {

@@ -67,12 +67,14 @@ void showCall(BuildContext context, ChatModel model) {
   });
 }
 
-/// What a finished call's state says, for the call screen.
-String callOutcome(String state) => switch (state) {
+/// What a finished call's state says, for the call screen; on WebRTC, a
+/// timeout is media that never connected.
+String callOutcome(String state, {String? transport}) => switch (state) {
   'ended:unreachable' => 'Not reachable now. Leave a voice message instead.',
   'declined:busy' => 'Busy: in another call',
   'declined:declined' => 'Declined',
   'declined:unsupported' => 'Their app cannot take calls',
+  'ended:timeout' when transport == 'webrtc' => 'Call ended: it could not connect',
   'ended:timeout' => 'Call ended: no sound for 10 s',
   'ended:cellular' => 'Call ended: a phone call took over',
   'ended:error' => 'Call ended: the connection dropped',
@@ -154,7 +156,7 @@ class _CallPageState extends State<CallPage> {
         'offered' => 'Calling…',
         'ringing' => 'Calling you',
         'connected' => '${d.inMinutes}:${(d.inSeconds % 60).toString().padLeft(2, '0')}',
-        _ => callOutcome(state),
+        _ => callOutcome(state, transport: call.transport),
       };
       if (!call.live) _closeSoon();
       return Scaffold(

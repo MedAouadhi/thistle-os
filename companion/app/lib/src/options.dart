@@ -14,6 +14,7 @@ class AppOptions {
     this.verbose = false,
     this.mic,
     this.speakerDir,
+    this.webrtc = true,
   });
 
   /// A second identity, database and Secret Service item on one machine.
@@ -41,10 +42,14 @@ class AppOptions {
   /// A folder for what the speaker plays, a WAV file each.
   final String? speakerDir;
 
+  /// Announce `call:webrtc` and call other companion apps over WebRTC;
+  /// `--no-webrtc` keeps every call on `ws-opus`.
+  final bool webrtc;
+
   static const usage = '''
 thistle_chat [--profile NAME] [--port N] [--listen HOST] [--loopback]
              [--discovery-port N] [--name NAME] [--verbose]
-             [--mic FILE.wav] [--speaker DIR]''';
+             [--mic FILE.wav] [--speaker DIR] [--no-webrtc]''';
 
   static AppOptions parse(List<String> args) {
     var o = const AppOptions();
@@ -67,6 +72,7 @@ thistle_chat [--profile NAME] [--port N] [--listen HOST] [--loopback]
         '--verbose' => o._with(verbose: true),
         '--mic' => o._with(mic: value(++i)),
         '--speaker' => o._with(speakerDir: value(++i)),
+        '--no-webrtc' => o._with(webrtc: false),
         _ => throw FormatException('unknown option $a\n$usage'),
       };
     }
@@ -86,6 +92,7 @@ thistle_chat [--profile NAME] [--port N] [--listen HOST] [--loopback]
     bool? verbose,
     String? mic,
     String? speakerDir,
+    bool? webrtc,
   }) => AppOptions(
     profile: profile ?? this.profile,
     listenHost: listenHost ?? this.listenHost,
@@ -96,5 +103,6 @@ thistle_chat [--profile NAME] [--port N] [--listen HOST] [--loopback]
     verbose: verbose ?? this.verbose,
     mic: mic ?? this.mic,
     speakerDir: speakerDir ?? this.speakerDir,
+    webrtc: webrtc ?? this.webrtc,
   );
 }

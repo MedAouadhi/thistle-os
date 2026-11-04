@@ -36,13 +36,22 @@ void main() {
     FakeService? service,
     TestCallWindow? callWindow,
     bool phone = false,
+    bool videoCapable = false,
   }) async {
     tester.view.physicalSize = phone ? const Size(390, 844) : const Size(1000, 800);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.reset);
     await tester.runAsync(() async {
-      app = testModel(tailnet, RecordingNotifier(), permissions: permissions, service: service);
+      app = testModel(
+        tailnet,
+        RecordingNotifier(),
+        permissions: permissions,
+        service: service,
+        callEngine: videoCapable ? FakeCallEngine() : null,
+      );
       device = ChatPeer(
+        // Another companion app's core, when video-capable; else the T-Deck.
+        caps: [...capsV1, if (videoCapable) capWebrtc],
         identity: Identity.generate(),
         store: Store.open(':memory:'),
         name: 'thistle-46cf20',
@@ -466,6 +475,25 @@ void main() {
     await tester.tap(find.byKey(const Key('call-close')));
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('call-close')), findsNothing);
+    await finish(tester);
+  });
+
+  testWidgets("a call with another companion app is WebRTC, and the echo line names WebRTC's canceller", (
+    tester,
+  ) async {
+    await launch(tester, videoCapable: true);
+    await befriend(tester);
+    await openDevice(tester);
+    await tester.tap(find.byKey(const Key('call')));
+    await until(tester, () => app.talk.call?.state == 'connected' && app.talk.echoCancellation != null);
+    await tester.pump();
+    expect(app.talk.call!.transport, 'webrtc');
+    expect(find.textContaining('Echo cancellation: on (WebRTC, fake)'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('call-hangup')));
+    await until(tester, () => device.calls.values.single.state == 'ended:hangup');
+    await until(tester, () => find.byKey(const Key('call-close')).evaluate().isNotEmpty);
+    await tester.tap(find.byKey(const Key('call-close')));
+    await tester.pumpAndSettle();
     await finish(tester);
   });
 

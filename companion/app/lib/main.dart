@@ -14,6 +14,7 @@ import 'src/notifier.dart';
 import 'src/options.dart';
 import 'src/permissions.dart';
 import 'src/tailnet.dart';
+import 'src/webrtc_engine.dart';
 import 'src/ui/app.dart';
 import 'src/ui/call_page.dart';
 
@@ -92,6 +93,11 @@ Future<void> main(List<String> args) async {
     background: android,
     permissions: android == null ? null : Permissions(android),
     audio: audio,
+    // Calls with another companion app on WebRTC, on Linux for now; Android
+    // announces no call:webrtc until ticket 05 of .scratch/tailnet-video.
+    callEngine: Platform.isLinux && options.webrtc
+        ? WebrtcCallEngine(log: options.verbose ? stderr.writeln : null)
+        : null,
     notifier: notifier,
     listenHost: options.listenHost,
     port: options.port,

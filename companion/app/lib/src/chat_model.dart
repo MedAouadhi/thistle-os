@@ -14,6 +14,7 @@ import 'package:flutter/foundation.dart';
 import 'package:tailnet_chat_core/tailnet_chat_core.dart';
 
 import 'background.dart';
+import 'call_engine.dart';
 import 'audio/devices.dart';
 import 'notifier.dart';
 import 'permissions.dart';
@@ -53,6 +54,7 @@ class ChatModel extends ChangeNotifier {
     this.background,
     this.permissions,
     AudioDevices? audio,
+    this.callEngine,
     Future<ProbeResult?> Function(PeerAddress address)? probe,
   }) : _probe = probe,
        notifier = notifier ?? _Silent(),
@@ -84,6 +86,10 @@ class ChatModel extends ChangeNotifier {
   /// The microphone and speaker: PulseAudio/PipeWire on Linux, or files.
   final AudioDevices audio;
 
+  /// WebRTC calls' media; with one, this app announces `call:webrtc` and
+  /// calls another such app over WebRTC. Null: `ws-opus` only.
+  final CallEngine? callEngine;
+
   /// How discovery probes an address; `ChatPeer.probe` unless a test says.
   final Future<ProbeResult?> Function(PeerAddress address)? _probe;
 
@@ -91,6 +97,7 @@ class ChatModel extends ChangeNotifier {
   late final Talk talk = Talk(
     peer: () => _peer,
     audio: audio,
+    engine: callEngine,
     notifier: notifier,
     foreground: () => _foreground,
     changed: () {
@@ -106,6 +113,7 @@ class ChatModel extends ChangeNotifier {
   late ChatPeer _peer = _newPeer('127.0.0.1');
   bool _started = false;
   StreamSubscription<ChatEvent>? _events;
+  StreamSubscription<CallRtc>? _rtc;
   Timer? _refresh;
   Timer? _tick;
   bool _closed = false;
@@ -138,6 +146,7 @@ class ChatModel extends ChangeNotifier {
       host: host,
       port: port,
       loopback: loopback,
+      caps: [...capsV1, if (callEngine != null) capWebrtc],
       callPolicy: CallPolicy.ignore, // calls ring for the user
       log: log,
     );
@@ -145,6 +154,7 @@ class ChatModel extends ChangeNotifier {
     // shows them now; on Android, none.
     p.tailnetPeers = () async => (await readStatus()).toShare;
     _events = p.events.listen(_onEvent);
+    _rtc = p.callRtc.listen(talk.onRtc);
     return p;
   }
 
@@ -171,6 +181,7 @@ class ChatModel extends ChangeNotifier {
       if (_started || host != _peer.host) {
         final old = _peer;
         await _events?.cancel();
+        await _rtc?.cancel();
         _started = false;
         await old.stop();
         _peer = _newPeer(host);
@@ -207,6 +218,7 @@ class ChatModel extends ChangeNotifier {
     _refresh?.cancel();
     _tick?.cancel();
     await _events?.cancel();
+    await _rtc?.cancel();
     await _peer.stop();
   }
 

@@ -1,7 +1,8 @@
 /// Voice messages and calls in the app: recording and playing, the call in
 /// progress, its ring, its notifications, mute and volume. The protocol,
 /// the codec and a call's frames are the core's (ChatPeer, VoiceRecorder,
-/// CallMedia); the devices are [AudioDevices]'.
+/// CallMedia); the devices are [AudioDevices]'. A call between two
+/// companion apps runs on WebRTC instead, its media the [CallEngine]'s.
 library;
 
 import 'dart:async';
@@ -11,6 +12,7 @@ import 'dart:typed_data';
 import 'package:tailnet_chat_core/tailnet_chat_core.dart';
 
 import 'audio/devices.dart';
+import 'call_engine.dart';
 import 'notifier.dart';
 import 'permissions.dart';
 
@@ -18,6 +20,7 @@ class Talk {
   Talk({
     required this.peer,
     required this.audio,
+    this.engine,
     required this.notifier,
     required this.foreground,
     required this.changed,
@@ -29,6 +32,9 @@ class Talk {
 
   final ChatPeer Function() peer;
   final AudioDevices audio;
+
+  /// WebRTC calls' media; null where the app announces no `call:webrtc`.
+  final CallEngine? engine;
   final Notifier notifier;
   final bool Function() foreground;
 
@@ -167,6 +173,13 @@ class Talk {
   CallDevices? _devices;
   String? echoCancellation;
 
+  /// A WebRTC call's media, once started; the other side's SDP and
+  /// candidates wait in `_rtcWaiting` until then, in order.
+  CallSession? _session;
+  bool _sessionStarting = false;
+  final List<CallRtc> _rtcWaiting = [];
+  Future<void> _rtcTaken = Future.value();
+
   /// Why the call has no audio, if it has none.
   String? audioProblem;
   bool _muted = false;
@@ -187,6 +200,7 @@ class Talk {
   set muted(bool on) {
     _muted = on;
     _media?.muted = on;
+    _session?.muted = on;
     changed();
   }
 
@@ -195,6 +209,7 @@ class Talk {
   set volume(double v) {
     _volume = v.clamp(0, 2);
     _media?.volume = _volume;
+    _session?.volume = _volume;
     changed();
   }
 
@@ -278,11 +293,15 @@ class Talk {
     } else {
       _stopRing(id);
     }
-    if (c.state == 'connected' && _media == null) unawaited(_startMedia(id));
+    if (c.state == 'connected' && c.webrtc) {
+      if (_session == null && !_sessionStarting) unawaited(_startWebrtc(id, c));
+    } else if (c.state == 'connected' && _media == null) {
+      unawaited(_startMedia(id));
+    }
     if (!c.live) {
       unawaited(_stopMedia());
       if (c.missed) unawaited(notifier.show('Missed call', 'from ${nameOf(c.peer)}'));
-      log?.call('call ${id.substring(0, 8)} ${c.state}');
+      log?.call('call ${id.substring(0, 8)} ${c.state}${c.transport == null ? '' : ', over ${c.transport}'}');
     }
     changed();
   }
@@ -318,12 +337,113 @@ class Talk {
   }
 
   Future<void> _stopMedia() async {
-    final media = _media, devices = _devices;
+    final media = _media, devices = _devices, session = _session;
     _media = null;
     _devices = null;
+    _session = null;
+    _rtcWaiting.clear();
     await media?.stop();
     await devices?.close();
+    await session?.close();
   }
+
+  // -- WebRTC calls: the media is the engine's; its SDP and candidates go
+  // through the core as call_rtc, which keeps the tailnet's alone.
+
+  /// The other side's SDP or candidate (the core's callRtc).
+  void onRtc(CallRtc r) {
+    if (r.call != callId) return;
+    final session = _session;
+    if (session == null) {
+      _rtcWaiting.add(r);
+    } else {
+      _take(session, r);
+    }
+  }
+
+  /// One at a time, in the order they came: a candidate never reaches the
+  /// connection before the SDP it belongs to.
+  void _take(CallSession session, CallRtc r) =>
+      _rtcTaken = _rtcTaken.then((_) => session.take(sdp: r.sdp, candidate: r.candidate)).catchError((Object e) {
+        log?.call('call ${r.call.substring(0, 8)}: WebRTC refused what the other side sent: $e');
+      });
+
+  Future<void> _startWebrtc(String id, Call c) async {
+    final engine = this.engine;
+    if (engine == null) return;
+    _sessionStarting = true;
+    log?.call('call ${id.substring(0, 8)} over webrtc');
+    final CallSession session;
+    try {
+      session = await engine.start(
+        offerer: c.mine,
+        send: ({sdp, candidate}) => peer().sendRtc(id, sdp: sdp, candidate: candidate),
+        onState: (state) => _onMediaState(id, state),
+      );
+    } on Object catch (e) {
+      _sessionStarting = false;
+      audioProblem = 'The call has no audio: $e';
+      log?.call('call ${id.substring(0, 8)}: WebRTC did not start: $e');
+      if (peer().calls[id]?.live ?? false) peer().endCall(id, reason: 'error');
+      changed();
+      return;
+    }
+    _sessionStarting = false;
+    if (callId != id || !(peer().calls[id]?.live ?? false)) {
+      await session.close();
+      return;
+    }
+    _session = session
+      ..muted = _muted
+      ..volume = _volume;
+    echoCancellation = session.echoCancellation;
+    for (final r in List.of(_rtcWaiting)) {
+      _take(session, r);
+    }
+    _rtcWaiting.clear();
+    // No camera yet: said at the answer, as every change will be.
+    peer().setCamera(id, 'off');
+    changed();
+  }
+
+  void _onMediaState(String id, String state) {
+    final first = state == 'connected' && !(peer().calls[id]?.mediaEverConnected ?? true);
+    peer().setMediaState(id, state);
+    if (first) unawaited(_checkPath(id));
+    changed();
+  }
+
+  /// While connected, the pair in use must be the tailnet's at both ends:
+  /// libwebrtc binds every interface, and may nominate a pair from one whose
+  /// candidate was never sent (ticket 02). On one machine it first takes a
+  /// peer-reflexive LAN address to the tailnet's and moves to the tailnet's
+  /// own pair within half a second, so the pair is read once ICE has
+  /// settled, [pathSettle] after connecting, then every [pathEvery]; one
+  /// outside the tailnet ends the call as an error.
+  Future<void> _checkPath(String id) async {
+    var logged = false;
+    for (var wait = pathSettle; ; wait = pathEvery) {
+      await Future<void>.delayed(wait);
+      final session = _session;
+      final call = peer().calls[id];
+      if (session == null || callId != id || call == null || !call.live) return;
+      if (call.media != 'connected') continue;
+      final path = await session.selectedPath();
+      if (path == null) continue;
+      final local = ipOf(path.local)?.address, remote = ipOf(path.remote)?.address;
+      if (local != null && remote != null && inTailnet(local) && inTailnet(remote)) {
+        if (!logged) log?.call('call ${id.substring(0, 8)}: media over $path');
+        logged = true;
+        continue;
+      }
+      log?.call('call ${id.substring(0, 8)}: media outside the tailnet, $path: ending it');
+      if (call.live) peer().endCall(id, reason: 'error');
+      return;
+    }
+  }
+
+  static const pathSettle = Duration(seconds: 2);
+  static const pathEvery = Duration(seconds: 5);
 
   /// Ring for a call coming in, once: the notifier with the app out of
   /// sight, and the phone's ringtone or else the app's own ring.

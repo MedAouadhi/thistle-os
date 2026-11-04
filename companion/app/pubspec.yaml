@@ -16,6 +16,11 @@ dependencies:
   ffi: 2.2.0
   path_provider: 2.1.6
   flutter_local_notifications: 22.3.3
+  # WebRTC calls between companion apps (ADR-0016), with its prebuilt
+  # libwebrtc; 1.6.3 or later, as ticket 02 found 1.4.1 freezes the UI for
+  # 10 s on a second call. On Linux the binary is pinned by hash
+  # (linux/libwebrtc.cmake). A bump needs ticket 02's check run again.
+  flutter_webrtc: 1.6.3
 
 dev_dependencies:
   flutter_test:

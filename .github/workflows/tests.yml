@@ -361,6 +361,9 @@ jobs:
       - name: Test the app
         run: flutter test
 
+      # flutter_webrtc's libwebrtc is fetched here and checked against the
+      # SHA-256 pinned in companion/app/linux/libwebrtc.cmake; another hash
+      # fails the build.
       - name: Build the Linux app
         run: flutter build linux --release
 
