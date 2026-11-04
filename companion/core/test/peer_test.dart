@@ -260,6 +260,22 @@ void main() {
       await eventually(() => bob.calls[call]!.remoteCamera == 'none', what: 'the camera');
     });
 
+    test('a contact is video-capable once its hello announced call:webrtc, and ours did too', () async {
+      await alice.stop();
+      await bob.stop();
+      alice = await startPeer('alice', caps: video);
+      bob = await startPeer('bob', caps: video);
+      final tdeck = await startPeer('tdeck');
+      addTearDown(tdeck.stop);
+      expect(alice.videoCapable(bob.identity.keyHex), isFalse, reason: 'nothing heard yet');
+      await befriend(alice, bob);
+      await befriend(tdeck, alice); // the T-Deck writes first
+      expect(alice.videoCapable(bob.identity.keyHex), isTrue);
+      expect(bob.videoCapable(alice.identity.keyHex), isTrue);
+      expect(alice.videoCapable(tdeck.identity.keyHex), isFalse, reason: 'the T-Deck announces no call:webrtc');
+      expect(tdeck.videoCapable(alice.identity.keyHex), isFalse, reason: 'nor does it take part');
+    });
+
     test('a peer without call:webrtc (the T-Deck) is offered ws-opus alone and takes it', () async {
       await alice.stop();
       alice = await startPeer('alice', caps: video);

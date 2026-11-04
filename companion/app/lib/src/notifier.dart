@@ -21,8 +21,9 @@ abstract interface class Notifier {
   bool get ringsItself;
 
   /// A call coming in, until [stopRinging]: with the app out of sight
-  /// ([inFront] false), a notification with Answer and Decline.
-  Future<void> ringing(String caller, String callId, {bool inFront = false});
+  /// ([inFront] false), a notification with Answer and Decline, saying
+  /// Video call when the caller's camera is on ([video]).
+  Future<void> ringing(String caller, String callId, {bool inFront = false, bool video = false});
   Future<void> stopRinging(String callId);
 }
 
@@ -30,7 +31,7 @@ abstract interface class Notifier {
 /// false the call-style notification, which opens the call window on a
 /// locked phone. Android's (android.dart).
 abstract interface class CallRinger {
-  Future<void> ring(String caller, String callId, {required bool notify});
+  Future<void> ring(String caller, String callId, {required bool notify, bool video = false});
   Future<void> stop(String callId);
 }
 
@@ -99,14 +100,14 @@ class SystemNotifier implements Notifier {
   bool get ringsItself => ringer != null;
 
   @override
-  Future<void> ringing(String caller, String callId, {bool inFront = false}) async {
+  Future<void> ringing(String caller, String callId, {bool inFront = false, bool video = false}) async {
     final phone = ringer;
-    if (phone != null) return phone.ring(caller, callId, notify: !inFront);
+    if (phone != null) return phone.ring(caller, callId, notify: !inFront, video: video);
     if (!_ready || inFront) return;
     final id = _ringing[callId] = _next++ & 0x7fffffff;
     await _plugin.show(
       id: id,
-      title: 'Call from $caller',
+      title: '${video ? 'Video call' : 'Call'} from $caller',
       body: 'Tailnet call',
       payload: 'call:$callId',
       notificationDetails: const NotificationDetails(

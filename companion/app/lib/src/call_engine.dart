@@ -3,8 +3,11 @@
 /// Talk drives it; flutter_webrtc implements it (webrtc_engine.dart), and a
 /// fake stands in for tests. The SDP and candidates it gives and takes are
 /// opaque to the app: the core carries them as `call_rtc` frames, the
-/// tailnet's candidates alone.
+/// tailnet's candidates alone. A camera is switched by replacing the video
+/// track, never by renegotiating.
 library;
+
+import 'package:flutter/widgets.dart' show Widget;
 
 /// Our SDP or one of our candidates, for the other side.
 typedef SendRtc = void Function({Map<String, Object?>? sdp, Map<String, Object?>? candidate});
@@ -20,7 +23,51 @@ class CallPath {
   String toString() => '$localType $local to $remoteType $remote';
 }
 
+/// A camera that opened but gave no picture: held by another process (on
+/// Linux, flutter_webrtc issue 2225), or refused.
+class CameraUnavailable implements Exception {
+  const CameraUnavailable(this.why);
+  final String why;
+  @override
+  String toString() => why;
+}
+
+/// Capture and sending are capped at 1280x720, 30 fps (tailnet-video spec,
+/// Quality); WebRTC's congestion control does the rest.
+const maxVideoWidth = 1280, maxVideoHeight = 720, maxVideoFps = 30;
+
+/// What a call's video has done so far, for the log.
+class VideoStats {
+  const VideoStats({
+    this.framesSent = 0,
+    this.framesReceived = 0,
+    this.sent,
+    this.received,
+    this.fpsSent,
+    this.limitedBy,
+  });
+  final int framesSent, framesReceived;
+
+  /// The size of the last frame sent and received, `1280x720`.
+  final String? sent, received;
+  final num? fpsSent;
+
+  /// What holds the sending back, as WebRTC says: `bandwidth`, `cpu`.
+  final String? limitedBy;
+
+  @override
+  String toString() =>
+      'sent $framesSent frames${sent == null ? '' : ' at $sent'}${fpsSent == null ? '' : ', $fpsSent fps'}'
+      '${limitedBy == null || limitedBy == 'none' ? '' : ', limited by $limitedBy'}, '
+      'received $framesReceived${received == null ? '' : ' at $received'}';
+}
+
 abstract interface class CallEngine {
+  /// The cameras this machine has, the usual one first: what
+  /// [CallSession.setCamera] takes, in the order Switch camera goes round.
+  /// Empty without one.
+  Future<List<String>> cameras();
+
   /// Start a call's media: the microphone, the camera off, one audio and one
   /// video track negotiated both ways, no ICE server. The caller (`offerer`)
   /// makes the SDP offer. `send` takes what is to go to the other side,
@@ -48,6 +95,18 @@ abstract interface class CallSession {
   /// The candidate pair in use, once connected; null if it cannot be told.
   Future<CallPath?> selectedPath();
 
-  /// Hang up the media: the microphone and the connection.
+  /// Send `camera`'s picture, one of [CallEngine.cameras], or none with
+  /// null: the video track is replaced. Throws [CameraUnavailable] if the
+  /// camera gives no picture, which leaves it off.
+  Future<void> setCamera(String? camera);
+
+  /// The video's frames so far; null if it cannot be told.
+  Future<VideoStats?> videoStats();
+
+  /// The other side's video, and our own camera's, to draw.
+  Widget remoteVideo();
+  Widget localVideo();
+
+  /// Hang up the media: the microphone, the camera and the connection.
   Future<void> close();
 }

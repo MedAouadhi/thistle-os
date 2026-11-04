@@ -220,6 +220,13 @@ class ChatPeer {
 
   final Map<String, Call> calls = {};
 
+  /// What each chat peer's last proven hello announced, by key, this run.
+  final Map<String, List<String>> _heardCaps = {};
+
+  /// Whether a call with `key` may carry video: its last hello announced
+  /// `call:webrtc` and ours does. False until it has been heard from.
+  bool videoCapable(String key) => mayUse(capWebrtc, caps, _heardCaps[key] ?? const []);
+
   /// The tailnet peers the platform shows online, shared with a contact
   /// that asks (protocol section 4.10): Linux's `tailscale status`; none
   /// where the platform has no peer list (Android).
@@ -918,6 +925,7 @@ class ChatPeer {
       ],
     );
     String who = 'stranger';
+    _heardCaps[key] = conn.peerCaps;
     switch (trust) {
       case KeyMismatch(:final contact):
         final c = store.contactById(contact)!;

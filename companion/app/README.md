@@ -32,7 +32,8 @@ platform glue:
   runs on WebRTC instead (below), its media the call engine's.
 - `lib/src/call_engine.dart`: the call media engine, the seam to WebRTC:
   start a call's media, take the other side's SDP and candidates, mute,
-  volume, the candidate pair in use, hang up. `lib/src/webrtc_engine.dart`
+  volume, the cameras and the one sending, each side's video to draw, the
+  candidate pair in use, hang up. `lib/src/webrtc_engine.dart`
   implements it over flutter_webrtc; the tests use a fake
   (`FakeCallEngine` in `test/helpers.dart`).
 - `lib/src/audio/`: the microphone and the speaker: on Linux PulseAudio's
@@ -110,7 +111,8 @@ flutter_webrtc and its prebuilt libwebrtc, camera or not; a call with the
 T-Deck, or with an app that does not announce it (Android until ticket 05
 of `.scratch/tailnet-video`, or `--no-webrtc`), stays `ws-opus`. The
 caller makes the SDP offer; one audio and one video track are negotiated
-from the start, the camera off for now (ticket 04). There is no STUN or
+from the start, so a camera switched on, off or to another replaces the
+track and never renegotiates. There is no STUN or
 TURN server and no TCP candidate; the core sends and takes only UDP
 candidates in the tailnet's ranges, and the app reads the pair in use
 from WebRTC's statistics 2 s after it connects and every 5 s after,
@@ -118,7 +120,39 @@ ending the call as an error if either end is outside the tailnet. A call
 whose media does not connect within 15 s of the answer ends as "it could
 not connect"; one disconnected for 10 s, as "the connection dropped".
 With `--verbose` the log says the transport, each candidate's kind and
-whether it went, the pair in use and why the call ended.
+whether it went, the pair in use, the cameras found, each camera change
+and the size it captures, the video's frames sent and received at the
+end, and why the call ended.
+
+### Video
+
+A conversation with a contact whose app announced `call:webrtc` has a
+Video call button beside Call; the T-Deck and older apps have none
+(`ChatPeer.videoCapable`, from the contact's last hello this run, so the
+button shows once the app has been connected to it). Video call offers
+with `video` and our camera on from the answer. A call offered with
+`video` rings as "Video call", in the notification too, with Answer with
+video, Answer (the camera stays off) and Decline; missed, it is "Missed
+video call". The camera is never on without a tap.
+
+During a WebRTC call the call screen has the camera switch, and Switch
+camera while the camera is on and the machine has more than one (in the
+order flutter_webrtc lists them, the first to start with). The other
+side's video fills the screen while its `call_camera` is `on`; otherwise
+a tile says Camera off, Camera paused or No camera. Ours is in the top
+right corner. A machine with no camera says `none`, its switch says No
+camera, and it still sees the other side. The camera is asked for at
+most 1280x720 at 30 fps, and at most 30 fps are sent; WebRTC's
+congestion control lowers both to fit the path.
+
+A camera that opens and gives no frame within 2.5 s (flutter_webrtc
+issue 2225: another process holds it) is turned off, the other side told
+`off`, and the call screen says so. libwebrtc opens the camera without
+close-on-exec, so a child process started while it is open keeps it and
+the next call's camera gives nothing: `lib/src/child_processes.dart`
+starts no child (`tailscale status`, PipeWire's echo canceller) while a
+camera is on, and opens a camera only once those running have exited.
+Tailscale's status is not read again meanwhile.
 
 The prebuilt libwebrtc (24 MB, in the bundle's `lib/`) is fetched by the
 Linux build at the release `linux/libwebrtc.cmake` names and checked
@@ -128,8 +162,11 @@ for another libwebrtc fails there too until the pin follows it.
 
 `tool/webrtc_call_check.dart` calls between two of the app's models in
 one process with the real libwebrtc, twice, over this machine's tailnet
-address, and prints PASS or FAIL; it needs Tailscale up, a sound server
-and a display, so CI does not run it. Built in place of the app (build
+address, then makes a video call on this machine's camera (the caller's
+camera on, off, then the callee's, never both: one camera opens once),
+reading each side's frames and their size from WebRTC's statistics, and
+prints PASS or FAIL; it needs Tailscale up, a sound server, a camera and
+a display, so CI does not run it. Built in place of the app (build
 the app again after):
 
 ```sh
@@ -289,13 +326,21 @@ one it builds as the artifact `thistle-chat-apk`.
   typing; Android's banner for the Tailscale app, discovery through the
   contacts there, and a
   refused permission's banner; a voice message's player and the recording
-  bar; the call screen placing, answering, muting and hanging up.
+  bar; the call screen placing, answering, muting and hanging up; video:
+  the Video call button by capability, the ring screen's three buttons
+  and the plain Answer, the camera switch, Switch camera with one and two
+  cameras, no camera, and the other side's tile for each camera state.
 - `test/voice_calls_test.dart`, WebRTC: two models calling with the fake
   call engine, the offer and answer and the tailnet's candidate alone
   crossing, no PipeWire canceller, the camera said off; mute, volume and
   hang up reaching the engine; the T-Deck still `ws-opus`; a pair outside
   the tailnet, media that never connects, and media lost, each ending the
-  call.
+  call; video: `video` on the offer and the caller's camera on, Answer
+  and Answer with video, the switch and Switch camera, no camera sending
+  `none`, a camera that gives no picture, the video call's notifications,
+  and no `tailscale status` while a camera is on.
+- `test/child_processes_test.dart`: no child starts while a camera is on,
+  and a camera waits for those running.
 - `test/voice_calls_test.dart`: voice messages recorded from a (fake)
   microphone reach a core peer as Ogg/Opus of their length, decoding to the
   tone recorded, and received ones play whole only when asked; calls placed

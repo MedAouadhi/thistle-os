@@ -264,6 +264,7 @@ void main() {
       late ChatModel friend;
       late FakeCallEngine mine, theirs;
       late FakeAudio friendAudio;
+      late RecordingNotifier friendNotifier;
       late String friendBox;
 
       setUp(() async {
@@ -273,7 +274,8 @@ void main() {
         theirs = FakeCallEngine();
         friendAudio = FakeAudio();
         app = testModel(tailnet, notifier, audio: audio, callEngine: mine);
-        friend = testModel(tailnet, RecordingNotifier(), audio: friendAudio, callEngine: theirs);
+        friendNotifier = RecordingNotifier();
+        friend = testModel(tailnet, friendNotifier, audio: friendAudio, callEngine: theirs);
         other = await otherPeer(); // the T-Deck, for the ws-opus case
         await app.start();
         await friend.start();
@@ -367,6 +369,119 @@ void main() {
         await eventually(() => mine.session.closed);
         expect(callOutcome('ended:timeout', transport: 'webrtc'), 'Call ended: it could not connect');
         expect(callOutcome('ended:timeout', transport: 'ws-opus'), 'Call ended: no sound for 10 s');
+      });
+
+      group('video', () {
+        test('a call started with video rings with `video`, and the caller\'s camera is on from the answer', () async {
+          final id = (await app.talk.startCall(friendBox, video: true))!;
+          await eventually(() => friend.talk.call?.state == 'ringing');
+          expect(friend.peer.calls[id]!.video, isTrue);
+          await friend.talk.answer();
+          await eventually(() => friend.peer.calls[id]!.remoteCamera == 'on');
+          expect(mine.session.camera, 'Integrated Webcam');
+          expect(app.talk.cameraOn, isTrue);
+        });
+
+        test('the caller\'s camera switched on while it rings is on from the answer', () async {
+          final id = (await app.talk.startCall(friendBox))!;
+          await eventually(() => friend.talk.call?.state == 'ringing');
+          await app.talk.setCameraOn(true);
+          expect(app.talk.cameraSwitchOn, isTrue);
+          await friend.talk.answer();
+          await eventually(() => friend.peer.calls[id]!.remoteCamera == 'on');
+          expect(mine.session.camera, 'Integrated Webcam');
+        });
+
+        test('a plain Answer leaves the camera off; the other side is told off', () async {
+          final id = (await app.talk.startCall(friendBox, video: true))!;
+          await eventually(() => friend.talk.call?.state == 'ringing');
+          await friend.talk.answer();
+          await eventually(() => app.peer.calls[id]!.remoteCamera == 'off');
+          expect(theirs.session.cameraLog, isEmpty, reason: 'the camera never opened');
+          expect(friend.talk.cameraOn, isFalse);
+        });
+
+        test('Answer with video turns the camera on and tells the other side', () async {
+          final id = (await app.talk.startCall(friendBox))!;
+          await eventually(() => friend.talk.call?.state == 'ringing');
+          expect(friend.peer.calls[id]!.video, isFalse);
+          await friend.talk.answer(null, true);
+          await eventually(() => app.peer.calls[id]!.remoteCamera == 'on');
+          expect(theirs.session.camera, 'Integrated Webcam');
+          expect(mine.session.cameraLog, isEmpty, reason: 'the caller started with it off');
+        });
+
+        test('the camera switch replaces the track and tells the other side, each time', () async {
+          final id = await connected();
+          await eventually(() => mine.sessions.isNotEmpty && app.talk.cameras != null);
+          expect(app.talk.canSwitchCamera, isFalse, reason: 'one camera');
+          await app.talk.setCameraOn(true);
+          await eventually(() => friend.peer.calls[id]!.remoteCamera == 'on');
+          expect(mine.session.camera, 'Integrated Webcam');
+          await app.talk.setCameraOn(false);
+          await eventually(() => friend.peer.calls[id]!.remoteCamera == 'off');
+          expect(mine.session.cameraLog, ['Integrated Webcam', null]);
+          expect(mine.sessions, hasLength(1), reason: 'the same session: no renegotiation');
+        });
+
+        test('Switch camera goes through the cameras, two or more, round and back', () async {
+          mine.cameraList = ['Integrated Webcam', 'USB Camera'];
+          await connected();
+          await eventually(() => app.talk.cameras != null);
+          expect(app.talk.canSwitchCamera, isTrue);
+          await app.talk.setCameraOn(true);
+          await app.talk.switchCamera();
+          expect(mine.session.camera, 'USB Camera');
+          await app.talk.switchCamera();
+          expect(mine.session.camera, 'Integrated Webcam');
+        });
+
+        test('no camera: it says none and still has the other side\'s video', () async {
+          theirs.cameraList = [];
+          final id = (await app.talk.startCall(friendBox, video: true))!;
+          await eventually(() => friend.talk.call?.state == 'ringing');
+          await friend.talk.answer(null, true);
+          await eventually(() => app.peer.calls[id]!.remoteCamera == 'none');
+          await eventually(() => friend.peer.calls[id]!.remoteCamera == 'on');
+          expect(friend.talk.cameraOn, isFalse);
+          expect(theirs.session.cameraLog, isEmpty);
+          expect(friend.talk.remoteVideoShown, isTrue);
+        });
+
+        test('a camera that gives no picture is turned off, the other side told, and the screen says why', () async {
+          final id = await connected();
+          mine.picture = false;
+          await eventually(() => app.talk.cameras != null);
+          await app.talk.setCameraOn(true);
+          expect(app.talk.cameraOn, isFalse);
+          expect(app.talk.cameraProblem, contains('no picture'));
+          await Future<void>.delayed(const Duration(milliseconds: 200));
+          expect(friend.peer.calls[id]!.remoteCamera, 'off');
+        });
+
+        test('a video call rings as one, and unanswered is a missed video call', () async {
+          friend.foreground = false;
+          final id = (await app.talk.startCall(friendBox, video: true))!;
+          await eventually(() => friendNotifier.rang.isNotEmpty);
+          expect(friendNotifier.rangVideo.single, isTrue);
+          app.talk.hangUp();
+          await eventually(() => friendNotifier.shown.any((s) => s.title == 'Missed video call'));
+          expect(friend.peer.calls[id]!.missed, isTrue);
+        });
+
+        test('while a camera is on, the app starts no child process: Tailscale\'s status is not read', () async {
+          final id = await connected();
+          await eventually(() => app.talk.cameras != null);
+          await app.talk.setCameraOn(true);
+          await eventually(() => friend.peer.calls[id]!.remoteCamera == 'on');
+          final reads = tailnet.reads;
+          await app.refresh();
+          await app.peer.tailnetPeers!(); // a contact asks for the peer list
+          expect(tailnet.reads, reads);
+          await app.talk.setCameraOn(false);
+          await app.refresh();
+          expect(tailnet.reads, reads + 1);
+        });
       });
 
       test('media lost for 10 s ends the call as an error', () async {

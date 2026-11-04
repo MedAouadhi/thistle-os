@@ -9,10 +9,12 @@ import 'dart:async';
 import 'dart:math';
 import 'dart:typed_data';
 
+import 'package:flutter/widgets.dart' show Widget;
 import 'package:tailnet_chat_core/tailnet_chat_core.dart';
 
 import 'audio/devices.dart';
 import 'call_engine.dart';
+import 'child_processes.dart';
 import 'notifier.dart';
 import 'permissions.dart';
 
@@ -27,8 +29,9 @@ class Talk {
     required this.sendVoice,
     required this.callee,
     this.permissions,
+    ChildProcesses? children,
     this.log,
-  });
+  }) : children = children ?? ChildProcesses();
 
   final ChatPeer Function() peer;
   final AudioDevices audio;
@@ -47,6 +50,9 @@ class Talk {
   /// How to name a conversation's contact to the core, to call it.
   final Object Function(String box) callee;
   final Permissions? permissions;
+
+  /// None starts while our camera is on.
+  final ChildProcesses children;
   final void Function(String)? log;
 
   // -- recording ----------------------------------------------------------------
@@ -222,9 +228,10 @@ class Talk {
 
   String nameOf(String key) => peer().contact(key)?.name ?? 'a contact';
 
-  /// Call a contact; the call's id, or null if one is already up. A contact
-  /// who cannot be reached fails at once (`ended:unreachable`).
-  Future<String?> startCall(String box) async {
+  /// Call a contact, with our camera on from the first ring if `video`; the
+  /// call's id, or null if one is already up. A contact who cannot be
+  /// reached fails at once (`ended:unreachable`).
+  Future<String?> startCall(String box, {bool video = false}) async {
     if (_callLive) return null;
     if (recordingBox != null) await stopRecording(send: false);
     if (!await _microphone()) {
@@ -235,14 +242,17 @@ class Talk {
     await stopPlaying();
     _muted = false;
     audioProblem = null;
-    final id = await peer().call(callee(box));
+    _wantCamera = video;
+    cameraProblem = null;
+    final id = await peer().call(callee(box), video: video);
     callId = id;
     changed();
     return id;
   }
 
-  /// Answer the ringing call (or the one named).
-  Future<void> answer([String? id]) async {
+  /// Answer the ringing call (or the one named), with our camera on if
+  /// `video`: it is never on unless asked.
+  Future<void> answer([String? id, bool video = false]) async {
     id ??= callId;
     final c = id == null ? null : peer().calls[id];
     if (c == null || c.state != 'ringing') return;
@@ -253,6 +263,8 @@ class Talk {
     if (recordingBox != null) await stopRecording(send: false);
     await stopPlaying();
     _muted = false;
+    _wantCamera = video;
+    cameraProblem = null;
     peer().answerCall(id!);
   }
 
@@ -284,7 +296,7 @@ class Talk {
     // A second call while one is up is the core's to answer busy; it is
     // only shown as missed.
     if (callId != null && callId != id && _callLive) {
-      if (c.missed) unawaited(notifier.show('Missed call', 'from ${nameOf(c.peer)} while you were in a call'));
+      if (c.missed) unawaited(notifier.show(_missed(c), 'from ${nameOf(c.peer)} while you were in a call'));
       return;
     }
     callId = id;
@@ -300,11 +312,13 @@ class Talk {
     }
     if (!c.live) {
       unawaited(_stopMedia());
-      if (c.missed) unawaited(notifier.show('Missed call', 'from ${nameOf(c.peer)}'));
+      if (c.missed) unawaited(notifier.show(_missed(c), 'from ${nameOf(c.peer)}'));
       log?.call('call ${id.substring(0, 8)} ${c.state}${c.transport == null ? '' : ', over ${c.transport}'}');
     }
     changed();
   }
+
+  static String _missed(Call c) => c.video ? 'Missed video call' : 'Missed call';
 
   Future<void> _startMedia(String id) async {
     final CallDevices devices;
@@ -337,14 +351,23 @@ class Talk {
   }
 
   Future<void> _stopMedia() async {
-    final media = _media, devices = _devices, session = _session;
+    final media = _media, devices = _devices, session = _session, id = callId;
     _media = null;
     _devices = null;
     _session = null;
     _rtcWaiting.clear();
+    _wantCamera = false;
+    cameraOn = false;
+    cameras = null;
+    _cameraAt = 0;
     await media?.stop();
     await devices?.close();
+    if (session != null) {
+      final video = await session.videoStats().catchError((Object _) => null);
+      if (video != null && id != null) log?.call('call ${id.substring(0, 8)}: video $video');
+    }
     await session?.close();
+    children.cameraClosed();
   }
 
   // -- WebRTC calls: the media is the engine's; its SDP and candidates go
@@ -401,9 +424,104 @@ class Talk {
       _take(session, r);
     }
     _rtcWaiting.clear();
-    // No camera yet: said at the answer, as every change will be.
-    peer().setCamera(id, 'off');
+    List<String> found;
+    try {
+      found = await engine.cameras();
+    } on Object catch (e) {
+      log?.call('call ${id.substring(0, 8)}: no camera found: $e');
+      found = const [];
+    }
+    if (_session != session) return;
+    cameras = found;
+    // Said at the answer, as every change will be.
+    if (found.isEmpty) {
+      peer().setCamera(id, 'none');
+    } else if (_wantCamera) {
+      await _applyCamera(session, id, on: true);
+    } else {
+      peer().setCamera(id, 'off');
+    }
     changed();
+  }
+
+  // -- the camera, on a WebRTC call ---------------------------------------------
+
+  /// What our camera should be until the call's media starts.
+  bool _wantCamera = false;
+
+  /// This machine's cameras, once the call's media has started; empty
+  /// with none.
+  List<String>? cameras;
+  int _cameraAt = 0;
+
+  /// Whether our camera is sending.
+  bool cameraOn = false;
+
+  /// Why the camera is off when it was asked on.
+  String? cameraProblem;
+
+  /// Whether the call screen offers the camera switch: a WebRTC call.
+  bool get cameraSwitch {
+    final c = call;
+    return c != null && c.live && (c.webrtc || (c.state == 'offered' && c.transports.contains('webrtc')));
+  }
+
+  bool get canSwitchCamera => (cameras?.length ?? 0) > 1;
+
+  /// Whether the camera switch shows on: sending, or asked for before the
+  /// call's media has started (Video call, while it rings).
+  bool get cameraSwitchOn => _session == null ? _wantCamera : cameraOn;
+
+  /// Whether the other side's video is to be drawn.
+  bool get remoteVideoShown => _session != null && call?.remoteCamera == 'on';
+
+  Widget? remoteVideo() => _session?.remoteVideo();
+  Widget? localVideo() => cameraOn ? _session?.localVideo() : null;
+
+  /// The video's frames so far, on a WebRTC call.
+  Future<VideoStats?> videoStats() async => _session?.videoStats();
+
+  /// Our camera on or off: before the call's media starts, as it starts.
+  Future<void> setCameraOn(bool on) async {
+    final session = _session, id = callId;
+    cameraProblem = null;
+    if (session == null || id == null) {
+      _wantCamera = on;
+      changed();
+      return;
+    }
+    if (on == cameraOn || (on && (cameras ?? const []).isEmpty)) return;
+    await _applyCamera(session, id, on: on);
+    changed();
+  }
+
+  /// The next camera, round and back to the first.
+  Future<void> switchCamera() async {
+    final session = _session, id = callId, list = cameras;
+    if (session == null || id == null || list == null || list.length < 2 || !cameraOn) return;
+    _cameraAt = (_cameraAt + 1) % list.length;
+    await _applyCamera(session, id, on: true);
+    changed();
+  }
+
+  /// No child process starts while the camera is on, and the camera waits
+  /// for those running (child_processes.dart); a camera that gives no
+  /// picture is turned off and said so.
+  Future<void> _applyCamera(CallSession session, String id, {required bool on}) async {
+    final camera = on ? cameras![_cameraAt] : null;
+    if (on) await children.cameraOpening();
+    try {
+      await session.setCamera(camera);
+      cameraOn = on;
+    } on CameraUnavailable catch (e) {
+      cameraOn = false;
+      cameraProblem = 'The camera is off: $e. Another program may be using it.';
+      log?.call('call ${id.substring(0, 8)}: camera $camera gave no picture: $e');
+    }
+    if (!cameraOn) children.cameraClosed();
+    if (_session != session) return;
+    log?.call('call ${id.substring(0, 8)}: our camera ${cameraOn ? 'on, $camera' : 'off'}');
+    peer().setCamera(id, cameraOn ? 'on' : 'off');
   }
 
   void _onMediaState(String id, String state) {
@@ -451,7 +569,7 @@ class Talk {
     if (_ringing == id) return;
     _ringing = id;
     if (!notifier.ringsItself) _startRing();
-    unawaited(notifier.ringing(nameOf(c.peer), id, inFront: foreground()));
+    unawaited(notifier.ringing(nameOf(c.peer), id, inFront: foreground(), video: c.video));
     unawaited(permissions?.checkFillScreen());
   }
 

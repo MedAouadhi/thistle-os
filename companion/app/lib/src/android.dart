@@ -71,8 +71,8 @@ class AndroidPlatform implements KeyVault, BackgroundService, PermissionPlatform
   Future<void> openFillScreenSettings() => _channel.invokeMethod<void>('fillscreen.open');
 
   @override
-  Future<void> ring(String caller, String callId, {required bool notify}) =>
-      _channel.invokeMethod<void>('ring.start', {'caller': caller, 'id': callId, 'notify': notify});
+  Future<void> ring(String caller, String callId, {required bool notify, bool video = false}) =>
+      _channel.invokeMethod<void>('ring.start', {'caller': caller, 'id': callId, 'notify': notify, 'video': video});
 
   @override
   Future<void> stop(String callId) => _channel.invokeMethod<void>('ring.stop', {'id': callId});

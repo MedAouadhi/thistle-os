@@ -15,6 +15,7 @@ import 'package:tailnet_chat_core/tailnet_chat_core.dart';
 
 import 'background.dart';
 import 'call_engine.dart';
+import 'child_processes.dart';
 import 'audio/devices.dart';
 import 'notifier.dart';
 import 'permissions.dart';
@@ -55,8 +56,10 @@ class ChatModel extends ChangeNotifier {
     this.permissions,
     AudioDevices? audio,
     this.callEngine,
+    ChildProcesses? children,
     Future<ProbeResult?> Function(PeerAddress address)? probe,
   }) : _probe = probe,
+       children = children ?? ChildProcesses(),
        notifier = notifier ?? _Silent(),
        audio = audio ?? NoAudioDevices('no audio devices given');
 
@@ -90,6 +93,9 @@ class ChatModel extends ChangeNotifier {
   /// calls another such app over WebRTC. Null: `ws-opus` only.
   final CallEngine? callEngine;
 
+  /// The app's child processes, none started while a camera is on.
+  final ChildProcesses children;
+
   /// How discovery probes an address; `ChatPeer.probe` unless a test says.
   final Future<ProbeResult?> Function(PeerAddress address)? _probe;
 
@@ -106,6 +112,7 @@ class ChatModel extends ChangeNotifier {
     sendVoice: sendVoice,
     callee: (box) => _who(_contact(box)),
     permissions: permissions,
+    children: children,
     log: log,
   );
 
@@ -152,7 +159,7 @@ class ChatModel extends ChangeNotifier {
     );
     // A contact that asks is told the tailnet's online peers, as Tailscale
     // shows them now; on Android, none.
-    p.tailnetPeers = () async => (await readStatus()).toShare;
+    p.tailnetPeers = () async => (await _readStatus()).toShare;
     _events = p.events.listen(_onEvent);
     _rtc = p.callRtc.listen(talk.onRtc);
     return p;
@@ -171,7 +178,7 @@ class ChatModel extends ChangeNotifier {
   /// and dial the contacts it shows online, so their outboxes flush.
   Future<void> refresh() async {
     final was = status.address;
-    status = await readStatus();
+    status = await _readStatus();
     if (_closed) return;
     final host = status.state == TailnetState.running ? (listenHost ?? status.address) : null;
     // Without a peer list (Android), the tailnet coming up or moving is
@@ -195,6 +202,18 @@ class ChatModel extends ChangeNotifier {
     }
     if (_started) unawaited(_peer.seenOnline(dialKnown ? _knownNames : status.onlineNames));
     notifyListeners();
+  }
+
+  /// Tailscale's status, read again unless a camera is on: on Linux that
+  /// runs `tailscale status`, a child process (child_processes.dart). With
+  /// the camera on, the last one read.
+  Future<TailscaleStatus> _readStatus() async => await children.run(readStatus) ?? status;
+
+  /// Whether a call with this conversation's contact may carry video, by
+  /// what both apps announced: the Video call button.
+  bool videoCapable(String box) {
+    final key = _contactByBox(box)?.key;
+    return key != null && _peer.videoCapable(key);
   }
 
   /// The contacts' tailnet names: who to dial when nothing says who is online.
@@ -403,7 +422,7 @@ class ChatModel extends ChangeNotifier {
     discovering = true;
     notifyListeners();
     try {
-      status = await readStatus();
+      status = await _readStatus();
       final probe = _probe ?? (PeerAddress a) => _peer.probe(a);
       _discovered = status.hasPeerList
           ? await discoverChatPeers(status, probe, port: discoveryPort)
@@ -506,7 +525,7 @@ class _Silent implements Notifier {
   @override
   Future<void> show(String title, String body, {String? conversation}) async {}
   @override
-  Future<void> ringing(String caller, String callId, {bool inFront = false}) async {}
+  Future<void> ringing(String caller, String callId, {bool inFront = false, bool video = false}) async {}
   @override
   Future<void> stopRinging(String callId) async {}
 }

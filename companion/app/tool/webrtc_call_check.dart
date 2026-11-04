@@ -104,11 +104,65 @@ Future<bool> check() async {
     b.talk.dismissCall();
     await Future<void>.delayed(const Duration(seconds: 1));
   }
+  ok &= await videoCall(a, b);
   await a.close();
   await b.close();
-  print(lines.where((l) => l.contains('call ')).join('\n'));
+  print(lines.where((l) => l.contains('call ') || l.contains('camera')).join('\n'));
   final sent = lines.where((l) => l.contains('candidate sent'));
   ok &= sent.isNotEmpty && sent.every((l) => l.contains('tailnet'));
-  ok &= lines.where((l) => l.contains('media over host/udp')).length == 4;
+  ok &= lines.where((l) => l.contains('media over host/udp')).length == 6;
+  return ok;
+}
+
+/// A video call: `a` calls with its camera on and `b` answers without; then
+/// `a` turns its camera off and `b` turns its own on. One process has one
+/// camera, so the two never send at once. Each side's frames come from
+/// getStats, and must be at most 1280x720.
+Future<bool> videoCall(ChatModel a, ChatModel b) async {
+  var ok = true;
+  final id = (await a.talk.startCall(b.identity.keyHex, video: true))!;
+  await eventually(() => b.talk.call?.state == 'ringing');
+  print('call 3: offered with video ${b.peer.calls[id]!.video}');
+  await b.talk.answer();
+  await eventually(() => b.peer.calls[id]!.remoteCamera == 'on', timeout: const Duration(seconds: 15));
+  print('call 3: cameras at a ${a.talk.cameras}, Switch camera ${a.talk.canSwitchCamera ? 'shown' : 'not shown'}');
+
+  Future<bool> flows(ChatModel from, ChatModel to, String what, {int seconds = 4}) async {
+    await Future<void>.delayed(Duration(seconds: seconds));
+    final sent = await from.talk.videoStats(), got = await to.talk.videoStats();
+    print('call 3, $what: sender $sent; receiver $got');
+    final size = sent?.sent?.split('x').map(int.parse).toList();
+    final good =
+        sent != null &&
+        got != null &&
+        sent.framesSent > 30 &&
+        got.framesReceived > 30 &&
+        size != null &&
+        size[0] <= 1280 &&
+        size[1] <= 720;
+    if (!good) print('  <- wrong');
+    return good;
+  }
+
+  ok &= a.talk.cameraOn && !b.talk.cameraOn;
+  ok &= await flows(a, b, "a's camera");
+  ok &= await flows(a, b, "a's camera, 12 s on", seconds: 8); // the bitrate climbs
+  if (a.talk.canSwitchCamera) {
+    await a.talk.switchCamera();
+    ok &= await flows(a, b, "a's second camera");
+  }
+  await a.talk.setCameraOn(false);
+  await eventually(() => b.peer.calls[id]!.remoteCamera == 'off');
+  final before = (await b.talk.videoStats())?.framesReceived ?? 0;
+  await b.talk.setCameraOn(true);
+  await eventually(() => a.peer.calls[id]!.remoteCamera == 'on');
+  print('call 3: b camera on (${b.talk.cameraProblem ?? 'no problem'}); b had received $before frames');
+  ok &= b.talk.cameraOn;
+  ok &= await flows(b, a, "b's camera");
+  a.talk.hangUp();
+  await eventually(() => b.peer.calls[id]!.state == 'ended:hangup');
+  a.talk.dismissCall();
+  b.talk.dismissCall();
+  await Future<void>.delayed(const Duration(seconds: 1));
   return ok;
 }

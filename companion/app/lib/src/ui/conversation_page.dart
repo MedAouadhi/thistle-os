@@ -119,8 +119,8 @@ class _ConversationPageState extends State<ConversationPage> {
     if (why != null && mounted) _say(why);
   }
 
-  Future<void> _call() async {
-    final id = await model.talk.startCall(_box!);
+  Future<void> _call({bool video = false}) async {
+    final id = await model.talk.startCall(_box!, video: video);
     if (!mounted) return;
     if (id == null) {
       _say(model.talk.audioProblem ?? 'A call is already up.');
@@ -291,6 +291,21 @@ class _ConversationPageState extends State<ConversationPage> {
             ],
           ),
           actions: [
+            // Only for a contact whose app can do video: never the T-Deck.
+            if (model.videoCapable(c.box))
+              Padding(
+                padding: const EdgeInsets.only(right: 6),
+                child: IconButton.filledTonal(
+                  key: const Key('video-call'),
+                  tooltip: 'Video call',
+                  style: IconButton.styleFrom(
+                    backgroundColor: k.card,
+                    side: BorderSide(color: k.line),
+                  ),
+                  icon: Icon(Icons.videocam_rounded, color: k.ink),
+                  onPressed: c.declinedByThem ? null : () => _call(video: true),
+                ),
+              ),
             Padding(
               padding: const EdgeInsets.only(right: 10),
               child: IconButton.filledTonal(

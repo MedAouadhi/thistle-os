@@ -9,6 +9,7 @@ import 'src/android.dart';
 import 'src/audio/android_audio.dart';
 import 'src/audio/devices.dart';
 import 'src/chat_model.dart';
+import 'src/child_processes.dart';
 import 'src/identity.dart';
 import 'src/notifier.dart';
 import 'src/options.dart';
@@ -76,6 +77,9 @@ Future<void> main(List<String> args) async {
       if (answer != false && ctx != null) showCall(ctx, model);
     },
   );
+  // `tailscale status` and PipeWire's echo canceller, kept clear of an open
+  // camera (child_processes.dart).
+  final children = ChildProcesses();
   // The microphone and speaker: audio files when asked (no sound card, a
   // second instance, a test run), else AudioRecord/AudioTrack on Android
   // and PulseAudio/PipeWire on Linux.
@@ -83,7 +87,7 @@ Future<void> main(List<String> args) async {
       ? FileAudioDevices(mic: options.mic, speakerDir: options.speakerDir)
       : android != null
       ? AndroidAudioDevices()
-      : PulseAudioDevices(configDir: dir.path, log: options.verbose ? stderr.writeln : null);
+      : PulseAudioDevices(configDir: dir.path, children: children, log: options.verbose ? stderr.writeln : null);
   await notifier.init();
   model = ChatModel(
     identity: identity,
@@ -93,6 +97,7 @@ Future<void> main(List<String> args) async {
     background: android,
     permissions: android == null ? null : Permissions(android),
     audio: audio,
+    children: children,
     // Calls with another companion app on WebRTC, on Linux for now; Android
     // announces no call:webrtc until ticket 05 of .scratch/tailnet-video.
     callEngine: Platform.isLinux && options.webrtc

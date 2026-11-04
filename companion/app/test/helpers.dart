@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:math';
 import 'dart:typed_data';
 
-import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
 import 'package:tailnet_chat_core/tailnet_chat_core.dart';
 import 'package:thistle_chat/src/chat_model.dart';
 import 'package:thistle_chat/src/audio/devices.dart';
@@ -16,7 +16,13 @@ import 'package:thistle_chat/src/ui/call_page.dart';
 class TestTailnet {
   TestTailnet(this.status);
   TailscaleStatus status;
-  Future<TailscaleStatus> read() async => status;
+
+  /// How many times it was read: `tailscale status` is a child process.
+  int reads = 0;
+  Future<TailscaleStatus> read() async {
+    reads++;
+    return status;
+  }
 }
 
 class Shown {
@@ -32,8 +38,9 @@ class RecordingNotifier implements Notifier {
   final List<Shown> shown = [];
   final List<String> rang = [];
 
-  /// Whether each ring was asked with the app in front.
+  /// Whether each ring was asked with the app in front, and with video.
   final List<bool> rangInFront = [];
+  final List<bool> rangVideo = [];
   final List<String> stoppedRinging = [];
 
   /// Android's notifier rings the phone itself.
@@ -42,9 +49,10 @@ class RecordingNotifier implements Notifier {
   @override
   Future<void> show(String title, String body, {String? conversation}) async => shown.add(Shown(title, body));
   @override
-  Future<void> ringing(String caller, String callId, {bool inFront = false}) async {
+  Future<void> ringing(String caller, String callId, {bool inFront = false, bool video = false}) async {
     rang.add(caller);
     rangInFront.add(inFront);
+    rangVideo.add(video);
   }
 
   @override
@@ -159,12 +167,14 @@ class FakePermissions implements PermissionPlatform {
 /// A call media engine for tests: no WebRTC, but the signalling a real one
 /// does. The offerer gives an SDP offer, the other an answer to it; each
 /// gives its `candidates`; a session reports `connected` once it holds the
-/// other's SDP and a candidate, unless `connects` is false.
+/// other's SDP and a candidate, unless `connects` is false. Its `cameras`
+/// give a picture unless `picture` is false, and its video is a keyed box.
 class FakeCallEngine implements CallEngine {
   FakeCallEngine({
     this.candidates = const [tailnetCandidate, lanCandidate],
     this.connects = true,
     this.path = const CallPath(local: '100.64.0.1', remote: '100.64.0.2', localType: 'host', remoteType: 'host'),
+    this.cameraList = const ['Integrated Webcam'],
   });
 
   static const tailnetCandidate = 'candidate:1 1 udp 2122260223 100.64.0.1 47998 typ host generation 0';
@@ -173,9 +183,14 @@ class FakeCallEngine implements CallEngine {
   final List<String> candidates;
   bool connects;
   CallPath? path;
+  List<String> cameraList;
+  bool picture = true;
   final List<FakeCallSession> sessions = [];
 
   FakeCallSession get session => sessions.last;
+
+  @override
+  Future<List<String>> cameras() async => cameraList;
 
   @override
   Future<CallSession> start({
@@ -230,8 +245,34 @@ class FakeCallSession implements CallSession {
   @override
   Future<CallPath?> selectedPath() async => engine.path;
 
+  /// The camera sending now, null for none; and every one it was set to.
+  String? camera;
+  final List<String?> cameraLog = [];
+
   @override
-  Future<void> close() async => closed = true;
+  Future<void> setCamera(String? camera) async {
+    cameraLog.add(camera);
+    if (camera != null && !engine.picture) {
+      this.camera = null;
+      throw const CameraUnavailable('no picture came from it');
+    }
+    this.camera = camera;
+  }
+
+  @override
+  Future<VideoStats?> videoStats() async => null;
+
+  @override
+  Widget remoteVideo() => const SizedBox.expand(key: Key('fake-remote-video'));
+
+  @override
+  Widget localVideo() => const SizedBox.expand(key: Key('fake-local-video'));
+
+  @override
+  Future<void> close() async {
+    camera = null;
+    closed = true;
+  }
 }
 
 /// A model listening on loopback, with the tailnet `tailnet` says.
