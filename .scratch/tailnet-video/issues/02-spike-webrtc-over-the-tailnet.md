@@ -6,7 +6,7 @@
 
 **Status:** ready-for-agent
 
-- [ ] A Linux to Android call and an Android to Linux call, each with audio and video both ways, over tailnet candidates only, on WiFi and through DERP; the candidates' kinds logged
+- [x] A Linux to Android call and an Android to Linux call, each with audio and video both ways, over tailnet candidates only, on WiFi and through DERP; the candidates' kinds logged
 - [x] Issue 2070: three calls in a row on Linux, the time each set-up and hang-up blocks the UI, written here
 - [x] Issue 2225: the camera opened while the app runs `tailscale status`, and whether a second call can open it, written here
 - [x] The release APK's split sizes and the Linux bundle's size, before and after
@@ -174,3 +174,46 @@ with a phone on the tailnet and the laptop at a real display:
 The go/stop box is the user's to tick once the phone run is in. On the
 Linux evidence there is no reason to stop: 2070 does not happen on 1.6.3,
 and 2225 has a known rule and a check.
+
+### The phone run (2026-11-04, Pixel 8 on Android 17, the laptop at its X11 display)
+
+The spike as committed, with an outgoing-video line added to its stats
+(packets, average size, frames encoded). Three calls each way, 4 s held,
+the spike's own TCP signalling. Every call: VP8 and Opus, 640x480.
+
+| Path (`tailscale ping`) | Laptop calls phone | Phone calls laptop |
+|---|---|---|
+| WiFi, direct on the LAN | 3/3, video both ways, 0 lost | 3/3, video both ways (phone awake) |
+| Mobile data, via DERP ("direct connection not established") | 3/3, video both ways, 0 lost | |
+| Mobile data, direct over the carrier's IPv6 | | 3/3, video both ways, 0 lost |
+
+- **2070 does not show here either.** Set-up 1.0 to 2.3 s, the first
+  call the slowest on every path; the phone's worst UI stall in a call
+  127 ms, its `getUserMedia` 0.24 to 1.2 s.
+- **Android gathers no candidate on Tailscale's interface.** The phone
+  has `tun1` (100.92.9.101, fd7a:115c:a1e0::d801:966, MTU 1280), but
+  libwebrtc offered only loopback, `wlan0` and the carrier's addresses,
+  all dropped by the filter. Every call connected through a
+  peer-reflexive candidate: the phone's checks reach the laptop's
+  tailnet address through the VPN (which is not bypassable), and each
+  side then sees the pair as tailnet at both ends (phone: local prflx
+  fd7a:...d801:966 -> remote host fd7a:...3936:6f36). Ticket 05 must
+  not need an Android tailnet candidate to connect, and its off-tailnet
+  pair check must pass on a prflx pair (it does on these addresses);
+  a phone calling a phone, where neither side has a tailnet candidate
+  to signal, is untested and may not connect at all.
+- **A locked or sleeping phone kills a foreground-less app's sockets.**
+  Twice the phone's 30 s screen timeout ended a run: about 5 s after the
+  lock, Android logged `Destroyed live tcp sockets for uids={10298}` and
+  then BLOCKED for the spike, and its media died with the signalling.
+  The companion app keeps its listening foreground service, which
+  should keep its network on a locked phone; ticket 01's run on a
+  locked phone is where that is checked. In the run where the phone
+  slept mid-way it also received no video from the laptop; awake, on
+  the same WiFi, it did on every call.
+- The spike still gathers TCP candidates, and some calls settled on a
+  tailnet TCP pair; the app admits UDP only (ticket 03).
+- The laptop encodes about 17 fps from its webcam on every path,
+  `qualityLimitationReason` none: the camera's rate, not the network.
+
+**Verdict: go**, on 2070. The box is the user's.

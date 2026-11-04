@@ -187,6 +187,18 @@ Future<String> statsSummary(RTCPeerConnection pc) async {
       out.add('video in: $codec, frames decoded ${v['framesDecoded']}, '
           '${v['frameWidth']}x${v['frameHeight']}');
     }
+    if (r.type == 'inbound-rtp' && v['kind'] == 'video') {
+      out.add('video in rtp: packets ${v['packetsReceived']}, lost ${v['packetsLost']}, '
+          'bytes ${v['bytesReceived']}, nacks ${v['nackCount']}, plis ${v['pliCount']}');
+    }
+    if (r.type == 'outbound-rtp' && v['kind'] == 'video') {
+      final codec = byId[v['codecId']]?.values['mimeType'];
+      final pkts = (v['packetsSent'] as num?) ?? 0;
+      final bytes = (v['bytesSent'] as num?) ?? 0;
+      out.add('video out: $codec, frames encoded ${v['framesEncoded']}, packets $pkts, '
+          'avg ${pkts > 0 ? (bytes / pkts).round() : 0} B, ${v['frameWidth']}x${v['frameHeight']}, '
+          'limit ${v['qualityLimitationReason']}, nacks in ${v['nackCount']}, plis in ${v['pliCount']}');
+    }
     if (r.type == 'inbound-rtp' && v['kind'] == 'audio') {
       final codec = byId[v['codecId']]?.values['mimeType'];
       out.add('audio in: $codec, packets ${v['packetsReceived']}');
