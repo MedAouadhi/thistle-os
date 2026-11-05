@@ -266,6 +266,18 @@ bool candidateAdmitted(String candidate) {
   return c != null && c.protocol == 'udp' && c.ip != null && inTailnet(c.ip!.address);
 }
 
+/// Whether a call's selected pair keeps its media on the tailnet: both ends'
+/// addresses in its ranges. libwebrtc's statistics hide the address of a
+/// peer-reflexive remote, as the phone's is (it signals no candidate,
+/// section 4.11); such a pair passes when our end is a tailnet address, as
+/// the remote's checks reached that socket, and only through WireGuard.
+/// `remoteType` is the stats' `type/protocol`, `prflx/udp`.
+bool pathOnTailnet({required String local, required String remote, required String remoteType}) {
+  if (!inTailnet(local)) return false;
+  if (remote.isEmpty) return remoteType.startsWith('prflx/');
+  return inTailnet(remote);
+}
+
 /// A candidate's kind, for a log: its type, its protocol, and whether its
 /// address is the tailnet's (`host/udp tailnet`, `srflx/udp other`).
 String candidateKind(String candidate) {

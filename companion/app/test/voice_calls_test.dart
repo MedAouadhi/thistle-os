@@ -9,6 +9,7 @@ import 'package:thistle_chat/src/chat_model.dart';
 import 'package:thistle_chat/src/permissions.dart';
 import 'package:thistle_chat/src/tailnet.dart';
 import 'package:thistle_chat/src/ui/call_page.dart';
+import 'package:thistle_chat/src/webrtc_call.dart';
 
 import 'helpers.dart';
 
@@ -382,6 +383,21 @@ void main() {
         await eventually(() => friend.peer.calls[id]!.state == 'ended:error');
         expect(callOutcome(app.peer.calls[id]!), 'Call ended: its media left the tailnet');
         expect(callOutcome(friend.peer.calls[id]!), 'Call ended: it failed on their side');
+      });
+
+      test("a phone's peer-reflexive end, its address hidden, to our tailnet address keeps the call", () async {
+        mine.path = const CallPath(
+          local: 'fd7a:115c:a1e0::3936:6f36',
+          remote: '',
+          localType: 'host/udp',
+          remoteType: 'prflx/udp',
+        );
+        final id = await connected();
+        await Future<void>.delayed(WebrtcCall.pathSettle + const Duration(milliseconds: 500));
+        expect(app.peer.calls[id]!.state, 'connected');
+        expect(friend.peer.calls[id]!.state, 'connected');
+        app.talk.hangUp();
+        await eventually(() => friend.peer.calls[id]!.state == 'ended:hangup');
       });
 
       test('WebRTC that does not start ends the call as an error, and says so', () async {

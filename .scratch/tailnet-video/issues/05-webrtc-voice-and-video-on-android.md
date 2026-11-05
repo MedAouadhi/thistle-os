@@ -192,3 +192,13 @@ conformance suite against the headless core (38 of 39, one skipped),
 `flutter build apk --release`, `flutter build linux --release`. The
 Pixel was not attached: nothing installed. Box 7 of the hardware run now
 checks two phones on `ws-opus`.
+
+- 2026-11-05, the first video call from the Linux app to the phone on this
+  build ended after 2 s as `error`, "its media went outside the tailnet":
+  the Linux side's selected pair was `host/udp fd7a:115c:a1e0::3936:6f36
+  to prflx/udp` with no address. libwebrtc's statistics hide a
+  peer-reflexive remote's address, and the phone's end is always
+  peer-reflexive (it signals no candidate), so the check failed every
+  such call. `pathOnTailnet` (core policy) now passes a hidden
+  peer-reflexive remote when our end is a tailnet address; protocol 4.11
+  says so. Tests in `policy_test.dart` and `voice_calls_test.dart`.

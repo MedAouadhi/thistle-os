@@ -439,8 +439,8 @@ class WebrtcCall {
       if (call.media != MediaState.connected) continue;
       final path = await session.selectedPath();
       if (path == null) continue;
-      final local = ipOf(path.local)?.address, remote = ipOf(path.remote)?.address;
-      if (local != null && remote != null && inTailnet(local) && inTailnet(remote)) {
+      final local = ipOf(path.local)?.address ?? '', remote = ipOf(path.remote)?.address ?? '';
+      if (pathOnTailnet(local: local, remote: remote, remoteType: path.remoteType)) {
         if (!logged) log?.call('${callLabel(id)}: media over $path');
         logged = true;
         continue;

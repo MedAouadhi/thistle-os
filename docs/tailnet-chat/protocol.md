@@ -370,6 +370,11 @@ tailnet removed.
   flutter_webrtc gives no way to change), so it signals none, and its
   checks reach the other side's tailnet address through the VPN; both
   sides then see a peer-reflexive tailnet address at the phone's end.
+  libwebrtc's statistics hide a peer-reflexive remote's address, so the
+  side facing the phone reads none there; a pair whose remote end is
+  peer-reflexive with no address passes when its local end is in the
+  ranges, as the remote's checks reached that socket, and only through
+  WireGuard.
 - **`call:webrtc-prflx`**: a side whose WebRTC gathers no candidate in
   the ranges above (the companion app on Android) announces it beside
   `call:webrtc`. Two such sides would have no candidate between them and

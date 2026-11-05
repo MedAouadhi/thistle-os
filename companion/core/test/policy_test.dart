@@ -260,6 +260,23 @@ void main() {
         expect(candidateAdmitted('nonsense'), isFalse);
       });
 
+      test("a selected pair is the tailnet's at both ends, or a hidden peer-reflexive one to ours", () {
+        expect(pathOnTailnet(local: '100.91.111.54', remote: '100.64.0.2', remoteType: 'host/udp'), isTrue);
+        expect(pathOnTailnet(local: 'fd7a:115c:a1e0::1', remote: 'fd7a:115c:a1e0::2', remoteType: 'prflx/udp'), isTrue);
+        // libwebrtc hides a peer-reflexive remote's address, as the phone's
+        // is: its checks reached our tailnet socket, so it is on the tailnet.
+        expect(pathOnTailnet(local: 'fd7a:115c:a1e0::3936:6f36', remote: '', remoteType: 'prflx/udp'), isTrue);
+        expect(pathOnTailnet(local: '100.91.111.54', remote: '', remoteType: 'prflx/udp'), isTrue);
+        expect(pathOnTailnet(local: '192.168.2.131', remote: '', remoteType: 'prflx/udp'), isFalse);
+        expect(
+          pathOnTailnet(local: '100.91.111.54', remote: '', remoteType: 'host/udp'),
+          isFalse,
+          reason: 'only prflx',
+        );
+        expect(pathOnTailnet(local: '192.168.2.131', remote: '100.64.0.2', remoteType: 'host/udp'), isFalse);
+        expect(pathOnTailnet(local: '100.91.111.54', remote: '81.2.3.4', remoteType: 'prflx/udp'), isFalse);
+      });
+
       test("an SDP keeps the tailnet's candidates and loses every other", () {
         const sdp =
             'v=0\r\n'
