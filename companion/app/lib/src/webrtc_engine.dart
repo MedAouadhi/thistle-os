@@ -15,6 +15,7 @@
 library;
 
 import 'dart:async';
+import 'dart:io' show Platform;
 
 import 'package:flutter/widgets.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
@@ -441,7 +442,14 @@ class _Session implements CallSession {
   }
 
   @override
-  Widget remoteVideo() => RTCVideoView(_remote, objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover);
+  // A phone's screen is filled; a desktop window shows the whole picture,
+  // whatever its shape, the call's bars over the margins.
+  Widget remoteVideo() => RTCVideoView(
+    _remote,
+    objectFit: Platform.isAndroid
+        ? RTCVideoViewObjectFit.RTCVideoViewObjectFitCover
+        : RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+  );
 
   @override
   Widget localVideo() => RTCVideoView(

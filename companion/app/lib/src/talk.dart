@@ -366,7 +366,9 @@ class Talk {
     try {
       devices = await audio.call();
     } on AudioUnavailable catch (e) {
-      _audioProblem = '$e';
+      // The screen says what is lost; the log, why.
+      _audioProblem = 'The call has no audio: the microphone or the speaker would not open.';
+      log?.call('${callLabel(id)}: no audio: $e');
       changed();
       return;
     }
@@ -377,13 +379,15 @@ class Talk {
     }
     _devices = devices;
     _echoCancellation = devices.echoCancellation;
+    log?.call('${callLabel(id)}: echo cancellation ${devices.echoCancellation}');
     try {
       _media = CallMedia(peer(), id, mic: devices.microphone, speaker: devices.speaker)
         ..muted = _muted
         ..volume = _volume
         ..start();
     } on OpusUnavailable catch (e) {
-      _audioProblem = '$e';
+      _audioProblem = 'The call has no audio: this machine has no Opus codec.';
+      log?.call('${callLabel(id)}: no audio: $e');
       await devices.speaker.close();
       await devices.close();
       _devices = null;

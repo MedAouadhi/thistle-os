@@ -170,34 +170,44 @@ class _CallPageState extends State<CallPage> {
         _ => callOutcome(call),
       };
       if (!call.live) _closeSoon();
+      // With the other side's picture, the screen is the picture: the name
+      // and time in a bar at the top, the buttons in one at the bottom,
+      // each on a shade that fades into it, and nothing over its middle.
+      final video = remoteVideo != null;
       return Scaffold(
-        backgroundColor: k.paper,
+        backgroundColor: video ? Colors.black : k.paper,
         appBar: AppBar(
           backgroundColor: Colors.transparent,
           shape: const Border(),
           automaticallyImplyLeading: !call.live,
-          title: Text('Tailnet call', style: mono(12, color: k.muted).copyWith(letterSpacing: 1.6)),
+          title: video ? null : Text('Tailnet call', style: mono(12, color: k.muted).copyWith(letterSpacing: 1.6)),
           centerTitle: true,
         ),
         extendBodyBehindAppBar: true,
         body: DecoratedBox(
           decoration: BoxDecoration(
-            gradient: RadialGradient(
-              center: const Alignment(0, -0.35),
-              radius: 1.1,
-              colors: [Color.alphaBlend(tint.withValues(alpha: 0.28), k.paper), k.paper],
-            ),
+            gradient: video
+                ? null
+                : RadialGradient(
+                    center: const Alignment(0, -0.35),
+                    radius: 1.1,
+                    colors: [Color.alphaBlend(tint.withValues(alpha: 0.28), k.paper), k.paper],
+                  ),
           ),
           child: Grain(
             child: Stack(
               fit: StackFit.expand,
               children: [
                 // The other side's picture, full size, under everything.
-                if (remoteVideo != null) Positioned.fill(child: remoteVideo),
+                if (video) ...[
+                  Positioned.fill(child: remoteVideo),
+                  const Positioned(top: 0, left: 0, right: 0, height: 150, child: _Shade(fromTop: true)),
+                  const Positioned(bottom: 0, left: 0, right: 0, height: 240, child: _Shade(fromTop: false)),
+                ],
                 SafeArea(
                   child: Padding(
                     padding: const EdgeInsets.fromLTRB(28, 24, 28, 28),
-                    child: _content(context, call, name, tint, status, waiting, ringing, remoteVideo != null, tile),
+                    child: _content(context, call, name, tint, status, waiting, ringing, video, tile),
                   ),
                 ),
                 // Ours, small, in a corner.
@@ -242,8 +252,38 @@ class _CallPageState extends State<CallPage> {
     final state = call.state;
     final cameras = talk.cameras;
     final noCamera = cameras != null && cameras.isEmpty;
+    // Over the picture, light on its shade.
+    final ink = video ? Colors.white : k.ink;
+    final muted = video ? Colors.white70 : k.muted;
+    final statusText = Text(
+      status,
+      key: const Key('call-status'),
+      textAlign: video ? TextAlign.start : TextAlign.center,
+      style: mono(state == 'connected' && !video ? 20 : 14, color: state == 'connected' ? ink : muted),
+    );
     return Column(
       children: [
+        if (video)
+          // Beside the back button's place, clear of our picture's corner.
+          Padding(
+            padding: const EdgeInsets.only(left: 28, right: 120),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    name,
+                    style: display(22, color: ink),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  const SizedBox(height: 4),
+                  statusText,
+                ],
+              ),
+            ),
+          ),
         const Spacer(),
         if (!video) ...[
           _Ripples(
@@ -252,22 +292,14 @@ class _CallPageState extends State<CallPage> {
             child: Monogram(name: name, keyHex: call.peer, size: 112),
           ),
           const SizedBox(height: 28),
-        ],
-        Text(
-          name,
-          style: display(36, color: k.ink),
-          textAlign: TextAlign.center,
-        ),
-        const SizedBox(height: 10),
-        AnimatedSwitcher(
-          duration: const Duration(milliseconds: 250),
-          child: Text(
-            status,
-            key: const Key('call-status'),
+          Text(
+            name,
+            style: display(36, color: k.ink),
             textAlign: TextAlign.center,
-            style: mono(state == 'connected' ? 20 : 14, color: state == 'connected' ? k.ink : k.muted),
           ),
-        ),
+          const SizedBox(height: 10),
+          AnimatedSwitcher(duration: const Duration(milliseconds: 250), child: statusText),
+        ],
         if (tile != null)
           Padding(
             padding: const EdgeInsets.only(top: 14),
@@ -298,18 +330,13 @@ class _CallPageState extends State<CallPage> {
               textAlign: TextAlign.center,
             ),
           ),
-        if (state == 'connected' && talk.echoCancellation != null)
-          Padding(
-            padding: const EdgeInsets.only(top: 10),
-            child: Text('Echo cancellation: ${talk.echoCancellation}', style: mono(11, color: k.muted)),
-          ),
-        const Spacer(),
+        if (!video) const Spacer(),
         if (state == 'connected')
           Padding(
             padding: const EdgeInsets.only(bottom: 18),
             child: Row(
               children: [
-                Icon(Icons.volume_down_rounded, color: k.muted),
+                Icon(Icons.volume_down_rounded, color: muted),
                 Expanded(
                   child: Slider(
                     key: const Key('call-volume'),
@@ -318,7 +345,7 @@ class _CallPageState extends State<CallPage> {
                     onChanged: (v) => talk.volume = v,
                   ),
                 ),
-                Icon(Icons.volume_up_rounded, color: k.muted),
+                Icon(Icons.volume_up_rounded, color: muted),
               ],
             ),
           ),
@@ -328,6 +355,7 @@ class _CallPageState extends State<CallPage> {
           children: [
             if (ringing) ...[
               _RoundButton(
+                labelColor: muted,
                 key: const Key('call-decline'),
                 label: 'Decline',
                 icon: Icons.call_end_rounded,
@@ -337,6 +365,7 @@ class _CallPageState extends State<CallPage> {
               // Plain Answer keeps the camera off, even on a
               // video call: it is never on without a tap.
               _RoundButton(
+                labelColor: muted,
                 key: const Key('call-answer'),
                 label: 'Answer',
                 icon: Icons.call_rounded,
@@ -345,6 +374,7 @@ class _CallPageState extends State<CallPage> {
               ),
               if (call.video)
                 _RoundButton(
+                  labelColor: muted,
                   key: const Key('call-answer-video'),
                   label: 'Answer with video',
                   icon: Icons.videocam_rounded,
@@ -353,6 +383,7 @@ class _CallPageState extends State<CallPage> {
                 ),
             ] else if (call.live) ...[
               _RoundButton(
+                labelColor: muted,
                 key: const Key('call-mute'),
                 label: talk.muted ? 'Unmute' : 'Mute',
                 tooltip: talk.muted ? 'Unmute' : 'Mute',
@@ -363,6 +394,7 @@ class _CallPageState extends State<CallPage> {
               ),
               if (talk.cameraSwitch)
                 _RoundButton(
+                  labelColor: muted,
                   key: const Key('call-camera'),
                   label: noCamera ? 'No camera' : 'Camera',
                   tooltip: noCamera
@@ -375,6 +407,7 @@ class _CallPageState extends State<CallPage> {
                 ),
               if (talk.canSwitchCamera && talk.cameraOn)
                 _RoundButton(
+                  labelColor: muted,
                   key: const Key('call-switch-camera'),
                   label: 'Switch camera',
                   tooltip: 'Switch camera',
@@ -384,6 +417,7 @@ class _CallPageState extends State<CallPage> {
                   onPressed: talk.switchCamera,
                 ),
               _RoundButton(
+                labelColor: muted,
                 key: const Key('call-hangup'),
                 label: 'Hang up',
                 tooltip: 'Hang up',
@@ -400,6 +434,26 @@ class _CallPageState extends State<CallPage> {
   }
 }
 
+/// A shade over the picture, dark at the screen's edge, so the bars over
+/// it can be read whatever it shows.
+class _Shade extends StatelessWidget {
+  const _Shade({required this.fromTop});
+  final bool fromTop;
+
+  @override
+  Widget build(BuildContext context) => IgnorePointer(
+    child: DecoratedBox(
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: fromTop ? Alignment.topCenter : Alignment.bottomCenter,
+          end: fromTop ? Alignment.bottomCenter : Alignment.topCenter,
+          colors: const [Color(0xB3000000), Color(0x00000000)],
+        ),
+      ),
+    ),
+  );
+}
+
 class _RoundButton extends StatelessWidget {
   const _RoundButton({
     super.key,
@@ -409,7 +463,9 @@ class _RoundButton extends StatelessWidget {
     required this.onPressed,
     this.foreground = Colors.white,
     this.tooltip,
+    this.labelColor,
   });
+  final Color? labelColor;
   final String label;
   final String? tooltip;
   final IconData icon;
@@ -440,7 +496,7 @@ class _RoundButton extends StatelessWidget {
           const SizedBox(height: 10),
           Text(
             label,
-            style: mono(11.5, color: k.muted),
+            style: mono(11.5, color: labelColor ?? k.muted),
             textAlign: TextAlign.center,
             maxLines: 2,
           ),
