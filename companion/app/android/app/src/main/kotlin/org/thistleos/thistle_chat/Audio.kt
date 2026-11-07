@@ -1,6 +1,7 @@
 package org.thistleos.thistle_chat
 
 import android.annotation.SuppressLint
+import android.app.Activity
 import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioFormat
@@ -15,6 +16,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
 import android.util.Log
+import android.view.WindowManager
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
@@ -33,6 +35,13 @@ import java.util.concurrent.LinkedBlockingQueue
  * turns the screen off at the ear (proximity), and has [ListenService] in
  * the foreground as using the microphone, so the call keeps its audio with
  * the app in the background (Android 14).
+ *
+ * A WebRTC call (`rtc.begin` .. `rtc.end`) has libwebrtc record and play,
+ * and flutter_webrtc's audio switch set the mode and the output; here it
+ * only has the service in the foreground as using the microphone, and the
+ * screen: dark at the ear (proximity) while no video shows, kept on while
+ * one does (`rtc.video`), on whichever window is attached, the main one or
+ * the call window.
  */
 class Audio(private val context: Context, engine: FlutterEngine) :
     MethodChannel.MethodCallHandler, EventChannel.StreamHandler {
@@ -52,6 +61,16 @@ class Audio(private val context: Context, engine: FlutterEngine) :
     private var inCall = false
     private var savedMode = AudioManager.MODE_NORMAL
     private var proximity: PowerManager.WakeLock? = null
+    private var inRtc = false
+    private var keepScreenOn = false
+
+    /** The window attached to the engine, if one is: for keeping the screen on. */
+    var window: Activity? = null
+        set(value) {
+            if (field !== value) field?.let { keepOn(it, false) }
+            field = value
+            value?.let { keepOn(it, keepScreenOn) }
+        }
     private val audioManager = context.getSystemService(AudioManager::class.java)
 
     init {
@@ -97,6 +116,18 @@ class Audio(private val context: Context, engine: FlutterEngine) :
                     endCall()
                     result.success(null)
                 }
+                "rtc.begin" -> {
+                    beginRtc()
+                    result.success(null)
+                }
+                "rtc.video" -> {
+                    rtcVideo(call.argument<Boolean>("shown") == true)
+                    result.success(null)
+                }
+                "rtc.end" -> {
+                    endRtc()
+                    result.success(null)
+                }
                 else -> result.notImplemented()
             }
         } catch (e: Exception) {
@@ -112,6 +143,7 @@ class Audio(private val context: Context, engine: FlutterEngine) :
         speakers.values.forEach { it.close {} }
         speakers.clear()
         endCall()
+        endRtc()
     }
 
     /** Opens the microphone; what cancels its echo for a call, or null. */
@@ -127,6 +159,58 @@ class Audio(private val context: Context, engine: FlutterEngine) :
         inCall = true
         savedMode = audioManager.mode
         audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+        callStarted()
+    }
+
+    private fun endCall() {
+        if (!inCall) return
+        inCall = false
+        audioManager.mode = savedMode
+        callEnded()
+    }
+
+    /** A WebRTC call: the service and the screen, no mode (libwebrtc's audio switch has it). */
+    private fun beginRtc() {
+        if (inRtc) return
+        inRtc = true
+        callStarted()
+    }
+
+    /** Video on screen: the screen stays on and lit; none: dark at the ear again. */
+    private fun rtcVideo(shown: Boolean) {
+        if (!inRtc) return
+        darkAtTheEar(!shown)
+        keepScreenOn = shown
+        window?.let { keepOn(it, shown) }
+    }
+
+    private fun endRtc() {
+        if (!inRtc) return
+        inRtc = false
+        keepScreenOn = false
+        window?.let { keepOn(it, false) }
+        callEnded()
+    }
+
+    /** What every call has: the screen dark at the ear, and the service in the foreground as using the microphone. */
+    private fun callStarted() {
+        darkAtTheEar(true)
+        ListenService.call(context, true)
+    }
+
+    private fun callEnded() {
+        darkAtTheEar(false)
+        ListenService.call(context, false)
+    }
+
+    /** The proximity lock: the screen off while something is near it. */
+    private fun darkAtTheEar(on: Boolean) {
+        if (!on) {
+            proximity?.release()
+            proximity = null
+            return
+        }
+        if (proximity != null) return
         val power = context.getSystemService(PowerManager::class.java)
         if (power.isWakeLockLevelSupported(PowerManager.PROXIMITY_SCREEN_OFF_WAKE_LOCK)) {
             proximity = power.newWakeLock(PowerManager.PROXIMITY_SCREEN_OFF_WAKE_LOCK, "thistle_chat:call").apply {
@@ -134,16 +218,14 @@ class Audio(private val context: Context, engine: FlutterEngine) :
                 acquire(4 * 60 * 60 * 1000L) // a call's longest; released at its end
             }
         }
-        ListenService.call(context, true)
     }
 
-    private fun endCall() {
-        if (!inCall) return
-        inCall = false
-        audioManager.mode = savedMode
-        proximity?.release()
-        proximity = null
-        ListenService.call(context, false)
+    private fun keepOn(activity: Activity, on: Boolean) = activity.runOnUiThread {
+        if (on) {
+            activity.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        } else {
+            activity.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
     }
 
     /** AudioRecord on a thread of its own, its frames to the event channel. */

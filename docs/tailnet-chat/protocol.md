@@ -229,15 +229,25 @@ through the outbox, and acked.
 
 ```json
 {"type":"call_offer","call":"<32 hex>","transports":["ws-opus"],"stream":2}
+{"type":"call_offer","call":"<32 hex>","transports":["webrtc","ws-opus"],"stream":2,"video":false}
 {"type":"call_answer","call":"<32 hex>","transport":"ws-opus"}
 {"type":"call_answer","call":"<32 hex>","decline":"busy"}
 {"type":"call_end","call":"<32 hex>","reason":"hangup"}
 ```
 
 - `call_offer` lists the media transports the caller can use, best first.
-  v1 defines one, **`ws-opus`**: Opus, 16 kHz mono, 20 ms frames, as
+  v1 defines two. **`ws-opus`**: Opus, 16 kHz mono, 20 ms frames, as
   binary frames of kind `02` on `stream`, one Opus packet each, sequence
   numbers counting frames from 0. Both directions use the same stream id.
+  **`webrtc`**, between two chat peers whose hellos both announce
+  `call:webrtc` and do not both announce `call:webrtc-prflx` (section
+  4.11). A caller MUST list `webrtc` first when that holds, then `ws-opus`
+  when both announce `call:ws-opus`, and MUST NOT list `webrtc` otherwise.
+- `video`, a boolean, goes with an offer that lists `webrtc`, and only
+  then: whether the caller's camera is on as it rings.
+- The callee MUST pick `webrtc` whenever it is offered and the callee
+  announced `call:webrtc`, else `ws-opus`; with neither in common, it
+  declines `unsupported`.
 - `call_answer` carries exactly one of `transport`, the one picked from
   the offer, or `decline` with a reason: `declined` (the user said no, or
   the caller is not a contact), `busy` (in a call already), `unsupported`
@@ -249,7 +259,9 @@ through the outbox, and acked.
   time and end it the same way.
 - A receiver SHOULD play from a jitter buffer of 60 to 200 ms and conceal a
   lost or late frame with Opus' own loss concealment. Either side MUST end
-  a connected call after **10 s** without a frame from the other.
+  a connected `ws-opus` call after **10 s** without a frame from the other.
+  A `webrtc` call carries no frames of kind `02`, and ends by the rules of
+  section 4.11.
 - A peer in a call MUST answer another offer with `decline` `busy`. A peer
   MUST decline an offer from a key that is not a contact with `declined`.
 - A call to a peer that cannot be connected to fails at once, as
@@ -302,10 +314,102 @@ hello did not announce it draws `error unsupported`.
 
 Neither frame is queued or acked: both are sent on an open connection.
 
+### 4.11 WebRTC calls: `call_rtc`, `call_camera`
+
+Between two video-capable chat peers (both hellos announce `call:webrtc`;
+the companion apps on Linux and Android do, the T-Deck does not) a call
+runs on WebRTC, with or without a camera on, unless both hellos also
+announce `call:webrtc-prflx` (below): then it runs on `ws-opus`, voice
+only. ADR-0016 has the reasons.
+`vectors/webrtc.json` has one of each frame, frames that must be refused,
+which candidates are admitted, and an SDP with its candidates outside the
+tailnet removed.
+
+```json
+{"type":"call_rtc","call":"<32 hex>","sdp":{"type":"offer","sdp":"v=0\r\n..."}}
+{"type":"call_rtc","call":"<32 hex>","candidate":{"candidate":"candidate:1 1 udp 2122260223 100.91.111.54 47998 typ host","sdpMid":"0","sdpMLineIndex":0}}
+{"type":"call_camera","call":"<32 hex>","camera":"paused"}
+```
+
+- **Signalling, once.** After `call_answer` picks `webrtc`, the caller
+  sends its SDP offer and the callee its SDP answer, each as a `call_rtc`
+  frame with `sdp` (`type` `offer` or `answer`, and `sdp`, the session
+  description as WebRTC writes it); both then send their ICE candidates as
+  they are gathered, each as a `call_rtc` frame with `candidate`
+  (`candidate`, the candidate's line, 1 to 1024 bytes; `sdpMid`, a string;
+  `sdpMLineIndex`, 0 to 65535). A `call_rtc` carries exactly one of `sdp`
+  and `candidate`; neither or both is `bad_request`. Both are opaque to the
+  chat connection: nothing in this protocol reads an SDP but its candidate
+  lines.
+- **One audio and one video track, negotiated from the start**, both ways,
+  whether or not a camera is on. Switching a camera on, off or to another
+  camera replaces a track and never renegotiates: there is no second offer,
+  and no glare to resolve.
+- **Tailnet only.** A side MUST NOT configure any ICE server (no STUN, no
+  TURN). It MUST send only UDP candidates whose address is in
+  `100.64.0.0/10` or `fd7a:115c:a1e0::/48` (an mDNS name is not an
+  address), and MUST ignore any other it receives, in a `call_rtc` frame or
+  as an `a=candidate` line of an SDP, which it removes before taking the
+  SDP. A side SHOULD gather no TCP candidates at all. The media goes over
+  WireGuard like every other frame; WebRTC's own DTLS-SRTP inside it cannot
+  be turned off and is not relied on.
+- **The selected pair.** Filtering what is signalled does not stop a
+  WebRTC stack that binds every interface from checking, and nominating, a
+  pair from a local address it never sent: on one machine, libwebrtc's
+  first selected pair is a peer-reflexive LAN address to the other side's
+  tailnet one, and within half a second it moves to a pair with tailnet
+  addresses at both ends. So while a call's media is connected, a side
+  SHOULD read the candidate pair its WebRTC has selected, both ends'
+  addresses, once ICE has settled, **2 s** after it first connects, and
+  every **5 s** after; if either end is outside the ranges above it SHOULD
+  end the call with `call_end` `error`. Between two machines a packet
+  from a LAN socket to a tailnet address should not cross WireGuard at
+  all; that is yet to be watched on hardware. A peer-reflexive end whose
+  address is in the ranges passes: the companion app on Android gathers
+  no candidate on the Tailscale app's interface (libwebrtc's, which
+  flutter_webrtc gives no way to change), so it signals none, and its
+  checks reach the other side's tailnet address through the VPN; both
+  sides then see a peer-reflexive tailnet address at the phone's end.
+  libwebrtc's statistics hide a peer-reflexive remote's address, so the
+  side facing the phone reads none there; a pair whose remote end is
+  peer-reflexive with no address passes when its local end is in the
+  ranges, as the remote's checks reached that socket, and only through
+  WireGuard.
+- **`call:webrtc-prflx`**: a side whose WebRTC gathers no candidate in
+  the ranges above (the companion app on Android) announces it beside
+  `call:webrtc`. Two such sides would have no candidate between them and
+  never connect, so a call between them is not offered `webrtc` (section
+  4.8) and runs on `ws-opus`, with no `video` member and no camera. With
+  one such side the call is WebRTC as above. A peer that announces
+  `call:webrtc-prflx` without `call:webrtc` announces nothing of WebRTC.
+  A peer from before this word (an older Android app) announces
+  `call:webrtc` alone; a call between it and a phone is offered `webrtc`
+  and, having no candidate, ends with `call_end` `timeout` 15 s after the
+  answer.
+- **Codecs.** VP8 SHOULD be first in the video codec preferences and Opus
+  in the audio ones; H.264 SHOULD NOT be offered. The media is WebRTC's,
+  not this protocol's binary frames; kind `02` stays `ws-opus`'s.
+- **`call_camera`** says what the sender's camera is doing: `on`, `off`,
+  `paused` (its app left the foreground) or `none` (no camera, no
+  permission, or one that opened and gave no picture). Each side sends it
+  once the call is answered and at every change; the other side's tile
+  follows it.
+- **Ends.** The 45 s ring and `busy` rules of section 4.8 hold. A side whose
+  WebRTC connection has not connected **15 s** after the answer MUST end
+  the call with `call_end` `timeout`; one whose connection, once connected,
+  stays disconnected for **10 s** MUST end it with `call_end` `error`.
+  Either side may be first; the other takes the `call_end`. A WebRTC call
+  never falls back to `ws-opus` once answered.
+- `call_rtc` and `call_camera` for a call that is not a connected WebRTC
+  call between the two are ignored. Neither is queued nor acked: calls are
+  never in the outbox.
+
 ## 5. Capabilities
 
 v1 announces: `text`, `receipts`, `typing`, `reply`, `react`,
-`voice-message`, `call:ws-opus`, `peers`.
+`voice-message`, `call:ws-opus`, `peers`; a video-capable chat peer adds
+`call:webrtc`, and one whose WebRTC gathers no tailnet candidate also
+`call:webrtc-prflx` (section 4.11).
 
 - A peer MUST use a feature only if both hellos announce it: no `read`
   unless both have `receipts`, no `typing` frame unless both have
@@ -316,13 +420,13 @@ v1 announces: `text`, `receipts`, `typing`, `reply`, `react`,
   ends at once as `unsupported`, with nothing sent; a peer without
   `peers` is not asked for its peer list (section 4.10).
 - A peer MUST ignore a capability it does not know.
-- **Room for later, with no new version.** Video: a `webrtc` capability and
-  a `webrtc` transport in `call_offer`, its SDP and ICE exchanged as JSON
-  frames on the same connection, between peers that both announce it.
-  Files: a `file` capability, a `file` message and its chunks as binary
-  frames of kind `03`, like a voice message but resumable. A v1 peer
-  answers either message with `error unsupported`, and never sees one from
-  a peer that read its hello.
+- A peer without `call:webrtc` is never offered `webrtc` and so never sees
+  `call_rtc` or `call_camera`; one that receives either anyway answers
+  `error unsupported`, as for any type it does not know.
+- **Room for later, with no new version.** Files: a `file` capability, a
+  `file` message and its chunks as binary frames of kind `03`, like a voice
+  message but resumable. A v1 peer answers it with `error unsupported`, and
+  never sees one from a peer that read its hello.
 
 ## 6. Binary frames
 

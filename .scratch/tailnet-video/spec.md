@@ -18,6 +18,14 @@ leave Tailnet chat for another messenger, one that goes through a company's
 servers, to do so. The T-Deck has no camera and could not show video, so
 whatever is added must leave its calls as they are.
 
+A call to a locked Android phone does not ring like a call either: the
+phone vibrates once, as for a message, and nothing comes on the screen.
+The call notification asks to fill the screen, but the only window it can
+open is the app's, which is kept off the lock screen so that the chats are
+never shown there; the notification alerts once, and the app plays its own
+two-tone ring. Every chat app the user has rings with the phone's ringtone
+and a call screen over the lock screen.
+
 ## Solution
 
 Calls between two companion apps on Linux and Android carry video. There is
@@ -31,6 +39,12 @@ video-capable, and calls with them are the voice calls of today.
 Between two video-capable chat peers a call runs on WebRTC, with or without a
 camera on, over the tailnet's addresses only. Calls with the T-Deck stay on
 `ws-opus`.
+
+On Android, every call that comes in, from a companion app or the T-Deck,
+voice or video, rings like a phone call: the screen turns on, a call screen
+shows over the lock screen with nothing of the chats behind it, and the
+phone's ringtone loops and vibrates as its ringer switch says, until the call
+is answered, declined or given up.
 
 ## User Stories
 
@@ -132,6 +146,36 @@ camera on, over the tailnet's addresses only. Calls with the T-Deck stay on
 34. As the user, I want video offered only to contacts, as calls are, so
     that a stranger cannot call me with a camera.
 
+### A call to a locked phone (Android)
+
+42. As the user, I want a call to my locked phone to turn the screen on and
+    show a call screen over the lock screen, so that I see who is calling
+    without unlocking.
+43. As the user, I want to answer or decline from that screen without
+    unlocking, and Answer with video when the caller's camera is on, so that
+    it works like a phone call.
+44. As the user, I want nothing but the call on that screen, and to be back
+    at the lock screen when the call ends, so that someone holding my locked
+    phone cannot read my chats.
+45. As the user, I want the phone's own ringtone to ring, again and again,
+    until I answer, decline or the caller gives up, so that a call sounds
+    like a call and not a message.
+46. As the user, I want the ring to follow my ringer switch and Do Not
+    Disturb's rules for calls, so that a silenced phone stays silent.
+47. As the user, I want the phone to vibrate while it rings when it is on
+    vibrate or set to ring and vibrate, so that I feel a call in my pocket.
+48. As the user, I want a call to ring this way whether it comes from my
+    laptop, another companion app or my T-Deck, and with or without video,
+    so that every call is the same.
+49. As the user, I want a call that comes while the phone is unlocked but
+    the app is in the background to show as a call notification with Answer
+    and Decline and ring the same way, so that I can take it from anywhere.
+50. As the user, I want Settings to tell me when Android stops calls from
+    filling the screen, with a button to the page that allows it, so that I
+    can fix it once.
+51. As the user, I want a call to still ring as a call notification when
+    that permission is missing, so that I never miss one for it.
+
 ### Development
 
 35. As a developer, I want the protocol document to describe `call:webrtc`,
@@ -193,7 +237,13 @@ camera on, over the tailnet's addresses only. Calls with the T-Deck stay on
   candidates whose address is in 100.64.0.0/10 or fd7a:115c:a1e0::/48, and
   ignores any other it receives, in `call_rtc` or inside an SDP. Media goes
   over WireGuard like every other frame; WebRTC's own DTLS-SRTP inside it
-  cannot be turned off and is not relied on.
+  cannot be turned off and is not relied on. libwebrtc binds every
+  interface and may still select a pair from an address it never sent
+  (tickets 02 and 03), so while the media is connected the app reads the
+  selected pair from WebRTC's statistics, 2 s after it first connects (on
+  one machine the first pair is a peer-reflexive LAN address, gone within
+  half a second) and every 5 s after, and ends the call with `call_end`
+  `error` if either end is outside those ranges.
 - **Ends.** The 45 s ring and `busy` rules are unchanged. A WebRTC call
   that is not connected 15 s after the answer, or that stays disconnected
   for 10 s, is ended by either side with `call_end` `error` (connected) or
@@ -263,6 +313,42 @@ camera on, over the tailnet's addresses only. Calls with the T-Deck stay on
   app starts none while a camera is on, or the spike shows that its
   short-lived ones do no harm.
 
+### A call to a locked phone (Android)
+
+- **For every incoming call**, `ws-opus` or WebRTC, voice or video. Nothing
+  changes on Linux, which keeps its notification and two-tone ring.
+- **A call window of its own**: an activity apart from the main one, shown
+  over the lock screen and turning the screen on, on the one Flutter
+  engine, that shows the call screen and nothing else. The full-screen
+  intent of the call notification opens it; answering from it needs no
+  unlock. When the call ends it finishes, so a locked phone is back at the
+  lock screen; only unlocking reaches the chats. The main window stays off
+  the lock screen, as before.
+- **A call-style notification** (Android's own, with the caller, Answer and
+  Decline), on the `calls` channel, while a call rings: on the lock screen
+  it is what opens the call window, and with the phone unlocked and the app
+  in the background it is a heads-up notification. Its Answer and Decline
+  reach the engine whose chat peer has the call.
+- **The ring is the phone's**: its default ringtone, looping, on the
+  ringtone stream, with a repeating vibration, both by the phone's ringer
+  mode and Do Not Disturb's call rules, from the offer until the answer, the
+  decline, the caller's `call_end` or the 45 s timeout. The app's
+  synthesised ring is no longer played on Android. The call notification is
+  silent itself, so nothing rings twice.
+- **The full-screen permission.** Where Android withholds it (Android 14
+  and later, for apps that are not calling apps), the app checks at start
+  and when a call comes; lacking it, Settings shows "Calls can't fill the
+  screen" with a button to Android's page for it, and calls ring as the
+  call-style notification alone.
+- **Not Telecom.** Calls are not registered with Android's telephony
+  framework (a self-managed ConnectionService): no answering from a
+  Bluetooth headset or a car, and the system does not arbitrate between a
+  tailnet call and a cellular one.
+- **The seam** is the notifier the call controller already drives (ringing
+  and stop ringing): its Android implementation gains the call window, the
+  call-style notification and the ringtone; the call tests drive a fake of
+  it, as they do now.
+
 ### Order of work
 
 1. **A spike, blocking the rest**: a tailnet-only VP8 call between the
@@ -275,7 +361,10 @@ camera on, over the tailnet's addresses only. Calls with the T-Deck stay on
 3. The Linux app: the media engine, the call screen, the build's pinning.
 4. The Android app: the camera's lifecycle, the audio route, Gradle
    verification.
-5. The manual hardware run.
+5. Android's incoming call: the call window over the lock screen, the
+   call-style notification, the phone's ringtone, the full-screen
+   permission. It does not need video and does not wait for the spike.
+6. The manual hardware run.
 
 ## Testing Decisions
 
@@ -304,13 +393,24 @@ camera on, over the tailnet's addresses only. Calls with the T-Deck stay on
   permission sending `none`; on Android, leaving the app sending `paused`
   and the audio route following the video. Prior art: the app's voice
   call and UI tests, and its fake audio devices.
+- **Ringing on Android.** The call tests check, through the fake notifier,
+  that a call coming in with the app in the background asks to ring with the
+  caller and whether the camera is on, and that the answer, the decline, the
+  caller's end and the timeout each stop it; the settings test, that the
+  banner shows when the full-screen permission is missing. The call window,
+  the ringtone and the lock screen are Android's, checked on the phone.
 - **Test vectors** beside the protocol document get one of each new frame.
 - **Hardware**, a written manual run in the tickets: Linux to Android and
   back, Linux to Linux, over WiFi directly and through DERP, with mobile
   data on the phone; a laptop without a camera; camera permission refused;
   leaving the app on Android; the speaker and the earpiece; echo with the
   laptop's own speaker; a call to the T-Deck from each, unchanged; a second
-  call in a row on Linux, for the freeze.
+  call in a row on Linux, for the freeze. On a locked phone: a call from the
+  Linux app and one from the T-Deck turn the screen on and ring with the
+  phone's ringtone; answered without unlocking, the chats are not reachable
+  and the lock screen is back after the hang-up; the ringer on vibrate and
+  on silent, and Do Not Disturb; the full-screen permission revoked in
+  Android's settings, and the banner.
 
 ## Out of Scope
 
@@ -323,6 +423,10 @@ camera on, over the tailnet's addresses only. Calls with the T-Deck stay on
 - A rule or setting for video over mobile data.
 - Switching a call between `ws-opus` and WebRTC once it has begun.
 - A call log in the companion app; missed calls stay notifications.
+- Registering calls with Android's telephony framework (a self-managed
+  ConnectionService): Bluetooth headset and car answering, and the system
+  arbitrating between a tailnet call and a cellular one.
+- Changes to how a call rings on Linux.
 
 ## Further Notes
 

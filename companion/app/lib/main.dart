@@ -9,11 +9,13 @@ import 'src/android.dart';
 import 'src/audio/android_audio.dart';
 import 'src/audio/devices.dart';
 import 'src/chat_model.dart';
+import 'src/child_processes.dart';
 import 'src/identity.dart';
 import 'src/notifier.dart';
 import 'src/options.dart';
 import 'src/permissions.dart';
 import 'src/tailnet.dart';
+import 'src/webrtc_engine.dart';
 import 'src/ui/app.dart';
 import 'src/ui/call_page.dart';
 
@@ -59,18 +61,25 @@ Future<void> main(List<String> args) async {
   final status = await readStatus();
   final navigator = GlobalKey<NavigatorState>();
   late final ChatModel model;
+  // On Android the phone rings for a call, with a call window over the
+  // lock screen; the notification's Answer and Decline come back here.
+  android?.onCall = (id, answer) => answer ? unawaited(model.talk.answer(id: id)) : model.talk.decline(id);
   final notifier = SystemNotifier(
+    ringer: android,
     onOpen: (box) {
       final nav = navigator.currentState;
       if (box != null && nav != null) openConversation(nav, model, box);
     },
     onCall: (id, answer) {
-      if (answer == true) unawaited(model.talk.answer(id));
+      if (answer == true) unawaited(model.talk.answer(id: id));
       if (answer == false) model.talk.decline(id);
       final ctx = navigator.currentContext;
       if (answer != false && ctx != null) showCall(ctx, model);
     },
   );
+  // `tailscale status` and PipeWire's echo canceller, kept clear of an open
+  // camera (child_processes.dart).
+  final children = ChildProcesses();
   // The microphone and speaker: audio files when asked (no sound card, a
   // second instance, a test run), else AudioRecord/AudioTrack on Android
   // and PulseAudio/PipeWire on Linux.
@@ -78,7 +87,7 @@ Future<void> main(List<String> args) async {
       ? FileAudioDevices(mic: options.mic, speakerDir: options.speakerDir)
       : android != null
       ? AndroidAudioDevices()
-      : PulseAudioDevices(configDir: dir.path, log: options.verbose ? stderr.writeln : null);
+      : PulseAudioDevices(configDir: dir.path, children: children, log: options.verbose ? stderr.writeln : null);
   await notifier.init();
   model = ChatModel(
     identity: identity,
@@ -88,6 +97,17 @@ Future<void> main(List<String> args) async {
     background: android,
     permissions: android == null ? null : Permissions(android),
     audio: audio,
+    children: children,
+    // Calls with another companion app on WebRTC; Android's gathers no
+    // tailnet candidate, so two phones call on ws-opus. On Android the
+    // sound follows the video (loudspeaker or earpiece), and the camera
+    // pauses while the app is away; the call lives on in the listening
+    // service.
+    callEngine: options.webrtc
+        ? WebrtcCallEngine(tailnetCandidates: android == null, log: options.verbose ? stderr.writeln : null)
+        : null,
+    callRoute: android != null ? AndroidCallRoute(log: options.verbose ? stderr.writeln : null) : null,
+    callWindow: android?.callWindow,
     notifier: notifier,
     listenHost: options.listenHost,
     port: options.port,
@@ -101,7 +121,7 @@ Future<void> main(List<String> args) async {
     // is no window: messages notify until one shows.
     model.foreground = WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
   }
-  runApp(ThistleChatApp(model: model, navigatorKey: navigator));
+  runApp(ThistleChatApp(model: model, navigatorKey: navigator, callWindow: android?.callWindow));
 }
 
 class _Failed extends StatelessWidget {

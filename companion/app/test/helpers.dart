@@ -2,10 +2,12 @@ import 'dart:async';
 import 'dart:math';
 import 'dart:typed_data';
 
+import 'package:flutter/widgets.dart';
 import 'package:tailnet_chat_core/tailnet_chat_core.dart';
 import 'package:thistle_chat/src/chat_model.dart';
 import 'package:thistle_chat/src/audio/devices.dart';
 import 'package:thistle_chat/src/background.dart';
+import 'package:thistle_chat/src/call_engine.dart';
 import 'package:thistle_chat/src/notifier.dart';
 import 'package:thistle_chat/src/permissions.dart';
 import 'package:thistle_chat/src/tailnet.dart';
@@ -13,7 +15,13 @@ import 'package:thistle_chat/src/tailnet.dart';
 class TestTailnet {
   TestTailnet(this.status);
   TailscaleStatus status;
-  Future<TailscaleStatus> read() async => status;
+
+  /// How many times it was read: `tailscale status` is a child process.
+  int reads = 0;
+  Future<TailscaleStatus> read() async {
+    reads++;
+    return status;
+  }
 }
 
 class Shown {
@@ -25,13 +33,27 @@ class Shown {
 }
 
 class RecordingNotifier implements Notifier {
+  RecordingNotifier({this.ringsItself = false});
   final List<Shown> shown = [];
   final List<String> rang = [];
+
+  /// Whether each ring was asked with the app in front, and with video.
+  final List<bool> rangInFront = [];
+  final List<bool> rangVideo = [];
   final List<String> stoppedRinging = [];
+
+  /// Android's notifier rings the phone itself.
+  @override
+  final bool ringsItself;
   @override
   Future<void> show(String title, String body, {String? conversation}) async => shown.add(Shown(title, body));
   @override
-  Future<void> ringing(String caller, String callId) async => rang.add(caller);
+  Future<void> ringing(String caller, String callId, {bool inFront = false, bool video = false}) async {
+    rang.add(caller);
+    rangInFront.add(inFront);
+    rangVideo.add(video);
+  }
+
   @override
   Future<void> stopRinging(String callId) async => stoppedRinging.add(callId);
 }
@@ -60,9 +82,15 @@ class FakeAudio implements AudioDevices {
     return _Kept((pcm) => played.add(pcm));
   }
 
+  /// How many times a call's devices were opened: a `ws-opus` call's, and
+  /// on Linux the PipeWire echo canceller with them.
+  int callsOpened = 0;
+
   @override
-  Future<CallDevices> call() async =>
-      CallDevices(pacedAudio(_tone), _Kept(null, into: callOut), 'none (test)', () async => callClosed = true);
+  Future<CallDevices> call() async {
+    callsOpened++;
+    return CallDevices(pacedAudio(_tone), _Kept(null, into: callOut), 'none (test)', () async => callClosed = true);
+  }
 }
 
 class _Kept implements AudioOut {
@@ -73,6 +101,28 @@ class _Kept implements AudioOut {
   void write(Int16List pcm) => _into.addAll(pcm);
   @override
   Future<void> close() async => onClose?.call(Int16List.fromList(_into));
+}
+
+/// Android's call window over the lock screen, shown and finished by hand;
+/// shown, it is in front.
+class TestCallWindow extends ChangeNotifier implements CallWindow {
+  @override
+  bool shown = false;
+  @override
+  bool get inFront => shown;
+  int finished = 0;
+
+  void show() {
+    shown = true;
+    notifyListeners();
+  }
+
+  @override
+  void finish() {
+    finished++;
+    shown = false;
+    notifyListeners();
+  }
 }
 
 class FakeService implements BackgroundService {
@@ -91,6 +141,19 @@ class FakePermissions implements PermissionPlatform {
   final Map<AppPermission, PermissionAnswer> state = {};
   final List<AppPermission> asked = [];
   int settingsOpened = 0;
+
+  /// Whether calls may fill the screen (Android 14's full-screen intents).
+  bool fillScreen = true;
+  int fillScreenChecks = 0;
+  int fillScreenOpened = 0;
+  @override
+  Future<bool> canFillScreen() async {
+    fillScreenChecks++;
+    return fillScreen;
+  }
+
+  @override
+  Future<void> openFillScreenSettings() async => fillScreenOpened++;
   @override
   Future<PermissionAnswer> status(AppPermission p) async => state[p] ?? PermissionAnswer.denied;
   @override
@@ -103,6 +166,186 @@ class FakePermissions implements PermissionPlatform {
   Future<void> openSettings() async => settingsOpened++;
 }
 
+/// A call media engine for tests: no WebRTC, but the signalling a real one
+/// does. The offerer gives an SDP offer, the other an answer to it; each
+/// gives its `candidates`; a session reports `connected` once it holds the
+/// other's SDP and a candidate, unless `connects` is false. Its `cameras`
+/// give a picture unless `picture` is false, and its video is a keyed box.
+class FakeCallEngine implements CallEngine {
+  FakeCallEngine({
+    this.candidates = const [tailnetCandidate, lanCandidate],
+    this.connects = true,
+    this.path = const CallPath(local: '100.64.0.1', remote: '100.64.0.2', localType: 'host', remoteType: 'host'),
+    this.cameraList = const ['Integrated Webcam'],
+    this.tailnetCandidates = true,
+  });
+
+  static const tailnetCandidate = 'candidate:1 1 udp 2122260223 100.64.0.1 47998 typ host generation 0';
+  static const lanCandidate = 'candidate:3 1 udp 2122194687 192.168.2.131 40000 typ host generation 0';
+
+  final List<String> candidates;
+  bool connects;
+  CallPath? path;
+
+  /// Cameras by id, facing no way said.
+  List<String> cameraList;
+  bool picture = true;
+
+  @override
+  final bool tailnetCandidates;
+
+  /// Called as a session starts, before it is handed back.
+  void Function()? onStart;
+
+  /// Whether starting a session throws, as WebRTC that does not start.
+  bool fails = false;
+  final List<FakeCallSession> sessions = [];
+
+  /// Cameras opened before a call's media, while it rings.
+  final List<FakeCameraPreview> previews = [];
+
+  FakeCallSession get session => sessions.last;
+
+  @override
+  Future<List<Camera>> cameras() async => [for (final id in cameraList) Camera(id)];
+
+  @override
+  Future<CameraPreview> preview(Camera camera) async {
+    if (!picture) throw const CameraUnavailable('no picture came from it');
+    final p = FakeCameraPreview(camera.id);
+    previews.add(p);
+    return p;
+  }
+
+  @override
+  Future<CallSession> start({
+    required bool offerer,
+    required SendRtc send,
+    required void Function(MediaState state) onState,
+    CameraPreview? camera,
+  }) async {
+    if (fails) throw StateError('no peer connection');
+    onStart?.call();
+    final s = FakeCallSession(this, offerer, send, onState)
+      ..adopted = camera
+      ..camera = camera?.camera.id;
+    sessions.add(s);
+    if (offerer) send(const RtcSdp('offer', 'v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\n'));
+    for (final c in candidates) {
+      send(RtcCandidate(c, sdpMid: '0', sdpMLineIndex: 0));
+    }
+    return s;
+  }
+}
+
+class FakeCallSession implements CallSession {
+  FakeCallSession(this.engine, this.offerer, this._send, this._onState);
+  final FakeCallEngine engine;
+  final bool offerer;
+  final SendRtc _send;
+  final void Function(MediaState) _onState;
+
+  /// What it took from the other side, in order.
+  final List<RtcSdp> sdps = [];
+  final List<String> candidates = [];
+  bool muted = false;
+  double volume = 1;
+  bool closed = false;
+  bool _connected = false;
+
+  void state(MediaState s) => _onState(s);
+
+  @override
+  String get echoCancellation => 'on (WebRTC, fake)';
+
+  @override
+  Future<void> take(RtcPayload payload) async {
+    if (closed) return;
+    switch (payload) {
+      case RtcSdp():
+        sdps.add(payload);
+        if (payload.type == 'offer') _send(const RtcSdp('answer', 'v=0\r\no=- 3 4 IN IP4 127.0.0.1\r\n'));
+      case RtcCandidate(:final candidate):
+        candidates.add(candidate);
+    }
+    if (!_connected && engine.connects && sdps.isNotEmpty && candidates.isNotEmpty) {
+      _connected = true;
+      _onState(MediaState.connected);
+    }
+  }
+
+  @override
+  Future<CallPath?> selectedPath() async => engine.path;
+
+  /// The camera sending now, by id, null for none; and every one it was
+  /// set to.
+  String? camera;
+  final List<String?> cameraLog = [];
+
+  /// The camera it was started with, open since the ring.
+  CameraPreview? adopted;
+
+  @override
+  Future<void> setCamera(Camera? camera) async {
+    cameraLog.add(camera?.id);
+    if (camera != null && !engine.picture) {
+      this.camera = null;
+      throw const CameraUnavailable('no picture came from it');
+    }
+    this.camera = camera?.id;
+  }
+
+  @override
+  Future<VideoStats?> videoStats() async => null;
+
+  @override
+  Widget remoteVideo() => const SizedBox.expand(key: Key('fake-remote-video'));
+
+  @override
+  Widget localVideo() => const SizedBox.expand(key: Key('fake-local-video'));
+
+  @override
+  Future<void> close() async {
+    camera = null;
+    closed = true;
+    await adopted?.close();
+  }
+}
+
+class FakeCameraPreview implements CameraPreview {
+  FakeCameraPreview(String id) : camera = Camera(id);
+  @override
+  final Camera camera;
+  bool closed = false;
+
+  @override
+  Widget view() => const SizedBox.expand(key: Key('fake-local-video'));
+
+  @override
+  Future<void> close() async => closed = true;
+}
+
+/// A phone's call route, as Android's would follow it: what it was told,
+/// in order (`begin`, `loudspeaker`, `earpiece`, `end`). Its camera pauses
+/// while the app is away.
+class FakeCallRoute implements CallRoute {
+  final List<String> log = [];
+
+  @override
+  bool get cameraPausesAway => true;
+
+  /// Where the sound goes now, the last of `loudspeaker` or `earpiece`;
+  /// null before either was told.
+  String? get now => log.where((e) => e == 'loudspeaker' || e == 'earpiece').lastOrNull;
+
+  @override
+  Future<void> begin() async => log.add('begin');
+  @override
+  Future<void> video(bool shown) async => log.add(shown ? 'loudspeaker' : 'earpiece');
+  @override
+  Future<void> end() async => log.add('end');
+}
+
 /// A model listening on loopback, with the tailnet `tailnet` says.
 ChatModel testModel(
   TestTailnet tailnet,
@@ -112,15 +355,22 @@ ChatModel testModel(
   FakePermissions? permissions,
   String store = ':memory:',
   AudioDevices? audio,
+  CallEngine? callEngine,
+  CallRoute? callRoute,
+  CallWindow? callWindow,
+  String name = 'laptop',
   Future<ProbeResult?> Function(PeerAddress address)? probe,
 }) => ChatModel(
   probe: probe,
+  callEngine: callEngine,
+  callRoute: callRoute,
+  callWindow: callWindow,
   audio: audio ?? FakeAudio(),
   identity: Identity.generate(),
   openStore: () => Store.open(store),
   background: service,
   permissions: permissions == null ? null : Permissions(permissions),
-  name: 'laptop',
+  name: name,
   readStatus: tailnet.read,
   notifier: notifier,
   listenHost: '127.0.0.1',

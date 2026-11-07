@@ -1,34 +1,89 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:tailnet_chat_core/tailnet_chat_core.dart' show Call, CallFault, CameraState, transportWebrtc;
 
 import '../chat_model.dart';
+import '../notifier.dart' show CallWindow;
 import 'theme.dart';
 import 'widgets.dart';
 
-bool _showing = false;
+/// The call screen showCall pushed, while it is up.
+Route<void>? _showing;
+
+/// What the app draws in its window: the screens, or while [window] shows,
+/// the call alone, the screens kept but neither drawn nor reachable.
+class CallWindowed extends StatelessWidget {
+  const CallWindowed({super.key, required this.model, required this.window, required this.child});
+  final ChatModel model;
+  final CallWindow window;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) => ListenableBuilder(
+    listenable: window,
+    builder: (context, _) => Stack(
+      children: [
+        Offstage(
+          offstage: window.shown,
+          child: TickerMode(enabled: !window.shown, child: child),
+        ),
+        if (window.shown)
+          // A navigator of its own for the call screen's dialogs and
+          // tooltips, with nothing beneath to go back to.
+          HeroControllerScope.none(
+            child: Navigator(
+              onGenerateRoute: (_) => MaterialPageRoute<void>(
+                builder: (_) => CallPage(
+                  model: model,
+                  onClose: () {
+                    model.talk.dismissCall();
+                    window.finish();
+                  },
+                ),
+              ),
+            ),
+          ),
+      ],
+    ),
+  );
+}
 
 /// Show the call screen over whatever is on screen, once.
 void showCall(BuildContext context, ChatModel model) {
-  if (_showing) return;
-  _showing = true;
-  Navigator.of(
-    context,
-  ).push(MaterialPageRoute<void>(fullscreenDialog: true, builder: (_) => CallPage(model: model))).whenComplete(() {
-    _showing = false;
+  // Gone with its navigator too, which completes nothing.
+  if (_showing?.isActive ?? false) return;
+  final route = _showing = MaterialPageRoute<void>(fullscreenDialog: true, builder: (_) => CallPage(model: model));
+  Navigator.of(context).push(route).whenComplete(() {
+    if (_showing == route) _showing = null;
     model.talk.dismissCall();
   });
 }
 
-/// What a finished call's state says, for the call screen.
-String callOutcome(String state) => switch (state) {
+/// What the other side's tile says while its camera gives no picture.
+const remoteCameraTile = <CameraState, String>{
+  CameraState.off: 'Camera off',
+  CameraState.paused: 'Camera paused',
+  CameraState.none: 'No camera',
+};
+
+/// What a finished call says, for the call screen; on WebRTC, a timeout is
+/// media that never connected, and an error says why where this side knows.
+String callOutcome(Call call) => switch (call.state) {
   'ended:unreachable' => 'Not reachable now. Leave a voice message instead.',
   'declined:busy' => 'Busy: in another call',
   'declined:declined' => 'Declined',
   'declined:unsupported' => 'Their app cannot take calls',
+  'ended:timeout' when call.transport == transportWebrtc => 'Call ended: it could not connect',
   'ended:timeout' => 'Call ended: no sound for 10 s',
   'ended:cellular' => 'Call ended: a phone call took over',
-  'ended:error' => 'Call ended: the connection dropped',
+  'ended:error' => switch (call.fault) {
+    CallFault.mediaLost => 'Call ended: the connection was lost for 10 s',
+    CallFault.offTailnet => 'Call ended: its media left the tailnet',
+    CallFault.webrtcFailed => 'Call ended: the call could not start',
+    CallFault.theirs => 'Call ended: it failed on their side',
+    CallFault.connectionLost || null => 'Call ended: the connection dropped',
+  },
   _ => 'Call ended',
 };
 
@@ -36,8 +91,11 @@ String callOutcome(String state) => switch (state) {
 /// call coming in, then mute, volume and hang up. Always dark, whatever
 /// the theme: a call is a room of its own.
 class CallPage extends StatefulWidget {
-  const CallPage({super.key, required this.model});
+  const CallPage({super.key, required this.model, this.onClose});
   final ChatModel model;
+
+  /// How the screen closes; by going back unless given.
+  final VoidCallback? onClose;
 
   @override
   State<CallPage> createState() => _CallPageState();
@@ -64,8 +122,13 @@ class _CallPageState extends State<CallPage> {
 
   void _closeSoon() {
     _close ??= Timer(const Duration(seconds: 3), () {
-      if (mounted) Navigator.of(context).maybePop();
+      if (mounted) _closeNow();
     });
+  }
+
+  void _closeNow() {
+    final close = widget.onClose;
+    close != null ? close() : Navigator.of(context).maybePop();
   }
 
   @override
@@ -95,11 +158,16 @@ class _CallPageState extends State<CallPage> {
       final ringing = state == 'ringing' && !call.mine;
       final waiting = state == 'offered' || state == 'ringing';
       final d = talk.connectedFor;
+      final remoteVideo = state == 'connected' && talk.remoteVideoShown ? talk.remoteVideo() : null;
+      final localVideo = call.live ? talk.localVideo() : null;
+      // What the other side's camera is doing, when there is no picture.
+      final tile = !call.webrtc || state != 'connected' ? null : remoteCameraTile[call.remoteCamera];
       final status = switch (state) {
         'offered' => 'Calling…',
+        'ringing' when call.video => 'Video call',
         'ringing' => 'Calling you',
         'connected' => '${d.inMinutes}:${(d.inSeconds % 60).toString().padLeft(2, '0')}',
-        _ => callOutcome(state),
+        _ => callOutcome(call),
       };
       if (!call.live) _closeSoon();
       return Scaffold(
@@ -121,119 +189,215 @@ class _CallPageState extends State<CallPage> {
             ),
           ),
           child: Grain(
-            child: SafeArea(
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(28, 24, 28, 28),
-                child: Column(
-                  children: [
-                    const Spacer(),
-                    _Ripples(
-                      active: waiting,
-                      color: tint,
-                      child: Monogram(name: name, keyHex: call.peer, size: 112),
-                    ),
-                    const SizedBox(height: 28),
-                    Text(
-                      name,
-                      style: display(36, color: k.ink),
-                      textAlign: TextAlign.center,
-                    ),
-                    const SizedBox(height: 10),
-                    AnimatedSwitcher(
-                      duration: const Duration(milliseconds: 250),
-                      child: Text(
-                        status,
-                        key: const Key('call-status'),
-                        textAlign: TextAlign.center,
-                        style: mono(state == 'connected' ? 20 : 14, color: state == 'connected' ? k.ink : k.muted),
-                      ),
-                    ),
-                    if (talk.audioProblem != null)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 10),
-                        child: Text(
-                          talk.audioProblem!,
-                          style: TextStyle(color: k.danger),
-                          textAlign: TextAlign.center,
-                        ),
-                      ),
-                    if (state == 'connected' && talk.echoCancellation != null)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 10),
-                        child: Text('Echo cancellation: ${talk.echoCancellation}', style: mono(11, color: k.muted)),
-                      ),
-                    const Spacer(),
-                    if (state == 'connected')
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 18),
-                        child: Row(
-                          children: [
-                            Icon(Icons.volume_down_rounded, color: k.muted),
-                            Expanded(
-                              child: Slider(
-                                key: const Key('call-volume'),
-                                value: talk.volume,
-                                max: 2,
-                                onChanged: (v) => talk.volume = v,
-                              ),
-                            ),
-                            Icon(Icons.volume_up_rounded, color: k.muted),
-                          ],
-                        ),
-                      ),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                      children: [
-                        if (ringing) ...[
-                          _RoundButton(
-                            key: const Key('call-decline'),
-                            label: 'Decline',
-                            icon: Icons.call_end_rounded,
-                            color: const Color(0xFFD8452E),
-                            onPressed: talk.decline,
-                          ),
-                          _RoundButton(
-                            key: const Key('call-answer'),
-                            label: 'Answer',
-                            icon: Icons.call_rounded,
-                            color: k.moss,
-                            onPressed: talk.answer,
-                          ),
-                        ] else if (call.live) ...[
-                          _RoundButton(
-                            key: const Key('call-mute'),
-                            label: talk.muted ? 'Unmute' : 'Mute',
-                            tooltip: talk.muted ? 'Unmute' : 'Mute',
-                            icon: talk.muted ? Icons.mic_off_rounded : Icons.mic_rounded,
-                            color: talk.muted ? k.ink : k.card,
-                            foreground: talk.muted ? k.paper : k.ink,
-                            onPressed: state == 'connected' ? () => talk.muted = !talk.muted : null,
-                          ),
-                          _RoundButton(
-                            key: const Key('call-hangup'),
-                            label: 'Hang up',
-                            tooltip: 'Hang up',
-                            icon: Icons.call_end_rounded,
-                            color: const Color(0xFFD8452E),
-                            onPressed: talk.hangUp,
-                          ),
-                        ] else
-                          FilledButton(
-                            key: const Key('call-close'),
-                            onPressed: () => Navigator.of(context).maybePop(),
-                            child: const Text('Close'),
-                          ),
-                      ],
-                    ),
-                  ],
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                // The other side's picture, full size, under everything.
+                if (remoteVideo != null) Positioned.fill(child: remoteVideo),
+                SafeArea(
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(28, 24, 28, 28),
+                    child: _content(context, call, name, tint, status, waiting, ringing, remoteVideo != null, tile),
+                  ),
                 ),
-              ),
+                // Ours, small, in a corner.
+                if (localVideo != null)
+                  Positioned(
+                    top: MediaQuery.paddingOf(context).top + 64,
+                    right: 16,
+                    width: 108,
+                    height: 144,
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(14),
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          color: Colors.black,
+                          border: Border.all(color: k.line),
+                        ),
+                        child: localVideo,
+                      ),
+                    ),
+                  ),
+              ],
             ),
           ),
         ),
       );
     },
   );
+
+  Widget _content(
+    BuildContext context,
+    Call call,
+    String name,
+    Color tint,
+    String status,
+    bool waiting,
+    bool ringing,
+    bool video,
+    String? tile,
+  ) {
+    final k = Palette.of(context);
+    final talk = widget.model.talk;
+    final state = call.state;
+    final cameras = talk.cameras;
+    final noCamera = cameras != null && cameras.isEmpty;
+    return Column(
+      children: [
+        const Spacer(),
+        if (!video) ...[
+          _Ripples(
+            active: waiting,
+            color: tint,
+            child: Monogram(name: name, keyHex: call.peer, size: 112),
+          ),
+          const SizedBox(height: 28),
+        ],
+        Text(
+          name,
+          style: display(36, color: k.ink),
+          textAlign: TextAlign.center,
+        ),
+        const SizedBox(height: 10),
+        AnimatedSwitcher(
+          duration: const Duration(milliseconds: 250),
+          child: Text(
+            status,
+            key: const Key('call-status'),
+            textAlign: TextAlign.center,
+            style: mono(state == 'connected' ? 20 : 14, color: state == 'connected' ? k.ink : k.muted),
+          ),
+        ),
+        if (tile != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 14),
+            child: Container(
+              key: const Key('call-remote-tile'),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+              decoration: BoxDecoration(
+                color: k.card,
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(color: k.line),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.videocam_off_rounded, size: 16, color: k.muted),
+                  const SizedBox(width: 8),
+                  Text(tile, style: mono(12, color: k.muted)),
+                ],
+              ),
+            ),
+          ),
+        for (final problem in [?talk.audioProblem, ?talk.cameraProblem])
+          Padding(
+            padding: const EdgeInsets.only(top: 10),
+            child: Text(
+              problem,
+              style: TextStyle(color: k.danger),
+              textAlign: TextAlign.center,
+            ),
+          ),
+        if (state == 'connected' && talk.echoCancellation != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 10),
+            child: Text('Echo cancellation: ${talk.echoCancellation}', style: mono(11, color: k.muted)),
+          ),
+        const Spacer(),
+        if (state == 'connected')
+          Padding(
+            padding: const EdgeInsets.only(bottom: 18),
+            child: Row(
+              children: [
+                Icon(Icons.volume_down_rounded, color: k.muted),
+                Expanded(
+                  child: Slider(
+                    key: const Key('call-volume'),
+                    value: talk.volume,
+                    max: 2,
+                    onChanged: (v) => talk.volume = v,
+                  ),
+                ),
+                Icon(Icons.volume_up_rounded, color: k.muted),
+              ],
+            ),
+          ),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+          crossAxisAlignment: CrossAxisAlignment.start, // the circles in line, whatever their labels
+          children: [
+            if (ringing) ...[
+              _RoundButton(
+                key: const Key('call-decline'),
+                label: 'Decline',
+                icon: Icons.call_end_rounded,
+                color: const Color(0xFFD8452E),
+                onPressed: talk.decline,
+              ),
+              // Plain Answer keeps the camera off, even on a
+              // video call: it is never on without a tap.
+              _RoundButton(
+                key: const Key('call-answer'),
+                label: 'Answer',
+                icon: Icons.call_rounded,
+                color: k.moss,
+                onPressed: talk.answer,
+              ),
+              if (call.video)
+                _RoundButton(
+                  key: const Key('call-answer-video'),
+                  label: 'Answer with video',
+                  icon: Icons.videocam_rounded,
+                  color: k.moss,
+                  onPressed: () => talk.answer(video: true),
+                ),
+            ] else if (call.live) ...[
+              _RoundButton(
+                key: const Key('call-mute'),
+                label: talk.muted ? 'Unmute' : 'Mute',
+                tooltip: talk.muted ? 'Unmute' : 'Mute',
+                icon: talk.muted ? Icons.mic_off_rounded : Icons.mic_rounded,
+                color: talk.muted ? k.ink : k.card,
+                foreground: talk.muted ? k.paper : k.ink,
+                onPressed: state == 'connected' ? () => talk.muted = !talk.muted : null,
+              ),
+              if (talk.cameraSwitch)
+                _RoundButton(
+                  key: const Key('call-camera'),
+                  label: noCamera ? 'No camera' : 'Camera',
+                  tooltip: noCamera
+                      ? 'No camera'
+                      : (talk.cameraSwitchOn ? 'Turn the camera off' : 'Turn the camera on'),
+                  icon: talk.cameraSwitchOn ? Icons.videocam_rounded : Icons.videocam_off_rounded,
+                  color: talk.cameraSwitchOn ? k.ink : k.card,
+                  foreground: talk.cameraSwitchOn ? k.paper : k.ink,
+                  onPressed: noCamera ? null : () => talk.setCameraOn(!talk.cameraSwitchOn),
+                ),
+              if (talk.canSwitchCamera && talk.cameraOn)
+                _RoundButton(
+                  key: const Key('call-switch-camera'),
+                  label: 'Switch camera',
+                  tooltip: 'Switch camera',
+                  icon: Icons.cameraswitch_rounded,
+                  color: k.card,
+                  foreground: k.ink,
+                  onPressed: talk.switchCamera,
+                ),
+              _RoundButton(
+                key: const Key('call-hangup'),
+                label: 'Hang up',
+                tooltip: 'Hang up',
+                icon: Icons.call_end_rounded,
+                color: const Color(0xFFD8452E),
+                onPressed: talk.hangUp,
+              ),
+            ] else
+              FilledButton(key: const Key('call-close'), onPressed: _closeNow, child: const Text('Close')),
+          ],
+        ),
+      ],
+    );
+  }
 }
 
 class _RoundButton extends StatelessWidget {
@@ -266,13 +430,22 @@ class _RoundButton extends StatelessWidget {
         child: SizedBox(width: 72, height: 72, child: Icon(icon, color: foreground, size: 30)),
       ),
     );
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        tooltip == null ? button : Tooltip(message: tooltip, child: button),
-        const SizedBox(height: 10),
-        Text(label, style: mono(11.5, color: k.muted)),
-      ],
+    // As wide as four fit on a phone; a long label takes two lines.
+    return SizedBox(
+      width: 80,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          tooltip == null ? button : Tooltip(message: tooltip, child: button),
+          const SizedBox(height: 10),
+          Text(
+            label,
+            style: mono(11.5, color: k.muted),
+            textAlign: TextAlign.center,
+            maxLines: 2,
+          ),
+        ],
+      ),
     );
   }
 }

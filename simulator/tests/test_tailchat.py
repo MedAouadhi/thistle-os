@@ -54,7 +54,11 @@ from tailnet_chat.peer import ChatPeer  # noqa: E402
 
 APP = "com.thistle.tailchat"
 # Every scenario but the calls, which have a case of their own.
-SCENARIOS = [s for s in conformance.SCENARIOS if s not in conformance.CALL_SCENARIOS]
+SCENARIOS = [s for s in conformance.SCENARIOS
+             if s not in conformance.CALL_SCENARIOS and s not in conformance.WEBRTC_SCENARIOS]
+# The device is not video-capable: of the WebRTC scenarios, the one that
+# shows it announces no call:webrtc and answers an offer of both with ws-opus.
+CALLS = conformance.CALL_SCENARIOS + [conformance.webrtc_unannounced_answers_ws_opus]
 
 # The app's tabs, along the bottom, and a tab's first row, on the T-Deck Max.
 TAB_REQUESTS = "200,298"
@@ -206,6 +210,11 @@ class SimTarget(conformance.Target):
 
     def talk(self, call: str):
         return True   # its microphone (THISTLE_SIM_MIC) streams by itself
+
+    def set_webrtc(self, on: bool):
+        if on:
+            raise conformance.Skipped("the T-Deck is not video-capable")
+        return True   # it never announces call:webrtc
 
     def screenshot(self, path: Path) -> None:
         self.call({"cmd": "screenshot", "file": str(path)})
@@ -735,7 +744,8 @@ def wav_samples(path: Path) -> list[int]:
 
 def case_calls(simulator: Path, root: Path) -> None:
     """The conformance suite's call scenarios against the simulator, the
-    cellular one through the fake modem's --call; the call screen by
+    cellular one through the fake modem's --call, and an offer of webrtc
+    and ws-opus answered with ws-opus; the call screen by
     screenshot; and the speaker playing what the reference peer sent."""
     dev = Device(simulator, root, "calls")
     speaker = root / "speaker.wav"
@@ -749,7 +759,7 @@ def case_calls(simulator: Path, root: Path) -> None:
                 out.append(s)
 
         skipped: list = []
-        failed = conformance.run(lambda: target, conformance.CALL_SCENARIOS, out=Out(), skipped=skipped)
+        failed = conformance.run(lambda: target, CALLS, out=Out(), skipped=skipped)
         print("      " + "".join(out).strip().replace("\n", "\n      "))
         assert failed == 0 and not skipped, f"{failed} call scenarios failed, {len(skipped)} skipped"
         log = dev.log_text()

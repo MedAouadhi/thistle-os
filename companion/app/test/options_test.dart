@@ -34,6 +34,11 @@ void main() {
     expect(AppOptions.parse(const []).mic, isNull);
   });
 
+  test('--no-webrtc: calls to another companion app on ws-opus, as before', () {
+    expect(AppOptions.parse(const []).webrtc, isTrue);
+    expect(AppOptions.parse(const ['--no-webrtc']).webrtc, isFalse);
+  });
+
   test('a bad option says so', () {
     expect(() => AppOptions.parse(const ['--port', 'x']), throwsFormatException);
     expect(() => AppOptions.parse(const ['--what']), throwsFormatException);

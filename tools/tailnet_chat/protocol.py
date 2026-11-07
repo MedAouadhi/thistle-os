@@ -17,6 +17,12 @@ PORT = 4810
 PATH = "/tailnet-chat/1"
 
 CAPS_V1 = ("text", "receipts", "typing", "reply", "react", "voice-message", "call:ws-opus", "peers")
+# A video-capable chat peer adds it (section 4.11); the T-Deck does not.
+CAP_WEBRTC = "call:webrtc"
+# And one whose WebRTC gathers no tailnet candidate (Android's) adds this
+# too: two such peers call on ws-opus (section 4.11).
+CAP_WEBRTC_PRFLX = "call:webrtc-prflx"
+CAMERA_STATES = ("on", "off", "paused", "none")
 
 LABEL = b"tailnet-chat/1 auth\x00"
 ROLES = {"dialler": 1, "listener": 2}
@@ -154,6 +160,54 @@ def addresses_to_probe(peers) -> list:
     return out
 
 
+def webrtc_between(mine, theirs) -> bool:
+    """Whether a call between two hellos' peers runs on WebRTC: both announce
+    `call:webrtc`, and not both `call:webrtc-prflx` (no candidate between
+    them)."""
+    return (CAP_WEBRTC in mine and CAP_WEBRTC in theirs
+            and not (CAP_WEBRTC_PRFLX in mine and CAP_WEBRTC_PRFLX in theirs))
+
+
+def offer_transports(mine, theirs) -> list:
+    """What a call offer lists, best first: `webrtc` when both hellos allow it
+    (webrtc_between), then `ws-opus` when both announce `call:ws-opus`."""
+    out = []
+    if webrtc_between(mine, theirs):
+        out.append("webrtc")
+    if "call:ws-opus" in mine and "call:ws-opus" in theirs:
+        out.append("ws-opus")
+    return out
+
+
+def pick_transport(offered, caps) -> str | None:
+    """The answer's pick: `webrtc` whenever offered and announced, else `ws-opus`."""
+    if "webrtc" in offered and CAP_WEBRTC in caps:
+        return "webrtc"
+    if "ws-opus" in offered and "call:ws-opus" in caps:
+        return "ws-opus"
+    return None
+
+
+def candidate_admitted(candidate: str) -> bool:
+    """Whether an ICE candidate may be sent or taken (section 4.11): UDP, from
+    an address in the tailnet's ranges; with or without SDP's `a=`."""
+    line = str(candidate).strip()
+    if line.startswith("a="):
+        line = line[2:]
+    if not line.startswith("candidate:"):
+        return False
+    f = line.split()
+    if len(f) < 8 or f[2].lower() != "udp":
+        return False
+    return in_tailnet(f[4])
+
+
+def tailnet_only_sdp(sdp: str) -> str:
+    """An SDP with each `a=candidate` line outside the tailnet taken out."""
+    return "".join(line for line in sdp.splitlines(keepends=True)
+                   if not line.startswith("a=candidate:") or candidate_admitted(line))
+
+
 def encode(frame: dict) -> str:
     """A JSON frame as the reference peer and the vectors write it.
 
@@ -215,6 +269,17 @@ def _peer(v):
             and _list(_str(64, empty=False), 1, MAX_PEER_ADDRS)(v.get("addrs")))
 
 
+def _sdp(v):
+    return (isinstance(v, dict) and v.get("type") in ("offer", "answer")
+            and _str(MAX_JSON_FRAME, empty=False)(v.get("sdp")))
+
+
+def _candidate(v):
+    return (isinstance(v, dict) and _str(1024, empty=False)(v.get("candidate"))
+            and ("sdpMid" not in v or v["sdpMid"] is None or _str(64)(v["sdpMid"]))
+            and ("sdpMLineIndex" not in v or v["sdpMLineIndex"] is None or _int(0, 65535)(v["sdpMLineIndex"])))
+
+
 _BOOL = lambda v: isinstance(v, bool)  # noqa: E731
 _U32 = _int(1, 0xFFFFFFFF)
 _TS = _int(0, 2 ** 53)
@@ -235,10 +300,12 @@ SCHEMA = {
                "bytes": _int(1, MAX_VOICE_BYTES), "codec": _str(32, empty=False),
                "stream": _U32}, {"reply_to": _ID}),
     "call_offer": ({"call": _ID, "transports": _list(_str(32, empty=False), 1, 8),
-                    "stream": _U32}, {}),
+                    "stream": _U32}, {"video": _BOOL}),
     "call_answer": ({"call": _ID}, {"transport": _str(32, empty=False),
                                     "decline": _str(32, empty=False)}),
     "call_end": ({"call": _ID, "reason": _str(32, empty=False)}, {}),
+    "call_rtc": ({"call": _ID}, {"sdp": _sdp, "candidate": _candidate}),
+    "call_camera": ({"call": _ID, "camera": _one_of(*CAMERA_STATES)}, {}),
     "peers_ask": ({}, {}),
     "peers": ({"peers": _list(_peer, 0, MAX_PEERS)}, {}),
     "error": ({"code": _str(32, empty=False)},
@@ -296,4 +363,6 @@ def check(text) -> tuple[dict | None, dict | None]:
         return None, error("unsupported", what="codec:" + frame["codec"], id=frame["id"])
     if kind == "call_answer" and ("transport" in frame) == ("decline" in frame):
         return None, error("bad_request", what=kind, detail="transport or decline")
+    if kind == "call_rtc" and ("sdp" in frame) == ("candidate" in frame):
+        return None, error("bad_request", what=kind, detail="sdp or candidate")
     return frame, None

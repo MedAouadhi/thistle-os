@@ -64,4 +64,16 @@ void main() {
     await permissions.need(AppPermission.microphone);
     expect(permissions.refusal(AppPermission.microphone), isNotNull);
   });
+
+  test('calls that may not fill the screen are known once checked, and allowed later, no longer', () async {
+    expect(permissions.callsFillScreen, isTrue, reason: 'assumed until checked');
+    platform.fillScreen = false;
+    await permissions.checkFillScreen();
+    expect(permissions.callsFillScreen, isFalse);
+    await permissions.openFillScreenSettings();
+    expect(platform.fillScreenOpened, 1);
+    platform.fillScreen = true;
+    await permissions.checkFillScreen();
+    expect(permissions.callsFillScreen, isTrue);
+  });
 }

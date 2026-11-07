@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:sqlite3/sqlite3.dart' show sqlite3;
 import 'package:tailnet_chat_core/tailnet_chat_core.dart';
 import 'package:test/test.dart';
 
@@ -204,12 +205,205 @@ void main() {
     await sub2.cancel();
   });
 
-  test('a call whose connection drops ends at once, as an error', () async {
+  test('a call whose connection drops ends at once, as an error, the connection lost', () async {
     await befriend(alice, bob);
     final call = await alice.call('bob');
     await eventually(() => alice.calls[call]!.state == 'connected', what: 'the answer');
     await bob.stop();
     await eventually(() => alice.calls[call]!.state == 'ended:error', what: 'the call to end');
+    expect(alice.calls[call]!.fault, CallFault.connectionLost);
+  });
+
+  group('WebRTC calls between video-capable peers', () {
+    const video = [...capsV1, capWebrtc];
+    final v = vector('webrtc.json');
+    RtcCandidate candidate(int i) =>
+        RtcCandidate((v['candidates'] as List)[i]['candidate'] as String, sdpMid: '0', sdpMLineIndex: 0);
+    final sdp = v['sdp'] as Map<String, dynamic>;
+
+    Future<String> webrtcCall({bool camera = false}) async {
+      await alice.stop();
+      await bob.stop();
+      alice = await startPeer('alice', caps: video);
+      bob = await startPeer('bob', caps: video);
+      await befriend(alice, bob);
+      final call = await alice.call('bob', video: camera);
+      await eventually(() => alice.calls[call]!.state == 'connected', what: 'the answer');
+      await eventually(() => bob.calls[call]?.state == 'connected', what: "bob's side");
+      return call;
+    }
+
+    test('the call runs on webrtc, with the offer\'s video, and SDP and tailnet candidates go both ways', () async {
+      final call = await webrtcCall(camera: true);
+      expect(alice.calls[call]!.transport, 'webrtc');
+      expect(bob.calls[call]!.transport, 'webrtc');
+      expect(bob.calls[call]!.video, isTrue);
+      final atBob = <CallRtc>[], atAlice = <CallRtc>[];
+      final s1 = bob.callRtc.listen(atBob.add), s2 = alice.callRtc.listen(atAlice.add);
+      expect(alice.sendRtc(call, RtcSdp('offer', sdp['written'] as String)), isTrue);
+      expect(bob.sendRtc(call, candidate(2)), isFalse, reason: 'a LAN candidate is not sent');
+      expect(bob.sendRtc(call, candidate(0)), isTrue);
+      await eventually(() => atBob.isNotEmpty && atAlice.isNotEmpty, what: 'the signalling');
+      expect(atBob.single.call, call);
+      expect(atBob.single.payload.toJson(), {
+        'sdp': {'type': 'offer', 'sdp': sdp['tailnet_only']},
+      });
+      expect(atAlice.single.payload.toJson(), candidate(0).toJson());
+      await s1.cancel();
+      await s2.cancel();
+    });
+
+    test("each side's camera state reaches the other, for its tile", () async {
+      final call = await webrtcCall();
+      expect(bob.setCamera(call, CameraState.paused), isTrue);
+      await eventually(() => alice.calls[call]!.remoteCamera == CameraState.paused, what: 'the camera');
+      alice.setCamera(call, CameraState.none);
+      await eventually(() => bob.calls[call]!.remoteCamera == CameraState.none, what: 'the camera');
+    });
+
+    test('a contact is video-capable once its hello announced call:webrtc, and ours did too', () async {
+      await alice.stop();
+      await bob.stop();
+      alice = await startPeer('alice', caps: video);
+      bob = await startPeer('bob', caps: video);
+      final tdeck = await startPeer('tdeck');
+      addTearDown(tdeck.stop);
+      expect(alice.videoCapable(bob.identity.keyHex), isFalse, reason: 'nothing heard yet');
+      await befriend(alice, bob);
+      await befriend(tdeck, alice); // the T-Deck writes first
+      expect(alice.videoCapable(bob.identity.keyHex), isTrue);
+      expect(bob.videoCapable(alice.identity.keyHex), isTrue);
+      expect(alice.videoCapable(tdeck.identity.keyHex), isFalse, reason: 'the T-Deck announces no call:webrtc');
+      expect(tdeck.videoCapable(alice.identity.keyHex), isFalse, reason: 'nor does it take part');
+    });
+
+    test('a contact stays video-capable across a restart, from its last hello, until one says otherwise', () async {
+      await alice.stop();
+      await bob.stop();
+      final db = '${tmp.path}/alice.db', identity = Identity.generate();
+      alice = await startPeer('alice', caps: video, db: db, identity: identity);
+      bob = await startPeer('bob', caps: video);
+      await befriend(alice, bob);
+      final key = bob.identity.keyHex;
+      expect(alice.videoCapable(key), isTrue);
+      await alice.stop();
+      alice = await startPeer('alice', caps: video, db: db, identity: identity);
+      expect(alice.videoCapable(key), isTrue, reason: 'nothing heard yet this run: the stored hello says');
+      // Bob's app goes back to a build without video: its next hello says so.
+      await bob.stop();
+      bob = await startPeer('bob', identity: bob.identity, port: bob.address.port);
+      alice.sendText(key, 'still there?');
+      await eventually(() => !alice.videoCapable(key), what: "bob's new hello");
+      await alice.stop();
+      alice = await startPeer('alice', caps: video, db: db, identity: identity);
+      expect(alice.videoCapable(key), isFalse);
+    });
+
+    test('two phones, which gather no tailnet candidate, are not video-capable with each other and call on '
+        'ws-opus; a phone and a laptop are, across a restart too', () async {
+      const phone = [...video, capWebrtcPrflx];
+      await alice.stop();
+      await bob.stop();
+      final db = '${tmp.path}/alice.db', identity = Identity.generate();
+      alice = await startPeer('alice', caps: phone, db: db, identity: identity);
+      bob = await startPeer('bob', caps: phone);
+      final laptop = await startPeer('laptop', caps: video);
+      addTearDown(laptop.stop);
+      await befriend(alice, bob);
+      await befriend(alice, laptop);
+      expect(alice.videoCapable(bob.identity.keyHex), isFalse);
+      expect(bob.videoCapable(alice.identity.keyHex), isFalse);
+      expect(alice.videoCapable(laptop.identity.keyHex), isTrue);
+      expect(laptop.videoCapable(alice.identity.keyHex), isTrue);
+      final call = await alice.call('bob', video: true);
+      await eventually(() => alice.calls[call]!.state == 'connected', what: 'the answer');
+      expect(alice.calls[call]!.transport, 'ws-opus');
+      expect(bob.calls[call]!.transports, ['ws-opus']);
+      expect(bob.calls[call]!.video, isFalse);
+      alice.endCall(call);
+      await alice.stop();
+      alice = await startPeer('alice', caps: phone, db: db, identity: identity);
+      expect(alice.videoCapable(bob.identity.keyHex), isFalse, reason: "bob's stored hello");
+      expect(alice.videoCapable(laptop.identity.keyHex), isTrue, reason: "the laptop's stored hello");
+    });
+
+    test("a database from before video keeps its contacts, none of them video-capable until it hears them", () {
+      final path = '${tmp.path}/v1.db';
+      sqlite3.open(path)
+        ..execute('''
+          CREATE TABLE contacts (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, key TEXT UNIQUE,
+            host TEXT, port INTEGER, tailnet_name TEXT, flagged_key TEXT, accepted_by_them INTEGER,
+            declined_by_them INTEGER NOT NULL DEFAULT 0);
+          INSERT INTO contacts (name, key) VALUES ('bob', '${'b' * 64}');
+          PRAGMA user_version = 1;
+        ''')
+        ..close();
+      final store = Store.open(path);
+      addTearDown(store.close);
+      final bob = store.contactByKey('b' * 64)!;
+      expect(bob.name, 'bob');
+      expect(bob.webrtc, isFalse);
+      store.setCallCaps(bob.id, [capWebrtc]);
+      expect(store.contactByKey('b' * 64)!.webrtc, isTrue);
+    });
+
+    test("a database from before call:webrtc-prflx keeps each contact's call:webrtc, and learns the rest", () {
+      final path = '${tmp.path}/v2.db';
+      sqlite3.open(path)
+        ..execute('''
+          CREATE TABLE contacts (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, key TEXT UNIQUE,
+            host TEXT, port INTEGER, tailnet_name TEXT, flagged_key TEXT, accepted_by_them INTEGER,
+            declined_by_them INTEGER NOT NULL DEFAULT 0, webrtc INTEGER NOT NULL DEFAULT 0);
+          INSERT INTO contacts (name, key, webrtc) VALUES ('bob', '${'b' * 64}', 1);
+          PRAGMA user_version = 2;
+        ''')
+        ..close();
+      final store = Store.open(path);
+      addTearDown(store.close);
+      final bob = store.contactByKey('b' * 64)!;
+      expect(bob.callCaps, [capWebrtc]);
+      store.setCallCaps(bob.id, [...capsV1, capWebrtc, capWebrtcPrflx]);
+      expect(store.contactByKey('b' * 64)!.callCaps, [capWebrtc, capWebrtcPrflx]);
+    });
+
+    test('a peer without call:webrtc (the T-Deck) is offered ws-opus alone and takes it', () async {
+      await alice.stop();
+      alice = await startPeer('alice', caps: video);
+      await befriend(alice, bob);
+      final call = await alice.call('bob', video: true);
+      await eventually(() => alice.calls[call]!.state == 'connected', what: 'the answer');
+      expect(alice.calls[call]!.transport, 'ws-opus');
+      expect(bob.calls[call]!.transports, ['ws-opus']);
+      expect(bob.calls[call]!.video, isFalse);
+    });
+
+    test('media never connected 15 s after the answer ends the call as timeout, on both sides', () async {
+      final call = await webrtcCall();
+      alice.calls[call]!.since = DateTime.now().subtract(const Duration(seconds: 16));
+      await eventually(() => alice.calls[call]!.state == 'ended:timeout', what: 'the end');
+      await eventually(() => bob.calls[call]!.state == 'ended:timeout', what: "bob's end");
+    });
+
+    test('connected, no ws-opus frame is awaited; disconnected for 10 s, the call ends as error, media lost', () async {
+      final call = await webrtcCall();
+      alice.setMediaState(call, MediaState.connected);
+      alice.calls[call]!.lastFrame = DateTime.now().subtract(const Duration(seconds: 30));
+      await Future<void>.delayed(const Duration(milliseconds: 1500));
+      expect(alice.calls[call]!.state, 'connected');
+      alice.setMediaState(call, MediaState.disconnected);
+      alice.calls[call]!.mediaSince = DateTime.now().subtract(const Duration(seconds: 11));
+      await eventually(() => alice.calls[call]!.state == 'ended:error', what: 'the end');
+      await eventually(() => bob.calls[call]!.state == 'ended:error', what: "bob's end");
+      expect(alice.calls[call]!.fault, CallFault.mediaLost);
+      expect(bob.calls[call]!.fault, CallFault.theirs, reason: 'the wire says error alone');
+    });
+
+    test('a call ended as an error says why on the side that ended it', () async {
+      final call = await webrtcCall();
+      alice.endCall(call, reason: 'error', fault: CallFault.offTailnet);
+      await eventually(() => bob.calls[call]!.state == 'ended:error', what: "bob's end");
+      expect(alice.calls[call]!.fault, CallFault.offTailnet);
+    });
   });
 
   test('an incoming call nobody answered is missed; an answered one is not', () async {

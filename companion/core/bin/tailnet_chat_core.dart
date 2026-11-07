@@ -26,6 +26,8 @@ usage: tailnet_chat_core [options]
   --loopback          admit loopback too, for tests
   --no-read-receipts  send no read receipts
   --call-policy P     answer, decline, busy or ignore (default answer)
+  --webrtc            announce call:webrtc: its calls' SDP and candidates go
+                      through the control protocol (rtc, rtc_received, media)
   --mic FILE.wav      what a call sends: a 16 kHz mono WAV file, looped (default: silence)
   --speaker FILE.wav  where a call's audio goes, written when the call ends (default: nowhere)
   --verbose           log to stderr''';
@@ -38,7 +40,7 @@ Never fail(String why) {
 Future<void> main(List<String> args) async {
   String? identityPath, db = ':memory:', host = '127.0.0.1', name, callPolicy, mic, speaker;
   var port = defaultPort;
-  var loopback = false, verbose = false, readReceipts = true;
+  var loopback = false, verbose = false, readReceipts = true, webrtc = false;
   for (var i = 0; i < args.length; i++) {
     String value() => i + 1 < args.length ? args[++i] : fail('${args[i]} needs a value');
     switch (args[i]) {
@@ -60,6 +62,8 @@ Future<void> main(List<String> args) async {
         name = value();
       case '--loopback':
         loopback = true;
+      case '--webrtc':
+        webrtc = true;
       case '--no-read-receipts':
         readReceipts = false;
       case '--call-policy':
@@ -85,10 +89,12 @@ Future<void> main(List<String> args) async {
     host: host!,
     port: port,
     loopback: loopback,
+    caps: [...capsV1, if (webrtc) capWebrtc],
     callPolicy: callPolicy == null ? CallPolicy.answer : CallPolicy.values.byName(callPolicy),
     log: verbose ? stderr.writeln : null,
   );
   if (!readReceipts) peer.readReceipts = false;
+  final controlled = Controlled(peer);
   await peer.start();
 
   // A connected call streams audio, as a device's microphone does: the
@@ -96,7 +102,8 @@ Future<void> main(List<String> args) async {
   final media = <String, CallMedia>{};
   peer.events.where((e) => e.kind == 'call' && e.id != null).listen((e) {
     final call = peer.calls[e.id!];
-    if (call?.state != 'connected' || media.containsKey(e.id)) return;
+    // A WebRTC call's media is not the core's: it carries no frames here.
+    if (call == null || call.state != 'connected' || call.webrtc || media.containsKey(e.id)) return;
     if (!opusAvailable) {
       stderr.writeln('call ${e.id}: no audio: ${OpusUnavailable('libopus.so.0 not found')}');
       return;
@@ -119,7 +126,7 @@ Future<void> main(List<String> args) async {
     try {
       command = jsonDecode(line);
       if (command is! Map<String, dynamic>) throw const FormatException('a command is a JSON object');
-      reply = {'ok': await control(peer, command)};
+      reply = {'ok': await control(controlled, command)};
     } on Object catch (e) {
       reply = {'error': '${e.runtimeType}: $e'};
     }

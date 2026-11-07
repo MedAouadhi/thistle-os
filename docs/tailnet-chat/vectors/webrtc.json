@@ -1,0 +1,261 @@
+{
+  "description": "WebRTC calls (protocol section 4.11). 'valid': one of each frame; 'invalid': frames that MUST draw the error shown. 'candidates': ICE candidates and whether a side may send or take them. 'sdp': an SDP as written, and as sent or taken, its candidates outside the tailnet removed. 'offers': the call capabilities of a caller's and a callee's hellos, and the transports the caller's offer lists.",
+  "valid": [
+    {
+      "name": "call_offer webrtc first, camera on",
+      "text": "{\"type\":\"call_offer\",\"call\":\"736cb5ecb862d89a0524e75aad83fec5\",\"transports\":[\"webrtc\",\"ws-opus\"],\"stream\":3,\"video\":true}"
+    },
+    {
+      "name": "call_offer webrtc, camera off",
+      "text": "{\"type\":\"call_offer\",\"call\":\"736cb5ecb862d89a0524e75aad83fec5\",\"transports\":[\"webrtc\",\"ws-opus\"],\"stream\":3,\"video\":false}"
+    },
+    {
+      "name": "call_answer webrtc",
+      "text": "{\"type\":\"call_answer\",\"call\":\"736cb5ecb862d89a0524e75aad83fec5\",\"transport\":\"webrtc\"}"
+    },
+    {
+      "name": "call_rtc offer",
+      "text": "{\"type\":\"call_rtc\",\"call\":\"736cb5ecb862d89a0524e75aad83fec5\",\"sdp\":{\"type\":\"offer\",\"sdp\":\"v=0\\r\\no=- 4611731400430051336 2 IN IP4 127.0.0.1\\r\\ns=-\\r\\nt=0 0\\r\\na=group:BUNDLE 0 1\\r\\nm=audio 47998 UDP/TLS/RTP/SAVPF 111\\r\\nc=IN IP4 100.91.111.54\\r\\na=candidate:1 1 udp 2122260223 100.91.111.54 47998 typ host generation 0\\r\\na=ice-ufrag:8hhY\\r\\na=ice-pwd:asd88fgpdd777uzjYhagZg5Q\\r\\na=fingerprint:sha-256 19:E2:1C:3B:4B:9F:81:E6:B8:5C:F4:A5:A8:D8:73:04:BB:05:2F:70:9F:04:A9:0E:05:E9:26:33:E8:70:88:A2\\r\\na=setup:actpass\\r\\na=mid:0\\r\\na=sendrecv\\r\\na=rtcp-mux\\r\\na=rtpmap:111 opus/48000/2\\r\\nm=video 9 UDP/TLS/RTP/SAVPF 96 97\\r\\nc=IN IP4 0.0.0.0\\r\\na=mid:1\\r\\na=sendrecv\\r\\na=rtcp-mux\\r\\na=rtpmap:96 VP8/90000\\r\\na=rtpmap:97 rtx/90000\\r\\na=fmtp:97 apt=96\\r\\n\"}}"
+    },
+    {
+      "name": "call_rtc answer",
+      "text": "{\"type\":\"call_rtc\",\"call\":\"736cb5ecb862d89a0524e75aad83fec5\",\"sdp\":{\"type\":\"answer\",\"sdp\":\"v=0\\r\\no=- 4611731400430051336 2 IN IP4 127.0.0.1\\r\\ns=-\\r\\nt=0 0\\r\\na=group:BUNDLE 0 1\\r\\nm=audio 47998 UDP/TLS/RTP/SAVPF 111\\r\\nc=IN IP4 100.91.111.54\\r\\na=candidate:1 1 udp 2122260223 100.91.111.54 47998 typ host generation 0\\r\\na=ice-ufrag:8hhY\\r\\na=ice-pwd:asd88fgpdd777uzjYhagZg5Q\\r\\na=fingerprint:sha-256 19:E2:1C:3B:4B:9F:81:E6:B8:5C:F4:A5:A8:D8:73:04:BB:05:2F:70:9F:04:A9:0E:05:E9:26:33:E8:70:88:A2\\r\\na=setup:actpass\\r\\na=mid:0\\r\\na=sendrecv\\r\\na=rtcp-mux\\r\\na=rtpmap:111 opus/48000/2\\r\\nm=video 9 UDP/TLS/RTP/SAVPF 96 97\\r\\nc=IN IP4 0.0.0.0\\r\\na=mid:1\\r\\na=sendrecv\\r\\na=rtcp-mux\\r\\na=rtpmap:96 VP8/90000\\r\\na=rtpmap:97 rtx/90000\\r\\na=fmtp:97 apt=96\\r\\n\"}}"
+    },
+    {
+      "name": "call_rtc candidate",
+      "text": "{\"type\":\"call_rtc\",\"call\":\"736cb5ecb862d89a0524e75aad83fec5\",\"candidate\":{\"candidate\":\"candidate:1 1 udp 2122260223 100.91.111.54 47998 typ host generation 0\",\"sdpMid\":\"0\",\"sdpMLineIndex\":0}}"
+    },
+    {
+      "name": "call_rtc candidate IPv6",
+      "text": "{\"type\":\"call_rtc\",\"call\":\"736cb5ecb862d89a0524e75aad83fec5\",\"candidate\":{\"candidate\":\"candidate:2 1 udp 2122262783 fd7a:115c:a1e0::3936:6f36 51234 typ host generation 0\",\"sdpMid\":\"0\",\"sdpMLineIndex\":0}}"
+    },
+    {
+      "name": "call_camera on",
+      "text": "{\"type\":\"call_camera\",\"call\":\"736cb5ecb862d89a0524e75aad83fec5\",\"camera\":\"on\"}"
+    },
+    {
+      "name": "call_camera off",
+      "text": "{\"type\":\"call_camera\",\"call\":\"736cb5ecb862d89a0524e75aad83fec5\",\"camera\":\"off\"}"
+    },
+    {
+      "name": "call_camera paused",
+      "text": "{\"type\":\"call_camera\",\"call\":\"736cb5ecb862d89a0524e75aad83fec5\",\"camera\":\"paused\"}"
+    },
+    {
+      "name": "call_camera none",
+      "text": "{\"type\":\"call_camera\",\"call\":\"736cb5ecb862d89a0524e75aad83fec5\",\"camera\":\"none\"}"
+    },
+    {
+      "name": "call_end error",
+      "text": "{\"type\":\"call_end\",\"call\":\"736cb5ecb862d89a0524e75aad83fec5\",\"reason\":\"error\"}"
+    }
+  ],
+  "invalid": [
+    {
+      "name": "call_rtc with neither",
+      "text": "{\"type\":\"call_rtc\",\"call\":\"736cb5ecb862d89a0524e75aad83fec5\"}",
+      "error": {
+        "type": "error",
+        "code": "bad_request",
+        "what": "call_rtc"
+      }
+    },
+    {
+      "name": "call_rtc with both",
+      "text": "{\"type\":\"call_rtc\",\"call\":\"736cb5ecb862d89a0524e75aad83fec5\",\"sdp\":{\"type\":\"offer\",\"sdp\":\"v=0\\r\\no=- 4611731400430051336 2 IN IP4 127.0.0.1\\r\\ns=-\\r\\nt=0 0\\r\\na=group:BUNDLE 0 1\\r\\nm=audio 47998 UDP/TLS/RTP/SAVPF 111\\r\\nc=IN IP4 100.91.111.54\\r\\na=candidate:1 1 udp 2122260223 100.91.111.54 47998 typ host generation 0\\r\\na=ice-ufrag:8hhY\\r\\na=ice-pwd:asd88fgpdd777uzjYhagZg5Q\\r\\na=fingerprint:sha-256 19:E2:1C:3B:4B:9F:81:E6:B8:5C:F4:A5:A8:D8:73:04:BB:05:2F:70:9F:04:A9:0E:05:E9:26:33:E8:70:88:A2\\r\\na=setup:actpass\\r\\na=mid:0\\r\\na=sendrecv\\r\\na=rtcp-mux\\r\\na=rtpmap:111 opus/48000/2\\r\\nm=video 9 UDP/TLS/RTP/SAVPF 96 97\\r\\nc=IN IP4 0.0.0.0\\r\\na=mid:1\\r\\na=sendrecv\\r\\na=rtcp-mux\\r\\na=rtpmap:96 VP8/90000\\r\\na=rtpmap:97 rtx/90000\\r\\na=fmtp:97 apt=96\\r\\n\"},\"candidate\":{\"candidate\":\"candidate:1 1 udp 2122260223 100.91.111.54 47998 typ host generation 0\",\"sdpMid\":\"0\"}}",
+      "error": {
+        "type": "error",
+        "code": "bad_request",
+        "what": "call_rtc"
+      }
+    },
+    {
+      "name": "call_rtc sdp of another type",
+      "text": "{\"type\":\"call_rtc\",\"call\":\"736cb5ecb862d89a0524e75aad83fec5\",\"sdp\":{\"type\":\"pranswer\",\"sdp\":\"v=0\\r\\no=- 4611731400430051336 2 IN IP4 127.0.0.1\\r\\ns=-\\r\\nt=0 0\\r\\na=group:BUNDLE 0 1\\r\\nm=audio 47998 UDP/TLS/RTP/SAVPF 111\\r\\nc=IN IP4 100.91.111.54\\r\\na=candidate:1 1 udp 2122260223 100.91.111.54 47998 typ host generation 0\\r\\na=ice-ufrag:8hhY\\r\\na=ice-pwd:asd88fgpdd777uzjYhagZg5Q\\r\\na=fingerprint:sha-256 19:E2:1C:3B:4B:9F:81:E6:B8:5C:F4:A5:A8:D8:73:04:BB:05:2F:70:9F:04:A9:0E:05:E9:26:33:E8:70:88:A2\\r\\na=setup:actpass\\r\\na=mid:0\\r\\na=sendrecv\\r\\na=rtcp-mux\\r\\na=rtpmap:111 opus/48000/2\\r\\nm=video 9 UDP/TLS/RTP/SAVPF 96 97\\r\\nc=IN IP4 0.0.0.0\\r\\na=mid:1\\r\\na=sendrecv\\r\\na=rtcp-mux\\r\\na=rtpmap:96 VP8/90000\\r\\na=rtpmap:97 rtx/90000\\r\\na=fmtp:97 apt=96\\r\\n\"}}",
+      "error": {
+        "type": "error",
+        "code": "bad_request",
+        "what": "call_rtc"
+      }
+    },
+    {
+      "name": "call_rtc empty candidate",
+      "text": "{\"type\":\"call_rtc\",\"call\":\"736cb5ecb862d89a0524e75aad83fec5\",\"candidate\":{\"candidate\":\"\",\"sdpMid\":\"0\"}}",
+      "error": {
+        "type": "error",
+        "code": "bad_request",
+        "what": "call_rtc"
+      }
+    },
+    {
+      "name": "call_camera of another state",
+      "text": "{\"type\":\"call_camera\",\"call\":\"736cb5ecb862d89a0524e75aad83fec5\",\"camera\":\"blurred\"}",
+      "error": {
+        "type": "error",
+        "code": "bad_request",
+        "what": "call_camera"
+      }
+    },
+    {
+      "name": "call_offer video not a boolean",
+      "text": "{\"type\":\"call_offer\",\"call\":\"736cb5ecb862d89a0524e75aad83fec5\",\"transports\":[\"webrtc\",\"ws-opus\"],\"stream\":3,\"video\":\"yes\"}",
+      "error": {
+        "type": "error",
+        "code": "bad_request",
+        "what": "call_offer"
+      }
+    }
+  ],
+  "candidates": [
+    {
+      "candidate": "candidate:1 1 udp 2122260223 100.91.111.54 47998 typ host generation 0",
+      "admitted": true
+    },
+    {
+      "candidate": "candidate:2 1 udp 2122262783 fd7a:115c:a1e0::3936:6f36 51234 typ host generation 0",
+      "admitted": true
+    },
+    {
+      "candidate": "candidate:3 1 udp 2122194687 192.168.2.131 40000 typ host generation 0",
+      "admitted": false
+    },
+    {
+      "candidate": "candidate:4 1 udp 2122129151 10.11.12.28 40002 typ host generation 0",
+      "admitted": false
+    },
+    {
+      "candidate": "candidate:5 1 udp 2122197247 2a02:1234::5 40004 typ host generation 0",
+      "admitted": false
+    },
+    {
+      "candidate": "candidate:6 1 udp 1686052607 81.2.3.4 40006 typ srflx raddr 192.168.2.131 rport 40000",
+      "admitted": false
+    },
+    {
+      "candidate": "candidate:7 1 tcp 1518280447 100.91.111.54 9 typ host tcptype active generation 0",
+      "admitted": false
+    },
+    {
+      "candidate": "candidate:8 1 udp 2122260223 4f0c1a2e-1b9d-4c2e.local 47998 typ host generation 0",
+      "admitted": false
+    },
+    {
+      "candidate": "candidate:9 1 udp 2122260223 100.128.0.1 47998 typ host generation 0",
+      "admitted": false
+    }
+  ],
+  "sdp": {
+    "written": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\nm=audio 47998 UDP/TLS/RTP/SAVPF 111\r\nc=IN IP4 100.91.111.54\r\na=candidate:1 1 udp 2122260223 100.91.111.54 47998 typ host generation 0\r\na=candidate:3 1 udp 2122194687 192.168.2.131 40000 typ host generation 0\r\na=ice-ufrag:8hhY\r\na=ice-pwd:asd88fgpdd777uzjYhagZg5Q\r\na=fingerprint:sha-256 19:E2:1C:3B:4B:9F:81:E6:B8:5C:F4:A5:A8:D8:73:04:BB:05:2F:70:9F:04:A9:0E:05:E9:26:33:E8:70:88:A2\r\na=setup:actpass\r\na=mid:0\r\na=sendrecv\r\na=rtcp-mux\r\na=rtpmap:111 opus/48000/2\r\nm=video 9 UDP/TLS/RTP/SAVPF 96 97\r\nc=IN IP4 0.0.0.0\r\na=mid:1\r\na=sendrecv\r\na=rtcp-mux\r\na=rtpmap:96 VP8/90000\r\na=rtpmap:97 rtx/90000\r\na=fmtp:97 apt=96\r\n",
+    "tailnet_only": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\nm=audio 47998 UDP/TLS/RTP/SAVPF 111\r\nc=IN IP4 100.91.111.54\r\na=candidate:1 1 udp 2122260223 100.91.111.54 47998 typ host generation 0\r\na=ice-ufrag:8hhY\r\na=ice-pwd:asd88fgpdd777uzjYhagZg5Q\r\na=fingerprint:sha-256 19:E2:1C:3B:4B:9F:81:E6:B8:5C:F4:A5:A8:D8:73:04:BB:05:2F:70:9F:04:A9:0E:05:E9:26:33:E8:70:88:A2\r\na=setup:actpass\r\na=mid:0\r\na=sendrecv\r\na=rtcp-mux\r\na=rtpmap:111 opus/48000/2\r\nm=video 9 UDP/TLS/RTP/SAVPF 96 97\r\nc=IN IP4 0.0.0.0\r\na=mid:1\r\na=sendrecv\r\na=rtcp-mux\r\na=rtpmap:96 VP8/90000\r\na=rtpmap:97 rtx/90000\r\na=fmtp:97 apt=96\r\n"
+  },
+  "offers": [
+    {
+      "name": "a laptop calls a phone",
+      "caller": [
+        "call:ws-opus",
+        "call:webrtc"
+      ],
+      "callee": [
+        "call:ws-opus",
+        "call:webrtc",
+        "call:webrtc-prflx"
+      ],
+      "transports": [
+        "webrtc",
+        "ws-opus"
+      ]
+    },
+    {
+      "name": "a phone calls a laptop",
+      "caller": [
+        "call:ws-opus",
+        "call:webrtc",
+        "call:webrtc-prflx"
+      ],
+      "callee": [
+        "call:ws-opus",
+        "call:webrtc"
+      ],
+      "transports": [
+        "webrtc",
+        "ws-opus"
+      ]
+    },
+    {
+      "name": "a phone calls a phone",
+      "caller": [
+        "call:ws-opus",
+        "call:webrtc",
+        "call:webrtc-prflx"
+      ],
+      "callee": [
+        "call:ws-opus",
+        "call:webrtc",
+        "call:webrtc-prflx"
+      ],
+      "transports": [
+        "ws-opus"
+      ]
+    },
+    {
+      "name": "an older phone calls a phone",
+      "caller": [
+        "call:ws-opus",
+        "call:webrtc"
+      ],
+      "callee": [
+        "call:ws-opus",
+        "call:webrtc",
+        "call:webrtc-prflx"
+      ],
+      "transports": [
+        "webrtc",
+        "ws-opus"
+      ]
+    },
+    {
+      "name": "a phone calls an older phone",
+      "caller": [
+        "call:ws-opus",
+        "call:webrtc",
+        "call:webrtc-prflx"
+      ],
+      "callee": [
+        "call:ws-opus",
+        "call:webrtc"
+      ],
+      "transports": [
+        "webrtc",
+        "ws-opus"
+      ]
+    },
+    {
+      "name": "a phone calls the T-Deck",
+      "caller": [
+        "call:ws-opus",
+        "call:webrtc",
+        "call:webrtc-prflx"
+      ],
+      "callee": [
+        "call:ws-opus"
+      ],
+      "transports": [
+        "ws-opus"
+      ]
+    },
+    {
+      "name": "call:webrtc-prflx alone is nothing of WebRTC",
+      "caller": [
+        "call:ws-opus",
+        "call:webrtc-prflx"
+      ],
+      "callee": [
+        "call:ws-opus",
+        "call:webrtc"
+      ],
+      "transports": [
+        "ws-opus"
+      ]
+    }
+  ]
+}

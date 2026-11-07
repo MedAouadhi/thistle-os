@@ -17,9 +17,10 @@ import java.util.WeakHashMap
 /**
  * The Dart side's `org.thistleos.thistle_chat/platform` channel
  * (lib/src/android.dart): the Keystore vault, the listening service, the
- * runtime permissions, the device's name ([Audio] has the audio's own
- * channels). Permissions are prompted for
- * only while a window is there to show the prompt.
+ * runtime permissions, the device's name, a call's ring ([CallRing]) and
+ * its window ([CallActivity]) ([Audio] has the audio's own channels).
+ * Permissions are prompted for only while a window is there to show the
+ * prompt.
  */
 class Platform private constructor(private val context: Context, engine: FlutterEngine) :
     MethodChannel.MethodCallHandler {
@@ -33,11 +34,21 @@ class Platform private constructor(private val context: Context, engine: Flutter
 
         @Synchronized
         fun forget(engine: FlutterEngine) {
-            all.remove(engine)?.audio?.release()
+            all.remove(engine)?.let {
+                it.audio.release()
+                CallRing.stopAll(it.context)
+            }
         }
     }
 
     var activity: Activity? = null
+        set(value) {
+            field = value
+            audio.window = value // a video call keeps the screen on in whichever window shows
+        }
+
+    /** The call window over the lock screen, while it is attached. */
+    var callWindow: Activity? = null
     private val channel = MethodChannel(engine.dartExecutor.binaryMessenger, "org.thistleos.thistle_chat/platform")
     private val pending = mutableMapOf<Int, Pair<String, MethodChannel.Result>>()
     private var nextRequest = 4810
@@ -72,12 +83,46 @@ class Platform private constructor(private val context: Context, engine: Flutter
                     result.success(null)
                 }
                 "device.name" -> result.success(deviceName())
+                "ring.start" -> {
+                    CallRing.start(
+                        context,
+                        call.argument<String>("caller")!!,
+                        call.argument<String>("id")!!,
+                        call.argument<Boolean>("notify") == true,
+                        call.argument<Boolean>("video") == true,
+                    )
+                    result.success(null)
+                }
+                "ring.stop" -> {
+                    CallRing.stop(context, call.argument<String>("id")!!)
+                    result.success(null)
+                }
+                "fillscreen.can" -> result.success(
+                    Build.VERSION.SDK_INT < 34 ||
+                        context.getSystemService(NotificationManager::class.java).canUseFullScreenIntent(),
+                )
+                "fillscreen.open" -> {
+                    val intent = if (Build.VERSION.SDK_INT >= 34) {
+                        Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT, Uri.parse("package:${context.packageName}"))
+                    } else {
+                        Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${context.packageName}"))
+                    }
+                    (activity ?: context).startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                    result.success(null)
+                }
+                "callwindow.finish" -> {
+                    callWindow?.finish()
+                    result.success(null)
+                }
                 else -> result.notImplemented()
             }
         } catch (e: Exception) {
             result.error("platform", e.toString(), null)
         }
     }
+
+    /** Tell Dart something (CallActivity, DeclineReceiver); on the main thread. */
+    fun toDart(method: String, args: Any?) = channel.invokeMethod(method, args)
 
     private fun deviceName(): String {
         val named = if (Build.VERSION.SDK_INT >= 25) {
@@ -92,6 +137,7 @@ class Platform private constructor(private val context: Context, engine: Flutter
     private fun permission(name: String): String? = when (name) {
         "notifications" -> if (Build.VERSION.SDK_INT >= 33) Manifest.permission.POST_NOTIFICATIONS else null
         "microphone" -> Manifest.permission.RECORD_AUDIO
+        "camera" -> Manifest.permission.CAMERA
         else -> throw IllegalArgumentException("no permission $name")
     }
 

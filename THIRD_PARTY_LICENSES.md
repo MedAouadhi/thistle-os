@@ -837,6 +837,35 @@ transitive ones in `companion/app/pubspec.lock` and
 | `dbus` (https://pub.dev/packages/dbus) | 0.8.0 | **MPL-2.0** | Linux: the identity key kept in the Secret Service (GNOME Keyring, KWallet), over D-Bus (`companion/app`) |
 | `ed25519_edwards` (https://pub.dev/packages/ed25519_edwards) | 0.3.2 | Apache-2.0 | Ed25519 signatures for the handshake (`companion/core`) |
 | `sqlite3` (https://pub.dev/packages/sqlite3) | 3.8.0 | MIT | The message store (`companion/core`); the SQLite library it loads is public domain |
+| `flutter_webrtc` (https://pub.dev/packages/flutter_webrtc) | 1.6.3 | MIT | WebRTC calls between companion apps (`companion/app`, ADR-0016); with it `dart_webrtc` 1.8.2, `webrtc_interface` 1.5.1, `logger` 2.8.0 and `synchronized` 3.5.0, all MIT |
+
+**libwebrtc, inside the Linux app.** flutter_webrtc's Linux build links a
+prebuilt `libwebrtc.so` (24 MB), release `libwebrtc.m150.7871.07` of
+github.com/webrtc-sdk/libwebrtc, fetched by the build and checked against
+the SHA-256 in `companion/app/linux/libwebrtc.cmake`, and shipped in the
+bundle's `lib/`. Its wrapper is MIT (the zip's `LICENSE`); what it is built
+from is Chromium's WebRTC (BSD-3-Clause) and the third-party code Chromium
+builds into it, among them:
+
+| Part | License | In the binary for |
+|------|---------|-------------------|
+| WebRTC, libyuv, libvpx, libsrtp, usrsctp, Opus | BSD-3-Clause | The call itself; VP8, the codec the app prefers, and Opus |
+| BoringSSL | OpenSSL / ISC | DTLS-SRTP, which runs inside WireGuard and is not relied on |
+| Abseil | Apache-2.0 | WebRTC's base library |
+| dav1d | BSD-2-Clause | AV1 decoding, never negotiated by the app |
+| OpenH264 | BSD-2-Clause | H.264, which the app never offers (patent-encumbered code is in the binary all the same) |
+| FFmpeg (Chromium's build) | **LGPL-2.1-or-later** | H.264 decoding, never negotiated by the app |
+
+FFmpeg is LGPL-2.1: the app links it dynamically, inside `libwebrtc.so`,
+which a user may replace with another build of the same release; its
+source is Chromium's `third_party/ffmpeg` at the WebRTC revision the
+release names. No GPL. The Android build's WebRTC comes from Maven
+(`io.github.webrtc-sdk:android` 150.7871.04, the same Chromium WebRTC and
+its BSD-3-Clause third-party code) and has no software H.264; with it
+comes flutter_webrtc's audio switch, `com.github.davidliu:audioswitch`
+(a fork of Twilio's AudioSwitch, Apache-2.0), from JitPack. Both, like
+every artifact the Android build fetches, are checked against the
+SHA-256 in `companion/app/android/gradle/verification-metadata.xml`.
 
 The app bundles three fonts, each with its licence beside it in
 `companion/app/assets/fonts/`, from github.com/google/fonts (`ofl/`):
@@ -862,7 +891,7 @@ All dependencies are compatible with the ThistleOS BSD 3-Clause license:
 | License | Compatible with BSD 3-Clause | Components |
 |---------|------------------------------|------------|
 | Apache-2.0 | Yes | ESP-IDF, esp_modem, esp_codec_dev, elf_loader, NimBLE, mbedTLS, ed25519_edwards (companion app) |
-| MIT | Yes | LVGL, FreeRTOS, RadioLib, libcurl, Unity, esp-rs crates, Expat, CrossPoint Reader, diy-esp32-epub-reader, MicroLink, cJSON, md4c, sqlite3 (companion app) |
+| MIT | Yes | LVGL, FreeRTOS, RadioLib, libcurl, Unity, esp-rs crates, Expat, CrossPoint Reader, diy-esp32-epub-reader, MicroLink, cJSON, md4c, sqlite3, flutter_webrtc and the libwebrtc wrapper (companion app) |
 | BSD-3-Clause | Yes | Bosch BHI260AP firmware and BHY2 SensorAPI, wireguard-lwip |
 | BSD-2-Clause | Yes | Monocypher |
 | zlib | Yes | SDL2, uzlib |
@@ -870,6 +899,7 @@ All dependencies are compatible with the ThistleOS BSD 3-Clause license:
 | Bitstream Vera | Yes | DejaVu fonts (the Reader's font) |
 | MIT OR Apache-2.0 | Yes | argon2, serde_json, esp-idf-hal, esp-idf-svc, esp-idf-sys |
 | MPL-2.0 (file-level copyleft) | Yes, used unmodified | dbus (companion app only) |
+| LGPL-2.1-or-later | Yes, dynamically linked and unmodified | Chromium's FFmpeg inside libwebrtc.so (companion app on Linux only) |
 | SIL OFL 1.1 | Yes, not sold alone | Fraunces, Instrument Sans, JetBrains Mono (companion app, unmodified); Noto Emoji (the Chat app's emoji, cut to bitmaps) |
 
-No GPL, LGPL or AGPL code is in the firmware. The one copyleft dependency elsewhere is the companion app's `dbus`, MPL-2.0, above.
+No GPL, LGPL or AGPL code is in the firmware. The copyleft dependencies elsewhere are the companion app's: `dbus`, MPL-2.0, and on Linux the FFmpeg inside libwebrtc, LGPL-2.1, above.

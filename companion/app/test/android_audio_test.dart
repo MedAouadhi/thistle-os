@@ -141,4 +141,55 @@ void main() {
     await (await AndroidAudioDevices().player(ring: true)).close();
     expect(fake.calls, ['speaker.open use=ring', 'speaker.close id=1']);
   });
+
+  group("a WebRTC call's route", () {
+    /// flutter_webrtc's own channel: its audio switch picks the output.
+    late List<String> webrtc;
+    setUp(() {
+      webrtc = [];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(
+        const MethodChannel('FlutterWebRTC.Method'),
+        (call) async {
+          if (call.method != 'initialize') webrtc.add('${call.method} ${call.arguments}');
+          return null;
+        },
+      );
+    });
+
+    test('begins with the screen dark at the ear and no output chosen before the media plays; no video is the '
+        'earpiece, video the loudspeaker, a headset first; the end undoes it', () async {
+      final fake = FakeAndroidAudio();
+      final route = AndroidCallRoute();
+      await route.begin();
+      expect(webrtc, isEmpty, reason: "the output is chosen once libwebrtc's audio has started");
+      await route.video(false);
+      await route.video(true);
+      await route.video(false);
+      await route.end();
+      expect(fake.calls, [
+        'rtc.begin null',
+        'rtc.video shown=false',
+        'rtc.video shown=true',
+        'rtc.video shown=false',
+        'rtc.end null',
+      ]);
+      expect(webrtc, [
+        'enableSpeakerphone {enable: false}',
+        'enableSpeakerphoneButPreferBluetooth null',
+        'enableSpeakerphone {enable: false}',
+      ]);
+    });
+
+    test('pauses the camera while the app is away: Android has no camera in the background', () {
+      expect(AndroidCallRoute().cameraPausesAway, isTrue);
+    });
+
+    test('a refusal of either side is logged, not thrown: the call goes on', () async {
+      final fake = FakeAndroidAudio()..refusing['rtc.video'] = 'no window';
+      final said = <String>[];
+      await AndroidCallRoute(log: said.add).video(true);
+      expect(fake.calls, ['rtc.video shown=true']);
+      expect(said.single, contains('no window'));
+    });
+  });
 }

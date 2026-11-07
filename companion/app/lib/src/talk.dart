@@ -1,36 +1,55 @@
 /// Voice messages and calls in the app: recording and playing, the call in
 /// progress, its ring, its notifications, mute and volume. The protocol,
 /// the codec and a call's frames are the core's (ChatPeer, VoiceRecorder,
-/// CallMedia); the devices are [AudioDevices]'.
+/// CallMedia); the devices are [AudioDevices]'. A call between two
+/// companion apps runs on WebRTC instead, its media a [WebrtcCall]'s.
 library;
 
 import 'dart:async';
 import 'dart:math';
 import 'dart:typed_data';
 
+import 'package:flutter/widgets.dart' show Widget;
 import 'package:tailnet_chat_core/tailnet_chat_core.dart';
 
 import 'audio/devices.dart';
+import 'call_engine.dart';
+import 'child_processes.dart';
 import 'notifier.dart';
 import 'permissions.dart';
+import 'webrtc_call.dart';
 
 class Talk {
   Talk({
     required this.peer,
     required this.audio,
+    this.engine,
+    this.route,
     required this.notifier,
     required this.foreground,
+    required this.away,
     required this.changed,
     required this.sendVoice,
     required this.callee,
     this.permissions,
+    ChildProcesses? children,
     this.log,
-  });
+  }) : children = children ?? ChildProcesses();
 
   final ChatPeer Function() peer;
   final AudioDevices audio;
+
+  /// WebRTC calls' media; null where the app announces no `call:webrtc`.
+  final CallEngine? engine;
+
+  /// A WebRTC call's loudspeaker or earpiece, the screen, and the camera
+  /// while the app is away; Android's.
+  final CallRoute? route;
   final Notifier notifier;
   final bool Function() foreground;
+
+  /// Whether the app is out of sight (ChatModel.away).
+  final bool Function() away;
 
   /// Something on screen may have changed.
   final void Function() changed;
@@ -41,6 +60,9 @@ class Talk {
   /// How to name a conversation's contact to the core, to call it.
   final Object Function(String box) callee;
   final Permissions? permissions;
+
+  /// None starts while our camera is on.
+  final ChildProcesses children;
   final void Function(String)? log;
 
   // -- recording ----------------------------------------------------------------
@@ -52,13 +74,16 @@ class Talk {
 
   int get recordingMs => _recorder?.ms ?? 0;
 
-  Future<bool> _microphone() async => permissions == null || await permissions!.need(AppPermission.microphone);
+  /// Whether `p` is allowed, asked the first time it is needed: the
+  /// microphone for a recording or a call, the camera when first switched
+  /// on in a call.
+  Future<bool> _allowed(AppPermission p) async => permissions == null || await permissions!.need(p);
 
   /// Start recording a voice message for `box`; why not, or null.
   Future<String?> startRecording(String box) async {
     if (recordingBox != null) return 'already recording';
     if (_callLive) return 'not during a call';
-    if (!await _microphone()) return 'The microphone is not allowed: voice messages need it.';
+    if (!await _allowed(AppPermission.microphone)) return 'The microphone is not allowed: voice messages need it.';
     final VoiceRecorder rec;
     try {
       rec = VoiceRecorder();
@@ -165,14 +190,24 @@ class Talk {
   String? callId;
   CallMedia? _media;
   CallDevices? _devices;
-  String? echoCancellation;
+  String? _echoCancellation;
+
+  /// The call's WebRTC media, on a call between companion apps.
+  WebrtcCall? _webrtc;
+
+  /// What removes the speaker from the microphone, for the call screen.
+  String? get echoCancellation => _webrtc?.echoCancellation ?? _echoCancellation;
 
   /// Why the call has no audio, if it has none.
-  String? audioProblem;
+  String? get audioProblem => _audioProblem ?? _webrtc?.audioProblem;
+  String? _audioProblem;
   bool _muted = false;
   double _volume = 1;
   AudioOut? _ring;
   Timer? _ringTimer;
+
+  /// The call ringing now, if one is.
+  String? _ringing;
 
   Call? get call => callId == null ? null : peer().calls[callId];
   bool get _callLive => call?.live ?? false;
@@ -184,6 +219,7 @@ class Talk {
   set muted(bool on) {
     _muted = on;
     _media?.muted = on;
+    _webrtc?.muted = on;
     changed();
   }
 
@@ -192,6 +228,7 @@ class Talk {
   set volume(double v) {
     _volume = v.clamp(0, 2);
     _media?.volume = _volume;
+    _webrtc?.volume = _volume;
     changed();
   }
 
@@ -204,39 +241,70 @@ class Talk {
 
   String nameOf(String key) => peer().contact(key)?.name ?? 'a contact';
 
-  /// Call a contact; the call's id, or null if one is already up. A contact
-  /// who cannot be reached fails at once (`ended:unreachable`).
-  Future<String?> startCall(String box) async {
+  /// Call a contact, with our camera on from the first ring if `video`; the
+  /// call's id, or null if one is already up. A contact who cannot be
+  /// reached fails at once (`ended:unreachable`).
+  Future<String?> startCall(String box, {bool video = false}) async {
     if (_callLive) return null;
     if (recordingBox != null) await stopRecording(send: false);
-    if (!await _microphone()) {
-      audioProblem = 'The microphone is not allowed: calls need it.';
+    if (!await _allowed(AppPermission.microphone)) {
+      _audioProblem = 'The microphone is not allowed: calls need it.';
       changed();
       return null;
     }
     await stopPlaying();
     _muted = false;
-    audioProblem = null;
-    final id = await peer().call(callee(box));
+    _audioProblem = null;
+    final id = await peer().call(callee(box), video: video);
     callId = id;
+    _webrtcFor(id, camera: video);
     changed();
     return id;
   }
 
-  /// Answer the ringing call (or the one named).
-  Future<void> answer([String? id]) async {
+  /// Answer the ringing call (or the one named), with our camera on if
+  /// `video`: it is never on unless asked.
+  Future<void> answer({String? id, bool video = false}) async {
     id ??= callId;
     final c = id == null ? null : peer().calls[id];
     if (c == null || c.state != 'ringing') return;
     callId = id;
-    if (!await _microphone()) {
-      audioProblem = 'The microphone is not allowed: calls need it.';
+    _audioProblem = null;
+    if (!await _allowed(AppPermission.microphone)) {
+      _audioProblem = 'The microphone is not allowed: calls need it.';
     }
     if (recordingBox != null) await stopRecording(send: false);
     await stopPlaying();
     _muted = false;
-    peer().answerCall(id!);
+    _webrtcFor(id!, camera: video);
+    peer().answerCall(id);
   }
+
+  /// The WebRTC media for a call that offers it, while we have an engine.
+  void _webrtcFor(String id, {required bool camera}) {
+    final engine = this.engine, c = peer().calls[id];
+    if (engine == null || c == null || !c.live || !c.transports.contains(transportWebrtc)) return;
+    if (_webrtc?.id == id) return;
+    unawaited(_webrtc?.close());
+    _webrtc =
+        WebrtcCall(
+            id: id,
+            engine: engine,
+            peer: peer,
+            children: children,
+            changed: changed,
+            camera: camera,
+            cameraAllowed: () => _allowed(AppPermission.camera),
+            route: route,
+            away: _cameraAway,
+            log: log,
+          )
+          ..muted = _muted
+          ..volume = _volume;
+  }
+
+  /// Whether our camera is let go: the app away, where the camera pauses.
+  bool _cameraAway() => (route?.cameraPausesAway ?? false) && away();
 
   void decline([String? id]) {
     id ??= callId;
@@ -266,31 +334,39 @@ class Talk {
     // A second call while one is up is the core's to answer busy; it is
     // only shown as missed.
     if (callId != null && callId != id && _callLive) {
-      if (c.missed) unawaited(notifier.show('Missed call', 'from ${nameOf(c.peer)} while you were in a call'));
+      if (c.missed) unawaited(notifier.show(_missed(c), 'from ${nameOf(c.peer)} while you were in a call'));
       return;
     }
     callId = id;
+    _webrtc?.followRoute(); // their camera may have come or gone
     if (c.state == 'ringing' && !c.mine) {
-      _startRing();
-      if (!foreground()) unawaited(notifier.ringing(nameOf(c.peer), id));
+      _ringFor(id, c);
     } else {
       _stopRing(id);
     }
-    if (c.state == 'connected' && _media == null) unawaited(_startMedia(id));
+    if (c.state == 'connected' && c.webrtc) {
+      _webrtcFor(id, camera: false); // answered by the core's own policy
+      unawaited(_webrtc?.start());
+    } else if (c.state == 'connected' && _media == null) {
+      unawaited(_stopWebrtc());
+      unawaited(_startMedia(id));
+    }
     if (!c.live) {
       unawaited(_stopMedia());
-      if (c.missed) unawaited(notifier.show('Missed call', 'from ${nameOf(c.peer)}'));
-      log?.call('call ${id.substring(0, 8)} ${c.state}');
+      if (c.missed) unawaited(notifier.show(_missed(c), 'from ${nameOf(c.peer)}'));
+      log?.call('${callLabel(id)} ${c.state}${c.transport == null ? '' : ', over ${c.transport}'}');
     }
     changed();
   }
+
+  static String _missed(Call c) => c.video ? 'Missed video call' : 'Missed call';
 
   Future<void> _startMedia(String id) async {
     final CallDevices devices;
     try {
       devices = await audio.call();
     } on AudioUnavailable catch (e) {
-      audioProblem = '$e';
+      _audioProblem = '$e';
       changed();
       return;
     }
@@ -300,14 +376,14 @@ class Talk {
       return;
     }
     _devices = devices;
-    echoCancellation = devices.echoCancellation;
+    _echoCancellation = devices.echoCancellation;
     try {
       _media = CallMedia(peer(), id, mic: devices.microphone, speaker: devices.speaker)
         ..muted = _muted
         ..volume = _volume
         ..start();
     } on OpusUnavailable catch (e) {
-      audioProblem = '$e';
+      _audioProblem = '$e';
       await devices.speaker.close();
       await devices.close();
       _devices = null;
@@ -321,6 +397,72 @@ class Talk {
     _devices = null;
     await media?.stop();
     await devices?.close();
+    await _stopWebrtc();
+  }
+
+  Future<void> _stopWebrtc() async {
+    final webrtc = _webrtc;
+    _webrtc = null;
+    _audioProblem ??= webrtc?.audioProblem; // kept for the ended call's screen
+    await webrtc?.close();
+  }
+
+  /// The other side's SDP or candidate (the core's callRtc).
+  void onRtc(CallRtc r) {
+    if (r.call == _webrtc?.id) _webrtc!.take(r.payload);
+  }
+
+  // -- the camera, on a WebRTC call: WebrtcCall's -------------------------------
+
+  /// This machine's cameras, once the call's media has started; empty
+  /// with none.
+  List<Camera>? get cameras => _webrtc?.cameras;
+
+  /// Whether our camera is sending.
+  bool get cameraOn => _webrtc?.cameraOn ?? false;
+
+  /// Why the camera is off when it was asked on.
+  String? get cameraProblem => _webrtc?.cameraProblem;
+
+  /// Whether the call screen offers the camera switch: a WebRTC call.
+  bool get cameraSwitch {
+    final c = call;
+    return c != null && c.live && (c.webrtc || (c.state == 'offered' && c.transports.contains(transportWebrtc)));
+  }
+
+  bool get canSwitchCamera => _webrtc?.canSwitchCamera ?? false;
+
+  /// Whether the camera switch shows on: sending, or asked for before the
+  /// call's media has started (Video call, while it rings).
+  bool get cameraSwitchOn => _webrtc?.cameraSwitchOn ?? false;
+
+  /// Whether the other side's video is to be drawn.
+  bool get remoteVideoShown => _webrtc?.remoteVideoShown ?? false;
+
+  Widget? remoteVideo() => _webrtc?.remoteVideo();
+  Widget? localVideo() => _webrtc?.localVideo();
+
+  /// The video's frames so far, on a WebRTC call.
+  Future<VideoStats?> videoStats() async => _webrtc?.videoStats();
+
+  /// Our camera on or off: before the call's media starts, as it starts.
+  Future<void> setCameraOn(bool on) async => _webrtc?.setCameraOn(on);
+
+  /// The app went out of sight, or came back ([away]): on Android our
+  /// camera pauses meanwhile, the call going on in the listening service.
+  Future<void> awayChanged() async => _webrtc?.followAway();
+
+  /// The next camera, round and back to the first.
+  Future<void> switchCamera() async => _webrtc?.switchCamera();
+
+  /// Ring for a call coming in, once: the notifier with the app out of
+  /// sight, and the phone's ringtone or else the app's own ring.
+  void _ringFor(String id, Call c) {
+    if (_ringing == id) return;
+    _ringing = id;
+    if (!notifier.ringsItself) _startRing();
+    unawaited(notifier.ringing(nameOf(c.peer), id, inFront: foreground(), video: c.video));
+    unawaited(permissions?.checkFillScreen());
   }
 
   /// A two-tone ring: 0.4 s on, 0.2 s off, 0.4 s on, 2 s off.
@@ -350,7 +492,8 @@ class Talk {
   }
 
   void _stopRing(String id) {
-    if (_ringTimer == null) return;
+    if (_ringing != id) return;
+    _ringing = null;
     _ringTimer?.cancel();
     _ringTimer = null;
     final r = _ring;

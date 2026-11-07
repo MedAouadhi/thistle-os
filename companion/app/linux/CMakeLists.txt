@@ -70,6 +70,10 @@ set_target_properties(${BINARY_NAME}
 )
 
 
+# flutter_webrtc's libwebrtc, fetched and checked against its pinned
+# SHA-256 before the plugin's own build looks for it.
+include(libwebrtc.cmake)
+
 # Generated plugin build rules, which manage building the plugins and adding
 # them to the application.
 include(flutter/generated_plugins.cmake)

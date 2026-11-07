@@ -361,6 +361,9 @@ jobs:
       - name: Test the app
         run: flutter test
 
+      # flutter_webrtc's libwebrtc is fetched here and checked against the
+      # SHA-256 pinned in companion/app/linux/libwebrtc.cmake; another hash
+      # fails the build.
       - name: Build the Linux app
         run: flutter build linux --release
 
@@ -397,6 +400,9 @@ jobs:
         run: |
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;28.2.13676358" "cmake;3.22.1" > /dev/null
 
+      # Every artifact Gradle fetches, flutter_webrtc's libwebrtc among
+      # them, is checked against companion/app/android/gradle/
+      # verification-metadata.xml; another hash fails the build.
       - name: Build the APK
         run: flutter build apk --release
 

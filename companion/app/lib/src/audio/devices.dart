@@ -10,6 +10,7 @@ import 'dart:typed_data';
 
 import 'package:tailnet_chat_core/tailnet_chat_core.dart';
 
+import '../child_processes.dart';
 import 'pulse.dart';
 
 export 'pulse.dart' show AudioUnavailable;
@@ -62,10 +63,14 @@ class NoAudioDevices implements AudioDevices {
 ///     `media.role=phone`, which PulseAudio's module-filter-apply honours
 ///     (loaded by default).
 class PulseAudioDevices implements AudioDevices {
-  PulseAudioDevices({required this.configDir, this.log});
+  PulseAudioDevices({required this.configDir, this.children, this.log});
 
   /// Where the echo canceller's PipeWire configuration is written.
   final String configDir;
+
+  /// The canceller is a child process: none starts while a camera is on.
+  /// A `ws-opus` call never has one, so this only guards the rule.
+  final ChildProcesses? children;
   final void Function(String)? log;
 
   static const ecSource = 'thistle-chat-ec-source';
@@ -104,6 +109,10 @@ class PulseAudioDevices implements AudioDevices {
   /// PipeWire's canceller and its microphone, once its nodes are up; null
   /// without PipeWire.
   Future<(Process, Future<Stream<Int16List>>)?> _startPipewireCanceller() async {
+    if (!(children?.mayStart ?? true)) {
+      log?.call('no PipeWire echo canceller while a camera is on');
+      return null;
+    }
     final Process p;
     try {
       final conf = File('$configDir/echo-cancel.conf');

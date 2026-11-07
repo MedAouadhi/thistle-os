@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:tailnet_chat_core/tailnet_chat_core.dart';
 
 import '../chat_model.dart';
+import '../notifier.dart' show CallWindow;
 import '../permissions.dart';
 import 'call_page.dart';
 import 'contacts_page.dart';
@@ -12,10 +13,13 @@ import 'theme.dart';
 import 'widgets.dart';
 
 class ThistleChatApp extends StatelessWidget {
-  const ThistleChatApp({super.key, required this.model, this.navigatorKey});
+  const ThistleChatApp({super.key, required this.model, this.navigatorKey, this.callWindow});
 
   final ChatModel model;
   final GlobalKey<NavigatorState>? navigatorKey;
+
+  /// Android's call window over the lock screen; null on Linux.
+  final CallWindow? callWindow;
 
   @override
   Widget build(BuildContext context) => MaterialApp(
@@ -25,6 +29,9 @@ class ThistleChatApp extends StatelessWidget {
     theme: inkTheme(Brightness.light),
     darkTheme: inkTheme(Brightness.dark),
     home: HomePage(model: model),
+    builder: callWindow == null
+        ? null
+        : (context, child) => CallWindowed(model: model, window: callWindow!, child: child!),
   );
 }
 
@@ -98,9 +105,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   /// In front only while resumed: a message to a hidden window notifies.
+  /// Away once hidden, and back once resumed: a prompt or the notification
+  /// shade over the window (inactive) leaves a call's camera on.
   @override
-  void didChangeAppLifecycleState(AppLifecycleState state) =>
-      widget.model.foreground = state == AppLifecycleState.resumed;
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final model = widget.model;
+    model.foreground = state == AppLifecycleState.resumed;
+    if (state == AppLifecycleState.resumed) {
+      model.hidden = false;
+    } else if (state != AppLifecycleState.inactive && !model.hidden) {
+      model.hidden = true;
+    }
+  }
 
   void _go(int tab) => setState(() => _tab = tab);
 
@@ -260,7 +276,7 @@ void _pushPage(BuildContext context, ChatModel model, Widget Function() page) =>
         child: SafeArea(
           bottom: false,
           child: ListenableBuilder(
-            listenable: model,
+            listenable: Listenable.merge([model, ?model.permissions]),
             builder: (_, _) => Column(
               children: [
                 if (model.problem != null) _ProblemBanner(model.problem!),
@@ -552,7 +568,11 @@ class _RefusalBanner extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => _Strip(
-    icon: permission == AppPermission.microphone ? Icons.mic_off_rounded : Icons.notifications_off_outlined,
+    icon: switch (permission) {
+      AppPermission.microphone => Icons.mic_off_rounded,
+      AppPermission.camera => Icons.videocam_off_rounded,
+      AppPermission.notifications => Icons.notifications_off_outlined,
+    },
     text: permissions.refusal(permission) ?? '',
     actions: [
       TextButton(onPressed: permissions.openSettings, child: const Text('Open settings')),

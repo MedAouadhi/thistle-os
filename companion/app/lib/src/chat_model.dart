@@ -14,6 +14,8 @@ import 'package:flutter/foundation.dart';
 import 'package:tailnet_chat_core/tailnet_chat_core.dart';
 
 import 'background.dart';
+import 'call_engine.dart';
+import 'child_processes.dart';
 import 'audio/devices.dart';
 import 'notifier.dart';
 import 'permissions.dart';
@@ -53,10 +55,19 @@ class ChatModel extends ChangeNotifier {
     this.background,
     this.permissions,
     AudioDevices? audio,
+    this.callEngine,
+    this.callRoute,
+    this.callWindow,
+    ChildProcesses? children,
     Future<ProbeResult?> Function(PeerAddress address)? probe,
   }) : _probe = probe,
+       children = children ?? ChildProcesses(),
        notifier = notifier ?? _Silent(),
-       audio = audio ?? NoAudioDevices('no audio devices given');
+       audio = audio ?? NoAudioDevices('no audio devices given') {
+    callWindow?.addListener(_callWindowChanged);
+  }
+
+  void _callWindowChanged() => unawaited(talk.awayChanged());
 
   final Identity identity;
   final Store Function() openStore;
@@ -84,6 +95,22 @@ class ChatModel extends ChangeNotifier {
   /// The microphone and speaker: PulseAudio/PipeWire on Linux, or files.
   final AudioDevices audio;
 
+  /// WebRTC calls' media; with one, this app announces `call:webrtc` and
+  /// calls another such app over WebRTC (and `call:webrtc-prflx` if its
+  /// WebRTC gathers no tailnet candidate: a call between two such is
+  /// `ws-opus`). Null: `ws-opus` only.
+  final CallEngine? callEngine;
+
+  /// What a phone does with a WebRTC call; Android's.
+  final CallRoute? callRoute;
+
+  /// Android's call window over the lock screen: while it is in front the
+  /// app is not [away].
+  final CallWindow? callWindow;
+
+  /// The app's child processes, none started while a camera is on.
+  final ChildProcesses children;
+
   /// How discovery probes an address; `ChatPeer.probe` unless a test says.
   final Future<ProbeResult?> Function(PeerAddress address)? _probe;
 
@@ -91,14 +118,18 @@ class ChatModel extends ChangeNotifier {
   late final Talk talk = Talk(
     peer: () => _peer,
     audio: audio,
+    engine: callEngine,
+    route: callRoute,
     notifier: notifier,
     foreground: () => _foreground,
+    away: () => away,
     changed: () {
       if (!_closed) notifyListeners();
     },
     sendVoice: sendVoice,
     callee: (box) => _who(_contact(box)),
     permissions: permissions,
+    children: children,
     log: log,
   );
 
@@ -106,6 +137,7 @@ class ChatModel extends ChangeNotifier {
   late ChatPeer _peer = _newPeer('127.0.0.1');
   bool _started = false;
   StreamSubscription<ChatEvent>? _events;
+  StreamSubscription<CallRtc>? _rtc;
   Timer? _refresh;
   Timer? _tick;
   bool _closed = false;
@@ -138,13 +170,18 @@ class ChatModel extends ChangeNotifier {
       host: host,
       port: port,
       loopback: loopback,
+      caps: [
+        ...capsV1,
+        if (callEngine case final engine?) ...[capWebrtc, if (!engine.tailnetCandidates) capWebrtcPrflx],
+      ],
       callPolicy: CallPolicy.ignore, // calls ring for the user
       log: log,
     );
     // A contact that asks is told the tailnet's online peers, as Tailscale
     // shows them now; on Android, none.
-    p.tailnetPeers = () async => (await readStatus()).toShare;
+    p.tailnetPeers = () async => (await _readStatus()).toShare;
     _events = p.events.listen(_onEvent);
+    _rtc = p.callRtc.listen(talk.onRtc);
     return p;
   }
 
@@ -152,6 +189,7 @@ class ChatModel extends ChangeNotifier {
     await refresh();
     // Not awaited: the notification prompt waits on the user, the screens do not.
     unawaited(_applyBackground());
+    unawaited(permissions?.checkFillScreen());
     if (refreshEvery > Duration.zero) _refresh = Timer.periodic(refreshEvery, (_) => refresh());
     _tick = Timer.periodic(const Duration(seconds: 1), (_) => _typingLapse());
   }
@@ -160,7 +198,7 @@ class ChatModel extends ChangeNotifier {
   /// and dial the contacts it shows online, so their outboxes flush.
   Future<void> refresh() async {
     final was = status.address;
-    status = await readStatus();
+    status = await _readStatus();
     if (_closed) return;
     final host = status.state == TailnetState.running ? (listenHost ?? status.address) : null;
     // Without a peer list (Android), the tailnet coming up or moving is
@@ -170,6 +208,7 @@ class ChatModel extends ChangeNotifier {
       if (_started || host != _peer.host) {
         final old = _peer;
         await _events?.cancel();
+        await _rtc?.cancel();
         _started = false;
         await old.stop();
         _peer = _newPeer(host);
@@ -183,6 +222,18 @@ class ChatModel extends ChangeNotifier {
     }
     if (_started) unawaited(_peer.seenOnline(dialKnown ? _knownNames : status.onlineNames));
     notifyListeners();
+  }
+
+  /// Tailscale's status, read again unless a camera is on: on Linux that
+  /// runs `tailscale status`, a child process (child_processes.dart). With
+  /// the camera on, the last one read.
+  Future<TailscaleStatus> _readStatus() async => await children.run(readStatus) ?? status;
+
+  /// Whether a call with this conversation's contact may carry video, by
+  /// what both apps announced: the Video call button.
+  bool videoCapable(String box) {
+    final key = _contactByBox(box)?.key;
+    return key != null && _peer.videoCapable(key);
   }
 
   /// The contacts' tailnet names: who to dial when nothing says who is online.
@@ -201,11 +252,13 @@ class ChatModel extends ChangeNotifier {
   Future<void> _background = Future.value();
 
   Future<void> close() async {
+    callWindow?.removeListener(_callWindowChanged);
     await talk.close();
     _closed = true;
     _refresh?.cancel();
     _tick?.cancel();
     await _events?.cancel();
+    await _rtc?.cancel();
     await _peer.stop();
   }
 
@@ -220,7 +273,25 @@ class ChatModel extends ChangeNotifier {
     // Without a peer list, coming to the front is when to look for the
     // contacts again: a message held for us while we were away comes now.
     if (back && _started && !status.hasPeerList) unawaited(_peer.seenOnline(_knownNames));
+    // Back from Android's page that allows calls to fill the screen, maybe.
+    if (back) unawaited(permissions?.checkFillScreen());
   }
+
+  /// Whether the main window is out of sight: hidden or paused, not merely
+  /// inactive behind a prompt or the notification shade. Set from the
+  /// app's lifecycle.
+  bool get hidden => _hidden;
+  set hidden(bool on) {
+    _hidden = on;
+    unawaited(talk.awayChanged());
+  }
+
+  bool _hidden = false;
+
+  /// Whether the app is out of sight: its main window [hidden], and no
+  /// call window in front (Answer with video over the lock screen). A
+  /// WebRTC call's camera pauses meanwhile where the call route says.
+  bool get away => _hidden && !(callWindow?.inFront ?? false);
 
   String? get openConversationBox => _open;
 
@@ -388,7 +459,7 @@ class ChatModel extends ChangeNotifier {
     discovering = true;
     notifyListeners();
     try {
-      status = await readStatus();
+      status = await _readStatus();
       final probe = _probe ?? (PeerAddress a) => _peer.probe(a);
       _discovered = status.hasPeerList
           ? await discoverChatPeers(status, probe, port: discoveryPort)
@@ -487,9 +558,11 @@ class ChatModel extends ChangeNotifier {
 
 class _Silent implements Notifier {
   @override
+  bool get ringsItself => false;
+  @override
   Future<void> show(String title, String body, {String? conversation}) async {}
   @override
-  Future<void> ringing(String caller, String callId) async {}
+  Future<void> ringing(String caller, String callId, {bool inFront = false, bool video = false}) async {}
   @override
   Future<void> stopRinging(String callId) async {}
 }

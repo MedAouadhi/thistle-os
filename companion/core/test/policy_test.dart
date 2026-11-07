@@ -1,5 +1,5 @@
 import 'package:tailnet_chat_core/policy.dart';
-import 'package:tailnet_chat_core/protocol.dart' show SharedPeer;
+import 'package:tailnet_chat_core/protocol.dart' show MediaState, SharedPeer;
 import 'package:test/test.dart';
 
 const a = 'aa00000000000000000000000000000000000000000000000000000000000000';
@@ -216,6 +216,127 @@ void main() {
       test('an ended or declined call has nothing more to end', () {
         expect(due('ended:hangup', nowS: 1000), isNull);
         expect(due('declined:busy', nowS: 1000), isNull);
+      });
+    });
+
+    group('WebRTC between two video-capable chat peers', () {
+      const v1 = ['call:ws-opus'];
+      const both = ['call:ws-opus', 'call:webrtc'];
+
+      test('the offer lists webrtc before ws-opus only when both hellos announce call:webrtc', () {
+        expect(offerTransports(both, both), ['webrtc', 'ws-opus']);
+        expect(offerTransports(both, v1), ['ws-opus']);
+        expect(offerTransports(v1, both), ['ws-opus']);
+        expect(offerTransports(v1, ['text']), isEmpty);
+      });
+
+      test('the answer picks webrtc whenever it is offered and the callee announced it', () {
+        CallAnswer pick(List<String> transports, List<String> caps) =>
+            answerOffer(isContact: true, busy: false, transports: transports, caps: caps, policy: CallPolicy.answer);
+        expect(pick(['webrtc', 'ws-opus'], both).transport, 'webrtc');
+        expect(pick(['ws-opus', 'webrtc'], both).transport, 'webrtc');
+        expect(pick(['webrtc', 'ws-opus'], v1).transport, 'ws-opus', reason: 'the T-Deck');
+        expect(pick(['webrtc'], v1).decline, 'unsupported');
+        expect(pickTransport(['webrtc', 'ws-opus'], both), 'webrtc');
+        expect(pickTransport(['ws-opus'], both), 'ws-opus');
+        expect(pickTransport(['carrier-pigeon'], both), isNull);
+      });
+
+      test('a candidate is admitted only over UDP from an address in the tailnet\'s ranges', () {
+        const v4 = 'candidate:1 1 udp 2122260223 100.91.111.54 47998 typ host generation 0';
+        const v6 = 'candidate:2 1 UDP 2122262783 fd7a:115c:a1e0::3936:6f36 51234 typ host';
+        expect(candidateAdmitted(v4), isTrue);
+        expect(candidateAdmitted(v6), isTrue);
+        expect(candidateAdmitted('a=$v4'), isTrue, reason: 'as an SDP writes it');
+        expect(candidateAdmitted('candidate:3 1 udp 2122194687 192.168.2.131 40000 typ host'), isFalse);
+        expect(
+          candidateAdmitted('candidate:4 1 udp 1686052607 81.2.3.4 40000 typ srflx raddr 0.0.0.0 rport 0'),
+          isFalse,
+        );
+        expect(candidateAdmitted('candidate:5 1 tcp 1518280447 100.91.111.54 9 typ host tcptype active'), isFalse);
+        expect(candidateAdmitted('candidate:6 1 udp 2122260223 4f0c1a2e-1b9d.local 47998 typ host'), isFalse);
+        expect(candidateAdmitted('candidate:7 1 udp 2122260223 100.128.0.1 47998 typ host'), isFalse);
+        expect(candidateAdmitted(''), isFalse);
+        expect(candidateAdmitted('nonsense'), isFalse);
+      });
+
+      test("a selected pair is the tailnet's at both ends, or a hidden peer-reflexive one to ours", () {
+        expect(pathOnTailnet(local: '100.91.111.54', remote: '100.64.0.2', remoteType: 'host/udp'), isTrue);
+        expect(pathOnTailnet(local: 'fd7a:115c:a1e0::1', remote: 'fd7a:115c:a1e0::2', remoteType: 'prflx/udp'), isTrue);
+        // libwebrtc hides a peer-reflexive remote's address, as the phone's
+        // is: its checks reached our tailnet socket, so it is on the tailnet.
+        expect(pathOnTailnet(local: 'fd7a:115c:a1e0::3936:6f36', remote: '', remoteType: 'prflx/udp'), isTrue);
+        expect(pathOnTailnet(local: '100.91.111.54', remote: '', remoteType: 'prflx/udp'), isTrue);
+        expect(pathOnTailnet(local: '192.168.2.131', remote: '', remoteType: 'prflx/udp'), isFalse);
+        expect(
+          pathOnTailnet(local: '100.91.111.54', remote: '', remoteType: 'host/udp'),
+          isFalse,
+          reason: 'only prflx',
+        );
+        expect(pathOnTailnet(local: '192.168.2.131', remote: '100.64.0.2', remoteType: 'host/udp'), isFalse);
+        expect(pathOnTailnet(local: '100.91.111.54', remote: '81.2.3.4', remoteType: 'prflx/udp'), isFalse);
+      });
+
+      test("an SDP keeps the tailnet's candidates and loses every other", () {
+        const sdp =
+            'v=0\r\n'
+            'm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n'
+            'a=candidate:1 1 udp 2122260223 100.91.111.54 47998 typ host\r\n'
+            'a=candidate:2 1 udp 2122194687 192.168.2.131 40000 typ host\r\n'
+            'a=candidate:3 1 tcp 1518280447 100.91.111.54 9 typ host tcptype active\r\n'
+            'a=rtcp-mux\r\n';
+        expect(
+          tailnetOnlySdp(sdp),
+          'v=0\r\n'
+          'm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n'
+          'a=candidate:1 1 udp 2122260223 100.91.111.54 47998 typ host\r\n'
+          'a=rtcp-mux\r\n',
+        );
+        expect(tailnetOnlySdp('v=0\nm=audio 9 RTP/AVP 0\n'), 'v=0\nm=audio 9 RTP/AVP 0\n');
+      });
+
+      group('ends', () {
+        final t0 = DateTime(2026, 11, 4, 12);
+        String? due({required MediaState media, int answeredS = 0, int mediaS = 0, bool ever = false, int nowS = 0}) =>
+            callEndDue(
+              state: 'connected',
+              since: t0.add(Duration(seconds: answeredS)),
+              lastFrame: t0, // no ws-opus frames on a WebRTC call
+              now: t0.add(Duration(seconds: nowS)),
+              transport: 'webrtc',
+              media: media,
+              mediaSince: t0.add(Duration(seconds: mediaS)),
+              mediaEverConnected: ever,
+            );
+
+        test('not connected 15 s after the answer ends as timeout', () {
+          expect(due(media: MediaState.fresh, nowS: 15), isNull);
+          expect(due(media: MediaState.fresh, nowS: 16), 'timeout');
+          expect(due(media: MediaState.failed, mediaS: 3, nowS: 16), 'timeout', reason: 'never connected');
+        });
+
+        test('connected, it does not end however long no ws-opus frame comes', () {
+          expect(due(media: MediaState.connected, mediaS: 1, ever: true, nowS: 600), isNull);
+        });
+
+        test('disconnected for 10 s after it connected ends as error, not before', () {
+          expect(due(media: MediaState.disconnected, mediaS: 100, ever: true, nowS: 110), isNull);
+          expect(due(media: MediaState.disconnected, mediaS: 100, ever: true, nowS: 111), 'error');
+          expect(due(media: MediaState.failed, mediaS: 100, ever: true, nowS: 111), 'error');
+        });
+
+        test('ringing, the 45 s rule is unchanged', () {
+          expect(
+            callEndDue(
+              state: 'ringing',
+              since: t0,
+              lastFrame: t0,
+              now: t0.add(const Duration(seconds: 46)),
+              transport: 'webrtc',
+            ),
+            'timeout',
+          );
+        });
       });
     });
 

@@ -7,7 +7,8 @@ import 'dart:io';
 
 import 'peer.dart';
 import 'policy.dart';
-import 'protocol.dart' show SharedPeer;
+import 'protocol.dart'
+    show CameraState, MediaState, RtcCandidate, RtcPayload, RtcSdp, SharedPeer, capWebrtc, capWebrtcPrflx;
 import 'store.dart';
 
 Map<String, Object?> identityJson(ChatPeer peer) => {
@@ -35,8 +36,35 @@ Map<String, Object?> _contactJson(Contact c) => {
   'declined_by_them': c.declinedByThem,
 };
 
+/// A chat peer driven by the control protocol, and what the headless core
+/// keeps for it: the other side's SDP and candidates on each WebRTC call,
+/// for `rtc_received`, as it has no engine to take them.
+class Controlled {
+  Controlled(this.peer) {
+    peer.callRtc.listen((r) => (rtcReceived[r.call] ??= []).add(r.payload.toJson()));
+  }
+
+  final ChatPeer peer;
+
+  /// By call id, in the order they came.
+  final Map<String, List<Map<String, Object?>>> rtcReceived = {};
+}
+
+/// The `sdp` or `candidate` of an `rtc` command, as a `call_rtc` carries it.
+RtcPayload _rtcPayload(Map<String, dynamic> command) {
+  final sdp = command['sdp'] as Map?, candidate = command['candidate'] as Map?;
+  if ((sdp == null) == (candidate == null)) throw ArgumentError('rtc takes sdp or candidate');
+  if (sdp != null) return RtcSdp(sdp['type'] as String, sdp['sdp'] as String);
+  return RtcCandidate(
+    candidate!['candidate'] as String,
+    sdpMid: candidate['sdpMid'] as String?,
+    sdpMLineIndex: candidate['sdpMLineIndex'] as int?,
+  );
+}
+
 /// One control command; its result, JSON-able.
-Future<Object?> control(ChatPeer peer, Map<String, dynamic> command) async {
+Future<Object?> control(Controlled controlled, Map<String, dynamic> command) async {
+  final peer = controlled.peer;
   final to = command['to'];
   switch (command['cmd']) {
     case 'identity':
@@ -92,6 +120,15 @@ Future<Object?> control(ChatPeer peer, Map<String, dynamic> command) async {
       if (command.containsKey('read_receipts')) peer.readReceipts = command['read_receipts'] as bool;
       if (command.containsKey('call_policy'))
         peer.callPolicy = CallPolicy.values.byName(command['call_policy'] as String);
+      if (command.containsKey('webrtc')) {
+        peer.caps = [...peer.caps.where((c) => c != capWebrtc), if (command['webrtc'] == true) capWebrtc];
+      }
+      if (command.containsKey('webrtc_prflx')) {
+        peer.caps = [
+          ...peer.caps.where((c) => c != capWebrtcPrflx),
+          if (command['webrtc_prflx'] == true) capWebrtcPrflx,
+        ];
+      }
       return true;
     case 'messages':
       return peer.messages(_who(to)).map(messageJson).toList();
@@ -103,7 +140,7 @@ Future<Object?> control(ChatPeer peer, Map<String, dynamic> command) async {
       await peer.flush(to == null ? null : _who(to));
       return true;
     case 'call':
-      return peer.call(_who(to));
+      return peer.call(_who(to), video: command['video'] == true);
     case 'calls':
       return {
         for (final MapEntry(:key, :value) in peer.calls.entries)
@@ -113,8 +150,22 @@ Future<Object?> control(ChatPeer peer, Map<String, dynamic> command) async {
             'frames': value.frames,
             'mine': value.mine,
             'missed': value.missed,
+            'transport': value.transport,
+            'video': value.video,
+            'camera': value.remoteCamera?.wire,
           },
       };
+    case 'rtc':
+      return peer.sendRtc(command['call'] as String, _rtcPayload(command));
+    case 'rtc_received':
+      return controlled.rtcReceived[command['call']] ?? const [];
+    case 'camera':
+      final camera = CameraState.fromWire(command['camera']) ?? (throw ArgumentError('no camera ${command['camera']}'));
+      return peer.setCamera(command['call'] as String, camera);
+    case 'media':
+      final state = MediaState.fromWire(command['state']) ?? (throw ArgumentError('no media ${command['state']}'));
+      peer.setMediaState(command['call'] as String, state);
+      return true;
     case 'talk':
       return true; // a connected call streams its microphone (the headless core's --mic) by itself
     case 'answer_call':

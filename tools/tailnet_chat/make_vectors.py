@@ -200,6 +200,125 @@ def voice(directory: str) -> dict:
             "call_audio": call}
 
 
+CANDIDATES = [
+    ("candidate:1 1 udp 2122260223 100.91.111.54 47998 typ host generation 0", True),
+    ("candidate:2 1 udp 2122262783 fd7a:115c:a1e0::3936:6f36 51234 typ host generation 0", True),
+    ("candidate:3 1 udp 2122194687 192.168.2.131 40000 typ host generation 0", False),
+    ("candidate:4 1 udp 2122129151 10.11.12.28 40002 typ host generation 0", False),
+    ("candidate:5 1 udp 2122197247 2a02:1234::5 40004 typ host generation 0", False),
+    ("candidate:6 1 udp 1686052607 81.2.3.4 40006 typ srflx raddr 192.168.2.131 rport 40000", False),
+    ("candidate:7 1 tcp 1518280447 100.91.111.54 9 typ host tcptype active generation 0", False),
+    ("candidate:8 1 udp 2122260223 4f0c1a2e-1b9d-4c2e.local 47998 typ host generation 0", False),
+    ("candidate:9 1 udp 2122260223 100.128.0.1 47998 typ host generation 0", False),
+]
+
+# An offer as libwebrtc writes one, cut short: one audio and one video
+# section, bundled, with one candidate in the tailnet and one on the LAN.
+SDP_OFFER = (
+    "v=0\r\n"
+    "o=- 4611731400430051336 2 IN IP4 127.0.0.1\r\n"
+    "s=-\r\n"
+    "t=0 0\r\n"
+    "a=group:BUNDLE 0 1\r\n"
+    "m=audio 47998 UDP/TLS/RTP/SAVPF 111\r\n"
+    "c=IN IP4 100.91.111.54\r\n"
+    "a=candidate:1 1 udp 2122260223 100.91.111.54 47998 typ host generation 0\r\n"
+    "a=candidate:3 1 udp 2122194687 192.168.2.131 40000 typ host generation 0\r\n"
+    "a=ice-ufrag:8hhY\r\n"
+    "a=ice-pwd:asd88fgpdd777uzjYhagZg5Q\r\n"
+    "a=fingerprint:sha-256 19:E2:1C:3B:4B:9F:81:E6:B8:5C:F4:A5:A8:D8:73:04:BB:05:2F:70:9F:04:A9:0E:05:E9:26:33:E8:70:88:A2\r\n"
+    "a=setup:actpass\r\n"
+    "a=mid:0\r\n"
+    "a=sendrecv\r\n"
+    "a=rtcp-mux\r\n"
+    "a=rtpmap:111 opus/48000/2\r\n"
+    "m=video 9 UDP/TLS/RTP/SAVPF 96 97\r\n"
+    "c=IN IP4 0.0.0.0\r\n"
+    "a=mid:1\r\n"
+    "a=sendrecv\r\n"
+    "a=rtcp-mux\r\n"
+    "a=rtpmap:96 VP8/90000\r\n"
+    "a=rtpmap:97 rtx/90000\r\n"
+    "a=fmtp:97 apt=96\r\n"
+)
+
+
+# Which transports a call offer lists, by both hellos' call capabilities
+# (protocol sections 4.8 and 4.11), written out by hand: a laptop, a phone
+# (whose WebRTC gathers no tailnet candidate), a phone from before
+# `call:webrtc-prflx`, and the T-Deck.
+LAPTOP = ["call:ws-opus", "call:webrtc"]
+PHONE = ["call:ws-opus", "call:webrtc", "call:webrtc-prflx"]
+OLDER_PHONE = ["call:ws-opus", "call:webrtc"]
+TDECK = ["call:ws-opus"]
+OFFERS = [
+    ("a laptop calls a phone", LAPTOP, PHONE, ["webrtc", "ws-opus"]),
+    ("a phone calls a laptop", PHONE, LAPTOP, ["webrtc", "ws-opus"]),
+    ("a phone calls a phone", PHONE, PHONE, ["ws-opus"]),
+    ("an older phone calls a phone", OLDER_PHONE, PHONE, ["webrtc", "ws-opus"]),
+    ("a phone calls an older phone", PHONE, OLDER_PHONE, ["webrtc", "ws-opus"]),
+    ("a phone calls the T-Deck", PHONE, TDECK, ["ws-opus"]),
+    ("call:webrtc-prflx alone is nothing of WebRTC", ["call:ws-opus", "call:webrtc-prflx"], LAPTOP, ["ws-opus"]),
+]
+
+
+def webrtc() -> dict:
+    """WebRTC calls between video-capable chat peers (protocol section 4.11):
+    their frames, which candidates are admitted, an SDP with those of the
+    tailnet alone, and which transports an offer lists."""
+    call = mid("call 2")
+    tailnet = protocol.tailnet_only_sdp(SDP_OFFER)
+    valid = [
+        ("call_offer webrtc first, camera on", {"type": "call_offer", "call": call,
+                                                 "transports": ["webrtc", "ws-opus"], "stream": 3, "video": True}),
+        ("call_offer webrtc, camera off", {"type": "call_offer", "call": call,
+                                           "transports": ["webrtc", "ws-opus"], "stream": 3, "video": False}),
+        ("call_answer webrtc", {"type": "call_answer", "call": call, "transport": "webrtc"}),
+        ("call_rtc offer", {"type": "call_rtc", "call": call, "sdp": {"type": "offer", "sdp": tailnet}}),
+        ("call_rtc answer", {"type": "call_rtc", "call": call, "sdp": {"type": "answer", "sdp": tailnet}}),
+        ("call_rtc candidate", {"type": "call_rtc", "call": call, "candidate": {
+            "candidate": CANDIDATES[0][0], "sdpMid": "0", "sdpMLineIndex": 0}}),
+        ("call_rtc candidate IPv6", {"type": "call_rtc", "call": call, "candidate": {
+            "candidate": CANDIDATES[1][0], "sdpMid": "0", "sdpMLineIndex": 0}}),
+        ("call_camera on", {"type": "call_camera", "call": call, "camera": "on"}),
+        ("call_camera off", {"type": "call_camera", "call": call, "camera": "off"}),
+        ("call_camera paused", {"type": "call_camera", "call": call, "camera": "paused"}),
+        ("call_camera none", {"type": "call_camera", "call": call, "camera": "none"}),
+        ("call_end error", {"type": "call_end", "call": call, "reason": "error"}),
+    ]
+    invalid = [
+        ("call_rtc with neither", protocol.encode({"type": "call_rtc", "call": call}),
+         protocol.error("bad_request", what="call_rtc")),
+        ("call_rtc with both", protocol.encode({"type": "call_rtc", "call": call,
+                                                "sdp": {"type": "offer", "sdp": tailnet},
+                                                "candidate": {"candidate": CANDIDATES[0][0], "sdpMid": "0"}}),
+         protocol.error("bad_request", what="call_rtc")),
+        ("call_rtc sdp of another type", protocol.encode({"type": "call_rtc", "call": call,
+                                                          "sdp": {"type": "pranswer", "sdp": tailnet}}),
+         protocol.error("bad_request", what="call_rtc")),
+        ("call_rtc empty candidate", protocol.encode({"type": "call_rtc", "call": call,
+                                                      "candidate": {"candidate": "", "sdpMid": "0"}}),
+         protocol.error("bad_request", what="call_rtc")),
+        ("call_camera of another state", protocol.encode({"type": "call_camera", "call": call, "camera": "blurred"}),
+         protocol.error("bad_request", what="call_camera")),
+        ("call_offer video not a boolean", protocol.encode({"type": "call_offer", "call": call,
+                                                            "transports": ["webrtc", "ws-opus"], "stream": 3,
+                                                            "video": "yes"}),
+         protocol.error("bad_request", what="call_offer")),
+    ]
+    return {"description": "WebRTC calls (protocol section 4.11). 'valid': one of each frame; 'invalid': "
+                           "frames that MUST draw the error shown. 'candidates': ICE candidates and "
+                           "whether a side may send or take them. 'sdp': an SDP as written, and as "
+                           "sent or taken, its candidates outside the tailnet removed. 'offers': the "
+                           "call capabilities of a caller's and a callee's hellos, and the transports "
+                           "the caller's offer lists.",
+            "valid": [{"name": n, "text": protocol.encode(f)} for n, f in valid],
+            "invalid": [{"name": n, "text": t, "error": e} for n, t, e in invalid],
+            "candidates": [{"candidate": c, "admitted": a} for c, a in CANDIDATES],
+            "sdp": {"written": SDP_OFFER, "tailnet_only": tailnet},
+            "offers": [{"name": n, "caller": a, "callee": b, "transports": t} for n, a, b, t in OFFERS]}
+
+
 def build(directory: str = DEFAULT_DIR) -> dict:
     v = voice(directory)
     msgs = messages()
@@ -208,7 +327,7 @@ def build(directory: str = DEFAULT_DIR) -> dict:
         if example["name"] == "voice":
             example["text"] = v["message"]
     return {"handshake.json": dump(handshake()), "messages.json": dump(msgs),
-            "frames.json": dump(frames()), "voice.json": dump(v)}
+            "frames.json": dump(frames()), "voice.json": dump(v), "webrtc.json": dump(webrtc())}
 
 
 def main() -> int:
