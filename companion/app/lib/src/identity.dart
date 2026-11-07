@@ -2,13 +2,15 @@
 /// platform's secure storage (spec, The companion app: Identity). On Linux
 /// that is the Secret Service (GNOME Keyring, KWallet), spoken to directly
 /// over D-Bus, so the build needs no libsecret. Android (ticket 11) adds a
-/// Keystore-backed [KeyVault].
+/// Keystore-backed [KeyVault]; macOS keeps it in the login keychain
+/// ([KeychainVault]).
 library;
 
 import 'dart:async';
 import 'dart:convert';
 
 import 'package:dbus/dbus.dart';
+import 'package:flutter/services.dart';
 import 'package:tailnet_chat_core/tailnet_chat_core.dart';
 
 /// Where the identity's 32-byte seed is kept, as 64 lowercase hex digits.
@@ -138,4 +140,22 @@ class SecretServiceVault implements KeyVault {
   Future<void> close() async {
     if (_ownsClient) await _client.close();
   }
+}
+
+/// The seed in the macOS login keychain, a generic password of service
+/// `org.thistleos.thistle_chat` and account the profile, over the app's
+/// own channel (`macos/Runner/MainFlutterWindow.swift`), so no plugin.
+class KeychainVault implements KeyVault {
+  KeychainVault({this.profile = 'default'});
+  final String profile;
+  static const _channel = MethodChannel('org.thistleos.thistle_chat/keychain');
+
+  @override
+  Future<String?> read() => _channel.invokeMethod<String>('read', {'profile': profile});
+
+  @override
+  Future<void> write(String seedHex) => _channel.invokeMethod<void>('write', {'profile': profile, 'seed': seedHex});
+
+  /// Forget the identity.
+  Future<void> delete() => _channel.invokeMethod<void>('delete', {'profile': profile});
 }

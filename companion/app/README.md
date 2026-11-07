@@ -1,7 +1,7 @@
 # Thistle Chat, the companion app
 
 Tailnet chat's companion app (`.scratch/tailnet-chat/spec.md`, ADR-0015) for
-Linux and Android, from the same code. The protocol, the
+Linux, macOS and Android, from the same code. The protocol, the
 policy, the outbox and the database are the Dart core's
 (`companion/core/`, `tailnet_chat_core`); this app is the screens and the
 platform glue:
@@ -231,6 +231,58 @@ and type on its standard input, a command a line (the control protocol in
 
 It shows in Requests with its fingerprint; Accept, and the conversation
 opens in Conversations.
+
+## macOS
+
+The same app, built on a Mac (Flutter cannot cross-build it from Linux).
+What differs from Linux is in `macos/Runner/MainFlutterWindow.swift`, over
+the app's own channels, so no plugin is added:
+
+- **The identity's seed is in the login keychain**, a generic password of
+  service `org.thistleos.thistle_chat`, account the profile
+  (`KeychainVault` in `identity.dart`). A build signed differently from the
+  one that kept it (each ad-hoc build is) makes macOS ask once whether it
+  may read it: Always Allow. Keychain Access shows and deletes it.
+- **Audio is AVAudioEngine**, answering the channels Android's `Audio.kt`
+  does (`AndroidAudioDevices`): 16 kHz mono, 20 ms frames. A `ws-opus`
+  call (the T-Deck) puts its microphone and speaker on one engine with
+  Apple's voice processing on, which cancels the echo; the call screen says
+  "on (macOS voice processing)". WebRTC calls and video are libwebrtc's, as
+  on Linux.
+- **Opus is the app's own** in the disk image (below), built universal from
+  `components/opus/` by Android's CMake file; a `flutter run` build finds
+  Homebrew's instead (`brew install opus`). Without either the app works
+  and says why it has no voice messages or T-Deck calls.
+- **Tailscale**: the `tailscale` command on the PATH, Homebrew's, or the
+  Tailscale app's own binary
+  (`/Applications/Tailscale.app/Contents/MacOS/Tailscale`), whichever
+  answers first (`tailscaleCommands`). The app is not sandboxed, so that
+  command can reach tailscaled.
+- **Notifications** go to the notification center; a call rings with
+  Answer and Decline. macOS asks for them, the microphone and the camera
+  the first time each is needed (System Settings, Privacy & Security, if
+  refused).
+
+Needs Xcode (with its command line tools), CocoaPods and Flutter 3.47.9:
+
+```sh
+brew install opus cocoapods
+cd companion/app
+flutter pub get --enforce-lockfile
+flutter run -d macos                 # or:
+flutter build macos --release        # build/macos/Build/Products/Release/thistle_chat.app
+open build/macos/Build/Products/Release/thistle_chat.app
+```
+
+**As a disk image**: `tool/make_dmg.sh` (on a Mac, with CMake too) builds
+`build/macos/ThistleChat.dmg`, the app with its libopus beside a link to
+Applications. CI's `companion-macos` job keeps one for each push as the
+artifact `thistle-chat-dmg`. It is signed ad hoc and not notarized, so macOS
+refuses it the first time: System Settings, Privacy & Security, Open
+Anyway, or `xattr -dr com.apple.quarantine "/Applications/Thistle Chat.app"`.
+
+The options are those of Linux, after `--args` when opened from the shell:
+`open thistle_chat.app --args --profile second --port 4811 --verbose`.
 
 ## Android
 

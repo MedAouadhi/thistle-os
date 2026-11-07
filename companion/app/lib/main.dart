@@ -30,13 +30,18 @@ Future<void> main(List<String> args) async {
   }
 
   // Android: the Keystore, the listening service and the permissions over
-  // the app's own channel; Linux: the Secret Service, and none of the rest.
+  // the app's own channel; Linux: the Secret Service, and none of the rest;
+  // macOS: the login keychain and the audio over the app's own channels
+  // (macos/Runner/MainFlutterWindow.swift).
   final android = Platform.isAndroid ? AndroidPlatform(profile: options.profile) : null;
+  final macOS = Platform.isMacOS;
 
   final Identity identity;
   try {
     if (android != null) {
       identity = await loadIdentity(android);
+    } else if (macOS) {
+      identity = await loadIdentity(KeychainVault(profile: options.profile));
     } else {
       final vault = SecretServiceVault(profile: options.profile);
       identity = await loadIdentity(vault);
@@ -48,6 +53,8 @@ Future<void> main(List<String> args) async {
       _Failed(
         android != null
             ? 'The identity key could not be read from or kept in the Android Keystore: $e'
+            : macOS
+            ? 'The identity key could not be read from or kept in the login keychain: $e'
             : 'The identity key could not be read from or kept in the Secret Service '
                   '(GNOME Keyring or KWallet): $e',
       ),
@@ -81,11 +88,12 @@ Future<void> main(List<String> args) async {
   // camera (child_processes.dart).
   final children = ChildProcesses();
   // The microphone and speaker: audio files when asked (no sound card, a
-  // second instance, a test run), else AudioRecord/AudioTrack on Android
-  // and PulseAudio/PipeWire on Linux.
+  // second instance, a test run), else AudioRecord/AudioTrack on Android,
+  // AVAudioEngine on macOS (the same channels), and PulseAudio/PipeWire on
+  // Linux.
   final AudioDevices audio = options.mic != null || options.speakerDir != null
       ? FileAudioDevices(mic: options.mic, speakerDir: options.speakerDir)
-      : android != null
+      : android != null || macOS
       ? AndroidAudioDevices()
       : PulseAudioDevices(configDir: dir.path, children: children, log: options.verbose ? stderr.writeln : null);
   await notifier.init();

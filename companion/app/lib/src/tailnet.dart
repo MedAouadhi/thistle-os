@@ -137,15 +137,30 @@ String _firstLabel(Object? dns) => dns is String && dns.isNotEmpty ? dns.split('
 
 typedef RunProcess = Future<ProcessResult> Function(String executable, List<String> arguments);
 
+/// Where the `tailscale` command may be. On macOS an app started from the
+/// Finder has no Homebrew on its PATH, and the Tailscale app's own binary
+/// answers the CLI's commands too.
+List<String> tailscaleCommands({bool macOS = false}) => [
+  'tailscale',
+  if (macOS) ...[
+    '/opt/homebrew/bin/tailscale',
+    '/usr/local/bin/tailscale',
+    '/Applications/Tailscale.app/Contents/MacOS/Tailscale',
+  ],
+];
+
 /// Run `tailscale status --json` and parse it.
-Future<TailscaleStatus> readTailscaleStatus({RunProcess run = Process.run}) async {
-  try {
-    final r = await run('tailscale', ['status', '--json']);
-    // `tailscale status` exits non-zero when stopped but still prints the JSON.
-    return parseTailscaleStatus('${r.stdout}');
-  } on ProcessException {
-    return const TailscaleStatus(TailnetState.notInstalled);
+Future<TailscaleStatus> readTailscaleStatus({RunProcess run = Process.run, List<String>? commands}) async {
+  for (final exe in commands ?? tailscaleCommands(macOS: Platform.isMacOS)) {
+    try {
+      final r = await run(exe, ['status', '--json']);
+      // `tailscale status` exits non-zero when stopped but still prints the JSON.
+      return parseTailscaleStatus('${r.stdout}');
+    } on ProcessException {
+      continue; // not there; the next
+    }
   }
+  return const TailscaleStatus(TailnetState.notInstalled);
 }
 
 // -- Android ----------------------------------------------------------------------
