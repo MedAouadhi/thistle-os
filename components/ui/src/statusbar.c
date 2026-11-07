@@ -39,10 +39,6 @@ static const char *TAG = "statusbar";
  * overflowed. The network reading gives way while the chip shows. */
 #define STATUSBAR_ROOMY_W 300
 
-/* Where a tap on the unread-message count goes: the Messenger, or Chat
- * when only Tailnet chat messages are unread. */
-#define MESSENGER_APP_ID "com.thistle.messenger"
-#define CHAT_APP_ID      "com.thistle.tailchat"
 
 /* The battery when the power driver cannot say. */
 #define BATTERY_UNKNOWN "--% " LV_SYMBOL_BATTERY_EMPTY
@@ -84,14 +80,14 @@ static void fit_time_label(const char *time_str)
 static void messages_tap_cb(lv_event_t *e)
 {
     (void)e;
-    /* Home's rule, host-tested in test_home_core.c: only Chat has unread
-     * messages, so the envelope opens Chat. */
+    /* Home's rule, host-tested in test_home_core.c: the envelope opens the
+     * app holding the unread, SMS, MeshCore or Chat. */
     home_now_in_t in = {
         .sms_unread = rs_sms_unread_count(),
         .mesh_unread = rs_mesh_unread_count(),
         .chat_unread = tailnet_chat_unread_count(),
     };
-    app_manager_launch(home_now_chat_only(&in) ? CHAT_APP_ID : MESSENGER_APP_ID);
+    app_manager_launch(home_msg_app_id(home_now_messages_app(&in)));
 }
 
 static void call_tap_cb(lv_event_t *e)
@@ -186,7 +182,7 @@ esp_err_t statusbar_create(lv_obj_t *parent)
     lv_obj_add_event_cb(s_call_label, call_tap_cb, LV_EVENT_CLICKED, NULL);
 
     /* Unread messages: an envelope and how many, hidden while there are
-     * none. A tap opens the Messenger; the label is small, so the area that
+     * none. A tap opens the app holding them; the label is small, so the area that
      * takes the tap reaches past it. */
     s_messages_label = lv_label_create(right);
     lv_label_set_text(s_messages_label, "");

@@ -6,10 +6,11 @@
 #include "esp_err.h"
 
 /* Alerts for messages as they arrive (msg_alert.rs). The kernel buzzes the
- * vibration motor for each SMS and MeshCore message it receives, Messenger
+ * vibration motor for each SMS and MeshCore message it receives, its app
  * open or not, and keeps the latest for the UI to show as a pop-up. Neither
  * happens with alerts switched off (thistle_os.messenger.alerts, on unless
- * switched off), nor for a message in the conversation the Messenger has on
+ * switched off; the section keeps the name of the app SMS and MeshCore were
+ * split from), nor for a message in the conversation its app has on
  * screen. */
 
 #define MSG_ALERT_SMS   0
@@ -26,7 +27,7 @@ typedef struct {
 /* Take the pop-up waiting for the latest message; false when none is. */
 bool rs_msg_alert_take(msg_alert_t *out);
 
-/* The conversation the Messenger shows, as it addresses it: a phone number
+/* The conversation the SMS or MeshCore app shows, as it addresses it: a phone number
  * for SMS, "" for the mesh's Public channel or a contact's address. A
  * transport of -1, or a NULL conv, is none. */
 void rs_msg_alert_set_viewing(int transport, const char *conv);

@@ -17,11 +17,16 @@
 /* The most apps Home pins: four columns of two rows. */
 #define HOME_MAX_PINS 8
 
-/* Left and right of the All apps button. */
+/* Left and right of the All apps button and the rows of what is new. */
 #define HOME_MARGIN 8
 
+/* The longest app ID Home keeps for a pinned place, NUL included, as a
+ * manifest's. */
+#define HOME_PIN_ID_MAX 64
+
 /* Home, top to bottom, in the app area below the status bar. A band with no
- * room on the screen has a height of 0; the bar always has its place. */
+ * room on the screen has a height of 0. The bar, when asked for, always has
+ * its place. */
 typedef struct {
     bool    landscape;        /* wider than tall: the date goes beside the time */
     int16_t clock_y, clock_h;
@@ -29,11 +34,13 @@ typedef struct {
     int16_t grid_y, grid_h;   /* the pinned apps, `rows` of `cols` */
     uint8_t cols, rows;
     int16_t cell_w, cell_h;
-    int16_t bar_y, bar_h;     /* the All apps button */
+    int16_t bar_y, bar_h;     /* the All apps button: 0 high without one */
 } home_layout_t;
 
-/* The bands for an app area `width` by `height`. */
-void home_layout(int16_t width, int16_t height, home_layout_t *out);
+/* The bands for an app area `width` by `height`, with an All apps button
+ * along the bottom when `apps_bar`: a board with an apps key
+ * (HAL_KEY_APPS) opens All apps from it, and its pinned apps have the room. */
+void home_layout(int16_t width, int16_t height, bool apps_bar, home_layout_t *out);
 
 /* The apps to pin, at most `max`: those of `preferred` that are installed,
  * in that order, then the other installed apps `eligible` accepts, in the
@@ -43,6 +50,24 @@ int home_pick_pins(const char *const *preferred, size_t n_preferred,
                    const char *const *installed, size_t n_installed,
                    bool (*eligible)(const char *id),
                    int *out, int max);
+
+/* The apps to pin, place by place, at most `max` places: in place i the
+ * installed app `chosen[i]` names, if it does and it is not in an earlier
+ * place; each place left over, in order, from home_pick_pins()'s choice of
+ * the rest. Writes indexes into `installed` to `out`, -1 for a place with
+ * nothing to put in it, and returns how many places there are: past the last
+ * filled one, there are none. `chosen` may be NULL, and its entries NULL or
+ * "" for a place the user never chose. */
+int home_place_pins(const char *const *chosen, size_t n_chosen,
+                    const char *const *preferred, size_t n_preferred,
+                    const char *const *installed, size_t n_installed,
+                    bool (*eligible)(const char *id),
+                    int *out, int max);
+
+/* Put `app_id` in place `slot` of the `n` places in `ids`, the app there
+ * before going to the place `app_id` leaves, if it was pinned already: an
+ * app is pinned once. Nothing for a slot out of range or an ID too long. */
+void home_choose_pin(char ids[][HOME_PIN_ID_MAX], int n, int slot, const char *app_id);
 
 /* The date as Home shows it, "Friday 16 October", or with the weekday on a
  * line of its own when `two_lines`. `wday` 0 is Sunday and `mon` 0 January,
@@ -65,15 +90,15 @@ void home_format_date(int wday, int mday, int mon, bool two_lines,
  * with none of the first four, CAUGHT_UP and then MESH. SYSTEM_UPDATE and
  * APP_UPDATES are one row, the one that applies. */
 typedef enum {
-    HOME_NOW_MESSAGES,     /* unread SMS, mesh and Tailnet chat messages: opens the
-                            * Messenger, or Chat when only Chat has any */
+    HOME_NOW_MESSAGES,     /* unread SMS, mesh and Tailnet chat messages: opens
+                            * the app home_now_messages_app() names */
     HOME_NOW_MISSED_CALL,  /* missed calls: opens Phone; its button calls back */
     HOME_NOW_TAILNET,      /* the tailnet waits for the user: opens Tailscale */
     HOME_NOW_SYSTEM_UPDATE,/* ThistleOS has an update, and perhaps apps: opens
                             * Settings -> System update */
     HOME_NOW_APP_UPDATES,  /* only apps have updates: opens the App Store */
     HOME_NOW_CAUGHT_UP,    /* nothing new: not a button */
-    HOME_NOW_MESH,         /* the mesh is on: opens the Messenger */
+    HOME_NOW_MESH,         /* the mesh is on: opens MeshCore */
 } home_now_kind_t;
 
 /* What the tailnet asks of the user, if anything. */
@@ -120,6 +145,16 @@ typedef struct {
  * Counts only, never what a message says or who sent it. */
 int home_now_rows(const home_now_in_t *in, home_now_row_t *out, int max);
 
-/* Whether the unread messages are all Chat's: the messages row opens Chat
- * rather than the Messenger. */
-bool home_now_chat_only(const home_now_in_t *in);
+/* The app holding unread messages, which the messages row and the status
+ * bar's envelope open: the only one with any, else the first of SMS,
+ * MeshCore and Chat that has some, as the row's detail lists them. SMS when
+ * none has any. */
+typedef enum {
+    HOME_MSG_SMS,
+    HOME_MSG_MESH,
+    HOME_MSG_CHAT,
+} home_msg_app_t;
+home_msg_app_t home_now_messages_app(const home_now_in_t *in);
+
+/* That app's ID. */
+const char *home_msg_app_id(home_msg_app_t app);

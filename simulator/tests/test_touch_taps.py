@@ -39,7 +39,7 @@ class Case:
 
 
 # Home's positions are its own layout on each screen (home_core.c): Phone is
-# the first pinned app, All apps the bar along the bottom.
+# the first pinned app; the T-Deck Max opens All apps from its apps key.
 CASES = (
     Case("eink-quick-tap", "tdeck-max", ("40,198",), 0,
          "(phone) on_create"),
@@ -47,15 +47,15 @@ CASES = (
          "(phone) on_create"),
     # All apps, then a tile elsewhere: the second tap must not be lost to a
     # press left over from the first.
-    Case("eink-second-tap-elsewhere", "tdeck-max", ("120,302", "120,95"), 100,
+    Case("eink-second-tap-elsewhere", "tdeck-max", ("apps", "120,95"), 100,
          "(filemgr) on_create"),
-    Case("eink-quick-second-tap-elsewhere", "tdeck-max", ("120,302", "120,95"), 0,
+    Case("eink-quick-second-tap-elsewhere", "tdeck-max", ("apps", "120,95"), 0,
          "(filemgr) on_create"),
     # Files from the drawer, over a card with twelve more folders: while the
     # drawer was only hidden, its nineteen tiles and these rows ran LVGL's
     # pool dry, which hangs the UI in LVGL's allocator and the run never
     # reaches its timeout.
-    Case("eink-files-from-the-drawer-over-a-full-card", "tdeck-max", ("120,302", "120,95"), 100,
+    Case("eink-files-from-the-drawer-over-a-full-card", "tdeck-max", ("apps", "120,95"), 100,
          "Simulator timeout reached", folders=12),
 )
 

@@ -15,14 +15,24 @@ set(THISTLE_OPTIONAL_APPS
     "file_manager|FILEMGR|filemgr"
     "filexfer|FILEXFER|filexfer"
     "hermes|HERMES|hermes"
+    "meshchat|MESHCHAT|meshchat"
     "navigator|NAVIGATOR|navigator"
     "phone|PHONE|phone"
     "podcasts|PODCASTS|podcasts"
     "reader|READER|reader"
+    "sms|SMS|sms"
     "tailchat|TAILCHAT|tailchat"
     "tailscale|TAILSCALE|tailscale"
     "todo|TODO|todo"
     "vault|VAULT|vault"
+)
+
+# Code the apps above share, as components of their own under apps/<dir>/
+# that register no app: "<dir>|<suffix>", their sources named in their
+# sources.cmake as THISTLE_<suffix>_SRCS. The chat kit is the SMS and
+# MeshCore apps' screens, in Chat's look.
+set(THISTLE_APP_LIBS
+    "chatkit|CHATKIT"
 )
 
 # Apps that come from the App Store instead, as the packages in
@@ -45,6 +55,23 @@ set(THISTLE_STORE_APPS
 # failure this file exists to prevent. Migrating an app out means deleting its
 # entry above, not letting the build quietly drop it.
 macro(thistle_collect_optional_apps)
+    foreach(_entry IN LISTS THISTLE_APP_LIBS)
+        string(REPLACE "|" ";" _parts "${_entry}")
+        list(GET _parts 0 _dir)
+        list(GET _parts 1 _flag)
+        set(_root "${THISTLE_DIR}/apps/${_dir}")
+        if(NOT EXISTS "${_root}/sources.cmake")
+            message(FATAL_ERROR
+                "Library '${_dir}' is listed in cmake/thistle_apps.cmake but "
+                "${_root}/sources.cmake does not exist.")
+        endif()
+        include("${_root}/sources.cmake")
+        foreach(_src IN LISTS THISTLE_${_flag}_SRCS)
+            list(APPEND THISTLE_SRCS "${_root}/${_src}")
+        endforeach()
+        list(APPEND THISTLE_APP_INCLUDE_DIRS "${_root}")
+    endforeach()
+
     foreach(_entry IN LISTS THISTLE_OPTIONAL_APPS)
         string(REPLACE "|" ";" _parts "${_entry}")
         list(GET _parts 0 _dir)

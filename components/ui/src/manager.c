@@ -141,12 +141,14 @@ static uint8_t     s_kbd_queue_len  = 0;
 static bool s_home_pending = false;
 static bool s_back_pending = false;
 
-/* The quick panel, asked for by a drag (pull_gesture.h) or the quick key,
- * and opened or closed by the same timer. */
+/* The quick panel, asked for by a drag (pull_gesture.h) and opened or
+ * closed by the same timer. */
 static pull_gesture_t s_pull;
 static bool s_quick_open_pending = false;
 static bool s_quick_close_pending = false;
-static bool s_quick_toggle_pending = false;
+/* An apps key press: All apps, over Home, opened or closed by the timer. */
+static bool s_apps_pending = false;
+static void (*s_apps_handler)(void) = NULL;
 /* Esc while the call screen is open: offered to it alone, as Back is. */
 static bool s_call_esc_pending = false;
 /* Backspace held this long empties the focused text field. LVGL repeats a
@@ -165,6 +167,11 @@ static bool (*s_back_handler)(void) = NULL;
 void ui_manager_set_home_handler(void (*handler)(void))
 {
     s_home_handler = handler;
+}
+
+void ui_manager_set_apps_handler(void (*handler)(void))
+{
+    s_apps_handler = handler;
 }
 
 static void back_owner_deleted_cb(lv_event_t *e)
@@ -241,9 +248,15 @@ static void nav_key_timer_cb(lv_timer_t *timer)
         s_quick_open_pending = false;
         if (!call_ui_is_open()) quick_panel_open();
     }
-    if (s_quick_toggle_pending) {
-        s_quick_toggle_pending = false;
-        if (!call_ui_is_open()) quick_panel_toggle();
+    /* All apps: Home brought forward, and its drawer opened or closed. Not
+     * over the call screen, which Home tucks away. */
+    if (s_apps_pending) {
+        s_apps_pending = false;
+        if (!call_ui_is_open()) {
+            quick_panel_close();
+            app_manager_launch("com.thistle.launcher");
+            if (s_apps_handler) s_apps_handler();
+        }
     }
     if (s_call_esc_pending) {
         s_call_esc_pending = false;
@@ -332,17 +345,17 @@ static void ui_input_hal_cb(const hal_input_event_t *event, void *user_data)
                 dictation_key(event->type == HAL_INPUT_EVENT_KEY_DOWN);
                 break;
             }
-            /* Home, Back and the quick key type nothing, so they never reach
+            /* Home, Back and the apps key type nothing, so they never reach
              * LVGL's keypad. */
             if (event->key.keycode == HAL_KEY_HOME || event->key.keycode == HAL_KEY_BACK ||
-                event->key.keycode == HAL_KEY_QUICK) {
+                event->key.keycode == HAL_KEY_APPS) {
                 if (event->type == HAL_INPUT_EVENT_KEY_DOWN) {
                     if (event->key.keycode == HAL_KEY_HOME) {
                         s_home_pending = true;
                     } else if (event->key.keycode == HAL_KEY_BACK) {
                         s_back_pending = true;
                     } else {
-                        s_quick_toggle_pending = true;
+                        s_apps_pending = true;
                     }
                 }
                 break;

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """The Phone app lists the contacts on the SD card, filters them as the
-keyboard types, stars them into Favourites, hands a number to the Messenger,
+keyboard types, stars them into Favourites, hands a number to the SMS app,
 dials from its keypad, and fits every screen it opens on.
 
 The contacts are simulator/sdcard/contacts/contacts.vcf: fifteen cards in the
@@ -17,7 +17,7 @@ What the kernel writes for the app, the stars and the call log, is under
 simulator/sdcard/phone, which is git-ignored; every case puts it back as it
 found it.
 
-Calls themselves, and the Messenger taking the number, are other parts'
+Calls themselves, and the SMS app taking the number, are other parts'
 work: these cases check only that the app asked for them.
 """
 
@@ -102,10 +102,10 @@ CASES = (
          expected=("(phone) page Anna Schmidt", "(phone) star Anna Schmidt on",
                    "(phone) tab favourites", "(phone) favourites: 1"),
          after=starred_anna),
-    Case("message-opens-the-messenger", "tdeck-max",
+    Case("message-opens-sms", "tdeck-max",
          taps(FIRST_CONTACT, MESSAGE), 2,
          expected=("(phone) page Anna Schmidt", "(phone) message +4915123456789",
-                   "(messenger) on_create")),
+                   "(sms) on_create", "(sms) compose +4915123456789: Anna Schmidt")),
     Case("call-from-a-contact", "tdeck-max",
          taps(FIRST_CONTACT, CALL), 2,
          expected=("(phone) page Anna Schmidt", "(phone) call +49 151 23456789")),

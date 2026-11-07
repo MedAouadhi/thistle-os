@@ -7,6 +7,7 @@
 #include "hal/board.h"
 #include "thistle/app_manager.h"
 #include "thistle/call.h"
+#include "thistle/home_prefs.h"
 #include "thistle/mesh.h"
 #include "thistle/phonebook.h"
 #include "thistle/sms.h"
@@ -70,10 +71,12 @@ static int s_app_h = 296;
 
 /* The apps Home pins, first to last, as many as the screen has room for. One
  * that is not installed gives its place to the next installed app that is
- * not a tool. */
+ * not a tool. A place the user chose, by holding its tile, keeps their
+ * choice (home_prefs.h). */
 static const char *const s_pin_preference[] = {
     "com.thistle.phone",
-    "com.thistle.messenger",
+    "com.thistle.sms",
+    "com.thistle.meshchat",
     "com.thistle.hermes",
     "com.thistle.podcasts",
     "com.thistle.notes",
@@ -99,7 +102,22 @@ static bool        s_mono        = false;  /* e-paper: outlines and inversion */
 static lv_obj_t   *s_clock_label = NULL;   /* NULL on a screen with no room */
 static lv_obj_t   *s_date_label  = NULL;
 static lv_timer_t *s_clock_timer = NULL;
-static lv_obj_t   *s_apps_btn    = NULL;   /* All apps */
+static bool        s_apps_bar    = true;   /* false on a board with an apps key */
+static lv_obj_t   *s_apps_btn    = NULL;   /* All apps, NULL with no bar */
+/* Home's last button, where the keyboard's focus starts (focus_home). */
+static lv_obj_t   *s_focus_start = NULL;
+
+/* The pinned places as Home shows them: each one's app ID, "" for a place
+ * with nothing in it. Read by the LVGL task alone, so in PSRAM. */
+static EXT_RAM_BSS_ATTR char s_pin_ids[HOME_MAX_PINS][HOME_PIN_ID_MAX];
+static int         s_pin_count   = 0;
+
+/* The list a held tile opens, to choose the app for its place. */
+static lv_obj_t   *s_picker      = NULL;
+static lv_obj_t   *s_picker_table = NULL;
+static int         s_picker_slot = -1;
+static int         s_picker_count = 0;
+static EXT_RAM_BSS_ATTR char s_picker_ids[32][HOME_PIN_ID_MAX];
 
 /* What is new: HOME_NOW_ROWS rows, built with Home and filled from
  * home_now_rows(). A row is a button holding its icon, title and detail,
@@ -147,7 +165,8 @@ static const char *app_icon_symbol(const char *app_id)
     if (strstr(app_id, "tailchat"))    return LV_SYMBOL_BELL;
     if (strstr(app_id, "hermes"))      return LV_SYMBOL_CHARGE;
     if (strstr(app_id, "reader"))      return LV_SYMBOL_FILE;
-    if (strstr(app_id, "messenger"))   return LV_SYMBOL_ENVELOPE;
+    if (strstr(app_id, "meshchat"))    return LV_SYMBOL_LOOP;      /* as the quick panel's LoRa */
+    if (strstr(app_id, ".sms"))        return LV_SYMBOL_ENVELOPE;
     if (strstr(app_id, "phone"))       return LV_SYMBOL_CALL;
     if (strstr(app_id, "navigator"))   return LV_SYMBOL_GPS;
     if (strstr(app_id, "notes"))       return LV_SYMBOL_EDIT;
@@ -243,13 +262,30 @@ static void launch_pinned_cb(void *arg)
     }
 }
 
+static void open_pin_picker(int slot);
+
 /* Launched once this click is over: leaving Home deletes its tiles, this one
- * among them (launcher_ui_hide). */
+ * among them (launcher_ui_hide). A place with nothing in it opens the list
+ * to choose its app, as holding a tile does. */
 static void pinned_clicked_cb(lv_event_t *e)
 {
-    const char *app_id = (const char *)lv_obj_get_user_data(lv_event_get_current_target(e));
-    if (app_id) {
-        lv_async_call(launch_pinned_cb, (void *)app_id);
+    int slot = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_current_target(e));
+    if (slot < 0 || slot >= s_pin_count) {
+        return;
+    }
+    if (s_pin_ids[slot][0] == '\0') {
+        open_pin_picker(slot);
+        return;
+    }
+    lv_async_call(launch_pinned_cb, s_pin_ids[slot]);
+}
+
+/* Held: choose another app for the place. LVGL sends no click after it. */
+static void pinned_long_pressed_cb(lv_event_t *e)
+{
+    int slot = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_current_target(e));
+    if (slot >= 0 && slot < s_pin_count) {
+        open_pin_picker(slot);
     }
 }
 
@@ -592,6 +628,7 @@ static void tile_ext_draw_cb(lv_event_t *e)
     lv_event_set_ext_draw_size(e, FOCUS_ROOM);
 }
 
+/* `app` NULL for a place with nothing in it: an empty box, "+" in it. */
 static void create_pinned_tile(lv_obj_t *parent, const app_manifest_t *app,
                                int index, const theme_colors_t *c)
 {
@@ -604,8 +641,10 @@ static void create_pinned_tile(lv_obj_t *parent, const app_manifest_t *app,
     lv_obj_add_flag(tile, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
     lv_obj_add_event_cb(tile, tile_ext_draw_cb, LV_EVENT_REFR_EXT_DRAW_SIZE, NULL);
     lv_obj_refresh_ext_draw_size(tile);
-    lv_obj_set_user_data(tile, (void *)app->id);
-    lv_obj_add_event_cb(tile, pinned_clicked_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_set_user_data(tile, (void *)(intptr_t)index);
+    lv_obj_add_event_cb(tile, pinned_clicked_cb, LV_EVENT_SHORT_CLICKED, NULL);
+    lv_obj_add_event_cb(tile, pinned_long_pressed_cb, LV_EVENT_LONG_PRESSED, NULL);
+    s_focus_start = tile;
     static const lv_event_code_t STATE_EVENTS[] = {
         LV_EVENT_PRESSED, LV_EVENT_RELEASED, LV_EVENT_PRESS_LOST,
         LV_EVENT_FOCUSED, LV_EVENT_DEFOCUSED,
@@ -621,7 +660,7 @@ static void create_pinned_tile(lv_obj_t *parent, const app_manifest_t *app,
     lv_obj_add_style(box, &s_st_pressed, LV_PART_MAIN | LV_STATE_PRESSED);
     lv_obj_add_style(box, &s_st_focus, LV_PART_MAIN | LV_STATE_FOCUS_KEY);
     lv_obj_clear_flag(box, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
-    if (!s_mono) {
+    if (!s_mono && app) {
         lv_obj_set_style_bg_color(box, tile_color(c, index), LV_PART_MAIN);
     }
 
@@ -629,8 +668,11 @@ static void create_pinned_tile(lv_obj_t *parent, const app_manifest_t *app,
      * each state. */
     lv_obj_t *glyph = lv_label_create(box);
     lv_obj_remove_style_all(glyph);
-    lv_label_set_text(glyph, app_icon_symbol(app->id));
+    lv_label_set_text(glyph, app ? app_icon_symbol(app->id) : LV_SYMBOL_PLUS);
     lv_obj_center(glyph);
+    if (app == NULL) {
+        return;
+    }
 
     /* As wide as its name, so focus inverts the name alone, but no wider than
      * the tile, past which it is cut. A label sized to its text cannot be
@@ -817,8 +859,8 @@ static const char *read_os_update(void)
     return version;
 }
 
-/* The unread messages are all Chat's: the messages row opens Chat. */
-static bool s_chat_only;
+/* The app the messages row opens: the one holding the unread. */
+static home_msg_app_t s_messages_app;
 
 static void read_now(home_now_in_t *in)
 {
@@ -828,7 +870,7 @@ static void read_now(home_now_in_t *in)
     in->sms_unread = rs_sms_unread_count();
     in->mesh_unread = rs_mesh_unread_count();
     in->chat_unread = tailnet_chat_unread_count();
-    s_chat_only = home_now_chat_only(in);
+    s_messages_app = home_now_messages_app(in);
     in->missed_calls = rs_call_missed_count();
     if (in->missed_calls > 0) {
         read_missed_call(in);
@@ -863,8 +905,8 @@ static const char SETTINGS_AT_UPDATE[] = "com.thistle.settings";
 static const char *now_app(home_now_kind_t kind)
 {
     switch (kind) {
-    case HOME_NOW_MESSAGES:    return s_chat_only ? "com.thistle.tailchat" : "com.thistle.messenger";
-    case HOME_NOW_MESH:        return "com.thistle.messenger";
+    case HOME_NOW_MESSAGES:    return home_msg_app_id(s_messages_app);
+    case HOME_NOW_MESH:        return "com.thistle.meshchat";
     case HOME_NOW_MISSED_CALL: return "com.thistle.phone";
     case HOME_NOW_TAILNET:     return "com.thistle.tailscale";
     case HOME_NOW_SYSTEM_UPDATE: return SETTINGS_AT_UPDATE;
@@ -1125,19 +1167,36 @@ static void create_pinned_grid(lv_obj_t *parent, const theme_colors_t *c)
     for (int i = 0; i < count; i++) {
         ids[i] = apps[i]->id;
     }
-    int picked[HOME_MAX_PINS];
-    int n = home_pick_pins(s_pin_preference,
-                           sizeof(s_pin_preference) / sizeof(s_pin_preference[0]),
-                           ids, (size_t)count, pin_eligible, picked, slots);
 
-    /* Room above and below the tiles for the focus ring: across, the icons
-     * are well inside their cells. */
+    /* The user's places, as saved; s_pin_ids holds them meanwhile. */
+    int saved = rs_home_pins_get(&s_pin_ids[0][0], HOME_PIN_ID_MAX, slots);
+    const char *chosen[HOME_MAX_PINS];
+    for (int i = 0; i < saved; i++) {
+        chosen[i] = s_pin_ids[i];
+    }
+    int picked[HOME_MAX_PINS];
+    int n = home_place_pins(chosen, (size_t)saved, s_pin_preference,
+                            sizeof(s_pin_preference) / sizeof(s_pin_preference[0]),
+                            ids, (size_t)count, pin_eligible, picked, slots);
+    /* Every place the screen has, so an empty one can be chosen too. */
+    s_pin_count = slots;
+    for (int i = 0; i < slots; i++) {
+        snprintf(s_pin_ids[i], HOME_PIN_ID_MAX, "%s",
+                 i < n && picked[i] >= 0 ? apps[picked[i]]->id : "");
+    }
+
+    /* The band's spare height shared out evenly above, between and below
+     * the rows, and room above and below the tiles for the focus ring:
+     * across, the icons are well inside their cells. */
     const int grid_w = s_layout.cols * s_layout.cell_w;
-    const int grid_h = s_layout.rows * s_layout.cell_h;
+    const int spare = s_layout.grid_h - s_layout.rows * s_layout.cell_h;
+    const int gap = spare > 0 ? spare / (s_layout.rows + 1) : 0;
+    const int grid_h = s_layout.rows * s_layout.cell_h + (s_layout.rows - 1) * gap;
     lv_obj_t *grid = lv_obj_create(parent);
     lv_obj_remove_style_all(grid);
     lv_obj_clear_flag(grid, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_pad_ver(grid, FOCUS_ROOM, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(grid, gap, LV_PART_MAIN);
     lv_obj_set_size(grid, grid_w, grid_h + 2 * FOCUS_ROOM);
     lv_obj_set_pos(grid, (s_app_w - grid_w) / 2,
                    s_layout.grid_y + (s_layout.grid_h - grid_h) / 2 - FOCUS_ROOM);
@@ -1145,12 +1204,12 @@ static void create_pinned_grid(lv_obj_t *parent, const theme_colors_t *c)
     lv_obj_set_flex_align(grid, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
                           LV_FLEX_ALIGN_START);
 
-    for (int i = 0; i < n; i++) {
-        create_pinned_tile(grid, apps[picked[i]], i, c);
+    for (int i = 0; i < slots; i++) {
+        create_pinned_tile(grid, i < n && picked[i] >= 0 ? apps[picked[i]] : NULL, i, c);
     }
 }
 
-/* All apps, along the bottom. */
+/* All apps, along the bottom, on a board with no apps key. */
 static void create_apps_bar(lv_obj_t *parent)
 {
     lv_obj_t *btn = lv_button_create(parent);
@@ -1162,11 +1221,201 @@ static void create_apps_bar(lv_obj_t *parent)
     lv_obj_set_pos(btn, HOME_MARGIN, s_layout.bar_y + 4);
     lv_obj_set_size(btn, s_app_w - 2 * HOME_MARGIN, s_layout.bar_h - 8);
     lv_obj_add_event_cb(btn, apps_btn_clicked_cb, LV_EVENT_CLICKED, NULL);
+    s_focus_start = btn;
 
     lv_obj_t *lbl = lv_label_create(btn);
     lv_obj_remove_style_all(lbl);
     lv_label_set_text(lbl, LV_SYMBOL_LIST "  All apps");
     lv_obj_center(lbl);
+}
+
+/* ------------------------------------------------------------------ */
+/* Choosing a pinned place's app                                        */
+/* ------------------------------------------------------------------ */
+
+static void build_home(void);
+static void destroy_home(void);
+static void focus_home(void);
+
+/* Deleted, not hidden, as the drawer is; asynchronously, as the close can
+ * come from a click inside it. The keyboard goes back to Home. */
+static void close_pin_picker(void)
+{
+    if (s_picker == NULL) {
+        return;
+    }
+    lv_group_t *group = lv_group_get_default();
+    if (group) {
+        lv_group_focus_freeze(group, false);
+    }
+    lv_obj_delete_async(s_picker);
+    s_picker = NULL;
+    s_picker_table = NULL;
+    s_picker_slot = -1;
+    show_bar_clock(false);
+}
+
+/* Out of the table's own event: the picker and Home are deleted, the
+ * choice saved, and Home built again with it. */
+static void apply_pin_cb(void *arg)
+{
+    int row = (int)(intptr_t)arg;
+    int slot = s_picker_slot;
+    if (s_picker) {
+        lv_obj_delete(s_picker);
+        s_picker = NULL;
+        s_picker_table = NULL;
+        s_picker_slot = -1;
+        lv_group_t *group = lv_group_get_default();
+        if (group) {
+            lv_group_focus_freeze(group, false);
+        }
+    }
+    show_bar_clock(false);
+    if (slot < 0 || slot >= s_pin_count || row < 0 || row >= s_picker_count) {
+        return;
+    }
+    home_choose_pin(s_pin_ids, s_pin_count, slot, s_picker_ids[row]);
+    const char *ids[HOME_MAX_PINS];
+    for (int i = 0; i < s_pin_count; i++) {
+        ids[i] = s_pin_ids[i];
+    }
+    esp_err_t err = rs_home_pins_set(ids, s_pin_count);
+    ESP_LOGI(TAG, "pinned %s in place %d: %s", s_picker_ids[row], slot + 1,
+             esp_err_to_name(err));
+    if (err != ESP_OK) {
+        toast_warn("Could not save Home's apps");
+    }
+    if (s_home) {
+        destroy_home();
+        build_home();
+        focus_home();
+    }
+}
+
+static void picker_table_cb(lv_event_t *e)
+{
+    uint32_t row = LV_TABLE_CELL_NONE, col = LV_TABLE_CELL_NONE;
+    lv_table_get_selected_cell(lv_event_get_target(e), &row, &col);
+    if (row != LV_TABLE_CELL_NONE && (int)row < s_picker_count) {
+        lv_async_call(apply_pin_cb, (void *)(intptr_t)row);
+    }
+}
+
+static void picker_close_cb(lv_event_t *e)
+{
+    (void)e;
+    close_pin_picker();
+}
+
+/* Every app but the launcher, in one table: a row is its text alone, where
+ * a row of widgets would cost LVGL's pool a kilobyte (CLAUDE.md). The app
+ * in the place now is ticked. */
+static void open_pin_picker(int slot)
+{
+    if (s_root == NULL || slot < 0 || slot >= s_pin_count) {
+        return;
+    }
+    close_pin_picker();
+    if (s_drawer_visible) {
+        close_app_drawer();
+    }
+    const theme_colors_t *c = theme_get_colors();
+    s_picker_slot = slot;
+
+    s_picker = lv_obj_create(s_root);
+    lv_obj_remove_style_all(s_picker);
+    lv_obj_set_size(s_picker, s_app_w, s_app_h);
+    lv_obj_set_style_bg_color(s_picker, c->bg, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(s_picker, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_clear_flag(s_picker, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_picker, LV_OBJ_FLAG_CLICKABLE);   /* nothing reaches Home */
+
+    const int header_h = 30;
+    lv_obj_t *header = lv_obj_create(s_picker);
+    lv_obj_remove_style_all(header);
+    lv_obj_set_size(header, s_app_w, header_h);
+    lv_obj_set_style_border_side(header, LV_BORDER_SIDE_BOTTOM, LV_PART_MAIN);
+    lv_obj_set_style_border_width(header, 1, LV_PART_MAIN);
+    lv_obj_set_style_border_color(header, s_mono ? c->text : c->text_secondary, LV_PART_MAIN);
+    lv_obj_clear_flag(header, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+
+    lv_obj_t *title = lv_label_create(header);
+    lv_label_set_text(title, "Pin to Home");
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_color(title, c->text, LV_PART_MAIN);
+    lv_obj_align(title, LV_ALIGN_LEFT_MID, 8, 0);
+
+    /* Not in the keyboard's group: Back, Esc and Home close it too. */
+    lv_obj_t *close_btn = lv_obj_create(header);
+    lv_obj_remove_style_all(close_btn);
+    lv_obj_set_size(close_btn, header_h, header_h);
+    lv_obj_align(close_btn, LV_ALIGN_RIGHT_MID, -2, 0);
+    lv_obj_add_flag(close_btn, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_ext_click_area(close_btn, 6);
+    lv_obj_add_style(close_btn, &s_st_pressed, LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_set_style_bg_opa(close_btn, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_set_style_radius(close_btn, 4, LV_PART_MAIN);
+    lv_obj_set_style_text_color(close_btn, c->text, LV_PART_MAIN);
+    lv_obj_add_event_cb(close_btn, picker_close_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *x = lv_label_create(close_btn);
+    lv_label_set_text(x, LV_SYMBOL_CLOSE);
+    lv_obj_center(x);
+
+    const app_manifest_t *apps[32];
+    int count = app_manager_list_apps(apps, 32);
+    s_picker_table = lv_table_create(s_picker);
+    lv_obj_t *table = s_picker_table;
+    lv_obj_set_pos(table, 0, header_h);
+    lv_obj_set_size(table, s_app_w, s_app_h - header_h);
+    lv_obj_set_style_bg_opa(table, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(table, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(table, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(table, 0, LV_PART_MAIN);
+    lv_obj_set_style_text_font(table, &lv_font_montserrat_18, LV_PART_ITEMS);
+    lv_obj_set_style_text_color(table, c->text, LV_PART_ITEMS);
+    lv_obj_set_style_bg_opa(table, LV_OPA_TRANSP, LV_PART_ITEMS);
+    lv_obj_set_style_pad_ver(table, 9, LV_PART_ITEMS);
+    lv_obj_set_style_pad_hor(table, 10, LV_PART_ITEMS);
+    lv_obj_set_style_border_side(table, LV_BORDER_SIDE_BOTTOM, LV_PART_ITEMS);
+    lv_obj_set_style_border_width(table, 1, LV_PART_ITEMS);
+    lv_obj_set_style_border_color(table, s_mono ? c->text : c->surface, LV_PART_ITEMS);
+    /* A row pressed or reached from the keyboard inverts on e-paper. */
+    lv_obj_set_style_bg_opa(table, LV_OPA_COVER, LV_PART_ITEMS | LV_STATE_PRESSED);
+    lv_obj_set_style_bg_color(table, s_mono ? c->text : c->primary, LV_PART_ITEMS | LV_STATE_PRESSED);
+    lv_obj_set_style_text_color(table, s_mono ? c->bg : c->text, LV_PART_ITEMS | LV_STATE_PRESSED);
+    lv_obj_set_style_bg_opa(table, LV_OPA_COVER, LV_PART_ITEMS | LV_STATE_FOCUS_KEY);
+    lv_obj_set_style_bg_color(table, s_mono ? c->text : c->primary, LV_PART_ITEMS | LV_STATE_FOCUS_KEY);
+    lv_obj_set_style_text_color(table, s_mono ? c->bg : c->text, LV_PART_ITEMS | LV_STATE_FOCUS_KEY);
+    lv_table_set_column_count(table, 1);
+    lv_table_set_column_width(table, 0, s_app_w);
+
+    s_picker_count = 0;
+    for (int i = 0; i < count && s_picker_count < 32; i++) {
+        if (is_launcher(apps[i]->id) || strlen(apps[i]->id) >= HOME_PIN_ID_MAX) {
+            continue;
+        }
+        int row = s_picker_count++;
+        snprintf(s_picker_ids[row], HOME_PIN_ID_MAX, "%s", apps[i]->id);
+        bool here = strcmp(apps[i]->id, s_pin_ids[slot]) == 0;
+        lv_table_set_cell_value_fmt(table, (uint32_t)row, 0, "%s  %s%s",
+                                    app_icon_symbol(apps[i]->id), apps[i]->name,
+                                    here ? "  " LV_SYMBOL_OK : "");
+    }
+    lv_table_set_row_count(table, (uint32_t)s_picker_count);
+    lv_obj_add_event_cb(table, picker_table_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
+    /* The keyboard reaches the list alone while it is open. */
+    lv_group_t *group = lv_group_get_default();
+    if (group) {
+        if (lv_obj_get_group(table) == NULL) {
+            lv_group_add_obj(group, table);
+        }
+        lv_group_focus_obj(table);
+        lv_group_focus_freeze(group, true);
+    }
+    show_bar_clock(true);
+    ESP_LOGI(TAG, "choosing the app for place %d", slot + 1);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1200,6 +1449,7 @@ static void populate_app_drawer(void)
 static void open_app_drawer(void)
 {
     const theme_colors_t *colors = theme_get_colors();
+    close_pin_picker();
 
     if (!s_app_drawer) {
         /* Full-screen overlay on top of the home screen */
@@ -1279,6 +1529,7 @@ static void open_app_drawer(void)
     lv_obj_move_foreground(s_app_drawer);
     s_drawer_visible = true;
     show_bar_clock(true);
+    ESP_LOGI(TAG, "All apps opened");
 }
 
 /* Deleted rather than hidden: its tiles take a share of LVGL's 64 KB pool
@@ -1288,6 +1539,9 @@ static void open_app_drawer(void)
  * from a click inside it. Opening the drawer builds it again. */
 static void close_app_drawer(void)
 {
+    if (s_drawer_visible || s_app_drawer) {
+        ESP_LOGI(TAG, "All apps closed");
+    }
     if (s_app_drawer) {
         lv_obj_delete_async(s_app_drawer);
         s_app_drawer = NULL;
@@ -1419,6 +1673,19 @@ static void close_overlays(void)
     if (s_folder_visible) {
         close_folder();
     }
+    if (s_picker) {
+        close_pin_picker();
+    }
+}
+
+/* The apps key: All apps, or Home again if it is open. The UI manager has
+ * brought the launcher forward first. */
+static void apps_key(void)
+{
+    if (s_picker) {
+        close_pin_picker();
+    }
+    apps_btn_clicked_cb(NULL);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1444,7 +1711,10 @@ esp_err_t launcher_ui_create(lv_obj_t *parent)
 
     const hal_registry_t *reg = hal_get_registry();
     s_mono = reg && reg->display && reg->display->type == HAL_DISPLAY_TYPE_EPAPER;
-    home_layout((int16_t)s_app_w, (int16_t)s_app_h, &s_layout);
+    /* A board with an apps key opens All apps from it, and its pinned apps
+     * have the bar's room. */
+    s_apps_bar = !hal_input_has_key(HAL_KEY_APPS);
+    home_layout((int16_t)s_app_w, (int16_t)s_app_h, s_apps_bar, &s_layout);
     init_home_styles(colors);
 
     /* Root container — fills the entire app area, in the theme's background:
@@ -1475,12 +1745,14 @@ esp_err_t launcher_ui_create(lv_obj_t *parent)
     s_folder_visible = false;
 
     ui_manager_set_home_handler(close_overlays);
+    ui_manager_set_apps_handler(apps_key);
 
     return ESP_OK;
 }
 
-/* Home, top to bottom: the clock, what is new, the pinned apps and All apps
- * (home_core.h); a band the screen has no room for is left out. Built when
+/* Home, top to bottom: the clock, what is new, the pinned apps and, on a
+ * board with no apps key, All apps (home_core.h); a band the screen has no
+ * room for is left out. Built when
  * Home comes to the front and deleted when it
  * leaves, so an app opened over it has Home's share of LVGL's pool, as one
  * opened from the drawer has the drawer's: Files, over a card of twenty
@@ -1503,7 +1775,9 @@ static void build_home(void)
         create_now(s_home);
     }
     create_pinned_grid(s_home, colors);
-    create_apps_bar(s_home);
+    if (s_apps_bar) {
+        create_apps_bar(s_home);
+    }
 }
 
 /* Never from inside one of Home's own events: a pinned app, or a row, launches
@@ -1520,6 +1794,7 @@ static void destroy_home(void)
     memset(s_now, 0, sizeof(s_now));
     s_now_count   = -1;
     s_apps_btn    = NULL;
+    s_focus_start = NULL;
 }
 
 static bool within(lv_obj_t *obj, const lv_obj_t *ancestor)
@@ -1532,7 +1807,8 @@ static bool within(lv_obj_t *obj, const lv_obj_t *ancestor)
     return false;
 }
 
-/* The keyboard's focus starts on All apps, Home's last button, unseen until
+/* The keyboard's focus starts on Home's last button, All apps or else the
+ * last pinned app, unseen until
  * a key is pressed, so the first Tab goes round to the first: a row of what
  * is new, when one is a button. LVGL focuses the first button to join an
  * empty group, and the first Tab moved on from it unseen; or, as the rows
@@ -1541,12 +1817,12 @@ static bool within(lv_obj_t *obj, const lv_obj_t *ancestor)
 static void focus_home(void)
 {
     lv_group_t *group = lv_group_get_default();
-    if (group == NULL || s_apps_btn == NULL) {
+    if (group == NULL || s_focus_start == NULL) {
         return;
     }
     lv_obj_t *focused = lv_group_get_focused(group);
     if (focused == NULL || within(focused, s_home)) {
-        lv_group_focus_obj(s_apps_btn);
+        lv_group_focus_obj(s_focus_start);
     }
 }
 

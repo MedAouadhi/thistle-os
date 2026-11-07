@@ -11,6 +11,9 @@ Each app is an independent ESP-IDF component today, on a path to becoming a sign
 |----------------|----------------------------|------------------------------------|
 | `todo/`        | com.thistle.todo           | Checklist, kept as Markdown on the SD card |
 | `tailchat/`    | com.thistle.tailchat       | Tailnet chat: conversations, contacts and contact requests |
+| `sms/`         | com.thistle.sms            | SMS: a conversation per number, the phonebook to start one |
+| `meshchat/`    | com.thistle.meshchat       | MeshCore over LoRa: the Public channel and each node |
+| `chatkit/`     | (none)                     | The SMS and MeshCore apps' screens, in Chat's look |
 | `reader/`      | com.thistle.reader         | Document/ebook reader               |
 | `podcasts/`    | com.thistle.podcasts       | PodcastIndex podcast player         |
 | `vault/`       | com.thistle.vault          | Encrypted file vault                |

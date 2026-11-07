@@ -91,7 +91,7 @@ int32_t phone_ui_width(void);
 int32_t phone_ui_page_height(void);
 
 /* Whether calls can be made here at all (a modem that makes them), and
- * whether there is a Messenger to send an SMS from. */
+ * whether there is an SMS app to send an SMS from. */
 bool phone_ui_calls_supported(void);
 bool phone_ui_messages_supported(void);
 
@@ -137,7 +137,7 @@ const char *phone_ui_tab_name(phone_tab_t tab);
 /* Place a call, saying why not when it cannot be; logs "call <number>".
  * True when the kernel took it: the call screen comes up on its own. */
 bool phone_ui_call(const char *number);
-/* Open the Messenger on an SMS to `number`, which is passed on without its
+/* Open the SMS app's conversation with `number`, which is passed on without its
  * spaces and punctuation; logs "message <number>" so. */
 void phone_ui_message(const char *number, const char *name);
 

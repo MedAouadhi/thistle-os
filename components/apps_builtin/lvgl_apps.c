@@ -39,8 +39,11 @@
 #ifndef THISTLE_HAVE_PHONE
 #define THISTLE_HAVE_PHONE 1
 #endif
-#ifndef THISTLE_HAVE_MESSENGER
-#define THISTLE_HAVE_MESSENGER 1
+#ifndef THISTLE_HAVE_MESHCHAT
+#define THISTLE_HAVE_MESHCHAT 1
+#endif
+#ifndef THISTLE_HAVE_SMS
+#define THISTLE_HAVE_SMS 1
 #endif
 #ifndef THISTLE_HAVE_NAVIGATOR
 #define THISTLE_HAVE_NAVIGATOR 1
@@ -91,8 +94,11 @@
 #if THISTLE_HAVE_PHONE
 #include "phone/phone_app.h"
 #endif
-#if THISTLE_HAVE_MESSENGER
-#include "messenger/messenger_app.h"
+#if THISTLE_HAVE_MESHCHAT
+#include "meshchat/meshchat_app.h"
+#endif
+#if THISTLE_HAVE_SMS
+#include "sms/sms_app.h"
 #endif
 #if THISTLE_HAVE_NAVIGATOR
 #include "navigator/navigator_app.h"
@@ -169,9 +175,13 @@ esp_err_t lvgl_apps_register_builtin(bool has_radio, bool has_gps)
      * app says where it cannot call. */
     REGISTER(phone_app_register);
 #endif
-#if THISTLE_HAVE_MESSENGER
+#if THISTLE_HAVE_SMS
+    /* On every board, as the Phone app: it says where there is no modem. */
+    REGISTER(sms_app_register);
+#endif
+#if THISTLE_HAVE_MESHCHAT
     if (has_radio) {
-        REGISTER(messenger_app_register);
+        REGISTER(meshchat_app_register);
     }
 #endif
 #if THISTLE_HAVE_NAVIGATOR
