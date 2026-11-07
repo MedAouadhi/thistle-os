@@ -15,13 +15,17 @@
 #define NOW_H_WIDE   64   /* two rows of 30, 4 apart */
 #define MAX_ROWS      2
 
-void home_layout(int16_t width, int16_t height, home_layout_t *out)
+void home_layout(int16_t width, int16_t height, bool apps_bar, home_layout_t *out)
 {
     memset(out, 0, sizeof(*out));
     out->landscape = width > height;
     out->cols = out->landscape ? 4 : 3;
-    out->bar_h = BAR_H;
-    out->bar_y = height > BAR_H ? (int16_t)(height - BAR_H) : 0;
+    if (apps_bar) {
+        out->bar_h = BAR_H;
+        out->bar_y = height > BAR_H ? (int16_t)(height - BAR_H) : 0;
+    } else {
+        out->bar_y = height > 0 ? height : 0;
+    }
 
     int16_t y = 0;
     int16_t room = out->bar_y;
@@ -90,6 +94,81 @@ int home_pick_pins(const char *const *preferred, size_t n_preferred,
         out[n++] = (int)i;
     }
     return n;
+}
+
+int home_place_pins(const char *const *chosen, size_t n_chosen,
+                    const char *const *preferred, size_t n_preferred,
+                    const char *const *installed, size_t n_installed,
+                    bool (*eligible)(const char *id),
+                    int *out, int max)
+{
+    if (out == NULL || max <= 0) {
+        return 0;
+    }
+    if (max > HOME_MAX_PINS) {
+        max = HOME_MAX_PINS;
+    }
+    for (int i = 0; i < max; i++) {
+        out[i] = -1;
+    }
+
+    /* What the user chose, where they chose it. */
+    int placed[HOME_MAX_PINS];
+    int n_placed = 0;
+    for (size_t slot = 0; chosen && slot < n_chosen && slot < (size_t)max; slot++) {
+        const char *id = chosen[slot];
+        if (id == NULL || id[0] == '\0') {
+            continue;
+        }
+        for (size_t i = 0; i < n_installed; i++) {
+            if (installed[i] && strcmp(installed[i], id) == 0) {
+                if (!picked(placed, n_placed, (int)i)) {
+                    out[slot] = (int)i;
+                    placed[n_placed++] = (int)i;
+                }
+                break;
+            }
+        }
+    }
+
+    /* The default choice for the rest, less what is placed already. Every
+     * installed app is a candidate once, so asking for them all is enough. */
+    int fill[HOME_MAX_PINS + HOME_MAX_PINS];
+    int n_fill = home_pick_pins(preferred, n_preferred, installed, n_installed,
+                                eligible, fill, max + n_placed);
+    int next = 0;
+    for (int slot = 0; slot < max; slot++) {
+        if (out[slot] >= 0) {
+            continue;
+        }
+        while (next < n_fill && picked(placed, n_placed, fill[next])) {
+            next++;
+        }
+        if (next < n_fill) {
+            out[slot] = fill[next++];
+        }
+    }
+
+    int n = max;
+    while (n > 0 && out[n - 1] < 0) {
+        n--;
+    }
+    return n;
+}
+
+void home_choose_pin(char ids[][HOME_PIN_ID_MAX], int n, int slot, const char *app_id)
+{
+    if (ids == NULL || app_id == NULL || slot < 0 || slot >= n ||
+        strlen(app_id) >= HOME_PIN_ID_MAX) {
+        return;
+    }
+    for (int i = 0; i < n; i++) {
+        if (i != slot && strcmp(ids[i], app_id) == 0) {
+            memcpy(ids[i], ids[slot], HOME_PIN_ID_MAX);
+            break;
+        }
+    }
+    snprintf(ids[slot], HOME_PIN_ID_MAX, "%s", app_id);
 }
 
 static const char *const WEEKDAYS[7] = {

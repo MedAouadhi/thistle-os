@@ -10,7 +10,7 @@
 
 use std::ops::{Deref, DerefMut};
 use std::os::raw::{c_char, c_void};
-use std::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicPtr, AtomicU32, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 // ── ESP error codes ──────────────────────────────────────────────────
@@ -96,9 +96,9 @@ pub const HAL_KEY_HOME: u16 = 0x0100;
 /// the app in front up one page, or home from its first page.
 pub const HAL_KEY_BACK: u16 = 0x0101;
 
-/// Mirrors `HAL_KEY_QUICK` in hal/input.h: a key that types nothing and opens
-/// or closes the quick panel.
-pub const HAL_KEY_QUICK: u16 = 0x0102;
+/// Mirrors `HAL_KEY_APPS` in hal/input.h: a key that types nothing and opens
+/// or closes All apps over Home.
+pub const HAL_KEY_APPS: u16 = 0x0102;
 
 /// Mirrors `HAL_KEY_MIC` in hal/input.h: a key that types nothing, held down
 /// to dictate into the focused text field. Both its edges matter.
@@ -1053,6 +1053,34 @@ pub extern "C" fn hal_rtc_get() -> *const HalRtcDriver {
     registry().rtc
 }
 
+/// The keys that type nothing (`HAL_KEY_HOME` and on, 0x0100 to 0x011F)
+/// that this board has, one bit each, as its input drivers declare them.
+static NAV_KEYS: AtomicU32 = AtomicU32::new(0);
+
+fn nav_key_bit(keycode: u16) -> Option<u32> {
+    (0x0100..0x0120).contains(&keycode).then(|| 1u32 << (keycode - 0x0100))
+}
+
+/// Say the board has the key `keycode`: an input driver's, at its start.
+/// Home leaves out its All apps button only on a board that has
+/// `HAL_KEY_APPS`.
+#[no_mangle]
+pub extern "C" fn hal_input_declare_key(keycode: u16) -> i32 {
+    match nav_key_bit(keycode) {
+        Some(bit) => {
+            NAV_KEYS.fetch_or(bit, Ordering::Relaxed);
+            ESP_OK
+        }
+        None => ESP_ERR_INVALID_ARG,
+    }
+}
+
+/// Whether an input driver has declared the key `keycode`.
+#[no_mangle]
+pub extern "C" fn hal_input_has_key(keycode: u16) -> bool {
+    nav_key_bit(keycode).is_some_and(|bit| NAV_KEYS.load(Ordering::Relaxed) & bit != 0)
+}
+
 /// Set the board name string (e.g. "T-Deck Pro").
 ///
 /// # Safety
@@ -1668,6 +1696,15 @@ mod tests {
             HalDisplayType::Epaper,
             "display_type must be preserved"
         );
+    }
+
+    #[test]
+    fn a_declared_key_is_had_and_only_keys_that_type_nothing_are_declared() {
+        assert_eq!(hal_input_declare_key(HAL_KEY_APPS), ESP_OK);
+        assert!(hal_input_has_key(HAL_KEY_APPS));
+        assert_eq!(hal_input_declare_key(b'a' as u16), ESP_ERR_INVALID_ARG);
+        assert!(!hal_input_has_key(b'a' as u16));
+        assert!(!hal_input_has_key(0x0120));
     }
 
     // -----------------------------------------------------------------------

@@ -587,8 +587,7 @@ power-off take down. Ticket 06 has the bring-up and the bench results.
 
 ### The quick panel
 
-A drag down from the status bar, or the quick key (`HAL_KEY_QUICK`, the
-T-Deck Max's middle touch key, `quick_key` in its profile), drops a panel of
+A drag down from the status bar, and only that, drops a panel of
 switches and sliders over the app in front (`components/ui/src/quick_panel.c`,
 `ui/quick_panel.h`); Back, Esc, Home, a tap below it or a drag up close it.
 The drag is picked out of the raw touch stream by `pull_gesture.c`, which has
@@ -604,16 +603,37 @@ host tests. LVGL window managers only; thistle-tk has none.
   `light_prefs.rs`, which now keeps the lights' levels. Set the lights
   through `light_set_display()` / `light_set_keys()`, not the drivers, or
   the panel shows a stale level.
-- `simulator/tests/test_quick_panel.py`; the simulator's `--drag` and
-  `--tap quick` drive it.
+- `simulator/tests/test_quick_panel.py`; the simulator's `--drag` drives
+  it. The T-Deck Max's middle touch key opened it until it became the apps
+  key (Home, below).
 
 ### Home
 
 The launcher's Home (`components/apps_builtin/launcher/`) is, top to
 bottom, the clock and the date, up to two rows of what is new, six pinned
-apps (four on a landscape screen) and All apps. `.scratch/home/spec.md` has
-the rest. LVGL window managers only; thistle-tk's launcher is its own.
+apps (four on a landscape screen) and, on a board with no apps key, All
+apps. `.scratch/home/spec.md` has the rest. LVGL window managers only;
+thistle-tk's launcher is its own.
 
+- **The apps key opens All apps**: `HAL_KEY_APPS`, the T-Deck Max's middle
+  touch key (still `quick_key` in its profile, named for the quick panel it
+  opened before). From an app it brings Home forward with All apps open
+  over it; pressed again it closes it (`ui_manager_set_apps_handler()`). A
+  board's input drivers declare the keys they have
+  (`hal_input_declare_key()`, `hal_input_has_key()`); the CST66xx driver
+  declares those its profile names, and the simulator only for the Max.
+  Home leaves out its All apps bar where the key exists, and its pinned
+  apps take the room, the spare height shared above, between and below the
+  rows.
+- **The pinned places are the user's to choose**: holding a tile opens a
+  list of every app (one `lv_table`), and the one tapped takes the place;
+  an app pinned elsewhere swaps places with it (`home_choose_pin()`). Home
+  saves every place, `thistle_os.home.pins` in system.json
+  (`home_prefs.rs`, `thistle/home_prefs.h`), so a place the user did not
+  touch keeps its app. A place whose app is not installed, or never chosen,
+  takes Home's own choice (`home_place_pins()`); a place with no app at all
+  shows "+", and a tap opens the list. The log says `(launcher_ui) pinned
+  com.thistle.filemgr in place 1: ESP_OK`.
 - **The bands are `home_core.c`'s**, host-tested in
   `simulator/tests/test_home_core.c`: where each goes on a screen of a given
   size, which apps are pinned, the date's text, and which rows of what is
@@ -640,8 +660,9 @@ the rest. LVGL window managers only; thistle-tk's launcher is its own.
   `launcher/fonts/home_clock_44{,_mono}.c`, made by
   `launcher/tools/gen_clock_font.sh`; the rows' detail line falls back on
   `home_latin_14{,_mono}.c` (`gen_latin_font.sh`) for a name's accents.
-- The keyboard's focus starts on All apps, unseen, so the first Tab goes
-  round to the first row.
+- The keyboard's focus starts on Home's last button, All apps or else the
+  last pinned app, unseen, so the first Tab goes round to the first row.
+  Enter held on a tile opens its list, as holding it does.
 - `test_launcher_visuals.py` masks Home's clock band as it does the status
   bar, and runs on a scratch copy of the card.
 

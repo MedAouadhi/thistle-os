@@ -58,14 +58,16 @@ CASES = (
         "bb9c21d8d8ddf28b4c911c0d1eb8d38501267995c96eac0a9697b2c62bc1d8a1",
         wm="thistle-tk",
     ),
-    # Home: the clock and date, masked, then what is new, the pinned apps and
-    # All apps. What is new is "All caught up" alone: the card is a fresh copy
+    # Home: the clock and date, masked, then what is new, the pinned apps and,
+    # on a board with no apps key, All apps. What is new is "All caught up" alone: the card is a fresh copy
     # (run_case), the tailnet is off in its system.json, and the simulated
     # mesh never runs (mesh_manager.rs starts MeshCore on the device alone),
     # so no row counts its contacts. The hashes changed when the rows came,
     # and the T-Deck Max's when Notes, its fifth pin, moved to the App Store
     # and Files took its place, and again when the Messenger's pin became
-    # SMS and MeshCore, the two apps it was split into.
+    # SMS and MeshCore, the two apps it was split into. The T-Deck Max's
+    # changed again when its apps key took over from the All apps bar, and
+    # its pinned apps spread over the bar's room.
     Case(
         "lcd-home",
         "tdeck",
@@ -83,7 +85,7 @@ CASES = (
         None,
         240,
         320,
-        "f1b5a7614da02d7b7a39d4cf63f0f915e346e04bbae493ab66a10bf2239136c0",
+        "399c36a712f77f76bc834235b964068911094a2e0dab6274fc1a16d960f1e4fe",
         clock_rows=64,
     ),
     # The LCD hashes cover every built-in app. The nine that live under apps/
@@ -117,7 +119,7 @@ CASES = (
         "eink-lvgl-apps",
         "tdeck-max",
         2500,
-        "120,302",
+        "apps",
         240,
         320,
         "3405d82e8ee3f31f5170efe53ae5f81121e8a7b4c79101d04b9a5db5cb9d2939",

@@ -48,6 +48,11 @@ lv_obj_t *ui_manager_focused_field(void);
  * home screen. One handler; NULL clears it. */
 void ui_manager_set_home_handler(void (*handler)(void));
 
+/* Called with the LVGL lock held after a HAL_KEY_APPS press has brought the
+ * launcher forward, so it can open All apps, or close it if it is open. One
+ * handler; NULL clears it. */
+void ui_manager_set_apps_handler(void (*handler)(void));
+
 /* Called with the LVGL lock held when HAL_KEY_BACK is pressed while owner is
  * shown. It takes the app up one page and returns true, or returns false on
  * the app's first page, where Back then does what Home does. Apps register

@@ -54,7 +54,7 @@ static const char *s_wm_override = NULL;
  * busy refreshing a panel. */
 #define SIM_MAX_TAPS   12
 #define SIM_TAP_GAP_MS 1500u
-/* keycode is HAL_KEY_HOME, HAL_KEY_BACK, HAL_KEY_QUICK, HAL_KEY_MIC or '\b' for a press
+/* keycode is HAL_KEY_HOME, HAL_KEY_BACK, HAL_KEY_APPS, HAL_KEY_MIC or '\b' for a press
  * of that key in place of a tap, and 0 for a tap at x,y. A drag goes down at
  * x,y and moves to x2,y2 over SIM_DRAG_MS before it lifts. A step is done in
  * place of a tap, at its turn: "wait" (nothing), "dial:NUMBER",
@@ -163,13 +163,13 @@ static bool add_tap(const char *spec)
         }
         s_taps[s_tap_count].keycode = strcmp(spec, "home") == 0  ? HAL_KEY_HOME
                                     : strcmp(spec, "back") == 0  ? HAL_KEY_BACK
-                                    : strcmp(spec, "quick") == 0 ? HAL_KEY_QUICK
+                                    : strcmp(spec, "apps") == 0  ? HAL_KEY_APPS
                                     : strcmp(spec, "mic") == 0   ? HAL_KEY_MIC : 0;
     }
     if (s_tap_count >= SIM_MAX_TAPS ||
         (s_taps[s_tap_count].keycode == 0 &&
          sscanf(spec, "%d,%d", &s_taps[s_tap_count].x, &s_taps[s_tap_count].y) != 2)) {
-        fprintf(stderr, "Invalid --tap value; expected X,Y, X,Y:MS, home, back, quick, mic, "
+        fprintf(stderr, "Invalid --tap value; expected X,Y, X,Y:MS, home, back, apps, mic, "
                         "backspace:MS, wait, dial:NUMBER, compose:NUMBER[:NAME] or "
                         "type:TEXT (at most %d taps)\n",
                 SIM_MAX_TAPS);
@@ -402,7 +402,7 @@ int main(int argc, char **argv)
             printf("  --screenshot FILE   Save native-resolution framebuffer as PPM on exit\n");
             printf("  --tap X,Y           Inject a native-coordinate tap after startup;\n");
             printf("                      repeat for more, %u ms apart\n", SIM_TAP_GAP_MS);
-            printf("  --tap home|back|quick  Press the Home, Back or quick key instead\n");
+            printf("  --tap home|back|apps   Press the Home, Back or apps key instead\n");
             printf("  --tap mic[:MS]      Hold the microphone key, to dictate (F4 in a\n");
             printf("                      window), for MS or else --tap-hold\n");
             printf("  --tap backspace:MS  Hold Backspace for MS\n");

@@ -70,6 +70,7 @@ mod gpio_isr_service;
 pub mod gps_assist;
 pub mod gps_report;
 pub mod gps_manager;
+pub mod home_prefs;
 pub mod gps_track;
 pub mod hal_registry;
 pub mod ipc;

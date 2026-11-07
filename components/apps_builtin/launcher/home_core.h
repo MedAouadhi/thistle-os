@@ -17,11 +17,16 @@
 /* The most apps Home pins: four columns of two rows. */
 #define HOME_MAX_PINS 8
 
-/* Left and right of the All apps button. */
+/* Left and right of the All apps button and the rows of what is new. */
 #define HOME_MARGIN 8
 
+/* The longest app ID Home keeps for a pinned place, NUL included, as a
+ * manifest's. */
+#define HOME_PIN_ID_MAX 64
+
 /* Home, top to bottom, in the app area below the status bar. A band with no
- * room on the screen has a height of 0; the bar always has its place. */
+ * room on the screen has a height of 0. The bar, when asked for, always has
+ * its place. */
 typedef struct {
     bool    landscape;        /* wider than tall: the date goes beside the time */
     int16_t clock_y, clock_h;
@@ -29,11 +34,13 @@ typedef struct {
     int16_t grid_y, grid_h;   /* the pinned apps, `rows` of `cols` */
     uint8_t cols, rows;
     int16_t cell_w, cell_h;
-    int16_t bar_y, bar_h;     /* the All apps button */
+    int16_t bar_y, bar_h;     /* the All apps button: 0 high without one */
 } home_layout_t;
 
-/* The bands for an app area `width` by `height`. */
-void home_layout(int16_t width, int16_t height, home_layout_t *out);
+/* The bands for an app area `width` by `height`, with an All apps button
+ * along the bottom when `apps_bar`: a board with an apps key
+ * (HAL_KEY_APPS) opens All apps from it, and its pinned apps have the room. */
+void home_layout(int16_t width, int16_t height, bool apps_bar, home_layout_t *out);
 
 /* The apps to pin, at most `max`: those of `preferred` that are installed,
  * in that order, then the other installed apps `eligible` accepts, in the
@@ -43,6 +50,24 @@ int home_pick_pins(const char *const *preferred, size_t n_preferred,
                    const char *const *installed, size_t n_installed,
                    bool (*eligible)(const char *id),
                    int *out, int max);
+
+/* The apps to pin, place by place, at most `max` places: in place i the
+ * installed app `chosen[i]` names, if it does and it is not in an earlier
+ * place; each place left over, in order, from home_pick_pins()'s choice of
+ * the rest. Writes indexes into `installed` to `out`, -1 for a place with
+ * nothing to put in it, and returns how many places there are: past the last
+ * filled one, there are none. `chosen` may be NULL, and its entries NULL or
+ * "" for a place the user never chose. */
+int home_place_pins(const char *const *chosen, size_t n_chosen,
+                    const char *const *preferred, size_t n_preferred,
+                    const char *const *installed, size_t n_installed,
+                    bool (*eligible)(const char *id),
+                    int *out, int max);
+
+/* Put `app_id` in place `slot` of the `n` places in `ids`, the app there
+ * before going to the place `app_id` leaves, if it was pinned already: an
+ * app is pinned once. Nothing for a slot out of range or an ID too long. */
+void home_choose_pin(char ids[][HOME_PIN_ID_MAX], int n, int slot, const char *app_id);
 
 /* The date as Home shows it, "Friday 16 October", or with the weekday on a
  * line of its own when `two_lines`. `wday` 0 is Sunday and `mon` 0 January,
