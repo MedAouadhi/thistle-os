@@ -17,7 +17,7 @@
 **2026-11-04, implementer.** Branch `tv-02-spike`, from `tailnet-video`
 at 52a0b56. Linux only: no phone was attached and there is no second
 machine, so the Android calls and the DERP path are still to do (below).
-The prototype is `companion/spike_webrtc/`, a separate Flutter project
+The prototype was `companion/spike_webrtc/` (deleted before the merge to main; it is in `tailnet-video` up to 8562d80), a separate Flutter project
 (Linux and Android) on flutter_webrtc 1.6.3 (libwebrtc m150.7871.07,
 published 2026-10-26). It is kept only so the phone run below can be
 repeated; delete it when this ticket closes. Nothing in `companion/app`
