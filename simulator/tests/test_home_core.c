@@ -69,7 +69,7 @@ TEST(home_a_tall_screen_stops_at_two_rows) {
 }
 
 TEST(home_cells_share_the_whole_width) {
-    /* 80 px holds "Messenger", 78 px in Montserrat 14. */
+    /* 80 px holds a name as long as "Messenger", 78 px in Montserrat 14. */
     home_layout(240, 296, &s_l);
     ASSERT_EQ(s_l.cell_w, 80);
     ASSERT_EQ(s_l.cell_h, 56);
@@ -78,7 +78,7 @@ TEST(home_cells_share_the_whole_width) {
 }
 
 static const char *const PREFERRED[] = {
-    "com.thistle.phone", "com.thistle.messenger", "com.thistle.hermes",
+    "com.thistle.phone", "com.thistle.sms", "com.thistle.hermes",
 };
 
 static bool not_settings(const char *id)
@@ -89,7 +89,7 @@ static bool not_settings(const char *id)
 TEST(home_pins_the_preferred_apps_in_their_order) {
     const char *installed[] = {
         "com.thistle.settings", "com.thistle.hermes", "com.thistle.phone",
-        "com.thistle.messenger",
+        "com.thistle.sms",
     };
     int out[HOME_MAX_PINS];
     ASSERT_EQ(home_pick_pins(PREFERRED, 3, installed, 4, not_settings, out, 3), 3);
@@ -99,7 +99,7 @@ TEST(home_pins_the_preferred_apps_in_their_order) {
 }
 
 TEST(home_fills_the_place_of_a_missing_app_from_the_rest) {
-    /* A board with no radio has no Messenger. */
+    /* A board with no SMS app. */
     const char *installed[] = {
         "com.thistle.settings", "com.thistle.notes", "com.thistle.phone",
         "com.thistle.hermes", "com.thistle.reader",
@@ -114,7 +114,7 @@ TEST(home_fills_the_place_of_a_missing_app_from_the_rest) {
 
 TEST(home_pins_no_more_than_asked_for) {
     const char *installed[] = {
-        "com.thistle.phone", "com.thistle.messenger", "com.thistle.hermes",
+        "com.thistle.phone", "com.thistle.sms", "com.thistle.hermes",
     };
     int out[HOME_MAX_PINS];
     ASSERT_EQ(home_pick_pins(PREFERRED, 3, installed, 3, NULL, out, 2), 2);
@@ -246,12 +246,12 @@ TEST(home_now_tailnet_chat_messages_count_with_the_rest) {
     ASSERT_EQ(s_rows[0].kind, HOME_NOW_MESSAGES);
     ASSERT_STR_EQ(s_rows[0].title, "2 new messages");
     ASSERT_STR_EQ(s_rows[0].detail, "Chat");
-    ASSERT_TRUE(home_now_chat_only(&in));
+    ASSERT_EQ(home_now_messages_app(&in), HOME_MSG_CHAT);
     in.sms_unread = 1;
     home_now_rows(&in, s_rows, HOME_NOW_ROWS);
     ASSERT_STR_EQ(s_rows[0].title, "3 new messages");
     ASSERT_STR_EQ(s_rows[0].detail, "1 SMS" DOT "2 in Chat");
-    ASSERT_TRUE(!home_now_chat_only(&in));
+    ASSERT_EQ(home_now_messages_app(&in), HOME_MSG_SMS);
     in.mesh_unread = 4;
     home_now_rows(&in, s_rows, HOME_NOW_ROWS);
     ASSERT_STR_EQ(s_rows[0].detail, "1 SMS" DOT "4 from the mesh" DOT "2 in Chat");
@@ -331,6 +331,20 @@ TEST(home_now_a_missed_call_gone_from_the_log_says_only_how_many) {
     /* The count outlives a cleared log until Recents is seen. */
     home_now_in_t in = quiet();
     in.missed_calls = 1;
+TEST(home_now_messages_open_the_app_that_has_them) {
+    home_now_in_t in = quiet();
+    in.mesh_unread = 2;
+    ASSERT_EQ(home_now_messages_app(&in), HOME_MSG_MESH);
+    ASSERT_STR_EQ(home_msg_app_id(home_now_messages_app(&in)), "com.thistle.meshchat");
+    in.chat_unread = 1;
+    ASSERT_EQ(home_now_messages_app(&in), HOME_MSG_MESH);
+    in.mesh_unread = 0;
+    ASSERT_STR_EQ(home_msg_app_id(home_now_messages_app(&in)), "com.thistle.tailchat");
+    in.sms_unread = 5;
+    ASSERT_STR_EQ(home_msg_app_id(home_now_messages_app(&in)), "com.thistle.sms");
+    ASSERT_EQ(home_now_messages_app(NULL), HOME_MSG_SMS);
+}
+
     home_now_rows(&in, s_rows, HOME_NOW_ROWS);
     ASSERT_STR_EQ(s_rows[0].title, "Missed call");
     ASSERT_STR_EQ(s_rows[0].detail, "");

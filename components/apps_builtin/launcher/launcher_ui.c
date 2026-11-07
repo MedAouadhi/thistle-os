@@ -73,7 +73,8 @@ static int s_app_h = 296;
  * not a tool. */
 static const char *const s_pin_preference[] = {
     "com.thistle.phone",
-    "com.thistle.messenger",
+    "com.thistle.sms",
+    "com.thistle.meshchat",
     "com.thistle.hermes",
     "com.thistle.podcasts",
     "com.thistle.notes",
@@ -147,7 +148,8 @@ static const char *app_icon_symbol(const char *app_id)
     if (strstr(app_id, "tailchat"))    return LV_SYMBOL_BELL;
     if (strstr(app_id, "hermes"))      return LV_SYMBOL_CHARGE;
     if (strstr(app_id, "reader"))      return LV_SYMBOL_FILE;
-    if (strstr(app_id, "messenger"))   return LV_SYMBOL_ENVELOPE;
+    if (strstr(app_id, "meshchat"))    return LV_SYMBOL_LOOP;      /* as the quick panel's LoRa */
+    if (strstr(app_id, ".sms"))        return LV_SYMBOL_ENVELOPE;
     if (strstr(app_id, "phone"))       return LV_SYMBOL_CALL;
     if (strstr(app_id, "navigator"))   return LV_SYMBOL_GPS;
     if (strstr(app_id, "notes"))       return LV_SYMBOL_EDIT;
@@ -817,8 +819,8 @@ static const char *read_os_update(void)
     return version;
 }
 
-/* The unread messages are all Chat's: the messages row opens Chat. */
-static bool s_chat_only;
+/* The app the messages row opens: the one holding the unread. */
+static home_msg_app_t s_messages_app;
 
 static void read_now(home_now_in_t *in)
 {
@@ -828,7 +830,7 @@ static void read_now(home_now_in_t *in)
     in->sms_unread = rs_sms_unread_count();
     in->mesh_unread = rs_mesh_unread_count();
     in->chat_unread = tailnet_chat_unread_count();
-    s_chat_only = home_now_chat_only(in);
+    s_messages_app = home_now_messages_app(in);
     in->missed_calls = rs_call_missed_count();
     if (in->missed_calls > 0) {
         read_missed_call(in);
@@ -863,8 +865,8 @@ static const char SETTINGS_AT_UPDATE[] = "com.thistle.settings";
 static const char *now_app(home_now_kind_t kind)
 {
     switch (kind) {
-    case HOME_NOW_MESSAGES:    return s_chat_only ? "com.thistle.tailchat" : "com.thistle.messenger";
-    case HOME_NOW_MESH:        return "com.thistle.messenger";
+    case HOME_NOW_MESSAGES:    return home_msg_app_id(s_messages_app);
+    case HOME_NOW_MESH:        return "com.thistle.meshchat";
     case HOME_NOW_MISSED_CALL: return "com.thistle.phone";
     case HOME_NOW_TAILNET:     return "com.thistle.tailscale";
     case HOME_NOW_SYSTEM_UPDATE: return SETTINGS_AT_UPDATE;

@@ -10,9 +10,6 @@ idf_component_register(
         "launcher/fonts/home_latin_14_mono.c"
         "settings/settings_app.c"
         "settings/settings_ui.c"
-        "messenger/messenger_app.c"
-        "messenger/messenger_transport.c"
-        "messenger/messenger_ui.c"
         "assistant/assistant_app.c"
         "assistant/assistant_config.c"
         "assistant/assistant_json.c"
@@ -26,6 +23,13 @@ idf_component_register(
     # lvgl_apps.c is the only caller of the apps that live as their own
     # components under apps/, and lvgl_apps.h exposes none of them, so this
     # dependency is an implementation detail rather than part of the interface.
-    PRIV_REQUIRES appstore file_manager filexfer hermes navigator
-                  phone podcasts reader tailchat tailscale todo vault
+    PRIV_REQUIRES appstore file_manager filexfer hermes meshchat navigator
+                  phone podcasts reader sms tailchat tailscale todo vault
 )
+
+# ui and apps_builtin require each other, so the linker sees the cycle's
+# libraries repeated, CMake's few times, and resolves a symbol only from a
+# repetition after the one that first needed it. The apps under apps/ that
+# use a library of their own (SMS and MeshCore the chat kit) are a level
+# deeper than the rest: a few more repetitions let the kit be found.
+set_property(TARGET ${COMPONENT_LIB} APPEND PROPERTY LINK_INTERFACE_MULTIPLICITY 5)

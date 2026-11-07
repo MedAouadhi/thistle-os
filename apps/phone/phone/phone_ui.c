@@ -51,7 +51,7 @@ LV_FONT_DECLARE(phone_icons_18_mono);
 #define TAB_TALL_H    40    /* a picture over a word */
 #define TAB_SHORT_H   26    /* a picture alone, on a screen too short for both */
 #define TALL_TABS_MIN 180   /* the app's height from which the words fit */
-#define MESSENGER_ID  "com.thistle.messenger"
+#define SMS_APP_ID    "com.thistle.sms"
 
 typedef enum { VIEW_TAB, VIEW_CONTACT } view_t;
 
@@ -686,23 +686,23 @@ bool phone_ui_call(const char *number)
 
 void phone_ui_message(const char *number_as_written, const char *name)
 {
-    /* As the network writes it, so that the Messenger's conversation is the
+    /* As the network writes it, so that the SMS app's conversation is the
      * one its replies land in. */
     char number[CALL_NUMBER_MAX];
     phone_text_compact(number_as_written, number, sizeof number);
     if (!number[0]) return;
     ESP_LOGI(TAG, "message %s", number);
     if (!s_ui.messages) {
-        toast_warn("There is no Messenger on this device");
+        toast_warn("There is no SMS app on this device");
         return;
     }
     rs_sms_request_compose(number, name);
-    /* The Messenger coming forward closes this app: nothing of it is touched
+    /* The SMS app coming forward closes this app: nothing of it is touched
      * after a launch that worked. */
-    if (app_manager_launch(MESSENGER_ID) != ESP_OK) {
+    if (app_manager_launch(SMS_APP_ID) != ESP_OK) {
         char n[SMS_SENDER_MAX], m[PB_NAME_MAX];
         rs_sms_take_compose(n, sizeof n, m, sizeof m);  /* not for a later launch */
-        toast_warn("The Messenger did not open");
+        toast_warn("The SMS app did not open");
     }
 }
 
@@ -740,7 +740,7 @@ esp_err_t phone_ui_create(lv_obj_t *parent)
     if (s_ui.h <= 0) s_ui.h = 296;
     s_ui.epaper = display_is_epaper();
     s_ui.calls = rs_call_supported();
-    s_ui.messages = s_ui.calls && app_registered(MESSENGER_ID);
+    s_ui.messages = s_ui.calls && app_registered(SMS_APP_ID);
     s_ui.tab_h = s_ui.h >= TALL_TABS_MIN ? TAB_TALL_H : TAB_SHORT_H;
     if (s_ui.tab_h > s_ui.h / 2) s_ui.tab_h = s_ui.h / 2;
     s_ui.page_h = s_ui.h - s_ui.tab_h;

@@ -65,15 +65,15 @@ void home_format_date(int wday, int mday, int mon, bool two_lines,
  * with none of the first four, CAUGHT_UP and then MESH. SYSTEM_UPDATE and
  * APP_UPDATES are one row, the one that applies. */
 typedef enum {
-    HOME_NOW_MESSAGES,     /* unread SMS, mesh and Tailnet chat messages: opens the
-                            * Messenger, or Chat when only Chat has any */
+    HOME_NOW_MESSAGES,     /* unread SMS, mesh and Tailnet chat messages: opens
+                            * the app home_now_messages_app() names */
     HOME_NOW_MISSED_CALL,  /* missed calls: opens Phone; its button calls back */
     HOME_NOW_TAILNET,      /* the tailnet waits for the user: opens Tailscale */
     HOME_NOW_SYSTEM_UPDATE,/* ThistleOS has an update, and perhaps apps: opens
                             * Settings -> System update */
     HOME_NOW_APP_UPDATES,  /* only apps have updates: opens the App Store */
     HOME_NOW_CAUGHT_UP,    /* nothing new: not a button */
-    HOME_NOW_MESH,         /* the mesh is on: opens the Messenger */
+    HOME_NOW_MESH,         /* the mesh is on: opens MeshCore */
 } home_now_kind_t;
 
 /* What the tailnet asks of the user, if anything. */
@@ -120,6 +120,16 @@ typedef struct {
  * Counts only, never what a message says or who sent it. */
 int home_now_rows(const home_now_in_t *in, home_now_row_t *out, int max);
 
-/* Whether the unread messages are all Chat's: the messages row opens Chat
- * rather than the Messenger. */
-bool home_now_chat_only(const home_now_in_t *in);
+/* The app holding unread messages, which the messages row and the status
+ * bar's envelope open: the only one with any, else the first of SMS,
+ * MeshCore and Chat that has some, as the row's detail lists them. SMS when
+ * none has any. */
+typedef enum {
+    HOME_MSG_SMS,
+    HOME_MSG_MESH,
+    HOME_MSG_CHAT,
+} home_msg_app_t;
+home_msg_app_t home_now_messages_app(const home_now_in_t *in);
+
+/* That app's ID. */
+const char *home_msg_app_id(home_msg_app_t app);

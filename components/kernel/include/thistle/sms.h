@@ -39,9 +39,9 @@ uint32_t rs_sms_inbox_count(void);
 uint32_t rs_sms_unread_count(void);
 void rs_sms_set_held_unread(uint32_t count);
 
-/* Ask the Messenger to open its SMS conversation with `number`, titled
- * `name` (NULL or "" for the number itself), the next time it comes
- * forward: another app sets this and then launches the Messenger. A later
+/* Ask the SMS app to open its conversation with `number`, titled `name`
+ * (NULL or "" for the number itself), the next time it comes forward:
+ * another app sets this and then launches com.thistle.sms. A later
  * request replaces one not yet taken. */
 void rs_sms_request_compose(const char *number, const char *name);
 

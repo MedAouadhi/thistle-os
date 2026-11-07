@@ -17,11 +17,13 @@
 //! sender's clock (MeshCore) or the SMS service centre's, when known.
 //!
 //! Messages are recorded where they enter and leave the kernel, so nothing
-//! depends on an app being open. The Messenger switches recording off and on:
-//! `thistle_os.messenger.save_history` in system.json, on unless switched
-//! off. The files are plain text: anyone holding the card can read them.
+//! depends on an app being open. The SMS and MeshCore apps switch recording
+//! off and on: `thistle_os.messenger.save_history` in system.json (the
+//! section keeps the name of the app they were split from), on unless
+//! switched off. The files are plain text: anyone holding the card can read
+//! them.
 //!
-//! The Messenger reads the history back the first time it opens after a
+//! Each app reads its own history back the first time it opens after a
 //! restart (`rs_msg_log_read_back`): the lines from before this boot, as
 //! everything since reaches it from the kernel's inboxes or its own sending.
 
@@ -329,32 +331,29 @@ fn last_lines(file: &mut File, end: u64, count: usize) -> std::io::Result<String
     Ok(lines[from..].join("\n"))
 }
 
-/// Every conversation's file under `root` that has lines from before this
-/// boot. Called with the writing lock held, so no line can land between
-/// reading a file's length and its mark.
-pub(crate) fn conversations(root: &Path, marks: &Marks) -> Vec<Found> {
+/// Every conversation's file of `transport` under `root` that has lines
+/// from before this boot. Called with the writing lock held, so no line can
+/// land between reading a file's length and its mark.
+pub(crate) fn conversations(root: &Path, marks: &Marks, transport: Transport) -> Vec<Found> {
     let mut found = Vec::new();
-    for transport in [Transport::Sms, Transport::Mesh] {
-        let Ok(dir) = std::fs::read_dir(root.join(transport.dir())) else {
+    let Ok(dir) = std::fs::read_dir(root.join(transport.dir())) else {
+        return found;
+    };
+    for item in dir.flatten() {
+        let path = item.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
             continue;
-        };
-        for item in dir.flatten() {
-            let path = item.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-                continue;
-            }
-            let Ok(meta) = item.metadata() else { continue };
-            let end = marks.get(&path).map_or(meta.len(), |&mark| mark.min(meta.len()));
-            if meta.is_file() && end > 0 {
-                found.push(Found { transport, path, end });
-            }
+        }
+        let Ok(meta) = item.metadata() else { continue };
+        let end = marks.get(&path).map_or(meta.len(), |&mark| mark.min(meta.len()));
+        if meta.is_file() && end > 0 {
+            found.push(Found { transport, path, end });
         }
     }
     found
 }
 
-/// The history in `found`, for the Messenger to show again after a
-/// restart: the `max_convs` conversations with the latest messages, the
+/// The history in `found`, for its app to show again after a restart: the `max_convs` conversations with the latest messages, the
 /// latest last, each with its last `max_msgs` messages, oldest first. One
 /// conversation's lines are in memory at a time.
 pub(crate) fn read_back(found: Vec<Found>, max_convs: usize, max_msgs: usize, mut visit: impl FnMut(Saved)) {
@@ -461,15 +460,15 @@ pub extern "C" fn rs_msg_log_dir() -> *const c_char {
     ROOT_C.as_ptr() as *const c_char
 }
 
-/// What rs_msg_log_read_back() hands over for each message.
+/// What rs_msg_log_read_back() hands over for each message: `when` in
+/// seconds since 1970, 0 when not known.
 pub type SavedFn = unsafe extern "C" fn(
     ctx: *mut c_void,
-    transport: i32,
     conv: *const c_char,
     sent: bool,
     peer: *const c_char,
     text: *const c_char,
-    time: *const c_char,
+    when: u64,
 );
 
 /// MSG_LOG_SMS and MSG_LOG_MESH in thistle/msg_log.h.
@@ -481,37 +480,35 @@ fn c_string(s: &str) -> CString {
     CString::new(s.replace('\0', "")).unwrap_or_default()
 }
 
-/// Hand `visit` the history from before this boot, as read_back() picks it,
-/// with each message's time of day as the status bar shows the time ("--:--"
-/// when it is not known). Returns how many messages it handed over.
+/// Hand `visit` the history of `transport` from before this boot, as
+/// read_back() picks it. Returns how many messages it handed over, or -1
+/// for a transport that is neither.
 ///
 /// # Safety
 /// `visit` is called with `ctx` and strings that live for the call only.
 #[no_mangle]
 pub unsafe extern "C" fn rs_msg_log_read_back(
+    transport: i32,
     max_convs: u32,
     max_msgs: u32,
     visit: Option<SavedFn>,
     ctx: *mut c_void,
 ) -> i32 {
+    let transport = match transport {
+        C_SMS => Transport::Sms,
+        C_MESH => Transport::Mesh,
+        _ => return -1,
+    };
     let Some(visit) = visit else { return 0 };
     let found = {
         let marks = WRITING.lock().unwrap_or_else(PoisonError::into_inner);
-        conversations(root(), &marks)
+        conversations(root(), &marks, transport)
     };
     let mut count = 0;
     read_back(found, max_convs as usize, max_msgs as usize, |m| {
-        let transport = match m.transport {
-            Transport::Sms => C_SMS,
-            Transport::Mesh => C_MESH,
-        };
-        let time = m
-            .time
-            .and_then(|t| i64::try_from(t).ok())
-            .and_then(crate::time_manager::clock_face_at)
-            .unwrap_or_else(|| "--:--".to_string());
-        let (conv, peer, text, time) = (c_string(&m.conv), c_string(&m.peer), c_string(&m.text), c_string(&time));
-        visit(ctx, transport, conv.as_ptr(), m.dir == Direction::Out, peer.as_ptr(), text.as_ptr(), time.as_ptr());
+        let when = m.time.filter(|&t| t >= CLOCK_SET_AFTER).unwrap_or(0);
+        let (conv, peer, text) = (c_string(&m.conv), c_string(&m.peer), c_string(&m.text));
+        visit(ctx, conv.as_ptr(), m.dir == Direction::Out, peer.as_ptr(), text.as_ptr(), when);
         count += 1;
     });
     count
@@ -1023,8 +1020,10 @@ mod tests {
     }
 
     fn read_all(root: &Path, marks: &Marks, max_convs: usize, max_msgs: usize) -> Vec<Saved> {
+        let mut found = conversations(root, marks, Transport::Sms);
+        found.extend(conversations(root, marks, Transport::Mesh));
         let mut out = Vec::new();
-        read_back(conversations(root, marks), max_convs, max_msgs, |m| out.push(m));
+        read_back(found, max_convs, max_msgs, |m| out.push(m));
         out
     }
 
@@ -1126,6 +1125,23 @@ mod tests {
             (Transport::Mesh, "1a2b3c4d5e6f", "Heltec V3"),
             (Transport::Sms, "DHL Paket", "DHL Paket"),
         ]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn each_app_reads_back_its_own_transport_alone() {
+        let root = temp_root("own");
+        saved_file(&root, "sms/+491701.jsonl", &[sms_line("+491701", "sms old", 1_000)]);
+        saved_file(&root, "sms/+491702.jsonl", &[sms_line("+491702", "sms new", 3_000)]);
+        saved_file(&root, "mesh/public.jsonl", &[r#"{"dir":"in","from":"Bob","text":"mesh","time":2000}"#.to_string()]);
+
+        // Newer SMS conversations take no place from the mesh's.
+        let mut mesh = Vec::new();
+        read_back(conversations(&root, &Marks::new(), Transport::Mesh), 1, 50, |m| mesh.push(m));
+        assert_eq!(texts(&mesh), ["mesh"]);
+        let mut sms = Vec::new();
+        read_back(conversations(&root, &Marks::new(), Transport::Sms), 1, 50, |m| sms.push(m));
+        assert_eq!(texts(&sms), ["sms new"]);
         let _ = std::fs::remove_dir_all(&root);
     }
 

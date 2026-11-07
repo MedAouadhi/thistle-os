@@ -2,7 +2,7 @@
 """Voice calls on the simulated T-Deck Max: the call screen opens for a call
 ringing here or placed, its buttons answer, decline, end, mute, switch the
 speaker and send DTMF, Back tucks a call away to the status bar and a tap
-there brings it back, and the Messenger opens the conversation another app
+there brings it back, and the SMS app opens the conversation another app
 asks it for.
 
 The simulated modem (drivers/sim_cellular.c) rings with --call 3 s after it
@@ -152,15 +152,16 @@ CASES = (
                     "[sim_cellular] dtmf #"),
                    ("[sim_audio] route voice, speaker on",
                     "[sim_audio] route voice, speaker off"))),
-    Case("messenger-opens-the-conversation-asked-for",
+    Case("sms-opens-the-conversation-asked-for",
          ("--tap", f"compose:{CALLER}:Sam Taylor"), 8000,
-         expected=((f"Compose to {CALLER}", "(messenger) on_create",
-                    f"(messenger_ui) compose {CALLER}: Sam Taylor"),)),
-    Case("messenger-in-front-takes-the-request-too",
-         ("--launch-app", "com.thistle.messenger", "--tap", f"compose:{CALLER}"), 9000,
-         expected=(("(messenger) on_create", f"Compose to {CALLER}",
-                    f"(messenger_ui) compose {CALLER}"),),
-         absent=("(messenger) on_destroy",)),
+         expected=((f"Compose to {CALLER}", "(sms) on_create",
+                    f"(sms) compose {CALLER}: Sam Taylor",
+                    f"(chatkit) sms: conversation Sam Taylor"),)),
+    Case("sms-in-front-takes-the-request-too",
+         ("--launch-app", "com.thistle.sms", "--tap", f"compose:{CALLER}"), 9000,
+         expected=(("(sms) on_create", f"Compose to {CALLER}",
+                    f"(sms) compose {CALLER}"),),
+         absent=("(sms) on_destroy",)),
 )
 
 # The call screen's layout, for a made-up call, on the e-paper Max and on the

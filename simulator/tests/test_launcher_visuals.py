@@ -64,7 +64,8 @@ CASES = (
     # mesh never runs (mesh_manager.rs starts MeshCore on the device alone),
     # so no row counts its contacts. The hashes changed when the rows came,
     # and the T-Deck Max's when Notes, its fifth pin, moved to the App Store
-    # and Files took its place.
+    # and Files took its place, and again when the Messenger's pin became
+    # SMS and MeshCore, the two apps it was split into.
     Case(
         "lcd-home",
         "tdeck",
@@ -72,7 +73,7 @@ CASES = (
         None,
         320,
         240,
-        "23b1c230be4fac294a0f458d1ea0514074451ff351136119900ab97192f29c20",
+        "cc33895f6bc822f3e492df258c9e01424d05ae543e39e7afeddb06d3539b98bc",
         clock_rows=48,
     ),
     Case(
@@ -82,7 +83,7 @@ CASES = (
         None,
         240,
         320,
-        "f524e3dab07d45014ec9f3e8f299b32d408dea27b537bf87c89b8c6cd856cede",
+        "f1b5a7614da02d7b7a39d4cf63f0f915e346e04bbae493ab66a10bf2239136c0",
         clock_rows=64,
     ),
     # The LCD hashes cover every built-in app. The nine that live under apps/
@@ -102,7 +103,7 @@ CASES = (
         "160,222",
         320,
         240,
-        "135e81813cc7b51b03ca9178b4e57ec58bfa2d68f6fc4b47c9240d307255477f",
+        "f286c4d5bca224b53b720aceff81737386165f9a57213479fa29e6d3e4fba70a",
     ),
     # What an e-paper board boots by default: the LVGL grid, three columns
     # wide on a 240 px screen. Its first hash had the tile under the tap
@@ -119,7 +120,7 @@ CASES = (
         "120,302",
         240,
         320,
-        "45691a0ed58fe01004b4e74413a75b34ff73870779469e4dcf550b631e5d9f08",
+        "3405d82e8ee3f31f5170efe53ae5f81121e8a7b4c79101d04b9a5db5cb9d2939",
     ),
 )
 

@@ -257,7 +257,7 @@ static void run_step(const char *step)
         rs_sms_request_compose(buf, name ? name + 1 : NULL);
         printf("Compose to %s\n", buf);
         pthread_mutex_lock(&s_lvgl_mutex);
-        app_manager_launch("com.thistle.messenger");
+        app_manager_launch("com.thistle.sms");
         pthread_mutex_unlock(&s_lvgl_mutex);
     } else if (strncmp(step, "type:", 5) == 0) {
         type_text(step + 5);
@@ -409,7 +409,7 @@ int main(int argc, char **argv)
             printf("  --tap wait          Take a tap's turn doing nothing\n");
             printf("  --tap dial:NUMBER   Place a call to NUMBER instead (rs_call_dial)\n");
             printf("  --tap compose:NUMBER[:NAME]\n");
-            printf("                      Ask the Messenger for an SMS to NUMBER, and open it\n");
+            printf("                      Ask the SMS app for a conversation with NUMBER, and open it\n");
             printf("  --tap type:TEXT     Type TEXT at the tap's turn, as --type does;\n");
             printf("                      16 keys at most\n");
             printf("  --tap-start WHEN    When the first tap lands: MS after startup (default\n");

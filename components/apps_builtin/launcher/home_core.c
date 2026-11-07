@@ -49,8 +49,8 @@ void home_layout(int16_t width, int16_t height, home_layout_t *out)
     out->grid_y = y;
     out->grid_h = room;
     out->cell_h = ROW_H;
-    /* The whole width, margins and all: at 240 px a cell of 80 holds
-     * "Messenger", one inside the margins does not. */
+    /* The whole width, margins and all: at 240 px a cell of 80 holds a
+     * name as long as "Messenger", one inside the margins does not. */
     out->cell_w = (int16_t)(width > 0 ? width / out->cols : 0);
 }
 
@@ -167,9 +167,22 @@ static void messages_row(const home_now_in_t *in, home_now_row_t *row)
     }
 }
 
-bool home_now_chat_only(const home_now_in_t *in)
+home_msg_app_t home_now_messages_app(const home_now_in_t *in)
 {
-    return in != NULL && in->chat_unread > 0 && in->sms_unread + in->mesh_unread == 0;
+    if (in == NULL || in->sms_unread > 0) return HOME_MSG_SMS;
+    if (in->mesh_unread > 0) return HOME_MSG_MESH;
+    if (in->chat_unread > 0) return HOME_MSG_CHAT;
+    return HOME_MSG_SMS;
+}
+
+const char *home_msg_app_id(home_msg_app_t app)
+{
+    switch (app) {
+    case HOME_MSG_MESH: return "com.thistle.meshchat";
+    case HOME_MSG_CHAT: return "com.thistle.tailchat";
+    case HOME_MSG_SMS:
+    default:            return "com.thistle.sms";
+    }
 }
 
 /* Who called last: the phonebook's name, else the number, else "Withheld";
