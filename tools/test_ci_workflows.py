@@ -34,7 +34,10 @@ class WorkflowTests(unittest.TestCase):
                 if "uses" in job:
                     continue  # a reusable workflow's jobs are checked in their file
                 with self.subTest(workflow=path.name, job=name):
-                    self.assertEqual(runner_labels(job), ["ubuntu-latest"])
+                    # GitHub's own: Linux, and macOS for the companion
+                    # app's disk image alone.
+                    hosted = [["macos-latest"]] if name == "companion-macos" else [["ubuntu-latest"]]
+                    self.assertIn(runner_labels(job), hosted)
 
     def test_nothing_of_upstreams_is_named(self):
         for path in self.paths:

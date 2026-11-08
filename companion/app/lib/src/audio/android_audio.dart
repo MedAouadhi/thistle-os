@@ -7,6 +7,11 @@
 /// listening service in the foreground as using the microphone, which
 /// Android 14 requires to record with the app in the background.
 ///
+/// macOS answers the same channels (`macos/Runner/MainFlutterWindow.swift`):
+/// AVAudioEngine, a call's microphone and speaker on one engine with Apple's
+/// voice processing on as the echo canceller; `call.begin` and `call.end`
+/// there only make and undo that engine.
+///
 /// A WebRTC call records and plays through libwebrtc instead, whose audio
 /// switch (flutter_webrtc's) puts the phone in communication mode and picks
 /// the output; [AndroidCallRoute] tells it which, and has Audio.kt keep the

@@ -1,7 +1,7 @@
 # Thistle Chat, the companion app
 
 Tailnet chat's companion app (`.scratch/tailnet-chat/spec.md`, ADR-0015) for
-Linux and Android, from the same code. The protocol, the
+Linux, macOS and Android, from the same code. The protocol, the
 policy, the outbox and the database are the Dart core's
 (`companion/core/`, `tailnet_chat_core`); this app is the screens and the
 platform glue:
@@ -132,6 +132,13 @@ end, and why the call ended.
 
 ### Video
 
+While the other side's picture shows, the call screen is the picture: the
+name and the time in a bar at the top, the buttons in one at the bottom,
+each on a shade fading into it, and nothing over its middle. A desktop
+window shows the whole picture, letterboxed; a phone fills the screen. What
+went wrong shows in plain words (`The call has no audio.`); the details are
+the log's.
+
 A conversation with a contact whose app announced `call:webrtc` has a
 Video call button beside Call; the T-Deck and older apps have none
 (`ChatPeer.videoCapable`, from the contact's last hello, kept with the
@@ -191,9 +198,10 @@ xvfb-run -a build/linux/x64/release/bundle/thistle_chat
 ### Echo cancellation
 
 A WebRTC call uses libwebrtc's own echo canceller, in the app; no PipeWire
-canceller is started for it, and the call screen says "on (WebRTC's own
-canceller, in the app)". A `ws-opus` call asks the platform to keep the
-speaker out of the microphone; the call screen says which way it got:
+canceller is started for it, and the log says `echo cancellation on
+(WebRTC's own canceller, in the app)`. A `ws-opus` call asks the platform to
+keep the speaker out of the microphone; the log (`--verbose`) says which way
+it got, never the call screen:
 
 1. **PipeWire** (Ubuntu 22.10 and later, Fedora): for the length of a call
    the app runs `pipewire -c echo-cancel.conf`, a client of the running
@@ -232,6 +240,58 @@ and type on its standard input, a command a line (the control protocol in
 It shows in Requests with its fingerprint; Accept, and the conversation
 opens in Conversations.
 
+## macOS
+
+The same app, built on a Mac (Flutter cannot cross-build it from Linux).
+What differs from Linux is in `macos/Runner/MainFlutterWindow.swift`, over
+the app's own channels, so no plugin is added:
+
+- **The identity's seed is in the login keychain**, a generic password of
+  service `org.thistleos.thistle_chat`, account the profile
+  (`KeychainVault` in `identity.dart`). A build signed differently from the
+  one that kept it (each ad-hoc build is) makes macOS ask once whether it
+  may read it: Always Allow. Keychain Access shows and deletes it.
+- **Audio is AVAudioEngine**, answering the channels Android's `Audio.kt`
+  does (`AndroidAudioDevices`): 16 kHz mono, 20 ms frames. A `ws-opus`
+  call (the T-Deck) puts its microphone and speaker on one engine with
+  Apple's voice processing on, which cancels the echo; the log says
+  `echo cancellation on (macOS voice processing)`. WebRTC calls and video are libwebrtc's, as
+  on Linux.
+- **Opus is the app's own** in the disk image (below), built universal from
+  `components/opus/` by Android's CMake file; a `flutter run` build finds
+  Homebrew's instead (`brew install opus`). Without either the app works
+  and says why it has no voice messages or T-Deck calls.
+- **Tailscale**: the `tailscale` command on the PATH, Homebrew's, or the
+  Tailscale app's own binary
+  (`/Applications/Tailscale.app/Contents/MacOS/Tailscale`), whichever
+  answers first (`tailscaleCommands`). The app is not sandboxed, so that
+  command can reach tailscaled.
+- **Notifications** go to the notification center; a call rings with
+  Answer and Decline. macOS asks for them, the microphone and the camera
+  the first time each is needed (System Settings, Privacy & Security, if
+  refused).
+
+Needs Xcode (with its command line tools), CocoaPods and Flutter 3.47.9:
+
+```sh
+brew install opus cocoapods
+cd companion/app
+flutter pub get --enforce-lockfile
+flutter run -d macos                 # or:
+flutter build macos --release        # build/macos/Build/Products/Release/thistle_chat.app
+open build/macos/Build/Products/Release/thistle_chat.app
+```
+
+**As a disk image**: `tool/make_dmg.sh` (on a Mac, with CMake too) builds
+`build/macos/ThistleChat.dmg`, the app with its libopus beside a link to
+Applications. CI's `companion-macos` job keeps one for each push as the
+artifact `thistle-chat-dmg`. It is signed ad hoc and not notarized, so macOS
+refuses it the first time: System Settings, Privacy & Security, Open
+Anyway, or `xattr -dr com.apple.quarantine "/Applications/Thistle Chat.app"`.
+
+The options are those of Linux, after `--args` when opened from the shell:
+`open thistle_chat.app --args --profile second --port 4811 --verbose`.
+
 ## Android
 
 The Tailscale app must be installed and connected on the phone: the chat
@@ -269,7 +329,7 @@ contact that asks with what `tailscale status --json` shows online.
   core opens. A voice message records from the microphone and plays as
   media. A call puts the phone in communication mode, records from the
   voice-communication source with Android's AcousticEchoCanceler (and
-  NoiseSuppressor) where the phone has them, which the call screen says,
+  NoiseSuppressor) where the phone has them, which the log says,
   plays on the voice-call stream (the earpiece, unless a headset or the
   phone's own routing says otherwise), and darkens the screen at the ear.
   While a call is up the listening service is in the foreground as using

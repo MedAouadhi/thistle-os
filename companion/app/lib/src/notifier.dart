@@ -1,7 +1,8 @@
 /// Desktop notifications for messages, requests and calls while the app is
 /// not in front (user story 55). flutter_local_notifications speaks to the
-/// freedesktop notification service over D-Bus on Linux, and to Android's
-/// notification manager on Android, on the channel `messages`;
+/// freedesktop notification service over D-Bus on Linux, to the user
+/// notification center on macOS, and to Android's notification manager on
+/// Android, on the channel `messages`;
 /// there notifications are a runtime permission (permissions.dart).
 ///
 /// A call on Android rings like a phone call instead (tailnet-video spec, A
@@ -49,6 +50,8 @@ abstract interface class CallWindow implements Listenable {
   void finish();
 }
 
+const _callCategory = 'call';
+
 class SystemNotifier implements Notifier {
   SystemNotifier({this.onOpen, this.onCall, this.ringer});
 
@@ -71,9 +74,30 @@ class SystemNotifier implements Notifier {
     try {
       _ready =
           await _plugin.initialize(
-            settings: const InitializationSettings(
-              linux: LinuxInitializationSettings(defaultActionName: 'Open'),
-              android: AndroidInitializationSettings('ic_stat_chat'),
+            settings: InitializationSettings(
+              linux: const LinuxInitializationSettings(defaultActionName: 'Open'),
+              android: const AndroidInitializationSettings('ic_stat_chat'),
+              // macOS: asks once for notifications; a call's Answer and
+              // Decline are its category's actions.
+              macOS: DarwinInitializationSettings(
+                notificationCategories: [
+                  DarwinNotificationCategory(
+                    _callCategory,
+                    actions: [
+                      DarwinNotificationAction.plain(
+                        'answer',
+                        'Answer',
+                        options: {DarwinNotificationActionOption.foreground},
+                      ),
+                      DarwinNotificationAction.plain(
+                        'decline',
+                        'Decline',
+                        options: {DarwinNotificationActionOption.destructive},
+                      ),
+                    ],
+                  ),
+                ],
+              ),
             ),
             onDidReceiveNotificationResponse: (r) {
               final payload = r.payload;
@@ -106,6 +130,7 @@ class SystemNotifier implements Notifier {
       notificationDetails: const NotificationDetails(
         linux: LinuxNotificationDetails(category: LinuxNotificationCategory.imReceived),
         android: AndroidNotificationDetails('messages', 'Messages', importance: Importance.high),
+        macOS: DarwinNotificationDetails(threadIdentifier: 'messages'),
       ),
     );
   }
@@ -133,6 +158,10 @@ class SystemNotifier implements Notifier {
             LinuxNotificationAction(key: 'answer', label: 'Answer'),
             LinuxNotificationAction(key: 'decline', label: 'Decline'),
           ],
+        ),
+        macOS: DarwinNotificationDetails(
+          categoryIdentifier: _callCategory,
+          interruptionLevel: InterruptionLevel.timeSensitive,
         ),
       ),
     );

@@ -78,6 +78,25 @@ void main() {
       expect(asked, ['tailscale', 'status', '--json']);
       expect(s.state, TailnetState.running);
     });
+
+    test('macOS: no tailscale on the PATH, the Tailscale app\'s own binary', () async {
+      final tried = <String>[];
+      final s = await readTailscaleStatus(
+        commands: tailscaleCommands(macOS: true),
+        run: (exe, args) async {
+          tried.add(exe);
+          if (!exe.startsWith('/Applications/')) throw ProcessException(exe, args);
+          return ProcessResult(1, 0, fixture('tailscale_status_running.json'), '');
+        },
+      );
+      expect(tried, [
+        'tailscale',
+        '/opt/homebrew/bin/tailscale',
+        '/usr/local/bin/tailscale',
+        '/Applications/Tailscale.app/Contents/MacOS/Tailscale',
+      ]);
+      expect(s.state, TailnetState.running);
+    });
   });
 
   test('what is shared with a contact that asks: the online peers by MagicDNS name; Android shares none', () {

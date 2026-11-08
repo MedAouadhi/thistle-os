@@ -422,6 +422,39 @@ jobs:
           path: companion/app/build/app/outputs/flutter-apk/app-release.apk
           retention-days: 14
 
+  # The same app for macOS, as a disk image (companion/app/tool/make_dmg.sh):
+  # the Swift glue (keychain, audio) compiled, libopus built universal into
+  # the app, signed ad hoc, not notarized.
+  companion-macos:
+    name: Companion App (Flutter, macOS DMG)
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: companion/app
+    env:
+      FLUTTER_VERSION: 3.47.9
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Flutter
+        working-directory: .
+        run: |
+          git clone --depth 1 --branch "$FLUTTER_VERSION" https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
+          echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+
+      - name: Build the disk image
+        run: |
+          flutter config --no-analytics --enable-macos-desktop
+          flutter --version
+          tool/make_dmg.sh
+
+      - name: Keep the disk image
+        uses: actions/upload-artifact@v7
+        with:
+          name: thistle-chat-dmg
+          path: companion/app/build/macos/ThistleChat.dmg
+          retention-days: 14
+
   simulator-boot:
     name: Simulator Boot Test
     runs-on: ubuntu-latest
