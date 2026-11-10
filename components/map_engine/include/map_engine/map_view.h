@@ -20,8 +20,10 @@
  *
  * Input: a swipe across the view moves it a step the other way, as if the
  * map were dragged; the arrow keys, and w, a, s, d, move it a step; +, =
- * and i zoom in, - and o out, keeping the view's centre. Other keys are
- * left for the app (LV_EVENT_KEY on map_view_obj()).
+ * and i zoom in, - and o out, keeping the view's centre; a tap that is
+ * not a swipe, and Enter, select the nearest overlay item
+ * (map_overlay.h). Other keys are left for the app (LV_EVENT_KEY on
+ * map_view_obj()).
  *
  * For built-in apps, on the UI task; the view does not own the Pack, which
  * must outlive it and which nothing else may read meanwhile.

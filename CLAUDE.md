@@ -939,9 +939,38 @@ on an About line at the bottom; it logs `(maps) opened X: format 1.0,
 ...`, `(maps) showing z16 around ...`, `(maps) view WxH at X,Y`, `(maps)
 zoom in at X,Y`, and each view swapped in, `(maps) shown z16 at X,Y: 4
 tiles, 0 places with none, 0 damaged; 4 read, 0 from the cache, 1 ms`.
-The marker and overlays are tickets 03 and 04.
+The marker is ticket 03.
 `simulator/tests/test_maps.py` compares the screen with the golden Pack
 pixel for pixel, after each pan and zoom, and with damaged Packs.
+
+**Overlays** (`map_engine/map_overlay.h`, `docs/maps/overlay-api.md`,
+ADR-0018) are a built-in app's own points, lines, polygons and text on its
+view, owned by it and retained; no syscall, no registry.
+
+- **Drawn over the tiles on the UI task**, one bit a pixel, in z order, at
+  most 256 items an overlay, decluttered (`map_overlay.c`). The image shows
+  a third buffer, the tiles with the overlays over them; labels go through
+  `lv_draw_label` on a layer over those pixels, so Arabic is shaped by the
+  usual wraps, then thresholded. Four screen buffers in PSRAM in all.
+- **A change shows at most every 20 s, and only the rectangle that
+  changed**: the view draws the next screen into a scratch buffer, compares
+  it with the shown one, copies the rectangle that differs and invalidates
+  only that (never `lv_image_set_src`, which invalidates the whole image).
+  `map_view_refresh()` draws at once; on/off, pan and zoom draw at once.
+  LVGL grows an invalidated area by a pixel.
+- **A tap that is not a swipe, or Enter, selects** the nearest drawn item
+  within 16 px and calls its overlay's callback; a miss calls the view's.
+- **In the Maps app** (`maps_layers.c`), each `*.geojson` or `*.json` in
+  `/sdcard/maps/overlays/`, eight at most, is an overlay, read with the
+  Podcasts app's `pod_json.c`, on and off in the Layers panel (top left);
+  a file that changes is read again within 2 s; Refresh (top right, `r`)
+  draws at once; a tapped item's card shows its name and properties. The
+  logs: `(maps) overlay X.geojson: N items[, M left out (256 at most)]`,
+  `(map_view) overlays drawn: ...`, `overlays redrawn for a change, 20.0 s
+  after the last: changed X1,Y1-X2,Y2`, `tap at X,Y: "name" item N, D px
+  away`, `(maps) info card: NAME; key: value`.
+- `simulator/tests/test_map_overlays.py` drives it, changing a file while
+  the simulator runs for the 20 s case.
 
 ### To-do
 

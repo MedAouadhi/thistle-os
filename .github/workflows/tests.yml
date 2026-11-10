@@ -613,6 +613,10 @@ jobs:
         working-directory: simulator
         run: python3 tests/test_maps.py --sim build/thistle_sim
 
+      - name: Run Maps overlay tests (GeoJSON files, declutter, the 20 s cap, selection)
+        working-directory: simulator
+        run: python3 tests/test_map_overlays.py --sim build/thistle_sim
+
       - name: Run Tailnet chat conformance, messages, card, restart and app tests
         working-directory: simulator
         run: python3 tests/test_tailchat.py --sim build/thistle_sim

@@ -16,10 +16,12 @@
  * with one that does not open, the page says why instead.
  *
  * A swipe or the keys pan half a screen; the zoom buttons and keys go
- * through the four levels (map_view.h). The position marker and overlays
- * are the next tickets' (.scratch/maps/).
+ * through the four levels (map_view.h). Every GeoJSON file in
+ * /sdcard/maps/overlays/ is a switchable overlay, with an info card for a
+ * tapped item (maps_layers.c).
  */
 #include "maps/maps_app.h"
+#include "maps/maps_layers.h"
 
 #include "map_engine/map_pack.h"
 #include "map_engine/map_view.h"
@@ -258,6 +260,7 @@ static void open_and_show(bool mono)
     lv_obj_t *out = make_zoom_button("-", -1, ABOUT_H + ZOOM_MARGIN);
     lv_obj_t *in = make_zoom_button("+", 1, ABOUT_H + ZOOM_MARGIN * 2 + ZOOM_BUTTON);
     make_about(mono);
+    maps_layers_open(s_ui.view, s_ui.root, ABOUT_H);
 
     lv_obj_update_layout(s_ui.root);
     lv_area_t at;
@@ -292,6 +295,7 @@ esp_err_t maps_ui_create(lv_obj_t *parent)
 
 void maps_ui_destroy(void)
 {
+    if (s_ui.view) maps_layers_close();
     map_view_destroy(s_ui.view);
     if (s_ui.root) lv_obj_delete(s_ui.root);
     map_pack_close(s_ui.pack);

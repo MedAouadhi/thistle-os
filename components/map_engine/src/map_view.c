@@ -17,9 +17,17 @@
  * through `ready`: the task writes back only while ready is false, and the
  * UI task touches back only to swap it in while ready is true. The Pack
  * and the cache are the task's alone once it runs.
+ *
+ * The overlays (map_overlay.h) are the UI task's alone. The image shows
+ * `screen`: front, the tiles, with the overlays drawn over them. A view
+ * swapped in is drawn whole; an overlay's change is drawn into `scratch`
+ * from front, compared with screen, and only the rectangle that differs is
+ * invalidated, so LVGL flushes only that and the e-paper panel refreshes
+ * only that.
  */
 #include "map_engine/map_view.h"
 #include "map_compose.h"
+#include "map_overlay_priv.h"
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -54,6 +62,8 @@ struct map_view {
     lv_timer_t      *poll;
     uint16_t        *front;  /* w * h, in PSRAM: what the image shows */
     uint16_t        *back;   /* w * h, in PSRAM: what the task composes */
+    uint16_t        *screen; /* w * h, in PSRAM: front and the overlays, shown */
+    uint16_t        *scratch;/* w * h, in PSRAM: the overlays' next screen */
     int              w, h;
     map_pack_t      *pack;
     map_tile_cache_t *cache;
@@ -61,6 +71,15 @@ struct map_view {
     void            *user;
     lv_point_t       press_at;
     bool             pressing;
+
+    /* The overlays, the UI task's: */
+    map_overlay_t   *overlays;     /* in z order, lowest first */
+    map_frame_t      on_screen;    /* what screen shows */
+    bool             have_screen;
+    bool             changed;      /* an overlay changed since screen was drawn */
+    int64_t          drawn_us;     /* when the overlays were last drawn */
+    map_view_miss_cb_t miss_cb;
+    void            *miss_user;
 
     SemaphoreHandle_t lock;
     QueueHandle_t    wake;   /* to the task: something changed */
@@ -176,9 +195,175 @@ out:
 /* The UI task's side                                                   */
 /* ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ */
+/* The overlays: what is drawn over the tiles, and when                 */
+/* ------------------------------------------------------------------ */
+
+static void log_drawn(const map_overlay_stats_t *st)
+{
+    ESP_LOGI(TAG, "overlays drawn: %d on, %d items in view, %d left out to declutter", st->on,
+             st->in_view, st->decluttered);
+}
+
+static void show_screen(map_view_t *v)
+{
+    lv_image_cache_drop(&v->dsc);
+    v->dsc.data = (const uint8_t *)v->screen;
+    lv_image_set_src(v->image, &v->dsc);
+}
+
+/* A view just swapped into front: the overlays over it, all of it shown. */
+static void show_whole(map_view_t *v, const map_view_shown_t *shown)
+{
+    v->on_screen = (map_frame_t){.zoom = shown->zoom, .left = shown->left, .top = shown->top,
+                                 .w = v->w, .h = v->h};
+    v->have_screen = true;
+    memcpy(v->screen, v->front, (size_t)v->w * v->h * sizeof(uint16_t));
+    if (v->overlays) {
+        map_overlay_stats_t st;
+        map_overlays_draw(v->overlays, &v->on_screen, v->screen, &st);
+        log_drawn(&st);
+    }
+    v->changed = false;
+    v->drawn_us = esp_timer_get_time();
+    show_screen(v);
+    lv_obj_invalidate(v->image);
+}
+
+/* The overlays drawn again over what is on the screen; only the rectangle
+ * that differs is invalidated. why is for the log. */
+static void redraw_overlays(map_view_t *v, const char *why)
+{
+    if (!v->have_screen) return;
+    int64_t now = esp_timer_get_time();
+    double after = (double)(now - v->drawn_us) / 1e6;
+    size_t n = (size_t)v->w * v->h;
+    memcpy(v->scratch, v->front, n * sizeof(uint16_t));
+    map_overlay_stats_t st;
+    map_overlays_draw(v->overlays, &v->on_screen, v->scratch, &st);
+    log_drawn(&st);
+    v->changed = false;
+    v->drawn_us = now;
+
+    int x1 = v->w, y1 = v->h, x2 = -1, y2 = -1;
+    for (int y = 0; y < v->h; y++) {
+        const uint16_t *a = v->screen + (size_t)y * v->w, *b = v->scratch + (size_t)y * v->w;
+        if (memcmp(a, b, (size_t)v->w * sizeof(uint16_t)) == 0) continue;
+        if (y < y1) y1 = y;
+        y2 = y;
+        for (int x = 0; x < v->w; x++) {
+            if (a[x] == b[x]) continue;
+            if (x < x1) x1 = x;
+            if (x > x2) x2 = x;
+        }
+    }
+    if (x2 < 0) {
+        ESP_LOGI(TAG, "overlays redrawn for %s, %.1f s after the last: nothing on the screen "
+                      "changed", why, after);
+        return;
+    }
+    /* Copied, not swapped: a new source would invalidate all the image. */
+    for (int y = y1; y <= y2; y++) {
+        memcpy(v->screen + (size_t)y * v->w + x1, v->scratch + (size_t)y * v->w + x1,
+               (size_t)(x2 - x1 + 1) * sizeof(uint16_t));
+    }
+    lv_image_cache_drop(&v->dsc);
+    lv_area_t at;
+    lv_obj_get_coords(v->image, &at);
+    lv_area_t area = {at.x1 + x1, at.y1 + y1, at.x1 + x2, at.y1 + y2};
+    ESP_LOGI(TAG, "overlays redrawn for %s, %.1f s after the last: changed %d,%d-%d,%d", why,
+             after, (int)area.x1, (int)area.y1, (int)area.x2, (int)area.y2);
+    lv_obj_invalidate_area(v->image, &area);
+}
+
+/* A change waits out MAP_OVERLAY_LIVE_MS after the last draw, and the view
+ * being on the screen. */
+static void live_overlays(map_view_t *v)
+{
+    if (!v->changed || !v->have_screen) return;
+    if (esp_timer_get_time() - v->drawn_us < (int64_t)MAP_OVERLAY_LIVE_MS * 1000) return;
+    if (!lv_obj_is_visible(v->image)) return;
+    redraw_overlays(v, "a change");
+}
+
+void map_view_attach_overlay(map_view_t *v, map_overlay_t *o)
+{
+    /* After every overlay of its z or lower. */
+    map_overlay_t *prev = NULL, *cur = v->overlays;
+    while (cur && map_overlay_z(cur) <= map_overlay_z(o)) {
+        prev = cur;
+        cur = map_overlay_next(cur);
+    }
+    map_overlay_set_next(o, cur);
+    if (prev) map_overlay_set_next(prev, o);
+    else v->overlays = o;
+}
+
+void map_view_detach_overlay(map_view_t *v, map_overlay_t *o)
+{
+    map_overlay_t *prev = NULL, *cur = v->overlays;
+    while (cur && cur != o) {
+        prev = cur;
+        cur = map_overlay_next(cur);
+    }
+    if (!cur) return;
+    if (prev) map_overlay_set_next(prev, map_overlay_next(o));
+    else v->overlays = map_overlay_next(o);
+    if (v->have_screen) redraw_overlays(v, "an overlay gone");
+}
+
+void map_view_overlay_changed(map_view_t *v, map_overlay_t *o)
+{
+    v->changed = true;
+    if (!v->have_screen) return;
+    double wait = (double)MAP_OVERLAY_LIVE_MS / 1000.0 -
+                  (double)(esp_timer_get_time() - v->drawn_us) / 1e6;
+    if (wait < 0) wait = 0;
+    ESP_LOGI(TAG, "overlay \"%s\" changed; drawn in %.1f s, %d s after the last",
+             map_overlay_name(o), wait, MAP_OVERLAY_LIVE_MS / 1000);
+    live_overlays(v);
+}
+
+void map_view_overlay_switched(map_view_t *v, map_overlay_t *o)
+{
+    ESP_LOGI(TAG, "overlay \"%s\" %s", map_overlay_name(o), map_overlay_visible(o) ? "on" : "off");
+    redraw_overlays(v, "on/off");
+}
+
+void map_view_refresh(map_view_t *v)
+{
+    if (!v) return;
+    redraw_overlays(v, "Refresh");
+}
+
+void map_view_set_miss_cb(map_view_t *v, map_view_miss_cb_t miss, void *user)
+{
+    v->miss_cb = miss;
+    v->miss_user = user;
+}
+
+/* Selects what is nearest view pixel (x, y). */
+static void select_at(map_view_t *v, int x, int y)
+{
+    if (!v->have_screen) return;
+    map_overlay_hit_t hit = map_overlays_hit(v->overlays, &v->on_screen, x, y);
+    lv_area_t at;
+    lv_obj_get_coords(v->image, &at);
+    if (!hit.overlay) {
+        ESP_LOGI(TAG, "tap at %d,%d: nothing within %d px", (int)at.x1 + x, (int)at.y1 + y,
+                 MAP_OVERLAY_HIT_PX);
+        if (v->miss_cb) v->miss_cb(v, x, y, v->miss_user);
+        return;
+    }
+    ESP_LOGI(TAG, "tap at %d,%d: \"%s\" item %d, %d px away", (int)at.x1 + x, (int)at.y1 + y,
+             map_overlay_name(hit.overlay), hit.item, hit.distance);
+    map_overlay_tap(hit.overlay, hit.item, hit.id);
+}
+
 static void poll_cb(lv_timer_t *timer)
 {
     map_view_t *v = lv_timer_get_user_data(timer);
+    live_overlays(v);
     if (v->inline_compose && !v->ready && v->want.seq != 0 && v->want.seq != v->done_seq) {
         compose(v, v->want);
     }
@@ -197,10 +382,7 @@ static void poll_cb(lv_timer_t *timer)
     wake(v);  /* for what was asked meanwhile, if anything */
     if (!wanted) return;  /* overtaken: never drawn */
 
-    lv_image_cache_drop(&v->dsc);
-    v->dsc.data = (const uint8_t *)v->front;
-    lv_image_set_src(v->image, &v->dsc);
-    lv_obj_invalidate(v->image);
+    show_whole(v, &shown);
     if (v->shown_cb) v->shown_cb(v, &shown, v->user);
 }
 
@@ -233,6 +415,7 @@ static void key_cb(lv_event_t *e)
     case LV_KEY_UP:    case 'w': case 'W': map_view_pan(v, 0, -1); break;
     case '+': case '=': case 'i': case 'I': map_view_zoom_by(v, 1); break;
     case '-': case 'o': case 'O': map_view_zoom_by(v, -1); break;
+    case LV_KEY_ENTER: select_at(v, v->w / 2, v->h / 2); break;
     default: return;  /* the app's */
     }
 }
@@ -246,7 +429,12 @@ static void swipe(map_view_t *v, lv_indev_t *indev)
     lv_indev_get_point(indev, &p);
     int dx = p.x - v->press_at.x, dy = p.y - v->press_at.y;
     int ax = dx < 0 ? -dx : dx, ay = dy < 0 ? -dy : dy;
-    if (ax < SWIPE_MIN_PX && ay < SWIPE_MIN_PX) return;
+    if (ax < SWIPE_MIN_PX && ay < SWIPE_MIN_PX) {
+        lv_area_t at;
+        lv_obj_get_coords(v->image, &at);
+        select_at(v, v->press_at.x - at.x1, v->press_at.y - at.y1);
+        return;
+    }
     if (ax >= ay) map_view_pan(v, dx < 0 ? 1 : -1, 0);
     else map_view_pan(v, 0, dy < 0 ? 1 : -1);
 }
@@ -289,6 +477,8 @@ map_view_t *map_view_create(lv_obj_t *parent, map_pack_t *pack, map_view_shown_c
     v->user = user;
     v->front = alloc_psram((size_t)w * h * sizeof(uint16_t));
     v->back = alloc_psram((size_t)w * h * sizeof(uint16_t));
+    v->screen = alloc_psram((size_t)w * h * sizeof(uint16_t));
+    v->scratch = alloc_psram((size_t)w * h * sizeof(uint16_t));
     v->cache = map_tile_cache_create(CACHE_SLOTS);
     v->lock = xSemaphoreCreateMutex();
 #ifdef __EMSCRIPTEN__
@@ -298,12 +488,12 @@ map_view_t *map_view_create(lv_obj_t *parent, map_pack_t *pack, map_view_shown_c
     v->wake = xQueueCreate(1, sizeof(uint8_t));
     v->ended = xQueueCreate(1, sizeof(uint8_t));
 #endif
-    if (!v->front || !v->back || !v->cache || !v->lock ||
+    if (!v->front || !v->back || !v->screen || !v->scratch || !v->cache || !v->lock ||
         (!v->inline_compose && (!v->wake || !v->ended))) {
         map_view_destroy(v);
         return NULL;
     }
-    for (size_t i = 0; i < (size_t)w * h; i++) v->front[i] = MAP_PAPER;
+    for (size_t i = 0; i < (size_t)w * h; i++) v->front[i] = v->screen[i] = MAP_PAPER;
 
     v->dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
     v->dsc.header.cf = LV_COLOR_FORMAT_RGB565;
@@ -311,7 +501,7 @@ map_view_t *map_view_create(lv_obj_t *parent, map_pack_t *pack, map_view_shown_c
     v->dsc.header.h = (uint32_t)h;
     v->dsc.header.stride = (uint32_t)w * sizeof(uint16_t);
     v->dsc.data_size = (uint32_t)((size_t)w * h * sizeof(uint16_t));
-    v->dsc.data = (const uint8_t *)v->front;
+    v->dsc.data = (const uint8_t *)v->screen;
 
     v->image = lv_image_create(parent);
     /* No theme: a press or the keyboard's focus would draw, a refresh of
@@ -371,6 +561,8 @@ void map_view_destroy(map_view_t *v)
     map_tile_cache_destroy(v->cache);
     free(v->front);
     free(v->back);
+    free(v->screen);
+    free(v->scratch);
     if (v->wake) vQueueDelete(v->wake);
     if (v->ended) vQueueDelete(v->ended);
     if (v->lock) vSemaphoreDelete(v->lock);
@@ -444,4 +636,20 @@ void map_view_origin(const map_view_t *v, int64_t *x, int64_t *y)
 {
     *x = v->want.left;
     *y = v->want.top;
+}
+
+void map_view_to_screen(const map_view_t *v, double lat, double lon, int *x, int *y)
+{
+    double gx, gy;
+    map_world_pixel(lat, lon, v->want.zoom, &gx, &gy);
+    *x = (int)(floor(gx) - (double)v->want.left);
+    *y = (int)(floor(gy) - (double)v->want.top);
+}
+
+void map_view_from_screen(const map_view_t *v, int x, int y, double *lat, double *lon)
+{
+    double size = 256.0 * (double)(1u << v->want.zoom);
+    double gx = (double)v->want.left + x + 0.5, gy = (double)v->want.top + y + 0.5;
+    *lon = gx / size * 360.0 - 180.0;
+    *lat = atan(sinh(M_PI * (1.0 - 2.0 * gy / size))) * 180.0 / M_PI;
 }
