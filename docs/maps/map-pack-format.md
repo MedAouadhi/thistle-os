@@ -13,7 +13,7 @@ document alone, which the tool's tests and the simulator's
 
 ## The Regions file
 
-What the tool builds from, and what the browser mode (ticket 05) saves: a
+What the tool builds from, and what the browser mode (`thistle_maps.py serve`) saves: a
 GeoJSON FeatureCollection, longitude before latitude as GeoJSON has it.
 
 ```json
@@ -230,5 +230,9 @@ Patterns are aligned to world pixels, so hatching meets across tiles.
 
 `estimate.py`'s `estimate_pack(regions)` counts the tiles exactly and prices
 each at an average for its level (z14 4.2 KB to z17 2.4 KB, a city's), the
-browser mode's live estimate. Each level holds about four times the tiles of
-the one above.
+browser mode's live estimate: a Pack of Monaco came out 13 % under it, and
+anywhere sparser further under, so it is an upper bound for a budget.
+`measure_pack()` (`estimate --extract`, the browser mode's Measure) draws
+up to twelve blocks of 8 x 8 tiles a level from the extract and prices the
+rest at their average: within 5 % of the built fixture. Each level holds
+about four times the tiles of the one above.

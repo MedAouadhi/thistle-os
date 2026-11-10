@@ -880,10 +880,26 @@ shown on the device (ADR-0017; `.scratch/maps/spec.md`, the vocabulary in
   `~/.cache/thistle-maps` (once; later builds are offline), clips it, draws
   one-bit tiles from z14 to each Region's `deepest_zoom`, and writes the
   Pack; `--extract FILE` reads a local extract instead. `estimate` counts the
-  tiles and prices them (`estimate.py`, for the browser mode).
-  `test_thistle_maps.py` reads the golden fixture, `testdata/fixture.tmap`,
-  through a reader of its own; it says how to rebuild it, and
-  `testdata/make_fixture.py` makes the made-up extract it is built from.
+  tiles exactly and prices them as a city's (Monaco's Pack came out 13 %
+  under it, sparser places far under: an upper bound for the budget), or,
+  with `--extract` or `--measure`, draws twelve blocks a level from the
+  extract and prices the rest at their average (within 5 % of the built
+  fixture; `estimate.py`). `test_thistle_maps.py` reads the golden fixture,
+  `testdata/fixture.tmap`, through a reader of its own; it says how to
+  rebuild it, and `testdata/make_fixture.py` makes the made-up extract it
+  is built from.
+- **The browser mode**, `thistle_maps.py serve REGIONS.geojson`
+  (`browser.py`, the page `tools/maps/web/`, Leaflet 1.9.4 vendored in
+  `web/leaflet/`): an OpenStreetMap basemap (`--tiles` names another) on
+  which circles and freehand polygons are drawn with the mouse, each with
+  its name, radius and deepest zoom, deleted with Delete; the quick
+  estimate after every change, a warning above `--budget` (1 GB), Measure,
+  Save (the Regions file, opened again at the next `serve`) and Build,
+  which saves and runs `build` with the same extract options. The server
+  listens on 127.0.0.1 only and refuses another Host and posts not in
+  JSON. `test_browser_mode.py` drives it in headless Chromium through
+  Playwright, against a blank basemap of its own, and skips without
+  Playwright.
 - **The format**, `docs/maps/map-pack-format.md`: version 1.0, a section
   directory with room for a name index and overlays, a colour variant
   reserved, raw DEFLATE and a CRC per tile, the "no map here" hatching.

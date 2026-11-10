@@ -245,6 +245,12 @@ jobs:
           sudo apt-get install -y fonts-dejavu-core
           python3 tools/maps/test_thistle_maps.py
 
+      - name: Test the Map Pack tool's browser mode in a real browser
+        run: |
+          python3 -m pip install playwright
+          python3 -m playwright install --with-deps chromium
+          python3 tools/maps/test_browser_mode.py
+
       - name: Test transactional recovery bundle activation
         run: |
           rustc --edition=2021 --test recovery/src/bundle_transaction.rs \
