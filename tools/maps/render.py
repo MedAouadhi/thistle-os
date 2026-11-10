@@ -298,8 +298,11 @@ class Metatile:
         self.draw.rectangle(box, fill=255, outline=0)
         for j, row in enumerate(rows):
             for i, ch in enumerate(row):
-                if ch == "#":
-                    self.img.putpixel((x0 + 1 + i, y0 + 1 + j), 0)
+                px, py = x0 + 1 + i, y0 + 1 + j
+                # Near the edge of the block part of it is off the image;
+                # the neighbouring block draws that part.
+                if ch == "#" and 0 <= px < self.size and 0 <= py < self.size:
+                    self.img.putpixel((px, py), 0)
         return True
 
     def labels(self, data: MapData) -> None:

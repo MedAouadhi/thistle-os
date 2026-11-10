@@ -332,6 +332,31 @@ class Building(unittest.TestCase):
         result = estimate.estimate_pack(load_regions(REGIONS))
         self.assertEqual(result.tiles, Pack(fresh_build()).tile_count)
 
+    def test_a_place_icon_on_the_edge_of_a_drawn_block_is_cut_not_a_crash(self):
+        """The tool draws 8 x 8 tiles at a time with a margin around them;
+        an icon straddling the margin's edge was drawn off the image, and
+        the build died with 'image index out of range'."""
+        z, block = 16, 8 * 256  # icons are drawn from z16
+        # 1 px inside the right edge of block 4 (and well inside block 5)
+        lon = (5 * block + 96 - 1) / (256 * (1 << z)) * 360.0 - 180.0
+        lat = 36.8
+        extract = ('<?xml version="1.0" encoding="UTF-8"?>\n<osm version="0.6">\n'
+                   f'  <node id="1" version="1" lat="{lat}" lon="{lon:.7f}">\n'
+                   '    <tag k="amenity" v="pharmacy"/>\n  </node>\n</osm>\n')
+        regions = {"type": "FeatureCollection", "features": [
+            {"type": "Feature", "properties": {"radius_m": 300, "deepest_zoom": 16},
+             "geometry": {"type": "Point", "coordinates": [lon, lat]}}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "edge.osm").write_text(extract)
+            (Path(tmp) / "edge.geojson").write_text(json.dumps(regions))
+            out = Path(tmp) / "edge.tmap"
+            run_tool("build", str(Path(tmp) / "edge.geojson"), "--extract",
+                     str(Path(tmp) / "edge.osm"), "-o", str(out))
+            pack = Pack(out.read_bytes())
+            self.assertGreaterEqual(len({x // 8 for zz, x, _y in pack.index() if zz == z}), 2)
+            for key in pack.index():
+                pack.tile(*key)
+
     def test_a_regions_file_with_no_regions_is_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
             empty = Path(tmp) / "empty.geojson"
