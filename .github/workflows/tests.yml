@@ -239,6 +239,12 @@ jobs:
           python3 tools/tailnet_chat/make_vectors.py --check
           python3 tools/test_tailnet_chat.py
 
+      - name: Test the Map Pack tool against its fixture and golden Pack
+        run: |
+          python3 -m pip install -r tools/maps/requirements.txt
+          sudo apt-get install -y fonts-dejavu-core
+          python3 tools/maps/test_thistle_maps.py
+
       - name: Test transactional recovery bundle activation
         run: |
           rustc --edition=2021 --test recovery/src/bundle_transaction.rs \
