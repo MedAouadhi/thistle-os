@@ -22,10 +22,13 @@
  * as the device moves; locate, its button or the l key, centres on it.
  *
  * The tracks the Navigator recorded, every *.gpx in /sdcard/tracks/, are
- * one overlay, shown at first; the Tracks button or the t key switches
- * it. Other overlays are the next ticket's (.scratch/maps/).
+ * one overlay (map_overlay.h), beneath the others and shown at first; the
+ * Tracks button or the t key switches it. Every GeoJSON file in
+ * /sdcard/maps/overlays/ is a switchable overlay too, with an info card
+ * for a tapped item (maps_layers.c).
  */
 #include "maps/maps_app.h"
+#include "maps/maps_layers.h"
 
 #include "map_engine/map_overlay.h"
 #include "map_engine/map_pack.h"
@@ -37,6 +40,7 @@
 #include "ui/theme.h"
 #include "ui/toast.h"
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "lvgl.h"
 
@@ -177,12 +181,9 @@ static void make_about(bool mono)
 /* Moving                                                               */
 /* ------------------------------------------------------------------ */
 
-static void style_tracks_button(bool on);
-
 static void shown_cb(map_view_t *view, const map_view_shown_t *shown, void *user)
 {
     (void)user;
-    if (s_ui.tracks) style_tracks_button(map_view_overlay_visible(view, s_ui.tracks));
     ESP_LOGI(TAG, "shown z%d at %lld,%lld: %d tiles, %d places with none, %d damaged; "
                   "%d read, %d from the cache, %u ms",
              shown->zoom, (long long)shown->left, (long long)shown->top, shown->tiles,
@@ -288,20 +289,65 @@ static bool tag_number(const char *tag, const char *name, double *out)
     return false;
 }
 
+/* A track segment's points as they are read, MAP_OVERLAY_MAX_VERTICES at
+ * most, in PSRAM while the tracks are read. */
+static struct {
+    map_lat_lon_t *points;
+    int            count;
+    bool           in_line;
+    bool           full;     /* the overlay took no more */
+} s_gpx;
+
+/* The segment read so far into the tracks overlay: a line, or a lone
+ * point as a dot. Returns how many points it added. */
+static int gpx_end_line(void)
+{
+    int n = s_gpx.count;
+    s_gpx.count = 0;
+    if (n == 0 || s_gpx.full) return 0;
+    int item = n == 1 ? map_overlay_add_point(s_ui.tracks, s_gpx.points[0].lat,
+                                              s_gpx.points[0].lon, MAP_ICON_DOT, NULL, 0)
+                      : map_overlay_add_line(s_ui.tracks, s_gpx.points, n, 0);
+    if (item < 0) {
+        s_gpx.full = true;
+        return 0;
+    }
+    return n;
+}
+
+static bool valid_lat_lon(double lat, double lon)
+{
+    return lat >= -85.06 && lat <= 85.06 && lon >= -180.0 && lon <= 180.0;  /* NaN too */
+}
+
 /* One tag's text, between < and >: a trkseg starts a line, a trkpt adds a
- * point to it. Returns how many points it added (0 or 1). */
-static int gpx_tag(const char *tag, bool *in_line)
+ * point to it, /trkseg ends it. Returns how many points went into the
+ * overlay. */
+static int gpx_tag(const char *tag)
 {
     if (strncmp(tag, "trkseg", 6) == 0 && (tag[6] == '\0' || tag[6] == ' ' || tag[6] == '>')) {
-        *in_line = map_overlay_line_begin(s_ui.tracks);
-        return 0;
+        int added = gpx_end_line();
+        s_gpx.in_line = true;
+        return added;
+    }
+    if (strncmp(tag, "/trkseg", 7) == 0) {
+        s_gpx.in_line = false;
+        return gpx_end_line();
     }
     if (strncmp(tag, "trkpt", 5) != 0 || (tag[5] != ' ' && tag[5] != '\t' && tag[5] != '\n')) {
         return 0;
     }
     double lat, lon;
-    if (!*in_line || !tag_number(tag, "lat", &lat) || !tag_number(tag, "lon", &lon)) return 0;
-    return map_overlay_line_point(s_ui.tracks, lat, lon) ? 1 : 0;
+    if (!s_gpx.in_line || !tag_number(tag, "lat", &lat) || !tag_number(tag, "lon", &lon) ||
+        !valid_lat_lon(lat, lon)) {
+        return 0;
+    }
+    if (s_gpx.count >= MAP_OVERLAY_MAX_VERTICES) {
+        s_gpx.full = true;
+        return 0;
+    }
+    s_gpx.points[s_gpx.count++] = (map_lat_lon_t){lat, lon};
+    return 0;
 }
 
 /* Reads one GPX file's track points into the tracks overlay, a line a
@@ -313,7 +359,9 @@ static int read_gpx(const char *path)
     char chunk[GPX_CHUNK];
     char tag[GPX_TAG_MAX];
     size_t tag_len = 0;
-    bool in_tag = false, too_long = false, in_line = false;
+    bool in_tag = false, too_long = false;
+    s_gpx.in_line = false;
+    s_gpx.count = 0;
     int points = 0;
     size_t got;
     while ((got = fread(chunk, 1, sizeof chunk, f)) > 0) {
@@ -327,7 +375,7 @@ static int read_gpx(const char *path)
                 in_tag = false;
                 if (too_long) continue;
                 tag[tag_len] = '\0';
-                points += gpx_tag(tag, &in_line);
+                points += gpx_tag(tag);
             } else if (in_tag && !too_long) {
                 if (tag_len + 1 >= sizeof tag) too_long = true;
                 else tag[tag_len++] = c;
@@ -335,11 +383,11 @@ static int read_gpx(const char *path)
         }
     }
     fclose(f);
-    return points;
+    return points + gpx_end_line();  /* a file cut short keeps what it has */
 }
 
-/* Inverted while the tracks show. Restyled only as the view showing the
- * change is swapped in, so the panel refreshes once for both. */
+/* Inverted while the tracks show. Restyled in the same pass as the view
+ * draws the change, so the panel refreshes once for both. */
 static void style_tracks_button(bool on)
 {
     if (!s_ui.tracks_button || on == s_ui.tracks_button_on) return;
@@ -357,8 +405,9 @@ static void style_tracks_button(bool on)
 static void toggle_tracks(void)
 {
     if (!s_ui.view || !s_ui.tracks) return;
-    bool on = !map_view_overlay_visible(s_ui.view, s_ui.tracks);
-    map_view_set_overlay_visible(s_ui.view, s_ui.tracks, on);
+    bool on = !map_overlay_visible(s_ui.tracks);
+    map_overlay_set_visible(s_ui.tracks, on);
+    style_tracks_button(on);
     ESP_LOGI(TAG, "tracks %s", on ? "on" : "off");
 }
 
@@ -368,7 +417,8 @@ static void tracks_cb(lv_event_t *e)
     toggle_tracks();
 }
 
-/* Every *.gpx in TRACKS_DIR into one overlay on the view, shown. */
+/* Every *.gpx in TRACKS_DIR into one overlay on the view, shown, beneath
+ * the GeoJSON files' (z 0). */
 static void load_tracks(void)
 {
     DIR *dir = opendir(TRACKS_DIR);
@@ -376,9 +426,17 @@ static void load_tracks(void)
         ESP_LOGI(TAG, "tracks: none in " TRACKS_DIR_SHOWN);
         return;
     }
-    s_ui.tracks = map_overlay_create("tracks");
-    if (!s_ui.tracks) {
+    s_ui.tracks = map_overlay_create(s_ui.view, "tracks", 0, NULL, NULL);
+    s_gpx.points = heap_caps_malloc(sizeof(map_lat_lon_t) * MAP_OVERLAY_MAX_VERTICES,
+                                    MALLOC_CAP_SPIRAM);
+    if (!s_gpx.points) s_gpx.points = malloc(sizeof(map_lat_lon_t) * MAP_OVERLAY_MAX_VERTICES);
+    s_gpx.full = false;
+    if (!s_ui.tracks || !s_gpx.points) {
         closedir(dir);
+        map_overlay_destroy(s_ui.tracks);
+        s_ui.tracks = NULL;
+        free(s_gpx.points);
+        s_gpx.points = NULL;
         ESP_LOGE(TAG, "tracks: no memory");
         return;
     }
@@ -394,20 +452,24 @@ static void load_tracks(void)
         points += got;
     }
     closedir(dir);
+    free(s_gpx.points);
+    s_gpx.points = NULL;
     if (points == 0) {
         map_overlay_destroy(s_ui.tracks);
         s_ui.tracks = NULL;
         ESP_LOGI(TAG, "tracks: none in " TRACKS_DIR_SHOWN);
         return;
     }
-    if (map_overlay_point_count(s_ui.tracks) >= MAP_OVERLAY_MAX_POINTS) {
-        ESP_LOGW(TAG, "tracks: only the first %d points are shown", MAP_OVERLAY_MAX_POINTS);
+    if (s_gpx.full) {
+        ESP_LOGW(TAG, "tracks: only the first %d points are shown (%d segments at most, "
+                      "%d points)", points, MAP_OVERLAY_MAX_ITEMS, MAP_OVERLAY_MAX_VERTICES);
     }
-    map_view_add_overlay(s_ui.view, s_ui.tracks, true);
+    map_overlay_changed(s_ui.tracks);
     ESP_LOGI(TAG, "tracks: %d track%s, %d points", files, files == 1 ? "" : "s", points);
 }
 
-static void make_tracks_button(void)
+/* At the top right, left of the overlays' Refresh when there is one. */
+static void make_tracks_button(bool beside_refresh)
 {
     s_ui.tracks_button = lv_obj_create(s_ui.root);
     lv_obj_remove_style_all(s_ui.tracks_button);
@@ -417,7 +479,8 @@ static void make_tracks_button(void)
     lv_obj_add_flag(s_ui.tracks_button, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_remove_flag(s_ui.tracks_button, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_size(s_ui.tracks_button, LV_SIZE_CONTENT, ZOOM_BUTTON);
-    lv_obj_align(s_ui.tracks_button, LV_ALIGN_TOP_RIGHT, -ZOOM_MARGIN, ZOOM_MARGIN);
+    int x = beside_refresh ? -(ZOOM_MARGIN * 2 + ZOOM_BUTTON) : -ZOOM_MARGIN;
+    lv_obj_align(s_ui.tracks_button, LV_ALIGN_TOP_RIGHT, x, ZOOM_MARGIN);
     lv_obj_add_event_cb(s_ui.tracks_button, tracks_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *label = lv_label_create(s_ui.tracks_button);
     lv_label_set_text(label, "Tracks");
@@ -539,8 +602,9 @@ static void open_and_show(bool mono)
     lv_obj_t *loc = make_button(LV_SYMBOL_GPS, locate_cb, NULL, ABOUT_H + ZOOM_MARGIN);
     lv_obj_align(loc, LV_ALIGN_BOTTOM_LEFT, ZOOM_MARGIN, -(ABOUT_H + ZOOM_MARGIN));
     load_tracks();
-    if (s_ui.tracks) make_tracks_button();
     make_about(mono);
+    bool refresh = maps_layers_open(s_ui.view, s_ui.root, ABOUT_H);
+    if (s_ui.tracks) make_tracks_button(refresh);
 
     lv_obj_update_layout(s_ui.root);
     lv_area_t at;
@@ -578,9 +642,11 @@ esp_err_t maps_ui_create(lv_obj_t *parent)
 void maps_ui_destroy(void)
 {
     if (s_ui.fix_poll) lv_timer_delete(s_ui.fix_poll);
+    /* The overlays before their view. */
+    if (s_ui.view) maps_layers_close();
+    map_overlay_destroy(s_ui.tracks);
     map_view_destroy(s_ui.view);
     if (s_ui.root) lv_obj_delete(s_ui.root);
-    map_overlay_destroy(s_ui.tracks);  /* after the view, which reads it */
     map_pack_close(s_ui.pack);
     memset(&s_ui, 0, sizeof s_ui);
 }

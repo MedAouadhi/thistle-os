@@ -943,14 +943,9 @@ shown on the device (ADR-0017; `.scratch/maps/spec.md`, the vocabulary in
   simulator's `lv_tick` runs fast. The log says `marker moved 30 px to
   150,148, 5.0 s after the last`, `marker held: ...`, `page jump east to
   keep the marker in view: ...`, `locate: ...`.
-- **An overlay is an app's own** (`map_engine/map_overlay.h`): lines so
-  far, 256 at most and 16384 points, kept in PSRAM, drawn into the view's
-  buffer on the tile task after the tiles, black 3 px in a paper casing
-  7 px, so a step with one on is still one refresh. Each view asked for
-  carries the overlays shown then; switching one composes the view again
-  where it is (`overlay tracks off: z16 at X,Y`). The view does not own
-  them; destroy them after it. GeoJSON overlays, items and selection are
-  ticket 04.
+- **The Navigator's tracks are an overlay** (Overlays, below): a line a
+  GPX `trkseg`, black 3 px in a paper casing 7 px, drawn in the same pass
+  as the view swapped in, so a step with them on is still one refresh.
 
 The Maps app (`apps/maps/`) opens the first `*.tmap` by name in
 `/sdcard/maps/` on the GPS fix if a Region holds it
@@ -959,7 +954,8 @@ Region's depth if shallower, with zoom buttons at the bottom right, locate
 (the arrow, or l) at the bottom left, and the credit on an About line at
 the bottom. It reads the fix once a second and hands it to the view.
 Every `*.gpx` in `/sdcard/tracks/`, where the Navigator records, is one
-overlay, shown at first; Tracks at the top right, or t, switches it. It
+overlay, beneath the GeoJSON files', shown at first; Tracks at the top
+right (left of Refresh when there is one), or t, switches it. It
 logs `(maps) opened X: format 1.0, ...`, `(maps) showing z16 around ...
 (your position)`, `(maps) view WxH at X,Y`, `(maps) zoom in at X,Y`,
 `(maps) locate button X1,Y1-X2,Y2`, `(maps) tracks: 1 track, 57 points`,
@@ -969,6 +965,35 @@ with none, 0 damaged; 4 read, 0 from the cache, 1 ms`.
 pixel for pixel, after each pan and zoom, and with damaged Packs; walks a
 fix along `THISTLE_SIM_GPS_PATH` for the marker and the page jump; and
 draws a recorded track.
+
+**Overlays** (`map_engine/map_overlay.h`, `docs/maps/overlay-api.md`,
+ADR-0018) are a built-in app's own points, lines, polygons and text on its
+view, owned by it and retained; no syscall, no registry.
+
+- **Drawn over the tiles on the UI task**, one bit a pixel, in z order, at
+  most 256 items an overlay, decluttered (`map_overlay.c`). The image shows
+  a third buffer, the tiles with the overlays over them; labels go through
+  `lv_draw_label` on a layer over those pixels, so Arabic is shaped by the
+  usual wraps, then thresholded. Four screen buffers in PSRAM in all.
+- **A change shows at most every 20 s, and only the rectangle that
+  changed**: the view draws the next screen into a scratch buffer, compares
+  it with the shown one, copies the rectangle that differs and invalidates
+  only that (never `lv_image_set_src`, which invalidates the whole image).
+  `map_view_refresh()` draws at once; on/off, pan and zoom draw at once.
+  LVGL grows an invalidated area by a pixel.
+- **A tap that is not a swipe, or Enter, selects** the nearest drawn item
+  within 16 px and calls its overlay's callback; a miss calls the view's.
+- **In the Maps app** (`maps_layers.c`), each `*.geojson` or `*.json` in
+  `/sdcard/maps/overlays/`, eight at most, is an overlay, read with the
+  Podcasts app's `pod_json.c`, on and off in the Layers panel (top left);
+  a file that changes is read again within 2 s; Refresh (top right, `r`)
+  draws at once; a tapped item's card shows its name and properties. The
+  logs: `(maps) overlay X.geojson: N items[, M left out (256 at most)]`,
+  `(map_view) overlays drawn: ...`, `overlays redrawn for a change, 20.0 s
+  after the last: changed X1,Y1-X2,Y2`, `tap at X,Y: "name" item N, D px
+  away`, `(maps) info card: NAME; key: value`.
+- `simulator/tests/test_map_overlays.py` drives it, changing a file while
+  the simulator runs for the 20 s case.
 
 ### To-do
 

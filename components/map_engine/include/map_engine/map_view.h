@@ -20,15 +20,16 @@
  *
  * Input: a swipe across the view moves it a step the other way, as if the
  * map were dragged; the arrow keys, and w, a, s, d, move it a step; +, =
- * and i zoom in, - and o out, keeping the view's centre. Other keys are
- * left for the app (LV_EVENT_KEY on map_view_obj()).
+ * and i zoom in, - and o out, keeping the view's centre; a tap that is
+ * not a swipe, and Enter, select the nearest overlay item
+ * (map_overlay.h). Other keys are left for the app (LV_EVENT_KEY on
+ * map_view_obj()).
  *
  * For built-in apps, on the UI task; the view does not own the Pack, which
  * must outlive it and which nothing else may read meanwhile.
  */
 #pragma once
 
-#include "map_engine/map_overlay.h"
 #include "map_engine/map_pack.h"
 #include "map_engine/map_projection.h"
 #include "lvgl.h"
@@ -40,8 +41,6 @@ extern "C" {
 #endif
 
 typedef struct map_view map_view_t;
-
-#define MAP_VIEW_MAX_OVERLAYS 16
 
 /* What a view now on the screen is, and what composing it took. */
 typedef struct {
@@ -101,17 +100,6 @@ void map_view_set_position(map_view_t *view, double lat, double lon);
 /* Shows the position in the middle of the view at the zoom asked for
  * last. False, and nothing asked, without a position yet. */
 bool map_view_locate(map_view_t *view);
-
-/* Adds overlay to the view, shown or not; it is drawn over the tiles from
- * the next view composed on (at once, if it is shown and a view is). The
- * view does not own it: destroy it after the view. False past
- * MAP_VIEW_MAX_OVERLAYS. */
-bool map_view_add_overlay(map_view_t *view, map_overlay_t *overlay, bool visible);
-
-/* Shows or hides an overlay added to the view: the view is composed again
- * where it is, one refresh. Logs "overlay tracks off: z16 at X,Y". */
-void map_view_set_overlay_visible(map_view_t *view, map_overlay_t *overlay, bool visible);
-bool map_view_overlay_visible(const map_view_t *view, const map_overlay_t *overlay);
 
 /* The view asked for last, which may not be on the screen yet. */
 int map_view_zoom(const map_view_t *view);

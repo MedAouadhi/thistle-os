@@ -271,7 +271,11 @@ def a_newer_format_is_refused_with_a_message() -> None:
 # Moving: what each step drew, and how many refreshes it cost
 # --------------------------------------------------------------------------
 
-ACTION = re.compile(r"\(map_view\) (pan \w+|zoom in|zoom out|already at z\d+|locate|page jump|overlay \S+ o(?:n|ff)\b)")
+ACTION = re.compile(r"\(map_view\) (pan \w+|zoom in|zoom out|already at z\d+|locate|page jump|"
+                    r"overlay \S+ o(?:n|ff)\b)")
+# A step that draws over the view on the screen, as switching an overlay
+# does, with no view swapped in.
+IN_PLACE = "in place"
 SHOWN = re.compile(r"\(maps\) shown z(\d+) at (-?\d+),(-?\d+): (\d+) tiles, (\d+) places "
                    r"with none, (\d+) damaged")
 FLUSH = re.compile(r"\[sim\] flush \((\d+),(\d+)\)-\((\d+),(\d+)\)")
@@ -321,9 +325,10 @@ def first_shown(log: str) -> tuple[int, int, int]:
     return z, left, top
 
 
-def expect_steps(log: str, want: list[tuple[str, Optional[tuple[int, int, int]]]]) -> None:
+def expect_steps(log: str, want: list[tuple[str, object]]) -> None:
     """Each step as wanted: its action, and the view it swapped in, with one
-    refresh, drawn whole; or, for None, nothing drawn and no refresh."""
+    refresh, drawn whole; for IN_PLACE, no view swapped in but one refresh;
+    or, for None, nothing drawn and no refresh."""
     steps = steps_of(log)
     got = [s.action for s in steps]
     if got != [a for a, _ in want]:
@@ -333,6 +338,12 @@ def expect_steps(log: str, want: list[tuple[str, Optional[tuple[int, int, int]]]
         if view is None:
             if step.shown or step.refreshes:
                 raise AssertionError(f"{name} drew: {step.shown}, {step.refreshes} refreshes")
+            continue
+        if view == IN_PLACE:
+            if step.shown:
+                raise AssertionError(f"{name} swapped in {step.shown}, not drawn in place")
+            if step.refreshes != 1:
+                raise AssertionError(f"{name} cost {step.refreshes} refreshes, not one")
             continue
         if [s[:3] for s in step.shown] != [view]:
             raise AssertionError(f"{name} showed {[s[:3] for s in step.shown]}, not {view}")
@@ -696,7 +707,7 @@ def track_ink(line: list[tuple[float, float]]):
 def a_recorded_track_is_drawn_and_can_be_switched_off() -> None:
     """A track the Navigator recorded in /sdcard/tracks/ is drawn over the
     map, and stays drawn as the map moves; the Tracks button takes it off,
-    and t puts it back, a refresh each."""
+    and t puts it back, a refresh each, drawn over the view in place."""
     pack = Pack(GOLDEN.read_bytes())
     cx, cy = medina(pack)
     corners = [(cx - 100, cy - 60), (cx + 20, cy - 60), (cx + 20, cy + 80), (cx + 170, cy + 90)]
@@ -716,12 +727,12 @@ def a_recorded_track_is_drawn_and_can_be_switched_off() -> None:
     # Off by the button: the map alone; on again by the key.
     off = run_app(GOLDEN.read_bytes(), timeout_ms=4000, files=files,
                   steps=(control_centre(probe.log, "tracks"),))
-    expect_steps(off.log, [("overlay tracks off", (16, left, top))])
+    expect_steps(off.log, [('overlay "tracks" off', IN_PLACE)])
     check_screen(off, pack, 16, left, top)
     on = run_app(GOLDEN.read_bytes(), timeout_ms=5500, files=files,
                  steps=(control_centre(probe.log, "tracks"), "type:t"))
-    expect_steps(on.log, [("overlay tracks off", (16, left, top)),
-                          ("overlay tracks on", (16, left, top))])
+    expect_steps(on.log, [('overlay "tracks" off', IN_PLACE),
+                          ('overlay "tracks" on', IN_PLACE)])
     check_screen(on, pack, 16, left, top, ink=track_ink(line))
 
 
