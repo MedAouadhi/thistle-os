@@ -388,6 +388,24 @@ class Building(unittest.TestCase):
         self.assertGreater(estimate["bytes"], 0)
         self.assertEqual(sum(estimate["tiles_per_zoom"].values()), estimate["tiles"])
 
+    def test_the_measured_estimate_is_within_5_percent_of_the_built_pack(self):
+        """With the extract, the estimate draws a sample of each level's
+        tiles and prices the rest as they came out."""
+        run = run_tool("estimate", str(REGIONS), "--extract", str(EXTRACT), "--json")
+        estimate = json.loads(run.stdout)
+        built = len(fresh_build())
+        self.assertTrue(estimate["measured"])
+        self.assertLessEqual(abs(estimate["bytes"] - built), 0.05 * built,
+                             f"estimated {estimate['bytes']}, built {built}")
+
+    def test_the_quick_estimate_does_not_undershoot_a_sparse_pack(self):
+        """Without the extract tiles are priced as a city's: the fixture's
+        few streets come out far smaller, so the budget warning comes
+        early, never late."""
+        estimate = json.loads(run_tool("estimate", str(REGIONS), "--json").stdout)
+        self.assertFalse(estimate["measured"])
+        self.assertGreaterEqual(estimate["bytes"], len(fresh_build()))
+
     def test_estimate_is_importable_for_the_browser_mode(self):
         sys.path.insert(0, str(HERE))
         try:
