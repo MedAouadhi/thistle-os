@@ -7,7 +7,8 @@
  * the Reader already builds (apps/reader/third_party/uzlib).
  *
  * Either way the decompressor's state, 11 KB for tinfl and 1.2 KB for
- * uzlib, is on the heap, never the caller's stack.
+ * uzlib, is on the heap, never the caller's stack, and a stream must end
+ * exactly at the tile's last byte.
  */
 #include "map_engine/map_pack.h"
 
@@ -25,19 +26,28 @@ bool map_inflate(const uint8_t *src, size_t src_len, uint8_t *out, size_t out_le
         uzlib_init();
         ready = true;
     }
+    /* A byte of room past the tile: uzlib stops once its buffer is full,
+     * before the block's end code, so a stream that runs on would pass
+     * for a tile as long as its first bytes were right. tinfl, on the
+     * device, refuses it; with the room, so does this. */
     struct uzlib_uncomp *d = calloc(1, sizeof *d);
-    if (!d) return false;
+    uint8_t *room = malloc(out_len + 1);
+    if (!d || !room) {
+        free(d);
+        free(room);
+        return false;
+    }
     uzlib_uncompress_init(d, NULL, 0);
     d->source       = src;
     d->source_limit = src + src_len;
-    d->dest_start   = out;
-    d->dest         = out;
-    d->dest_limit   = out + out_len;
+    d->dest_start   = room;
+    d->dest         = room;
+    d->dest_limit   = room + out_len + 1;
     int res = uzlib_uncompress(d);
-    /* uzlib stops once the buffer is full, before the block's end code, so
-     * a stream that runs on is not caught here: the tile's CRC catches
-     * what it would have made wrong. eof: it wanted more than there is. */
-    bool ok = res >= 0 && d->dest == d->dest_limit && !d->eof;
+    /* eof: it wanted more than there is. */
+    bool ok = res == TINF_DONE && d->dest == room + out_len && !d->eof;
+    if (ok) memcpy(out, room, out_len);
+    free(room);
     free(d);
     return ok;
 }

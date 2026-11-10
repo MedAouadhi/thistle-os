@@ -101,6 +101,7 @@ int xQueueGenericSend(void *q, const void *item, unsigned int ticks, int pos) {
 int xQueueReceive(void *q, void *buf, unsigned int ticks) {
     (void)q;(void)buf;(void)ticks; return 0;
 }
+void vQueueDelete(void *q) { (void)q; }
 
 /* ── esp_elf ───────────────────────────────────────────────────────── */
 void *esp_elf_init(void *elf) { (void)elf; return NULL; }

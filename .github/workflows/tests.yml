@@ -203,6 +203,9 @@ jobs:
       - name: Test the Chat app's text under sanitizers
         run: apps/tailchat/tests/run_tests.sh
 
+      - name: Test the map engine's Pack reader and views over damaged Packs under sanitizers
+        run: components/map_engine/tests/run_tests.sh
+
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'

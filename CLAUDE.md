@@ -906,18 +906,42 @@ shown on the device (ADR-0017; `.scratch/maps/spec.md`, the vocabulary in
 - **The map engine**, `components/map_engine/` (`map_engine/map_pack.h`,
   `map_view.h`), a library component like none other yet: it reads a Pack
   as untrusted, inflates with the S3 ROM's tinfl (uzlib, the Reader's, in
-  the simulators: `ESP_PLATFORM` decides), and composes the view into an
-  RGB565 buffer in PSRAM that an `lv_image` shows undecoded. A one-bit
-  (`I1`) image would be decoded to ARGB8888 from LVGL's 64 KB pool. The
+  the simulators: `ESP_PLATFORM` decides; a stream must end exactly at
+  the tile's last byte on both), and composes the view into an RGB565
+  buffer in PSRAM that an `lv_image` shows undecoded. A one-bit (`I1`)
+  image would be decoded to ARGB8888 from LVGL's 64 KB pool. The
   simulators take its sources from `cmake/thistle_apps.cmake`.
+- **A view moves a step at a time, one refresh a step**: a swipe, the
+  arrows or w/a/s/d pan half the view; +, = or i and - or o zoom a level,
+  keeping the middle. The tiles are read, inflated and composed on the
+  view's own task, `map_tiles` (8 KB internal stack), through a 12-tile
+  cache in PSRAM (`map_compose.c`), into a second buffer the UI task swaps
+  in whole only if it is still the view last asked for: a step overtaken
+  by the next is never drawn. The browser's simulator has no tasks and
+  composes on the UI task. The view logs `(map_view) pan east: z16 at
+  X,Y`, `zoom in: ...`, `already at z17`, internal RAM around its making,
+  and the task's unused stack after its first view and as it stops
+  (measured on a device only).
+- **The simulator refreshes its e-paper as a device does**
+  (`ui_manager_epaper_commit()` after each `lv_timer_handler()`), so a
+  run logs `refreshing the e-paper panel (fast)` and a test can count the
+  refreshes an action costs, as `test_maps.py` does with `--log-flushes`.
+- `components/map_engine/tests/run_tests.sh` reads the golden Pack, every
+  length of it cut short, a bit flipped in every byte, fields made wrong
+  with their CRCs made right, and random damage, composing views over
+  them, under ASan and UBSan. It found uzlib using a decoding error as a
+  table index, patched in `apps/reader/third_party/uzlib/tinflate.c`.
 
 The Maps app (`apps/maps/`) opens the first `*.tmap` by name in
 `/sdcard/maps/` on the first Region's centre, at z16 or the Region's
-depth if shallower, with the credit on an About line at the bottom; it
-logs `(maps) opened X: format 1.0, ...`, `(maps) showing z16 around ...`,
-`(maps) view WxH at X,Y`. Pan, zoom, the marker and overlays are tickets
-02 to 04. `simulator/tests/test_maps.py` compares the screen with the
-golden Pack pixel for pixel.
+depth if shallower, with zoom buttons at the bottom right and the credit
+on an About line at the bottom; it logs `(maps) opened X: format 1.0,
+...`, `(maps) showing z16 around ...`, `(maps) view WxH at X,Y`, `(maps)
+zoom in at X,Y`, and each view swapped in, `(maps) shown z16 at X,Y: 4
+tiles, 0 places with none, 0 damaged; 4 read, 0 from the cache, 1 ms`.
+The marker and overlays are tickets 03 and 04.
+`simulator/tests/test_maps.py` compares the screen with the golden Pack
+pixel for pixel, after each pan and zoom, and with damaged Packs.
 
 ### To-do
 
