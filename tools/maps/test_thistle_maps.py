@@ -25,6 +25,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import zlib
 from pathlib import Path
@@ -186,6 +187,71 @@ def components(points: set[tuple[int, int]]) -> list[set[tuple[int, int]]]:
     return out
 
 
+def polygon_tiles(ring: list[tuple[float, float]], z: int) -> set[tuple[int, int]]:
+    """The format document's rule, by brute force over the ring's box: a
+    tile is the polygon's if they overlap, edges and corners included, in
+    latitude and longitude. ring is (lat, lon), not closed."""
+
+    def inside(lat, lon):
+        hit = False
+        for (a, b), (c, d) in zip(ring, ring[1:] + ring[:1]):
+            if (a > lat) != (c > lat) and lon < b + (lat - a) * (d - b) / (c - a):
+                hit = not hit
+        return hit
+
+    def cross(p, q, r, s):
+        def side(a, b, c):
+            v = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+            return (v > 0) - (v < 0)
+
+        def within(a, b, c):
+            return min(a[0], b[0]) <= c[0] <= max(a[0], b[0]) and min(a[1], b[1]) <= c[1] <= max(a[1], b[1])
+
+        d1, d2, d3, d4 = side(p, q, r), side(p, q, s), side(r, s, p), side(r, s, q)
+        if d1 != d2 and d3 != d4:
+            return True
+        return any(d == 0 and within(a, b, c) for d, a, b, c in
+                   ((d1, p, q, r), (d2, p, q, s), (d3, r, s, p), (d4, r, s, q)))
+
+    lats, lons = [p[0] for p in ring], [p[1] for p in ring]
+    x0, y0 = (int(v // 256) for v in world_pixel(max(lats), min(lons), z))
+    x1, y1 = (int(v // 256) for v in world_pixel(min(lats), max(lons), z))
+    out = set()
+    for x in range(x0, x1 + 1):
+        for y in range(y0, y1 + 1):
+            s, w, n, e = tile_bounds(z, x, y)
+            corners = [(s, w), (s, e), (n, e), (n, w)]
+            if (any(s <= a <= n and w <= b <= e for a, b in ring)
+                    or any(inside(a, b) for a, b in corners)
+                    or any(cross(p, q, corners[k], corners[(k + 1) % 4])
+                           for p, q in zip(ring, ring[1:] + ring[:1]) for k in range(4))):
+                out.add((x, y))
+    return out
+
+
+def freehand(centre: tuple[float, float], radius_m: float, points: int) -> list[tuple[float, float]]:
+    """A wobbly, concave ring as a hand draws one: a C open to the east."""
+    lat0, lon0 = centre
+    ring = []
+    for i in range(points):
+        a = 2 * math.pi * i / points
+        r = radius_m * (1 + 0.15 * math.sin(7 * a)) * (0.35 if abs(a - math.pi * 2) < 0.6 or a < 0.6 else 1)
+        ring.append((lat0 + r * math.sin(a) / 111_320.0,
+                     lon0 + r * math.cos(a) / (111_320.0 * math.cos(math.radians(lat0)))))
+    return ring
+
+
+def regions_file(path: Path, features: list[dict]) -> Path:
+    path.write_text(json.dumps({"type": "FeatureCollection", "thistle_regions": 1, "features": features}))
+    return path
+
+
+def polygon_feature(ring, deepest: int, name: str = "Freehand") -> dict:
+    coords = [[lon, lat] for lat, lon in ring] + [[ring[0][1], ring[0][0]]]
+    return {"type": "Feature", "properties": {"name": name, "deepest_zoom": deepest},
+            "geometry": {"type": "Polygon", "coordinates": [coords]}}
+
+
 # --------------------------------------------------------------------------
 # Running the tool
 # --------------------------------------------------------------------------
@@ -331,6 +397,28 @@ class Building(unittest.TestCase):
             sys.path.remove(str(HERE))
         result = estimate.estimate_pack(load_regions(REGIONS))
         self.assertEqual(result.tiles, Pack(fresh_build()).tile_count)
+
+    def test_a_freehand_polygon_needs_the_tiles_the_format_says(self):
+        """A concave ring of 160 points, as the browser mode saves one:
+        every level's tiles are those the format's rule gives."""
+        ring = freehand((36.80, 10.18), 1800, 160)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = regions_file(Path(tmp) / "c.geojson", [polygon_feature(ring, 17)])
+            estimate = json.loads(run_tool("estimate", str(path), "--json").stdout)
+        for z in range(14, 18):
+            self.assertEqual(estimate["tiles_per_zoom"][str(z)], len(polygon_tiles(ring, z)), f"z{z}")
+
+    def test_the_estimate_of_a_big_freehand_polygon_is_quick(self):
+        """The browser mode estimates on every stroke: a 60 km polygon at
+        z17, about 50 000 tiles, takes a few seconds at most."""
+        ring = freehand((52.52, 13.40), 30_000, 300)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = regions_file(Path(tmp) / "big.geojson", [polygon_feature(ring, 17)])
+            started = time.monotonic()
+            estimate = json.loads(run_tool("estimate", str(path), "--json").stdout)
+            took = time.monotonic() - started
+        self.assertGreater(estimate["tiles_per_zoom"]["17"], 40_000)
+        self.assertLess(took, 4.0)
 
     def test_a_place_icon_on_the_edge_of_a_drawn_block_is_cut_not_a_crash(self):
         """The tool draws 8 x 8 tiles at a time with a margin around them;
