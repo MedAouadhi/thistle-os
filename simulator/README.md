@@ -106,6 +106,12 @@ Pre-load hardware state via a JSON file passed with `--scenario`:
 
 Values are applied to fake HAL drivers at boot. Unspecified fields use defaults.
 
+A fix that moves: `THISTLE_SIM_GPS_PATH="MS:LAT,LON;MS:LAT,LON;..."` (up
+to 32 points) puts the fix at each position from MS milliseconds after the
+GPS driver starts until the next, with a fix; before the first, the
+scenario's position. `simulator/tests/test_maps.py` walks the Maps app's
+marker with it.
+
 ## Testing
 
 ### Unit Tests

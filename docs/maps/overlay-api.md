@@ -41,7 +41,7 @@ One bit a pixel, made for e-paper:
 | Item | Drawn as |
 |------|----------|
 | Point | an icon in a 15 px paper halo: `MAP_ICON_DOT`, `_CIRCLE`, `_SQUARE`, `_TRIANGLE`, `_CROSS`; its label to the right |
-| Line | 3 px of ink inside 5 px of paper, so it shows on any street |
+| Line | 3 px of ink inside 7 px of paper, so it shows on any street |
 | Polygon | its outline as a line, its inside dotted every 4 px |
 | Text | its text alone, centred on the place |
 

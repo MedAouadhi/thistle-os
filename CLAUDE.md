@@ -932,16 +932,39 @@ shown on the device (ADR-0017; `.scratch/maps/spec.md`, the vocabulary in
   them, under ASan and UBSan. It found uzlib using a decoding error as a
   table index, patched in `apps/reader/third_party/uzlib/tinflate.c`.
 
+- **The position marker is the view's** (`map_view_set_position()`,
+  `map_view_locate()`): an LVGL ring with a dot over the map, so moving it
+  flushes only its old and new places. It is redrawn only once the fix
+  has moved more than 12 px on the screen, and at most every 5 s; a fix
+  that walks it to within 24 px of the view's edge (the About line
+  counted off, `map_view_set_bottom_inset()`) makes the map jump a step
+  that way, marker and map in one refresh. A marker the user panned to
+  the edge or away is left there. It is timed with `esp_timer`: the
+  simulator's `lv_tick` runs fast. The log says `marker moved 30 px to
+  150,148, 5.0 s after the last`, `marker held: ...`, `page jump east to
+  keep the marker in view: ...`, `locate: ...`.
+- **The Navigator's tracks are an overlay** (Overlays, below): a line a
+  GPX `trkseg`, black 3 px in a paper casing 7 px, drawn in the same pass
+  as the view swapped in, so a step with them on is still one refresh.
+
 The Maps app (`apps/maps/`) opens the first `*.tmap` by name in
-`/sdcard/maps/` on the first Region's centre, at z16 or the Region's
-depth if shallower, with zoom buttons at the bottom right and the credit
-on an About line at the bottom; it logs `(maps) opened X: format 1.0,
-...`, `(maps) showing z16 around ...`, `(maps) view WxH at X,Y`, `(maps)
-zoom in at X,Y`, and each view swapped in, `(maps) shown z16 at X,Y: 4
-tiles, 0 places with none, 0 damaged; 4 read, 0 from the cache, 1 ms`.
-The marker is ticket 03.
+`/sdcard/maps/` on the GPS fix if a Region holds it
+(`map_pack_has_tile()`), else on the first Region's centre, at z16 or the
+Region's depth if shallower, with zoom buttons at the bottom right, locate
+(the arrow, or l) at the bottom left, and the credit on an About line at
+the bottom. It reads the fix once a second and hands it to the view.
+Every `*.gpx` in `/sdcard/tracks/`, where the Navigator records, is one
+overlay, beneath the GeoJSON files', shown at first; Tracks at the top
+right (left of Refresh when there is one), or t, switches it. It
+logs `(maps) opened X: format 1.0, ...`, `(maps) showing z16 around ...
+(your position)`, `(maps) view WxH at X,Y`, `(maps) zoom in at X,Y`,
+`(maps) locate button X1,Y1-X2,Y2`, `(maps) tracks: 1 track, 57 points`,
+and each view swapped in, `(maps) shown z16 at X,Y: 4 tiles, 0 places
+with none, 0 damaged; 4 read, 0 from the cache, 1 ms`.
 `simulator/tests/test_maps.py` compares the screen with the golden Pack
-pixel for pixel, after each pan and zoom, and with damaged Packs.
+pixel for pixel, after each pan and zoom, and with damaged Packs; walks a
+fix along `THISTLE_SIM_GPS_PATH` for the marker and the page jump; and
+draws a recorded track.
 
 **Overlays** (`map_engine/map_overlay.h`, `docs/maps/overlay-api.md`,
 ADR-0018) are a built-in app's own points, lines, polygons and text on its

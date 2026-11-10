@@ -667,7 +667,7 @@ static void find_files(void)
     qsort(s.layers, (size_t)s.count, sizeof *s.layers, by_name);
 }
 
-void maps_layers_open(map_view_t *view, lv_obj_t *root, int bottom)
+bool maps_layers_open(map_view_t *view, lv_obj_t *root, int bottom)
 {
     memset(&s, 0, sizeof s);
     s.view = view;
@@ -682,7 +682,7 @@ void maps_layers_open(map_view_t *view, lv_obj_t *root, int bottom)
         free(s.points);
         s.layers = NULL;
         s.points = NULL;
-        return;
+        return false;
     }
     find_files();
     for (int i = 0; i < s.count; i++) {
@@ -702,11 +702,12 @@ void maps_layers_open(map_view_t *view, lv_obj_t *root, int bottom)
         map_overlay_changed(l->overlay);
     }
     map_view_set_miss_cb(view, miss_cb, NULL);
-    if (s.count == 0) return;  /* no buttons for nothing to switch */
+    if (s.count == 0) return false;  /* no buttons for nothing to switch */
     lv_obj_add_event_cb(map_view_obj(view), key_cb, LV_EVENT_KEY, NULL);
     s.layers_button = corner_button(LV_SYMBOL_LIST, LV_ALIGN_TOP_LEFT, MARGIN, layers_cb, "layers");
     corner_button(LV_SYMBOL_REFRESH, LV_ALIGN_TOP_RIGHT, -MARGIN, refresh_cb, "refresh");
     s.watch = lv_timer_create(watch_cb, WATCH_MS, NULL);
+    return true;
 }
 
 void maps_layers_close(void)

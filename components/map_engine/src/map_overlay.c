@@ -6,9 +6,11 @@
  * items, kept in PSRAM; their drawing, one bit a pixel, into the view's
  * RGB565 pixels; the declutter; and the hit test.
  *
- * Positions are kept as world pixels at z17, which fit an int32 (the world
- * is 2^25 px a side there), so drawing at any of the four levels is a
- * shift, with no trigonometry per frame.
+ * Positions are kept as world pixels at z17, fractions and all, so drawing
+ * at any of the four levels is a scale, with no trigonometry per frame.
+ * Lines and outlines are drawn as round pens, each pixel whose centre is
+ * near enough the segment inked: an overlay's line falls where a track's
+ * points put it, to the fraction of a pixel.
  *
  * Labels are drawn by LVGL's software renderer into the same pixels, on a
  * layer made over them as lv_canvas makes one, so the Arabic wraps of
@@ -28,7 +30,9 @@
 #include <string.h>
 
 #define WORLD_ZOOM   17
-#define WORLD_MAX    ((int32_t)((256u << WORLD_ZOOM) - 1))
+#define WORLD_MAX    ((double)(256u << WORLD_ZOOM))
+#define INK_R        1.5  /* px: lines 3 px wide */
+#define CASING_R     3.5  /* px: in paper 7 px wide */
 #define TEXT_BYTES   (MAP_OVERLAY_MAX_ITEMS * MAP_OVERLAY_LABEL_MAX)
 #define ICON_R       7    /* the icon's paper halo; its ink is 5 */
 #define LABEL_GAP    2    /* between the halo and the label's box */
@@ -60,7 +64,7 @@ struct map_overlay {
     void                *user;
     item_t              *items;  /* MAP_OVERLAY_MAX_ITEMS, PSRAM */
     int                  count;
-    int32_t             *xy;     /* vertices, x then y, PSRAM, grown */
+    double              *xy;     /* vertices, x then y, PSRAM, grown */
     uint32_t             vertices, vcap;
     char                *text;   /* TEXT_BYTES, PSRAM */
     uint32_t             text_used;
@@ -122,19 +126,18 @@ static bool reserve_vertices(map_overlay_t *o, uint32_t n)
     uint32_t cap = o->vcap ? o->vcap : 256;
     while (cap < o->vertices + n) cap *= 2;
     if (cap > MAP_OVERLAY_MAX_VERTICES) cap = MAP_OVERLAY_MAX_VERTICES;
-    int32_t *xy = heap_caps_realloc(o->xy, (size_t)cap * 2 * sizeof(int32_t), MALLOC_CAP_SPIRAM);
-    if (!xy) xy = realloc(o->xy, (size_t)cap * 2 * sizeof(int32_t));
+    double *xy = heap_caps_realloc(o->xy, (size_t)cap * 2 * sizeof(double), MALLOC_CAP_SPIRAM);
+    if (!xy) xy = realloc(o->xy, (size_t)cap * 2 * sizeof(double));
     if (!xy) return false;
     o->xy = xy;
     o->vcap = cap;
     return true;
 }
 
-static int32_t world(double v)
+static double world(double v)
 {
-    double f = floor(v);
-    if (!(f >= 0)) return 0;  /* NaN too */
-    return f > WORLD_MAX ? WORLD_MAX : (int32_t)f;
+    if (!(v >= 0)) return 0;  /* NaN too */
+    return v > WORLD_MAX ? WORLD_MAX : v;
 }
 
 static void push_vertex(map_overlay_t *o, double lat, double lon)
@@ -379,22 +382,27 @@ static bool clip(const canvas_t *c, double *x0, double *y0, double *x1, double *
     return true;
 }
 
-/* A segment of square pens `half` px from its centre each way. */
-static void segment(const canvas_t *c, double fx0, double fy0, double fx1, double fy1, int half,
+/* Sets each pixel whose centre is within radius of the segment. */
+static void segment(const canvas_t *c, double ax, double ay, double bx, double by, double radius,
                     uint16_t colour)
 {
-    if (!clip(c, &fx0, &fy0, &fx1, &fy1)) return;
-    int x0 = (int)lround(fx0), y0 = (int)lround(fy0);
-    int x1 = (int)lround(fx1), y1 = (int)lround(fy1);
-    int dx = abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
-    int dy = -abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
-    int err = dx + dy;
-    for (;;) {
-        fill_rect(c, x0 - half, y0 - half, x0 + half, y0 + half, colour);
-        if (x0 == x1 && y0 == y1) break;
-        int e2 = 2 * err;
-        if (e2 >= dy) { err += dy; x0 += sx; }
-        if (e2 <= dx) { err += dx; y0 += sy; }
+    if (!clip(c, &ax, &ay, &bx, &by)) return;
+    double x0 = fmin(ax, bx) - radius, x1 = fmax(ax, bx) + radius;
+    double y0 = fmin(ay, by) - radius, y1 = fmax(ay, by) + radius;
+    if (x1 < 0 || y1 < 0 || x0 >= c->w || y0 >= c->h) return;
+    int sx0 = x0 < 0 ? 0 : (int)x0, sx1 = x1 >= c->w ? c->w - 1 : (int)x1;
+    int sy0 = y0 < 0 ? 0 : (int)y0, sy1 = y1 >= c->h ? c->h - 1 : (int)y1;
+    double dx = bx - ax, dy = by - ay, len2 = dx * dx + dy * dy, r2 = radius * radius;
+    for (int y = sy0; y <= sy1; y++) {
+        double py = y + 0.5;
+        uint16_t *row = c->px + (size_t)y * (size_t)c->w;
+        for (int x = sx0; x <= sx1; x++) {
+            double px = x + 0.5;
+            double t = len2 > 0 ? ((px - ax) * dx + (py - ay) * dy) / len2 : 0.0;
+            t = t < 0 ? 0 : t > 1 ? 1 : t;
+            double ex = px - (ax + t * dx), ey = py - (ay + t * dy);
+            if (ex * ex + ey * ey <= r2) row[x] = colour;
+        }
     }
 }
 
@@ -402,20 +410,22 @@ static void segment(const canvas_t *c, double fx0, double fy0, double fx1, doubl
 static void vertex(const map_overlay_t *o, uint32_t i, int zoom, const canvas_t *c, double *x,
                    double *y)
 {
-    int shift = WORLD_ZOOM - zoom;
-    *x = (double)((int64_t)(o->xy[i * 2] >> shift) - c->left);
-    *y = (double)((int64_t)(o->xy[i * 2 + 1] >> shift) - c->top);
+    double scale = ldexp(1.0, zoom - WORLD_ZOOM);
+    *x = o->xy[i * 2] * scale - (double)c->left;
+    *y = o->xy[i * 2 + 1] * scale - (double)c->top;
 }
 
+/* Every segment of a line or a ring: each one's casing first, then each
+ * one's ink, so a line that crosses itself keeps its ink. */
 static void path(const map_overlay_t *o, const item_t *it, int zoom, const canvas_t *c,
-                 int half, uint16_t colour)
+                 double radius, uint16_t colour)
 {
     uint32_t n = it->count, segs = it->kind == MAP_ITEM_POLYGON ? n : n - 1;
     for (uint32_t s = 0; s < segs; s++) {
         double x0, y0, x1, y1;
         vertex(o, it->first + s, zoom, c, &x0, &y0);
         vertex(o, it->first + (s + 1) % n, zoom, c, &x1, &y1);
-        segment(c, x0, y0, x1, y1, half, colour);
+        segment(c, x0, y0, x1, y1, radius, colour);
     }
 }
 
@@ -492,8 +502,8 @@ static void place_of(const map_overlay_t *o, const item_t *it, int zoom, const c
     if (x > 10000) x = 10000;
     if (y < -10000) y = -10000;
     if (y > 10000) y = 10000;
-    *cx = (int)x;
-    *cy = (int)y;
+    *cx = (int)floor(x);
+    *cy = (int)floor(y);
     if (it->kind == MAP_ITEM_TEXT) {
         int w = it->label_w + 2 * LABEL_PAD;
         *box = (lv_area_t){*cx - w / 2, *cy - LABEL_H / 2, *cx - w / 2 + w - 1,
@@ -615,11 +625,11 @@ void map_overlays_draw(map_overlay_t *first, const map_frame_t *f, uint16_t *pix
                 if (!it->drawn) continue;
                 if (pass == 0 && it->kind == MAP_ITEM_POLYGON) {
                     dots_inside(o, it, f->zoom, &c);
-                    path(o, it, f->zoom, &c, 2, MAP_PAPER);
-                    path(o, it, f->zoom, &c, 1, MAP_INK);
+                    path(o, it, f->zoom, &c, CASING_R, MAP_PAPER);
+                    path(o, it, f->zoom, &c, INK_R, MAP_INK);
                 } else if (pass == 1 && it->kind == MAP_ITEM_LINE) {
-                    path(o, it, f->zoom, &c, 2, MAP_PAPER);
-                    path(o, it, f->zoom, &c, 1, MAP_INK);
+                    path(o, it, f->zoom, &c, CASING_R, MAP_PAPER);
+                    path(o, it, f->zoom, &c, INK_R, MAP_INK);
                 } else if (pass == 2 && it->kind == MAP_ITEM_POINT) {
                     icon(&c, (it->box.x1 + it->box.x2) / 2, (it->box.y1 + it->box.y2) / 2,
                          (map_icon_t)it->icon);

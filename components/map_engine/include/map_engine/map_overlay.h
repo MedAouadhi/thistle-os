@@ -15,7 +15,7 @@
  *   - Overlays in their z order, the highest on top; in one overlay its
  *     polygons (outlined, dotted inside), then its lines, then its points'
  *     icons, then their labels and the texts. Lines and outlines are 3 px
- *     of ink inside 5 px of paper, so they show on any map.
+ *     of ink inside 7 px of paper, so they show on any map.
  *   - Decluttered: a point or a text whose box would cover another one
  *     already placed is left out, and a label that would is dropped while
  *     its icon stays. Higher overlays are placed first and, in an overlay,
