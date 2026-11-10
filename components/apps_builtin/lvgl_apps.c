@@ -60,6 +60,9 @@
 #ifndef THISTLE_HAVE_MAPS
 #define THISTLE_HAVE_MAPS 1
 #endif
+#ifndef THISTLE_HAVE_TRANSIT
+#define THISTLE_HAVE_TRANSIT 1
+#endif
 #ifndef THISTLE_HAVE_TODO
 #define THISTLE_HAVE_TODO 1
 #endif
@@ -102,6 +105,9 @@
 #endif
 #if THISTLE_HAVE_MAPS
 #include "maps/maps_app.h"
+#endif
+#if THISTLE_HAVE_TRANSIT
+#include "transit/transit_app.h"
 #endif
 #if THISTLE_HAVE_TODO
 #include "todo/todo_app.h"
@@ -189,6 +195,10 @@ esp_err_t lvgl_apps_register_builtin(bool has_radio, bool has_gps)
     /* On every board: it shows the card's Map Pack, and says where to put
      * one when there is none. */
     REGISTER(maps_app_register);
+#endif
+#if THISTLE_HAVE_TRANSIT
+    /* On every board: it says so when a Provider cannot be reached. */
+    REGISTER(transit_app_register);
 #endif
 #if THISTLE_HAVE_TODO
     REGISTER(todo_app_register);
