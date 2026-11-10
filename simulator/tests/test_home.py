@@ -54,6 +54,12 @@ CONTACT = "+491609876543"
 ROW = "100,128"
 CALL_BACK = "216,128"
 
+# The first pinned place, held long enough to choose its app; and in the
+# list that opens, the second row, Files (the app manager's order).
+PLACE_1 = "40,209"
+HOLD_PLACE_1 = PLACE_1 + ":900"
+FILES_ROW = "120,112"
+
 REGISTERED = "registered+2500"
 # The call screen says "Missed call" 20 s after the ring, for 2.5 s.
 AFTER_MISSED = "ring+25000"
@@ -118,6 +124,16 @@ def kept_catalog(firmware: Optional[str] = None, notes: Optional[tuple[str, int,
     return setup
 
 
+def saved_pins(*pins: str) -> Callable[[Path], None]:
+    """Pins chosen on an earlier boot, as Home saves them in system.json."""
+    def put(card: Path) -> None:
+        path = card / "config" / "system.json"
+        system = json.loads(path.read_text())
+        system.get("thistle_os", system)["home"] = {"pins": list(pins)}
+        path.write_text(json.dumps(system, indent=2))
+    return put
+
+
 CASES = (
     Case("quiet-home-is-all-caught-up",
          ("--tap", ROW), 5000,
@@ -132,11 +148,16 @@ CASES = (
                    # The status bar still has its pop-up: Home never takes it.
                    ("[sim_cellular] SMS fetched: 1", "toast: " "" " Reza: hi")),
          absent=("All caught up",)),
-    Case("messages-row-opens-the-messenger",
+    Case("messages-row-opens-sms",
          ("--sms", "Reza: hi", "--tap-start", REGISTERED, "--tap", ROW), 10000,
          expected=((NOW + "1 new message (SMS)",
-                    "Launching app from Home: com.thistle.messenger",
-                    "(messenger) on_create"),)),
+                    "Launching app from Home: com.thistle.sms",
+                    "(sms) on_create"),)),
+    Case("mesh-messages-row-opens-meshchat",
+         ("--mesh-direct", "Anna: hi", "--tap-start", "4000", "--tap", ROW), 10000,
+         expected=((NOW + "1 new message (From the mesh)",
+                    "Launching app from Home: com.thistle.meshchat",
+                    "(meshchat) on_create", "(meshchat) received from Anna"),)),
     Case("missed-call-row-names-the-number",
          ("--call", CALLER), 34000,
          expected=(("(call_ui) ended shown: Missed call",
@@ -200,6 +221,27 @@ CASES = (
          card=kept_catalog(notes=("1.0.0", 1_000_000, "0.1.0")),
          expected=((NOW + "All caught up (No new messages or calls)",),),
          absent=("App updates",)),
+    # The pinned places: a held tile opens the list of apps, and the one
+    # chosen takes the place, saved for the next boot.
+    Case("holding-a-pinned-app-chooses-the-app-for-its-place",
+         ("--tap", HOLD_PLACE_1, "--tap", FILES_ROW, "--tap", PLACE_1), 9000,
+         expected=(("(launcher_ui) choosing the app for place 1",
+                    "(launcher_ui) pinned com.thistle.filemgr in place 1: ESP_OK",
+                    "Launching app from Home: com.thistle.filemgr",
+                    "(filemgr) on_create"),),
+         absent=("Launching app from Home: com.thistle.phone",)),
+    Case("a-place-chosen-on-an-earlier-boot-keeps-its-app",
+         ("--tap", PLACE_1), 5000,
+         card=saved_pins("com.thistle.reader"),
+         expected=(("Launching app from Home: com.thistle.reader",),)),
+    Case("a-chosen-app-no-longer-installed-gives-its-place-back",
+         ("--tap", PLACE_1), 5000,
+         card=saved_pins("com.thistle.gone"),
+         expected=(("Launching app from Home: com.thistle.phone",),)),
+    # The T-Deck Max's middle key: All apps, from Home or from an app.
+    Case("the-apps-key-opens-all-apps-from-an-app",
+         ("--launch-app", "com.thistle.todo", "--tap", "apps"), 5000,
+         expected=(("(todo) on_create", "(launcher_ui) All apps opened"),)),
 )
 
 

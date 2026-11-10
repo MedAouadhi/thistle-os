@@ -206,6 +206,15 @@ jobs:
       - name: Test the map engine's Pack reader and views over damaged Packs under sanitizers
         run: components/map_engine/tests/run_tests.sh
 
+      - name: Test the chat apps' conversation store under sanitizers
+        run: apps/chatkit/tests/run_tests.sh
+
+      - name: Test the SMS app's phone numbers under sanitizers
+        run: apps/sms/tests/run_tests.sh
+
+      - name: Test the MeshCore app's addresses under sanitizers
+        run: apps/meshchat/tests/run_tests.sh
+
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
@@ -581,9 +590,13 @@ jobs:
         working-directory: simulator
         run: python3 tests/test_phone_app.py --sim build/thistle_sim
 
-      - name: Run Messenger history tests
+      - name: Run SMS app history, reply and compose tests
         working-directory: simulator
-        run: python3 tests/test_messenger_history.py --sim build/thistle_sim
+        run: python3 tests/test_sms.py --sim build/thistle_sim
+
+      - name: Run MeshCore app history and receive tests
+        working-directory: simulator
+        run: python3 tests/test_meshchat.py --sim build/thistle_sim
 
       - name: Run File Transfer web server tests
         working-directory: simulator

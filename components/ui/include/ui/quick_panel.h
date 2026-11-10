@@ -3,7 +3,7 @@
 
 /*
  * The quick panel: switches and sliders that drop below the status bar when
- * the user drags down from it, or presses the quick key (HAL_KEY_QUICK).
+ * the user drags down from it.
  * Back, Esc, Home, a tap below it or a drag up close it.
  *
  * What it holds is registered, not built in: each switch is a

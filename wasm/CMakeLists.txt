@@ -60,9 +60,6 @@ set(THISTLE_SRCS
     ${THISTLE_DIR}/components/apps_builtin/launcher/fonts/home_latin_14_mono.c
     ${THISTLE_DIR}/components/apps_builtin/settings/settings_app.c
     ${THISTLE_DIR}/components/apps_builtin/settings/settings_ui.c
-    ${THISTLE_DIR}/components/apps_builtin/messenger/messenger_app.c
-    ${THISTLE_DIR}/components/apps_builtin/messenger/messenger_ui.c
-    ${THISTLE_DIR}/components/apps_builtin/messenger/messenger_transport.c
     ${THISTLE_DIR}/components/apps_builtin/assistant/assistant_app.c
     ${THISTLE_DIR}/components/apps_builtin/assistant/assistant_config.c
     ${THISTLE_DIR}/components/apps_builtin/assistant/assistant_json.c
@@ -86,7 +83,6 @@ endfunction()
 
 thistle_set_optional_app_flag(THISTLE_HAVE_LAUNCHER "components/apps_builtin/launcher/launcher_app.c")
 thistle_set_optional_app_flag(THISTLE_HAVE_SETTINGS "components/apps_builtin/settings/settings_app.c")
-thistle_set_optional_app_flag(THISTLE_HAVE_MESSENGER "components/apps_builtin/messenger/messenger_app.c")
 thistle_set_optional_app_flag(THISTLE_HAVE_ASSISTANT "components/apps_builtin/assistant/assistant_app.c")
 thistle_set_optional_app_flag(THISTLE_HAVE_TERMINAL "components/apps_builtin/terminal/terminal_app.c")
 
@@ -179,7 +175,6 @@ target_compile_definitions(thistle_wasm PRIVATE
     THISTLE_HAVE_FILEXFER=${THISTLE_HAVE_FILEXFER}
     THISTLE_HAVE_READER=${THISTLE_HAVE_READER}
     THISTLE_HAVE_PODCASTS=${THISTLE_HAVE_PODCASTS}
-    THISTLE_HAVE_MESSENGER=${THISTLE_HAVE_MESSENGER}
     THISTLE_HAVE_NAVIGATOR=${THISTLE_HAVE_NAVIGATOR}
     THISTLE_HAVE_APPSTORE=${THISTLE_HAVE_APPSTORE}
     THISTLE_HAVE_ASSISTANT=${THISTLE_HAVE_ASSISTANT}
@@ -187,6 +182,8 @@ target_compile_definitions(thistle_wasm PRIVATE
     THISTLE_HAVE_VAULT=${THISTLE_HAVE_VAULT}
     THISTLE_HAVE_TAILSCALE=${THISTLE_HAVE_TAILSCALE}
     THISTLE_HAVE_HERMES=${THISTLE_HAVE_HERMES}
+    THISTLE_HAVE_MESHCHAT=${THISTLE_HAVE_MESHCHAT}
+    THISTLE_HAVE_SMS=${THISTLE_HAVE_SMS}
     THISTLE_HAVE_TAILCHAT=${THISTLE_HAVE_TAILCHAT}
     THISTLE_HAVE_TODO=${THISTLE_HAVE_TODO}
     THISTLE_HAVE_MAPS=${THISTLE_HAVE_MAPS}

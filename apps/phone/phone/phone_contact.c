@@ -8,8 +8,8 @@
  * page with the number as its name and no star.
  *
  * Call hands the number to the kernel, whose call screen comes up over
- * everything; Message asks the Messenger to open an SMS to it and brings
- * the Messenger forward (thistle/sms.h). Where the device has no modem that
+ * everything; Message asks the SMS app to open a conversation with it and
+ * brings the SMS app forward (thistle/sms.h). Where the device has no modem that
  * makes calls there are neither, and the page is an address book's.
  */
 #include "phone/phone_text.h"

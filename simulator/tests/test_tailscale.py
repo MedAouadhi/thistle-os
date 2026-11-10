@@ -98,7 +98,7 @@ CASES = (
          absent=("[tailnet] waiting for a sign-in",)),
     Case("stays-off-until-switched-on", (), 5000, enabled=False, joined=True,
          absent=("[tailnet] connecting", "[tailnet] connected as", "(statusbar) tailnet shown")),
-    Case("the-quick-panel-switches-it-on", ("--tap", "quick", "--tap", TAILSCALE_TILE), 8000,
+    Case("the-quick-panel-switches-it-on", ("--drag", "120,8,120,160", "--tap", TAILSCALE_TILE), 8000,
          enabled=False, joined=True,
          expected=("(quick_panel) open", "[tailnet] switched on",
                    "(quick_panel) Tailscale -> on", "[tailnet] connected as"),

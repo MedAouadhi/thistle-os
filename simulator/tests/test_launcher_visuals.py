@@ -58,13 +58,16 @@ CASES = (
         "bb9c21d8d8ddf28b4c911c0d1eb8d38501267995c96eac0a9697b2c62bc1d8a1",
         wm="thistle-tk",
     ),
-    # Home: the clock and date, masked, then what is new, the pinned apps and
-    # All apps. What is new is "All caught up" alone: the card is a fresh copy
+    # Home: the clock and date, masked, then what is new, the pinned apps and,
+    # on a board with no apps key, All apps. What is new is "All caught up" alone: the card is a fresh copy
     # (run_case), the tailnet is off in its system.json, and the simulated
     # mesh never runs (mesh_manager.rs starts MeshCore on the device alone),
     # so no row counts its contacts. The hashes changed when the rows came,
     # and the T-Deck Max's when Notes, its fifth pin, moved to the App Store
-    # and Files took its place.
+    # and Files took its place, and again when the Messenger's pin became
+    # SMS and MeshCore, the two apps it was split into. The T-Deck Max's
+    # changed again when its apps key took over from the All apps bar, and
+    # its pinned apps spread over the bar's room.
     Case(
         "lcd-home",
         "tdeck",
@@ -72,7 +75,7 @@ CASES = (
         None,
         320,
         240,
-        "23b1c230be4fac294a0f458d1ea0514074451ff351136119900ab97192f29c20",
+        "cc33895f6bc822f3e492df258c9e01424d05ae543e39e7afeddb06d3539b98bc",
         clock_rows=48,
     ),
     Case(
@@ -82,7 +85,7 @@ CASES = (
         None,
         240,
         320,
-        "f524e3dab07d45014ec9f3e8f299b32d408dea27b537bf87c89b8c6cd856cede",
+        "399c36a712f77f76bc834235b964068911094a2e0dab6274fc1a16d960f1e4fe",
         clock_rows=64,
     ),
     # The LCD hashes cover every built-in app. The nine that live under apps/
@@ -103,7 +106,7 @@ CASES = (
         "160,222",
         320,
         240,
-        "b893205294c496a5467653df3fb92a528102390f46afa424bded7f7c6eef8649",
+        "f286c4d5bca224b53b720aceff81737386165f9a57213479fa29e6d3e4fba70a",
     ),
     # What an e-paper board boots by default: the LVGL grid, three columns
     # wide on a 240 px screen. Its first hash had the tile under the tap
@@ -117,10 +120,10 @@ CASES = (
         "eink-lvgl-apps",
         "tdeck-max",
         2500,
-        "120,302",
+        "apps",
         240,
         320,
-        "dc6ae35c3c936d6e461f9813d8d85168456d95d2e1fbeafcff3ffbaa23d2c6ad",
+        "3405d82e8ee3f31f5170efe53ae5f81121e8a7b4c79101d04b9a5db5cb9d2939",
     ),
 )
 

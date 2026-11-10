@@ -35,7 +35,7 @@ ThistleOS separates the **kernel** from the **hardware**. The kernel runs across
 ```
 ┌─────────────────────────────────────────────┐
 │         APPS (.app.elf from SPIFFS/SD)     │
-│  Messenger • Reader • Navigator • ...      │
+│  SMS • MeshCore • Reader • Navigator • ... │
 ├─────────────────────────────────────────────┤
 │         WINDOW MANAGER (.wm.elf)           │
 │  Status bar • Launcher • Theme engine      │
@@ -206,7 +206,8 @@ ThistleOS ships with 19 apps that demonstrate the platform. All are built-in but
 | **Reader** | EPUB and text books, Arabic included; recent books first, each opened where it was left |
 | **Podcasts** | PodcastIndex search, trending and categories; streams MP3 episodes, saves them to the SD card to play offline; starred, recently viewed, continue listening |
 | **Phone** | Voice calls through the A7682E modem; contacts from the SD card's vCards, favourites and recent calls |
-| **Messenger** | Messaging app with working LoRa transport and in-progress SMS/BLE/Internet backends |
+| **SMS** | Text messages through the modem: a conversation per number, the phonebook to start one, Call from a conversation |
+| **MeshCore** | MeshCore over LoRa: the Public channel and a conversation per node, the nodes heard, Advertise |
 | **Navigator** | GPS dashboard with GPX track recording |
 | **Notes** | Text editor with auto-save |
 | **Assistant** | AI chat interface (API integration planned) |
@@ -239,8 +240,7 @@ Included themes: Default (monochrome for e-paper), Dark, link42 (dark), link42 L
 
 The current beta is strongest on the primary boards, T-Deck Pro and T-Deck. A few user-visible paths are still being hardened:
 
-- Messenger's LoRa path is the most complete transport today.
-- BLE relay and Internet messaging backends are present as scaffolding but are not yet complete end-to-end transports.
+- MeshCore messaging over LoRa and SMS are separate apps, in Chat's look. The Messenger's BLE relay and Internet scaffolding went with it.
 - The T-Deck Pro light sensor now has a real Rust LTR-553 driver path, but it still needs on-device validation before we should call it proven.
 - Stage 1 of the roadmap is focused on closing these truth gaps before expanding feature scope.
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""The quick panel opens on a drag down from the status bar, or the quick key,
-switches what its tiles say, saves the choice, and closes every way it should.
+"""The quick panel opens on a drag down from the status bar (the T-Deck Max's
+middle key, which opened it too, opens All apps now), switches what its tiles say, saves the choice, and closes every way it should.
 
 Coordinates are the panel's own layout: on the T-Deck Max (240 x 320) it hangs
 from y 24, with tiles 72 px wide and 44 high from y 30, the volume slider's
@@ -53,33 +53,35 @@ CASES = (
     Case("drag-from-below-the-bar-does-not-open", "tdeck-max",
          ("--drag", "120,60,120,220"), 1,
          absent=("(quick_panel) open",)),
-    Case("quick-key-opens-and-closes", "tdeck-max",
-         ("--tap", "quick", "--tap", "quick"), 2,
-         expected=("(quick_panel) open", "(quick_panel) closed")),
+    # The middle key opens All apps now; the panel comes only from the drag.
+    Case("the-apps-key-opens-all-apps-not-the-panel", "tdeck-max",
+         ("--tap", "apps", "--tap", "apps"), 2,
+         expected=("(launcher_ui) All apps opened", "(launcher_ui) All apps closed"),
+         absent=("(quick_panel) open",)),
     Case("a-tile-switches-and-is-saved", "tdeck-max",
-         ("--tap", "quick", "--tap", WIFI_TILE), 2,
+         ("--drag", "120,8,120,160", "--tap", WIFI_TILE), 2,
          expected=("(quick_panel) WiFi -> off",),
          saved=lambda s: thistle_os(s).get("wifi", {}).get("radio_off") is True),
     Case("the-dictation-tile-picks-english", "tdeck-max",
-         ("--tap", "quick", "--tap", DICTATION_TILE), 2,
+         ("--drag", "120,8,120,160", "--tap", DICTATION_TILE), 2,
          expected=("(quick_panel) Dictation -> on",),
          saved=lambda s: thistle_os(s).get("dictation", {}).get("language") == "en"),
     Case("a-slider-sets-and-saves-the-volume", "tdeck-max",
-         ("--tap", "quick", "--tap", VOLUME_SLIDER), 2,
+         ("--drag", "120,8,120,160", "--tap", VOLUME_SLIDER), 2,
          expected=("(quick_panel) Volume -> ",),
          saved=lambda s: isinstance(thistle_os(s).get("audio", {}).get("volume"), int)),
     Case("drag-up-closes", "tdeck-max",
-         ("--tap", "quick", "--drag", "120,250,120,90"), 2,
+         ("--drag", "120,8,120,160", "--drag", "120,250,120,90"), 2,
          expected=("(quick_panel) open", "(quick_panel) closed")),
     Case("tap-below-closes", "tdeck-max",
-         ("--tap", "quick", "--tap", BELOW_PANEL), 2,
+         ("--drag", "120,8,120,160", "--tap", BELOW_PANEL), 2,
          expected=("(quick_panel) open", "(quick_panel) closed")),
     Case("back-closes-and-stays-in-the-app", "tdeck-max",
-         ("--launch-app", "com.thistle.todo", "--tap", "quick", "--tap", "back"), 2,
+         ("--launch-app", "com.thistle.todo", "--drag", "120,8,120,160", "--tap", "back"), 2,
          expected=("(todo) on_create", "(quick_panel) open", "(quick_panel) closed"),
          absent=("(todo) on_destroy",)),
     Case("settings-button-opens-settings", "tdeck-max",
-         ("--tap", "quick", "--tap", SETTINGS_BUTTON), 2,
+         ("--drag", "120,8,120,160", "--tap", SETTINGS_BUTTON), 2,
          expected=("(quick_panel) closed", "(settings) on_create")),
 )
 

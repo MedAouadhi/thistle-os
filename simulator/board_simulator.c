@@ -114,6 +114,14 @@ esp_err_t board_init(void)
     board_config_set_board_id(dev->name);
     hal_display_register(sim_display_get(), NULL);
     hal_input_register(sim_input_get(), NULL);
+    /* The keyboard's F-keys stand in for the Max's touch keys on every
+     * device, but only the Max has them, so only the Max says so: Home
+     * elsewhere keeps its All apps button, as on the hardware. */
+    if (dev->touch_is_cst66xx) {
+        hal_input_declare_key(HAL_KEY_HOME);
+        hal_input_declare_key(HAL_KEY_BACK);
+        hal_input_declare_key(HAL_KEY_APPS);
+    }
     hal_storage_register(sim_storage_get(), NULL);
 
     /* Register host network transport — net_manager_init() is called

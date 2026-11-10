@@ -29,6 +29,18 @@ A glance home, in four fixed bands, top to bottom:
 3. **Pinned apps**, six on a portrait screen (3 × 2), four on a landscape one.
    Positions do not move, so they can be learnt.
 4. **Search and All apps.** Typing anywhere on Home searches apps and contacts.
+   On a board with an apps key (`HAL_KEY_APPS`, the T-Deck Max's middle
+   touch key, which opened the quick panel before) there is no All apps
+   button: the key opens it, from Home or from any app, and the pinned apps
+   have the button's room. The quick panel comes only from the drag down.
+
+### The user chooses the pinned apps
+
+Holding a pinned app opens a list of every app; the one tapped takes the
+place, swapping places with it if it was pinned elsewhere. Every place is
+saved (`thistle_os.home.pins` in system.json), so the ones not touched keep
+their apps. A place whose app is gone, or never chosen, takes Home's own
+choice; one with nothing to put in it shows "+", which opens the list.
 
 A band the screen has no room for is left out: the T-Display loses what is
 new, the Cardputer the clock as well, an OLED keeps only All apps. The bands

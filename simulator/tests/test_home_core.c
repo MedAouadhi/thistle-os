@@ -12,7 +12,7 @@
 static home_layout_t s_l;
 
 TEST(home_tdeck_max_has_the_clock_the_new_rows_and_two_rows_of_three) {
-    home_layout(240, 296, &s_l);
+    home_layout(240, 296, true, &s_l);
     ASSERT_TRUE(!s_l.landscape);
     ASSERT_EQ(s_l.clock_y, 0);
     ASSERT_EQ(s_l.clock_h, 64);
@@ -26,7 +26,7 @@ TEST(home_tdeck_max_has_the_clock_the_new_rows_and_two_rows_of_three) {
 }
 
 TEST(home_tdeck_lcd_has_one_row_of_four) {
-    home_layout(320, 216, &s_l);
+    home_layout(320, 216, true, &s_l);
     ASSERT_TRUE(s_l.landscape);
     ASSERT_EQ(s_l.clock_h, 48);
     ASSERT_EQ(s_l.now_y, 48);
@@ -38,7 +38,7 @@ TEST(home_tdeck_lcd_has_one_row_of_four) {
 }
 
 TEST(home_tdisplay_gives_up_the_new_rows_first) {
-    home_layout(320, 146, &s_l);
+    home_layout(320, 146, true, &s_l);
     ASSERT_EQ(s_l.clock_h, 48);
     ASSERT_EQ(s_l.now_h, 0);
     ASSERT_EQ(s_l.grid_y, 48);
@@ -46,7 +46,7 @@ TEST(home_tdisplay_gives_up_the_new_rows_first) {
 }
 
 TEST(home_cardputer_gives_up_the_clock_too) {
-    home_layout(240, 111, &s_l);
+    home_layout(240, 111, true, &s_l);
     ASSERT_EQ(s_l.clock_h, 0);
     ASSERT_EQ(s_l.now_h, 0);
     ASSERT_EQ(s_l.grid_y, 0);
@@ -55,30 +55,41 @@ TEST(home_cardputer_gives_up_the_clock_too) {
 }
 
 TEST(home_an_oled_has_room_for_the_bar_alone) {
-    home_layout(128, 40, &s_l);
+    home_layout(128, 40, true, &s_l);
     ASSERT_EQ(s_l.clock_h, 0);
     ASSERT_EQ(s_l.rows, 0);
     ASSERT_EQ(s_l.bar_y, 4);
 }
 
 TEST(home_a_tall_screen_stops_at_two_rows) {
-    home_layout(410, 478, &s_l);
+    home_layout(410, 478, true, &s_l);
     ASSERT_EQ(s_l.cols, 3);
     ASSERT_EQ(s_l.rows, 2);
     ASSERT_EQ(s_l.bar_y, 442);
 }
 
+TEST(home_tdeck_max_with_its_apps_key_gives_the_bar_to_the_apps) {
+    /* The rows of apps sit in the middle of what is left: 20 px from what
+     * is new, where the bar left them 2. */
+    home_layout(240, 296, false, &s_l);
+    ASSERT_EQ(s_l.grid_y, 144);
+    ASSERT_EQ(s_l.grid_h, 152);
+    ASSERT_EQ(s_l.rows, 2);
+    ASSERT_EQ(s_l.bar_h, 0);
+    ASSERT_EQ(s_l.bar_y, 296);
+}
+
 TEST(home_cells_share_the_whole_width) {
-    /* 80 px holds "Messenger", 78 px in Montserrat 14. */
-    home_layout(240, 296, &s_l);
+    /* 80 px holds a name as long as "Messenger", 78 px in Montserrat 14. */
+    home_layout(240, 296, true, &s_l);
     ASSERT_EQ(s_l.cell_w, 80);
     ASSERT_EQ(s_l.cell_h, 56);
-    home_layout(320, 216, &s_l);
+    home_layout(320, 216, true, &s_l);
     ASSERT_EQ(s_l.cell_w, 80);
 }
 
 static const char *const PREFERRED[] = {
-    "com.thistle.phone", "com.thistle.messenger", "com.thistle.hermes",
+    "com.thistle.phone", "com.thistle.sms", "com.thistle.hermes",
 };
 
 static bool not_settings(const char *id)
@@ -89,7 +100,7 @@ static bool not_settings(const char *id)
 TEST(home_pins_the_preferred_apps_in_their_order) {
     const char *installed[] = {
         "com.thistle.settings", "com.thistle.hermes", "com.thistle.phone",
-        "com.thistle.messenger",
+        "com.thistle.sms",
     };
     int out[HOME_MAX_PINS];
     ASSERT_EQ(home_pick_pins(PREFERRED, 3, installed, 4, not_settings, out, 3), 3);
@@ -99,7 +110,7 @@ TEST(home_pins_the_preferred_apps_in_their_order) {
 }
 
 TEST(home_fills_the_place_of_a_missing_app_from_the_rest) {
-    /* A board with no radio has no Messenger. */
+    /* A board with no SMS app. */
     const char *installed[] = {
         "com.thistle.settings", "com.thistle.notes", "com.thistle.phone",
         "com.thistle.hermes", "com.thistle.reader",
@@ -114,7 +125,7 @@ TEST(home_fills_the_place_of_a_missing_app_from_the_rest) {
 
 TEST(home_pins_no_more_than_asked_for) {
     const char *installed[] = {
-        "com.thistle.phone", "com.thistle.messenger", "com.thistle.hermes",
+        "com.thistle.phone", "com.thistle.sms", "com.thistle.hermes",
     };
     int out[HOME_MAX_PINS];
     ASSERT_EQ(home_pick_pins(PREFERRED, 3, installed, 3, NULL, out, 2), 2);
@@ -130,6 +141,69 @@ TEST(home_pins_an_app_once_though_preferred_twice) {
     ASSERT_EQ(home_pick_pins(twice, 2, installed, 2, NULL, out, 4), 2);
     ASSERT_EQ(out[0], 0);
     ASSERT_EQ(out[1], 1);
+}
+
+static const char *const INSTALLED6[] = {
+    "com.thistle.phone", "com.thistle.sms", "com.thistle.hermes",
+    "com.thistle.notes", "com.thistle.reader", "com.thistle.todo",
+};
+
+TEST(home_places_with_no_choice_are_the_default_pins) {
+    int out[HOME_MAX_PINS];
+    ASSERT_EQ(home_place_pins(NULL, 0, PREFERRED, 3, INSTALLED6, 6, NULL, out, 4), 4);
+    ASSERT_EQ(out[0], 0);
+    ASSERT_EQ(out[1], 1);
+    ASSERT_EQ(out[2], 2);
+    ASSERT_EQ(out[3], 3);
+}
+
+TEST(home_places_keep_the_users_choice_where_they_made_it) {
+    const char *chosen[] = { "com.thistle.todo", "", "com.thistle.phone" };
+    int out[HOME_MAX_PINS];
+    ASSERT_EQ(home_place_pins(chosen, 3, PREFERRED, 3, INSTALLED6, 6, NULL, out, 4), 4);
+    ASSERT_EQ(out[0], 5);  /* todo, chosen */
+    ASSERT_EQ(out[1], 1);  /* sms: phone is placed already */
+    ASSERT_EQ(out[2], 0);  /* phone, chosen */
+    ASSERT_EQ(out[3], 2);  /* hermes */
+}
+
+TEST(home_places_fill_a_choice_no_longer_installed) {
+    const char *chosen[] = { "com.thistle.gone", "com.thistle.reader" };
+    int out[HOME_MAX_PINS];
+    ASSERT_EQ(home_place_pins(chosen, 2, PREFERRED, 3, INSTALLED6, 6, NULL, out, 3), 3);
+    ASSERT_EQ(out[0], 0);  /* phone, the first default */
+    ASSERT_EQ(out[1], 4);  /* reader, chosen */
+    ASSERT_EQ(out[2], 1);
+}
+
+TEST(home_places_an_app_chosen_twice_once) {
+    const char *chosen[] = { "com.thistle.sms", "com.thistle.sms" };
+    int out[HOME_MAX_PINS];
+    ASSERT_EQ(home_place_pins(chosen, 2, PREFERRED, 3, INSTALLED6, 6, NULL, out, 2), 2);
+    ASSERT_EQ(out[0], 1);
+    ASSERT_EQ(out[1], 0);
+}
+
+TEST(home_places_left_empty_when_there_are_too_few_apps) {
+    const char *installed[] = { "com.thistle.phone", "com.thistle.sms" };
+    const char *chosen[] = { "", "", "com.thistle.sms" };
+    int out[HOME_MAX_PINS];
+    ASSERT_EQ(home_place_pins(chosen, 3, PREFERRED, 3, installed, 2, NULL, out, 6), 3);
+    ASSERT_EQ(out[0], 0);
+    ASSERT_EQ(out[1], -1);
+    ASSERT_EQ(out[2], 1);
+}
+
+TEST(home_choosing_a_pinned_app_swaps_the_two_places) {
+    char ids[3][HOME_PIN_ID_MAX] = { "a", "b", "c" };
+    home_choose_pin(ids, 3, 0, "c");
+    ASSERT_STR_EQ(ids[0], "c");
+    ASSERT_STR_EQ(ids[1], "b");
+    ASSERT_STR_EQ(ids[2], "a");
+    home_choose_pin(ids, 3, 1, "z");
+    ASSERT_STR_EQ(ids[1], "z");
+    home_choose_pin(ids, 3, 3, "y");   /* no such place */
+    ASSERT_STR_EQ(ids[2], "a");
 }
 
 TEST(home_writes_the_date_on_one_line) {
@@ -246,15 +320,29 @@ TEST(home_now_tailnet_chat_messages_count_with_the_rest) {
     ASSERT_EQ(s_rows[0].kind, HOME_NOW_MESSAGES);
     ASSERT_STR_EQ(s_rows[0].title, "2 new messages");
     ASSERT_STR_EQ(s_rows[0].detail, "Chat");
-    ASSERT_TRUE(home_now_chat_only(&in));
+    ASSERT_EQ(home_now_messages_app(&in), HOME_MSG_CHAT);
     in.sms_unread = 1;
     home_now_rows(&in, s_rows, HOME_NOW_ROWS);
     ASSERT_STR_EQ(s_rows[0].title, "3 new messages");
     ASSERT_STR_EQ(s_rows[0].detail, "1 SMS" DOT "2 in Chat");
-    ASSERT_TRUE(!home_now_chat_only(&in));
+    ASSERT_EQ(home_now_messages_app(&in), HOME_MSG_SMS);
     in.mesh_unread = 4;
     home_now_rows(&in, s_rows, HOME_NOW_ROWS);
     ASSERT_STR_EQ(s_rows[0].detail, "1 SMS" DOT "4 from the mesh" DOT "2 in Chat");
+}
+
+TEST(home_now_messages_open_the_app_that_has_them) {
+    home_now_in_t in = quiet();
+    in.mesh_unread = 2;
+    ASSERT_EQ(home_now_messages_app(&in), HOME_MSG_MESH);
+    ASSERT_STR_EQ(home_msg_app_id(home_now_messages_app(&in)), "com.thistle.meshchat");
+    in.chat_unread = 1;
+    ASSERT_EQ(home_now_messages_app(&in), HOME_MSG_MESH);
+    in.mesh_unread = 0;
+    ASSERT_STR_EQ(home_msg_app_id(home_now_messages_app(&in)), "com.thistle.tailchat");
+    in.sms_unread = 5;
+    ASSERT_STR_EQ(home_msg_app_id(home_now_messages_app(&in)), "com.thistle.sms");
+    ASSERT_EQ(home_now_messages_app(NULL), HOME_MSG_SMS);
 }
 
 TEST(home_now_a_missed_call_is_named_and_timed) {

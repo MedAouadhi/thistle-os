@@ -34,7 +34,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::hal_registry::{
     HalInputCb, HalInputDriver, HalInputEvent, HalInputEventData, HalInputEventType,
-    HalInputKeyData, HalInputTouchData, HAL_KEY_BACK, HAL_KEY_HOME, HAL_KEY_QUICK,
+    HalInputKeyData, HalInputTouchData, HAL_KEY_BACK, HAL_KEY_HOME, HAL_KEY_APPS,
 };
 
 // ── ESP error codes ─────────────────────────────────────────────────────────
@@ -362,7 +362,7 @@ fn log_key(id: u8, keycode: Option<u16>) {
     let meaning: &[u8] = match keycode {
         Some(HAL_KEY_HOME) => b" (home)\0",
         Some(HAL_KEY_BACK) => b" (back)\0",
-        Some(HAL_KEY_QUICK) => b" (quick panel)\0",
+        Some(HAL_KEY_APPS) => b" (all apps)\0",
         _ => b"\0",
     };
     unsafe {
@@ -408,7 +408,8 @@ pub struct TouchCst66xxConfig {
     pub home_key: i32,
     /// Id of the touch key reported as `HAL_KEY_BACK`, or `-1`.
     pub back_key: i32,
-    /// Id of the touch key reported as `HAL_KEY_QUICK`, or `-1`.
+    /// Id of the touch key reported as `HAL_KEY_APPS`, or `-1`. Named for
+    /// the quick panel, which the key opened before it opened All apps.
     pub quick_key: i32,
 }
 
@@ -651,7 +652,7 @@ fn keycode_for(id: u8, cfg: &TouchCst66xxConfig) -> Option<u16> {
     match id as i32 {
         k if k == cfg.home_key => Some(HAL_KEY_HOME),
         k if k == cfg.back_key => Some(HAL_KEY_BACK),
-        k if k == cfg.quick_key => Some(HAL_KEY_QUICK),
+        k if k == cfg.quick_key => Some(HAL_KEY_APPS),
         _ => None,
     }
 }
@@ -812,6 +813,18 @@ unsafe extern "C" fn cst66xx_init(config: *const c_void) -> i32 {
     S_TOUCH.cfg.home_key = src.home_key;
     S_TOUCH.cfg.back_key = src.back_key;
     S_TOUCH.cfg.quick_key = src.quick_key;
+    // The keys the profile gave a meaning, so Home knows whether it needs an
+    // All apps button of its own. The profile's `quick_key` is named for the
+    // quick panel the key opened before it opened All apps.
+    for (key, code) in [
+        (src.home_key, HAL_KEY_HOME),
+        (src.back_key, HAL_KEY_BACK),
+        (src.quick_key, HAL_KEY_APPS),
+    ] {
+        if key >= 0 {
+            crate::hal_registry::hal_input_declare_key(code);
+        }
+    }
 
     S_TOUCH.irq_pending.store(false, Ordering::Relaxed);
     S_TOUCH.touching = false;
@@ -1386,7 +1399,7 @@ mod tests {
         // the middle one, 1, opens the quick panel.
         let max = keys(0, 2, 1);
         assert_eq!(keycode_for(0, &max), Some(HAL_KEY_HOME));
-        assert_eq!(keycode_for(1, &max), Some(HAL_KEY_QUICK));
+        assert_eq!(keycode_for(1, &max), Some(HAL_KEY_APPS));
         assert_eq!(keycode_for(2, &max), Some(HAL_KEY_BACK));
     }
 

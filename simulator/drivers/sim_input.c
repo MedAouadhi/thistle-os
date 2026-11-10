@@ -46,7 +46,7 @@ static uint16_t sdl_key_to_keycode(SDL_Keycode key)
         /* The touch keys below the T-Deck Max's panel: left, middle and
          * right. */
         case SDLK_F1:        return HAL_KEY_HOME;
-        case SDLK_F2:        return HAL_KEY_QUICK;
+        case SDLK_F2:        return HAL_KEY_APPS;
         case SDLK_F3:        return HAL_KEY_BACK;
         case SDLK_F4:        return HAL_KEY_MIC;   /* hold to dictate */
         default:             return 0;

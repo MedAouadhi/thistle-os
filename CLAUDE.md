@@ -369,22 +369,60 @@ while `thistle_os.cellular.sms` is on even with mobile data off. During a
 data session an SMS is noticed by the modem's RI line and fetched by
 interrupting the session (ADR-0004). Every SMS and MeshCore message, in or
 out, is appended to `/sdcard/messages/{sms,mesh}/<conversation>.jsonl` by
-`msg_log.rs`, unless `thistle_os.messenger.save_history` is off (the
-Messenger's settings). The Messenger reads them back the first time it opens
-after a restart (`rs_msg_log_read_back`): the 12 latest conversations, the
-last 20 messages of each. Only what earlier boots saved comes back, as this
-boot's messages reach it from the kernel's inboxes; `msg_log.rs` marks where
-each file ended before this boot first wrote to it. The simulator's
+`msg_log.rs`, unless `thistle_os.messenger.save_history` is off (Keep history
+in either app's Settings; the section keeps the name of the Messenger they
+were split from). Each app reads its own transport's back the first time it
+opens after a restart (`rs_msg_log_read_back(MSG_LOG_SMS | MSG_LOG_MESH, ...)`,
+with each message's time in seconds): the 12 latest conversations, the last
+20 messages of each. Only what earlier boots saved comes back, as this boot's
+messages reach it from the kernel's inboxes; `msg_log.rs` marks where each
+file ended before this boot first wrote to it. The simulator's
 `--sms "SENDER: TEXT"` puts a message in its fake modem. Ticket 14 has what
-the hardware has yet to confirm; `test_messenger_history.py`.
+the hardware has yet to confirm.
 
 Each message received also buzzes the vibration motor and pops up
 (`msg_alert.rs`, `thistle/msg_alert.h`), unless
-`thistle_os.messenger.alerts` is off or the Messenger has its conversation on
+`thistle_os.messenger.alerts` is off or its app has its conversation on
 screen (`rs_msg_alert_set_viewing`). The buzz is played where the message is
 received, so a LoRa wake buzzes without the UI; the status bar takes the
-pop-up. The status bar's envelope counts unread SMS and mesh messages. The
+pop-up. The status bar's envelope counts unread SMS, mesh and Tailnet chat
+messages, and opens the app holding them (`home_now_messages_app()`). The
 simulator's motor prints `[sim_haptic] message buzz`. Ticket 15.
+
+### The SMS and MeshCore apps
+
+The Messenger was split into two apps, each with only its transport's
+conversations, drawn in Chat's look by a shared kit
+(`apps/chatkit/`, `chatkit/chatkit.h`): two tabs (Chats and the app's
+contacts), a conversation of table-drawn bubbles, Settings.
+
+- **The kit is a component with no app** (`THISTLE_APP_LIBS` in
+  `cmake/thistle_apps.cmake`). It borrows Chat's pictures and text helpers
+  (`tailchat_icons_*`, `tailchat_core.c`) and the Reader's 16 px font for
+  the accents Montserrat lacks. Each app hands it a `chatkit_app_t` of
+  callbacks: poll, read the history, send, its contacts and settings.
+- **Each app keeps its conversations in a `chatkit_store_t`** of its own
+  (`chatkit_store.c`, host-tested by `apps/chatkit/tests/run_tests.sh`):
+  16 conversations of 20 messages, in PSRAM, kept while the device runs, as
+  the kernel hands each message over once. A full store forgets the one
+  longest quiet, unread ones last, never the Public channel or the one on
+  screen.
+- **SMS** (`apps/sms/`, `com.thistle.sms`, on every board): a conversation
+  per number, matched by its last 9 digits (`sms_core.c`); Contacts searches
+  the phonebook and offers a number typed whole; Call in a conversation's
+  header. `rs_sms_send()` blocks for seconds, so it runs on a task of its
+  own (`sms_send`, 8 KB internal stack, the device held awake), and the
+  bubble shows a clock until it is done. The Phone app's Message opens a
+  conversation here (`rs_sms_request_compose()`). The older
+  `contact_manager.rs` still names numbers the phonebook does not, and
+  encrypts for its contacts with an encrypted chat.
+- **MeshCore** (`apps/meshchat/`, `com.thistle.meshchat`, only with a
+  radio): the Public channel, a group whose bubbles name their writers, and
+  a conversation per node; Nodes lists the chat nodes heard, with Advertise;
+  Settings switches the mesh. The simulator runs no MeshCore node, so there
+  it never goes on air and sending is refused. Its component is `meshchat`,
+  not `meshcore`: that name is the MeshCore engine's (`components/meshcore`).
+- `simulator/tests/test_sms.py`, `test_meshchat.py`.
 
 ### Calls and the Phone app
 
@@ -409,7 +447,7 @@ switch (`AUDIO_SEL`, XL9555 P12, HIGH = modem). ADR-0008 has the reasons,
   every `contacts.vcf` on the card, any case, up to 4 folders deep, read on a
   one-shot thread the first time anything asks. Stars are kept by name in
   `/sdcard/phone/starred.json`; the call log is `/sdcard/phone/calls.jsonl`.
-  The Messenger's older `contact_manager.rs` is separate.
+  The SMS app's older `contact_manager.rs` is separate.
 - **The call screen is system UI** (`components/ui/src/call_ui.c`), like the
   quick panel: LVGL window managers only. The Phone app (`apps/phone/`) only
   dials; "Message" hands over through `rs_sms_request_compose()`.
@@ -549,8 +587,7 @@ power-off take down. Ticket 06 has the bring-up and the bench results.
 
 ### The quick panel
 
-A drag down from the status bar, or the quick key (`HAL_KEY_QUICK`, the
-T-Deck Max's middle touch key, `quick_key` in its profile), drops a panel of
+A drag down from the status bar, and only that, drops a panel of
 switches and sliders over the app in front (`components/ui/src/quick_panel.c`,
 `ui/quick_panel.h`); Back, Esc, Home, a tap below it or a drag up close it.
 The drag is picked out of the raw touch stream by `pull_gesture.c`, which has
@@ -566,16 +603,37 @@ host tests. LVGL window managers only; thistle-tk has none.
   `light_prefs.rs`, which now keeps the lights' levels. Set the lights
   through `light_set_display()` / `light_set_keys()`, not the drivers, or
   the panel shows a stale level.
-- `simulator/tests/test_quick_panel.py`; the simulator's `--drag` and
-  `--tap quick` drive it.
+- `simulator/tests/test_quick_panel.py`; the simulator's `--drag` drives
+  it. The T-Deck Max's middle touch key opened it until it became the apps
+  key (Home, below).
 
 ### Home
 
 The launcher's Home (`components/apps_builtin/launcher/`) is, top to
 bottom, the clock and the date, up to two rows of what is new, six pinned
-apps (four on a landscape screen) and All apps. `.scratch/home/spec.md` has
-the rest. LVGL window managers only; thistle-tk's launcher is its own.
+apps (four on a landscape screen) and, on a board with no apps key, All
+apps. `.scratch/home/spec.md` has the rest. LVGL window managers only;
+thistle-tk's launcher is its own.
 
+- **The apps key opens All apps**: `HAL_KEY_APPS`, the T-Deck Max's middle
+  touch key (still `quick_key` in its profile, named for the quick panel it
+  opened before). From an app it brings Home forward with All apps open
+  over it; pressed again it closes it (`ui_manager_set_apps_handler()`). A
+  board's input drivers declare the keys they have
+  (`hal_input_declare_key()`, `hal_input_has_key()`); the CST66xx driver
+  declares those its profile names, and the simulator only for the Max.
+  Home leaves out its All apps bar where the key exists, and its pinned
+  apps take the room, the spare height shared above, between and below the
+  rows.
+- **The pinned places are the user's to choose**: holding a tile opens a
+  list of every app (one `lv_table`), and the one tapped takes the place;
+  an app pinned elsewhere swaps places with it (`home_choose_pin()`). Home
+  saves every place, `thistle_os.home.pins` in system.json
+  (`home_prefs.rs`, `thistle/home_prefs.h`), so a place the user did not
+  touch keeps its app. A place whose app is not installed, or never chosen,
+  takes Home's own choice (`home_place_pins()`); a place with no app at all
+  shows "+", and a tap opens the list. The log says `(launcher_ui) pinned
+  com.thistle.filemgr in place 1: ESP_OK`.
 - **The bands are `home_core.c`'s**, host-tested in
   `simulator/tests/test_home_core.c`: where each goes on a screen of a given
   size, which apps are pinned, the date's text, and which rows of what is
@@ -602,8 +660,9 @@ the rest. LVGL window managers only; thistle-tk's launcher is its own.
   `launcher/fonts/home_clock_44{,_mono}.c`, made by
   `launcher/tools/gen_clock_font.sh`; the rows' detail line falls back on
   `home_latin_14{,_mono}.c` (`gen_latin_font.sh`) for a name's accents.
-- The keyboard's focus starts on All apps, unseen, so the first Tab goes
-  round to the first row.
+- The keyboard's focus starts on Home's last button, All apps or else the
+  last pinned app, unseen, so the first Tab goes round to the first row.
+  Enter held on a tile opens its list, as holding it does.
 - `test_launcher_visuals.py` masks Home's clock band as it does the status
   bar, and runs on a scratch copy of the card.
 
@@ -1176,8 +1235,9 @@ deletes its app drawer before opening an app from it: its nineteen tiles,
 styled a property at a time, once left Files too little for a card of
 nine folders. Home's widgets go the same way whenever an app comes to the
 front; in the simulator a pool run dry shows as a segfault in
-`lv_draw_add_task`, not a hang. A Messenger bubble costs about 0.75 KB even
-with shared styles, which is why a conversation keeps 20 messages.
+`lv_draw_add_task`, not a hang. The Messenger's bubbles, widgets with shared
+styles, cost about 0.75 KB each, which is why a conversation keeps 20
+messages; the SMS and MeshCore apps now draw theirs in one `lv_table`.
 
 ### The e-paper refresh
 
@@ -1262,10 +1322,11 @@ The kernel is **100% Rust and hardware-independent**. It never calls ESP-IDF har
 - **Kernel (Rust)** (`components/kernel_rs/`): 100% Rust. 57 modules: manifest parser, permissions, IPC, events, app manager, version, crypto, HAL registry, driver manager, WM, app store, wifi/ble/net managers, OTA, and more.
 - **Display Server** (`components/kernel/src/display_server.c`): Surface management, compositor, WM vtable interface.
 - **UI** (`components/ui/`): thistle-tk WM (default). LVGL-based WM also available. Both loadable as `.wm.elf`.
-- **Apps**: 19 built in, and 4 from the App Store (Notes, Weather, WiFi
-  Scanner, Flashlight: `standalone_apps/`). Five remain in
-  `components/apps_builtin/`; the other fourteen are their own components under
-  `apps/`, listed once in `cmake/thistle_apps.cmake` for the simulators and
+- **Apps**: 20 built in, and 4 from the App Store (Notes, Weather, WiFi
+  Scanner, Flashlight: `standalone_apps/`). Four remain in
+  `components/apps_builtin/`; the other sixteen are their own components
+  under `apps/` (with `chatkit/`, which SMS and MeshCore share), listed once
+  in `cmake/thistle_apps.cmake` for the simulators and
   found by `EXTRA_COMPONENT_DIRS` for the firmware, which excludes the four
   store apps' old LVGL versions still there. The app manager has 32
   slots (`APP_SLOTS_MAX`), the built-in apps taking theirs at boot before any
@@ -1339,8 +1400,9 @@ launching them under thistle-tk segfaults. App Store and Flashlight exist in
 both toolkits under the same IDs, and the app manager keeps the first
 registration of an ID, so each manager registers only its own:
 `lvgl_apps_register_builtin()` under LVGL, `tk_native_apps_register()` under
-thistle-tk. All nineteen built-in apps are reachable by default on every S3
-board; naming `thistle-tk` trades seventeen of them for its refresh behaviour.
+thistle-tk. All twenty built-in apps are reachable by default on every S3
+board (MeshCore and Navigator only with a radio and a GPS); naming
+`thistle-tk` trades eighteen of them for its refresh behaviour.
 
 `simulator/tests/test_app_matrix.py` launches every app on every simulated
 device profile, and the simulator's `--wm NAME` overrides `system.json` for a

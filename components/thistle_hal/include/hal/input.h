@@ -26,8 +26,15 @@ typedef struct {
  * never delivered to an app as text. */
 #define HAL_KEY_HOME 0x0100  /* Back to the launcher's home screen */
 #define HAL_KEY_BACK 0x0101  /* Up one page in the app in front; Home from its first */
-#define HAL_KEY_QUICK 0x0102 /* Open or close the quick panel */
+#define HAL_KEY_APPS 0x0102 /* Open or close All apps over Home */
 #define HAL_KEY_MIC 0x0103   /* Held to dictate into the focused text field */
+
+/* Which of the keys above the board has, as its input drivers declare them
+ * when they start: HAL_KEY_APPS is the T-Deck Max's middle touch key, and a
+ * board without it keeps an All apps button on Home. Only keycodes 0x0100 to
+ * 0x011F; anything else is ESP_ERR_INVALID_ARG, and never had. */
+esp_err_t hal_input_declare_key(uint16_t keycode);
+bool hal_input_has_key(uint16_t keycode);
 
 typedef void (*hal_input_cb_t)(const hal_input_event_t *event, void *user_data);
 

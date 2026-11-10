@@ -1,0 +1,7 @@
+{
+  "id": "com.thistle.sms",
+  "name": "SMS",
+  "version": "0.1.0",
+  "allow_background": false,
+  "permissions": ["network", "storage"]
+}
