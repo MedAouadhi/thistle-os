@@ -943,6 +943,19 @@ shown on the device (ADR-0017; `.scratch/maps/spec.md`, the vocabulary in
   simulator's `lv_tick` runs fast. The log says `marker moved 30 px to
   150,148, 5.0 s after the last`, `marker held: ...`, `page jump east to
   keep the marker in view: ...`, `locate: ...`.
+- **A static transit network can be baked into the Pack**: `build
+  --transit osm` (the extract's route relations) or `--transit FEED`
+  (GTFS, a .zip or a folder) writes an OVLY section, format 1.1, of two
+  overlays, "Transit lines" (a line a stretch the same routes share,
+  labelled `5, 23`) and "Transit stops" (one point a stop and its
+  platforms, with its `lines`), 256 items each, the most important kept
+  (`transit.py`, `docs/maps/map-pack-format.md`). The engine checks OVLY
+  whole at opening and leaves a damaged one out, the tiles shown as ever
+  (`map_pack_overlay_*()`, `map_overlay_add_from_pack()`); the Maps app
+  lists them first in its Layers panel, beneath the files on the map, with
+  a card of their properties. `testdata/fixture-transit.tmap` is the
+  golden fixture's tiles with the network baked in;
+  `simulator/tests/test_map_transit.py`.
 - **The Navigator's tracks are an overlay** (Overlays, below): a line a
   GPX `trkseg`, black 3 px in a paper casing 7 px, drawn in the same pass
   as the view swapped in, so a step with them on is still one refresh.

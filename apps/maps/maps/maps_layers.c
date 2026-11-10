@@ -1,6 +1,7 @@
 /*
  * SPDX-License-Identifier: BSD-3-Clause
- * ThistleOS — the Maps app's overlays: the GeoJSON files on the card
+ * ThistleOS — the Maps app's overlays: the Pack's own, and the GeoJSON
+ * files on the card
  *
  *   ┌──────────────────────────────┐
  *   │ [≡]                     [⟳]  │  Layers: each file on or off.
@@ -14,9 +15,14 @@
  *   │ └──────────────────────────┘ │
  *   └──────────────────────────────┘
  *
+ * The overlays baked into the Map Pack (map_pack.h), a static transit
+ * network's lines and stops, come first in the panel, beneath the files'
+ * on the map, with an info card of their own properties.
+ *
  * Every *.geojson and *.json in /sdcard/maps/overlays/, by name, is an
- * overlay (with none, there are no Layers and Refresh buttons) (map_overlay.h), named by its file's name without the suffix,
- * each above the one before; at most MAX_FILES. A file is a GeoJSON
+ * overlay (map_overlay.h), named by its file's name without the suffix,
+ * each above the one before; at most MAX_FILES. With no overlay at all
+ * there is no Layers button, and with no file no Refresh. A file is a GeoJSON
  * FeatureCollection: Points and MultiPoints are points, labelled with
  * their "name" (or "title"), with the icon their "marker-symbol" (or
  * "icon") names: circle, square, triangle or cross, else a dot, and
@@ -51,6 +57,7 @@ static const char *TAG = "maps";
 
 #define OVERLAYS_DIR  THISTLE_SDCARD "/maps/overlays"
 #define MAX_FILES     8
+#define MAX_LAYERS    (MAX_FILES + MAP_PACK_MAX_OVERLAYS)
 #define FILE_NAME_MAX 64
 #define FILE_MAX_SIZE (1024 * 1024)
 #define WATCH_MS      2000
@@ -65,6 +72,7 @@ typedef struct {
 } props_t;
 
 typedef struct {
+    int            pack_overlay;  /* the Pack's overlay; -1 for a file */
     char           file[FILE_NAME_MAX];
     char           name[MAP_OVERLAY_NAME_MAX];
     time_t         mtime;
@@ -80,8 +88,10 @@ static struct {
     map_view_t *view;
     lv_obj_t   *root;
     int         bottom;
-    layer_t    *layers;  /* MAX_FILES, PSRAM */
+    map_pack_t *pack;
+    layer_t    *layers;  /* MAX_LAYERS, PSRAM: the Pack's, then the files */
     int         count;
+    int         files;
     lv_timer_t *watch;
     lv_obj_t   *layers_button;
     lv_obj_t   *panel;
@@ -413,17 +423,43 @@ static void card_lines(const layer_t *layer, props_t props, char *out, size_t ca
     }
 }
 
-static void show_card(layer_t *layer, int item)
+/* The same for an item of the Pack's: its properties as the Pack has them. */
+static void pack_card_lines(const layer_t *layer, int id, char *out, size_t cap, char *log,
+                            size_t log_cap)
+{
+    out[0] = '\0';
+    size_t used = 0, logged = strlen(log);
+    char key[MAP_PACK_KEY_MAX], value[MAP_PACK_VALUE_MAX];
+    for (int p = 0; p < CARD_LINES && map_pack_overlay_prop(s.pack, layer->pack_overlay, id, p, key,
+                                                            sizeof key, value, sizeof value);
+         p++) {
+        if (!value[0]) continue;
+        int n = snprintf(out + used, cap - used, "%s%s: %s", used ? "\n" : "", key, value);
+        if (n < 0 || (size_t)n >= cap - used) break;
+        used += (size_t)n;
+        int m = snprintf(log + logged, log_cap - logged, "; %s: %s", key, value);
+        if (m > 0 && (size_t)m < log_cap - logged) logged += (size_t)m;
+    }
+}
+
+static void show_card(layer_t *layer, int item, uint32_t id)
 {
     close_card();
+    /* A Pack's line has a label the overlay does not draw: its routes. */
+    map_pack_item_t pi;
     const char *name = map_overlay_item_label(layer->overlay, item);
+    if (layer->pack_overlay >= 0 &&
+        map_pack_overlay_item(s.pack, layer->pack_overlay, (int)id, &pi)) {
+        name = pi.label;
+    }
     char title[MAP_OVERLAY_LABEL_MAX + 16];
     if (name[0]) snprintf(title, sizeof title, "%s", name);
     else snprintf(title, sizeof title, "%s", layer->name);
     static char body[CARD_TEXT];
     char log[CARD_TEXT + 96];
     snprintf(log, sizeof log, "%s", title);
-    card_lines(layer, layer->props[item], body, sizeof body, log, sizeof log);
+    if (layer->pack_overlay >= 0) pack_card_lines(layer, (int)id, body, sizeof body, log, sizeof log);
+    else card_lines(layer, layer->props[item], body, sizeof body, log, sizeof log);
     ESP_LOGI(TAG, "info card: %s", log);
 
     s.card = lv_obj_create(s.root);
@@ -459,8 +495,7 @@ static void show_card(layer_t *layer, int item)
 static void tap_cb(map_overlay_t *overlay, int item, uint32_t id, void *user)
 {
     (void)overlay;
-    (void)id;
-    show_card(user, item);
+    show_card(user, item, id);
 }
 
 static void miss_cb(map_view_t *view, int x, int y, void *user)
@@ -482,6 +517,7 @@ static bool reread_changed(void)
     bool any = false;
     for (int i = 0; i < s.count; i++) {
         layer_t *l = &s.layers[i];
+        if (l->pack_overlay >= 0) continue;
         char path[sizeof OVERLAYS_DIR + FILE_NAME_MAX + 1];
         snprintf(path, sizeof path, "%s/%s", OVERLAYS_DIR, l->file);
         struct stat st;
@@ -646,35 +682,67 @@ static int by_name(const void *a, const void *b)
     return strcmp(((const layer_t *)a)->file, ((const layer_t *)b)->file);
 }
 
-/* The overlay files' names, sorted, into s.layers. */
+/* The overlay files' names, sorted, into s.layers after the Pack's. */
 static void find_files(void)
 {
+    layer_t *first = &s.layers[s.count];
     DIR *dir = opendir(OVERLAYS_DIR);
     if (!dir) return;
     struct dirent *e;
     while ((e = readdir(dir)) != NULL) {
         if (!is_overlay_file(e->d_name)) continue;
-        if (s.count == MAX_FILES) {
+        if (s.files == MAX_FILES) {
             ESP_LOGW(TAG, "more than %d overlay files: %s and the rest left out", MAX_FILES,
                      e->d_name);
             break;
         }
-        layer_t *l = &s.layers[s.count++];
+        layer_t *l = &first[s.files++];
         memset(l, 0, sizeof *l);
+        l->pack_overlay = -1;
         snprintf(l->file, sizeof l->file, "%s", e->d_name);
     }
     closedir(dir);
-    qsort(s.layers, (size_t)s.count, sizeof *s.layers, by_name);
+    qsort(first, (size_t)s.files, sizeof *s.layers, by_name);
 }
 
-bool maps_layers_open(map_view_t *view, lv_obj_t *root, int bottom)
+/* The Pack's overlays, each a layer. */
+static void open_pack_overlays(map_view_t *view)
+{
+    if (map_pack_overlays_damaged(s.pack)) {
+        ESP_LOGW(TAG, "the Pack's overlays are damaged: left out");
+    }
+    for (int o = 0; o < map_pack_overlay_count(s.pack); o++) {
+        layer_t *l = &s.layers[s.count];
+        memset(l, 0, sizeof *l);
+        l->pack_overlay = o;
+        snprintf(l->name, sizeof l->name, "%s", map_pack_overlay_name(s.pack, o));
+        /* Beneath the files', above the tracks (made before, at 0). */
+        l->overlay = map_overlay_create(view, l->name, 0, tap_cb, l);
+        if (!l->overlay) {
+            ESP_LOGE(TAG, "no memory for the Pack's overlay %s", l->name);
+            return;
+        }
+        s.count++;
+        int added = map_overlay_add_from_pack(l->overlay, s.pack, o);
+        int items = map_pack_overlay_items(s.pack, o);
+        if (added < items) {
+            ESP_LOGW(TAG, "Pack overlay %s: %d items, %d left out", l->name, added, items - added);
+        } else {
+            ESP_LOGI(TAG, "Pack overlay %s: %d items", l->name, added);
+        }
+        map_overlay_changed(l->overlay);
+    }
+}
+
+bool maps_layers_open(map_view_t *view, map_pack_t *pack, lv_obj_t *root, int bottom)
 {
     memset(&s, 0, sizeof s);
     s.view = view;
+    s.pack = pack;
     s.root = root;
     s.bottom = bottom;
     init_styles();
-    s.layers = alloc_psram(sizeof(layer_t) * MAX_FILES);
+    s.layers = alloc_psram(sizeof(layer_t) * MAX_LAYERS);
     s.points = alloc_psram(sizeof(map_lat_lon_t) * MAP_OVERLAY_MAX_VERTICES);
     if (!s.layers || !s.points) {
         ESP_LOGE(TAG, "no memory for the overlays");
@@ -684,17 +752,20 @@ bool maps_layers_open(map_view_t *view, lv_obj_t *root, int bottom)
         s.points = NULL;
         return false;
     }
+    open_pack_overlays(view);
     find_files();
-    for (int i = 0; i < s.count; i++) {
-        layer_t *l = &s.layers[i];
+    int packs = s.count;
+    for (int f = 0; f < s.files; f++) {
+        layer_t *l = &s.layers[packs + f];
         size_t n = strlen(l->file) - (strstr(l->file, ".geojson") ? 8 : 5);
         snprintf(l->name, sizeof l->name, "%.*s", (int)n, l->file);
-        l->overlay = map_overlay_create(view, l->name, i + 1, tap_cb, l);
+        l->overlay = map_overlay_create(view, l->name, f + 1, tap_cb, l);
         if (!l->overlay) {
             ESP_LOGE(TAG, "no memory for overlay %s", l->file);
-            s.count = i;
+            s.files = f;
             break;
         }
+        s.count++;
         char path[sizeof OVERLAYS_DIR + FILE_NAME_MAX + 1];
         snprintf(path, sizeof path, "%s/%s", OVERLAYS_DIR, l->file);
         struct stat st;
@@ -705,6 +776,7 @@ bool maps_layers_open(map_view_t *view, lv_obj_t *root, int bottom)
     if (s.count == 0) return false;  /* no buttons for nothing to switch */
     lv_obj_add_event_cb(map_view_obj(view), key_cb, LV_EVENT_KEY, NULL);
     s.layers_button = corner_button(LV_SYMBOL_LIST, LV_ALIGN_TOP_LEFT, MARGIN, layers_cb, "layers");
+    if (s.files == 0) return false;  /* the Pack's do not change */
     corner_button(LV_SYMBOL_REFRESH, LV_ALIGN_TOP_RIGHT, -MARGIN, refresh_cb, "refresh");
     s.watch = lv_timer_create(watch_cb, WATCH_MS, NULL);
     return true;

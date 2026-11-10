@@ -11,6 +11,13 @@ After a deliberate change to the format or the cartography, rebuild it:
 
     python3 tools/maps/thistle_maps.py build tools/maps/testdata/fixture-regions.geojson \\
         --extract tools/maps/testdata/fixture.osm -o tools/maps/testdata/fixture.tmap
+
+and testdata/fixture-transit.tmap, the same with the extract's transit
+network baked in, which the simulator's test_map_transit.py shows:
+
+    python3 tools/maps/thistle_maps.py build tools/maps/testdata/fixture-regions.geojson \\
+        --extract tools/maps/testdata/fixture.osm --transit osm \\
+        -o tools/maps/testdata/fixture-transit.tmap
 """
 
 from __future__ import annotations
@@ -36,6 +43,8 @@ DATA = HERE / "testdata"
 REGIONS = DATA / "fixture-regions.geojson"
 EXTRACT = DATA / "fixture.osm"
 GOLDEN = DATA / "fixture.tmap"
+GTFS = DATA / "fixture-gtfs"
+GOLDEN_TRANSIT = DATA / "fixture-transit.tmap"
 
 MEDINA = (36.8000, 10.1800)
 LAC_NORD = (36.8150, 10.2000)
@@ -120,6 +129,66 @@ class Pack:
                 raise ValueError("index not sorted by z, x, y")
             previous = key
             out[key] = (offset, length, crc)
+        return out
+
+    def overlays(self) -> list[dict]:
+        """OVLY: [{"name", "items": [{"kind", "icon", "points", "label",
+        "props"}]}]; [] when the Pack has none."""
+        body = self.sections.get(b"OVLY")
+        if body is None:
+            return []
+        kinds = {0: "point", 1: "line", 2: "polygon", 3: "text"}
+        least = {"point": 1, "line": 2, "polygon": 3, "text": 1}
+
+        def take(n: int) -> bytes:
+            nonlocal at
+            if at + n > len(body):
+                raise ValueError("OVLY cut short")
+            at += n
+            return body[at - n:at]
+
+        def u8() -> int:
+            return take(1)[0]
+
+        def text(limit: int) -> str:
+            n = u8()
+            if n > limit:
+                raise ValueError(f"OVLY text of {n} bytes")
+            return take(n).decode("utf-8")
+
+        at = 0
+        (count,) = struct.unpack("<H", take(2))
+        if count > 8:
+            raise ValueError("more than 8 overlays")
+        out = []
+        for _ in range(count):
+            name = text(31)
+            if not name:
+                raise ValueError("an overlay with no name")
+            (n_items,) = struct.unpack("<H", take(2))
+            if n_items > 256:
+                raise ValueError("more than 256 items")
+            items, vertices = [], 0
+            for _ in range(n_items):
+                kind, icon, n = struct.unpack("<BBH", take(4))
+                kind = kinds[kind]
+                if icon > 4 or (kind != "point" and icon != 0):
+                    raise ValueError(f"icon {icon}")
+                if n < least[kind] or (kind in ("point", "text") and n != 1):
+                    raise ValueError(f"a {kind} of {n} points")
+                points = [tuple(v / 1e7 for v in struct.unpack("<ii", take(8))) for _ in range(n)]
+                vertices += n
+                label = text(63)
+                props = [(text(31), text(159)) for _ in range(u8())]
+                if len(props) > 10 or any(not k for k, _v in props):
+                    raise ValueError("properties")
+                items.append({"kind": kind, "icon": icon, "points": points, "label": label,
+                              "props": dict(props)})
+            if vertices > 16384:
+                raise ValueError("more than 16384 vertices")
+            out.append({"name": name, "items": items})
+        if at != len(body):
+            raise ValueError("trailing bytes in OVLY")
         return out
 
     def tile(self, z: int, x: int, y: int) -> bytes:
@@ -482,6 +551,169 @@ class Building(unittest.TestCase):
                            "-o", str(Path(tmp) / "x.tmap"), check=False)
             self.assertNotEqual(run.returncode, 0)
             self.assertIn("deepest_zoom", run.stderr)
+
+
+def metres_from_medina(east_m: float, north_m: float) -> tuple[float, float]:
+    """make_fixture.py's at(MEDINA, ...)."""
+    return (MEDINA[0] + north_m / 111_320.0,
+            MEDINA[1] + east_m / (111_320.0 * math.cos(math.radians(MEDINA[0]))))
+
+
+def near(a: tuple[float, float], b: tuple[float, float], m: float = 2.0) -> bool:
+    return metres(a, b) <= m
+
+
+@functools.lru_cache(maxsize=None)
+def transit_build(source: str) -> bytes:
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "transit.tmap"
+        run = run_tool("build", str(REGIONS), "--extract", str(EXTRACT), "--transit", source,
+                       "-o", str(out))
+        transit_build.logs[source] = run.stdout
+        return out.read_bytes()
+
+
+transit_build.logs = {}
+
+
+class Transit(unittest.TestCase):
+    """--transit bakes the stops and lines inside the Regions into the Pack
+    as two overlays (OVLY), from the extract's route relations or a GTFS
+    feed; the tiles stay as they are."""
+
+    def overlays(self, source: str) -> dict[str, list[dict]]:
+        pack = Pack(transit_build(source))
+        self.assertEqual((pack.major, pack.minor), (1, 1))
+        return {o["name"]: o["items"] for o in pack.overlays()}
+
+    def test_a_pack_without_transit_has_no_overlays_and_stays_1_0(self):
+        pack = Pack(fresh_build())
+        self.assertEqual((pack.major, pack.minor), (1, 0))
+        self.assertNotIn(b"OVLY", pack.sections)
+
+    def test_the_tiles_are_those_of_a_pack_without_transit(self):
+        plain = Pack(fresh_build())
+        for source in ("osm", str(GTFS)):
+            baked = Pack(transit_build(source))
+            self.assertEqual(baked.index().keys(), plain.index().keys())
+            for key in plain.index():
+                self.assertEqual(baked.tile(*key), plain.tile(*key), f"{source} {key}")
+            self.assertEqual(baked.regions(), plain.regions())
+
+    def test_osm_stops_merged_by_name_with_their_lines_and_far_ones_left_out(self):
+        stops = self.overlays("osm")["Transit stops"]
+        self.assertEqual([s["label"] for s in stops],
+                         ["Bab Bhar", "Place Barcelone", "Avenue de France"])
+        bab, place, avenue = stops
+        self.assertEqual(bab["props"], {"lines": "T1", "mode": "tram"})
+        self.assertEqual(avenue["props"], {"lines": "5, 23", "mode": "bus"})
+        # Bab Bhar's two platforms, 20 m apart: one stop between them.
+        self.assertTrue(near(bab["points"][0], metres_from_medina(100, 140)))
+        self.assertTrue(near(place["points"][0], metres_from_medina(-200, 150)))
+        self.assertEqual([(s["kind"], s["icon"]) for s in stops],
+                         [("point", 1), ("point", 1), ("point", 0)])  # ring: tram, dot: bus
+
+    def test_osm_lines_follow_the_routes_once_each_with_their_names(self):
+        lines = self.overlays("osm")["Transit lines"]
+        self.assertEqual([(l["kind"], l["label"], l["props"]) for l in lines],
+                         [("line", "T1", {"mode": "tram"}), ("line", "5, 23", {"mode": "bus"})])
+        tram, bus = lines
+        # Straight: the tram's stop vertices are simplified away.
+        ends = {tuple(round(v, 5) for v in p) for p in (tram["points"][0], tram["points"][-1])}
+        want = {tuple(round(v, 5) for v in metres_from_medina(x, 140)) for x in (-600, 600)}
+        self.assertEqual(ends, want)
+        self.assertEqual(len(tram["points"]), 2)
+        for p in bus["points"]:
+            self.assertTrue(near((p[0], p[1]), (metres_from_medina(0, -60)[0], p[1])))
+
+    def test_gtfs_gives_the_same_network_plus_its_unshaped_route(self):
+        overlays = self.overlays(str(GTFS))
+        stops = {s["label"]: s for s in overlays["Transit stops"]}
+        self.assertEqual(set(stops), {"Bab Bhar", "Place Barcelone", "Avenue de France",
+                                      "Rue d'Alger"})
+        self.assertEqual(stops["Bab Bhar"]["props"], {"lines": "T1", "mode": "tram"})
+        self.assertEqual(stops["Avenue de France"]["props"], {"lines": "5, 7, 23", "mode": "bus"})
+        # A station's platforms are the station.
+        self.assertTrue(near(stops["Bab Bhar"]["points"][0], metres_from_medina(100, 140), 0.5))
+        lines = overlays["Transit lines"]
+        # T1 runs both ways on two shapes, and 5 and 23 share one: drawn once each.
+        self.assertEqual([l["label"] for l in lines], ["T1", "5, 23", "7"])
+        # 7 has no shape: from its first stop to its last, whichever way.
+        seven = lines[2]["points"]
+        a, b = metres_from_medina(-20, -50), metres_from_medina(250, -300)
+        self.assertEqual(len(seven), 2)
+        self.assertTrue((near(seven[0], a) and near(seven[1], b))
+                        or (near(seven[0], b) and near(seven[1], a)), seven)
+
+    def test_the_build_says_what_it_baked(self):
+        transit_build("osm")
+        self.assertIn("transit: 2 lines, 3 stops", transit_build.logs["osm"])
+
+    def test_the_same_source_gives_the_same_bytes(self):
+        first = transit_build("osm")
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "again.tmap"
+            run_tool("build", str(REGIONS), "--extract", str(EXTRACT), "--transit", "osm",
+                     "-o", str(out))
+            self.assertEqual(out.read_bytes(), first)
+
+    def test_the_golden_transit_pack_is_what_the_tool_builds(self):
+        fresh, golden = Pack(transit_build("osm")), Pack(GOLDEN_TRANSIT.read_bytes())
+        self.assertEqual(fresh.overlays(), golden.overlays())
+        self.assertEqual(sorted(fresh.index()), sorted(golden.index()))
+
+    def test_an_overlay_holds_at_most_256_items_the_most_important_kept(self):
+        """A grid of 300 bus stops and one railway station: 256 stops, the
+        station first, and the build says how many were left out."""
+        rows = [("S", "Central", *metres_from_medina(0, 0), 0, "")]
+        trips = ["R1,D,t1,", "R2,D,t2,"]
+        times = ["t1,08:00:00,08:00:00,S,1"]
+        for i in range(300):
+            rows.append((f"b{i}", f"Stop {i:03d}", *metres_from_medina(-280 + (i % 20) * 28,
+                                                                     -280 + (i // 20) * 37), 0, ""))
+            times.append(f"t2,08:00:00,08:00:00,b{i},{i + 1}")
+        with tempfile.TemporaryDirectory() as tmp:
+            feed = Path(tmp) / "feed"
+            feed.mkdir()
+            (feed / "stops.txt").write_text(
+                "stop_id,stop_name,stop_lat,stop_lon,location_type,parent_station\n"
+                + "".join(",".join(str(v) for v in r) + "\n" for r in rows))
+            (feed / "routes.txt").write_text("route_id,route_short_name,route_type\n"
+                                             "R1,S1,2\nR2,100,3\n")
+            (feed / "trips.txt").write_text("route_id,service_id,trip_id,shape_id\n"
+                                            + "\n".join(trips) + "\n")
+            (feed / "stop_times.txt").write_text(
+                "trip_id,arrival_time,departure_time,stop_id,stop_sequence\n"
+                + "\n".join(times) + "\n")
+            out = Path(tmp) / "many.tmap"
+            run = run_tool("build", str(REGIONS), "--extract", str(EXTRACT), "--transit",
+                           str(feed), "-o", str(out))
+            stops = {o["name"]: o["items"] for o in Pack(out.read_bytes()).overlays()}["Transit stops"]
+        self.assertEqual(len(stops), 256)
+        self.assertEqual((stops[0]["label"], stops[0]["icon"]), ("Central", 2))  # a square
+        self.assertIn("transit: 1 lines, 256 stops (45 left out, 256 at most)", run.stdout)
+
+    def test_a_missing_feed_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = run_tool("build", str(REGIONS), "--extract", str(EXTRACT), "--transit",
+                           str(Path(tmp) / "nowhere.zip"), "-o", str(Path(tmp) / "x.tmap"),
+                           check=False)
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn("no GTFS feed", run.stderr)
+
+    def test_a_zipped_feed_reads_as_its_folder(self):
+        import zipfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp) / "feed.zip"
+            with zipfile.ZipFile(archive, "w") as z:
+                for f in sorted(GTFS.iterdir()):
+                    z.write(f, f.name)
+            out = Path(tmp) / "zip.tmap"
+            run_tool("build", str(REGIONS), "--extract", str(EXTRACT), "--transit", str(archive),
+                     "-o", str(out))
+            self.assertEqual(Pack(out.read_bytes()).overlays(),
+                             Pack(transit_build(str(GTFS))).overlays())
 
 
 class _Quiet(http.server.SimpleHTTPRequestHandler):

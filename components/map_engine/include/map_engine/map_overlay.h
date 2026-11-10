@@ -110,6 +110,13 @@ int map_overlay_add_line(map_overlay_t *overlay, const map_lat_lon_t *points, in
 int map_overlay_add_polygon(map_overlay_t *overlay, const map_lat_lon_t *points, int count,
                             uint32_t id);
 
+/* Adds every item of the Pack's baked overlay `overlay` (map_pack.h), in
+ * the Pack's order, each with its index in the Pack as its id (for
+ * map_pack_overlay_prop()). Returns how many were added, which is fewer
+ * when the overlay was not empty; -1 if the Pack has no such overlay.
+ * Nothing shows until map_overlay_changed(). */
+int map_overlay_add_from_pack(map_overlay_t *overlay, const map_pack_t *pack, int overlay_index);
+
 /* Removes every item; nothing shows until map_overlay_changed(). */
 void map_overlay_clear(map_overlay_t *overlay);
 

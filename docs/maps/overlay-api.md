@@ -128,6 +128,7 @@ widget of its own over the map.
 | `map_overlay_add_text(o, lat, lon, text, id)` | a text with no icon |
 | `map_overlay_add_line(o, points, n, id)` | a line of n >= 2 points |
 | `map_overlay_add_polygon(o, points, n, id)` | a polygon of n >= 3 points |
+| `map_overlay_add_from_pack(o, pack, i)` | adds the Pack's baked overlay i (OVLY, a transit network), each item's id its index in the Pack |
 | `map_overlay_clear(o)` | removes every item |
 | `map_overlay_changed(o)` | done changing it: drawn under the 20 s rule |
 | `map_overlay_set_visible(o, on)`, `map_overlay_visible(o)` | on or off, drawn at once |
@@ -156,6 +157,17 @@ its overlays, 142 KB each on the T-Deck Max, for the screen as shown and the
 next one, which it compares to find what changed. Drawing runs on the UI
 task and allocates nothing in internal RAM but a few hundred bytes for a
 polygon's crossings.
+
+## Overlays baked into the Pack
+
+A Pack built with `--transit` holds overlays of its own, a transit
+network's lines and stops (`docs/maps/map-pack-format.md`, OVLY). An app
+reads them with `map_pack_overlay_count()`, `_name()`, `_items()`,
+`_item()`, `_vertex()` and `_prop()` (`map_pack.h`), or puts one on its
+view whole with `map_overlay_add_from_pack()`. The Maps app shows each in
+its Layers panel above the files, beneath them on the map, with an info
+card of the item's label and properties (`lines: 5, 23`); a line's card is
+titled with its label, the routes along it.
 
 ## GeoJSON files in the Maps app
 

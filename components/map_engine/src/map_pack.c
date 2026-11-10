@@ -25,6 +25,10 @@
 /* Raw DEFLATE of 8192 bytes is at most a little over 8192 (stored blocks);
  * anything past this is damage. */
 #define MAX_PAYLOAD       (16 * 1024)
+/* Baked overlays: the format's limits make about 5 MB possible; a real
+ * network is a few hundred KB, and the section is kept in PSRAM. */
+#define MAX_OVERLAYS_LEN  (2 * 1024 * 1024)
+#define OVERLAY_NAME_MAX  32
 
 static const uint8_t MAGIC[8] = {'T', 'H', 'S', 'T', 'M', 'A', 'P', 0};
 
@@ -46,6 +50,18 @@ struct map_pack {
     map_region_t regions[MAP_PACK_MAX_REGIONS];
     int          region_count;
     uint8_t     *payload;  /* MAX_PAYLOAD, in PSRAM */
+
+    /* OVLY, checked whole at opening, kept in PSRAM. */
+    uint8_t     *ovly;
+    uint32_t     ovly_len;
+    bool         ovly_damaged;
+    int          overlay_count;
+    struct {
+        char     name[OVERLAY_NAME_MAX];
+        int      items;
+        int      first;  /* its first item's place in item_at */
+    } overlays[MAP_PACK_MAX_OVERLAYS];
+    uint32_t    *item_at;  /* each item's offset in ovly, PSRAM */
 };
 
 /* ------------------------------------------------------------------ */
@@ -178,6 +194,94 @@ static bool parse_regions(map_pack_t *pack, const uint8_t *p, uint32_t len)
     return at == len && count > 0;
 }
 
+/* OVLY, docs/maps/map-pack-format.md: checked byte by byte before any of
+ * it is used, each item's offset kept. False if it does not hold. */
+static bool parse_overlays(map_pack_t *pack, const uint8_t *p, uint32_t len)
+{
+    static const int least[4] = {1, 2, 3, 1};  /* point, line, polygon, text */
+    if (len < 2) return false;
+    unsigned count = rd16(p);
+    if (count > MAP_PACK_MAX_OVERLAYS) return false;
+    uint32_t at = 2;
+    int total = 0;
+    for (unsigned o = 0; o < count; o++) {
+        if (len - at < 1) return false;
+        unsigned name_len = p[at++];
+        if (name_len == 0 || name_len >= OVERLAY_NAME_MAX || len - at < name_len + 2) return false;
+        copy_text(pack->overlays[o].name, OVERLAY_NAME_MAX, p + at, name_len);
+        at += name_len;
+        unsigned items = rd16(p + at);
+        at += 2;
+        if (items > MAP_PACK_ITEMS_MAX) return false;
+        pack->overlays[o].items = (int)items;
+        pack->overlays[o].first = total;
+        uint32_t vertices = 0;
+        for (unsigned i = 0; i < items; i++) {
+            if (len - at < 4) return false;
+            pack->item_at[total++] = at;
+            unsigned kind = p[at], icon = p[at + 1], n = rd16(p + at + 2);
+            at += 4;
+            if (kind > 3 || icon > 4 || (kind != 0 && icon != 0)) return false;
+            if ((int)n < least[kind] || ((kind == 0 || kind == 3) && n != 1)) return false;
+            vertices += n;
+            if (vertices > MAP_PACK_VERTICES_MAX || (len - at) / 8 < n) return false;
+            for (unsigned v = 0; v < n; v++) {
+                int32_t lat = (int32_t)rd32(p + at), lon = (int32_t)rd32(p + at + 4);
+                if (lat < -900000000 || lat > 900000000 || lon < -1800000000 || lon > 1800000000) {
+                    return false;
+                }
+                at += 8;
+            }
+            if (len - at < 1) return false;
+            unsigned label_len = p[at++];
+            if (label_len >= MAP_PACK_LABEL_MAX || len - at < label_len + 1) return false;
+            at += label_len;
+            unsigned props = p[at++];
+            if (props > MAP_PACK_ITEM_PROPS) return false;
+            for (unsigned k = 0; k < props; k++) {
+                if (len - at < 1) return false;
+                unsigned key_len = p[at++];
+                if (key_len == 0 || key_len >= MAP_PACK_KEY_MAX || len - at < key_len + 1) {
+                    return false;
+                }
+                at += key_len;
+                unsigned value_len = p[at++];
+                if (value_len >= MAP_PACK_VALUE_MAX || len - at < value_len) return false;
+                at += value_len;
+            }
+        }
+    }
+    if (at != len) return false;
+    pack->overlay_count = (int)count;
+    return true;
+}
+
+/* Reads and checks OVLY; one that does not hold is left out, the Pack
+ * opening without overlays. False only without the memory. */
+static bool load_overlays(map_pack_t *pack, const section_t *s)
+{
+    if (s->length > MAX_OVERLAYS_LEN) {
+        pack->ovly_damaged = true;
+        return true;
+    }
+    pack->ovly = alloc_psram(s->length ? s->length : 1);
+    pack->item_at = alloc_psram(sizeof(uint32_t) * MAP_PACK_MAX_OVERLAYS * MAP_PACK_ITEMS_MAX);
+    if (!pack->ovly || !pack->item_at) return false;
+    if ((s->length && !read_at(pack->file, s->offset, pack->ovly, s->length)) ||
+        map_crc32(0, pack->ovly, s->length) != s->crc ||
+        !parse_overlays(pack, pack->ovly, s->length)) {
+        pack->ovly_damaged = true;
+        pack->overlay_count = 0;
+        free(pack->ovly);
+        free(pack->item_at);
+        pack->ovly = NULL;
+        pack->item_at = NULL;
+        return true;
+    }
+    pack->ovly_len = s->length;
+    return true;
+}
+
 static map_pack_err_t open_file(map_pack_t *pack, unsigned *newer_major)
 {
     FILE *f = pack->file;
@@ -214,7 +318,7 @@ static map_pack_err_t open_file(map_pack_t *pack, unsigned *newer_major)
     /* Checked after the CRC, so a damaged byte is not taken for colour. */
     if (variant != 0) return MAP_PACK_ERR_VARIANT;
 
-    section_t attr = {0}, regn = {0};
+    section_t attr = {0}, regn = {0}, ovly = {0};
     uint32_t first = HEADER_LEN + (uint32_t)dir_len;
     for (unsigned i = 0; i < sections; i++) {
         const uint8_t *d = directory + i * DIR_ENTRY_LEN;
@@ -224,8 +328,9 @@ static map_pack_err_t open_file(map_pack_t *pack, unsigned *newer_major)
         else if (memcmp(d, "REGN", 4) == 0) slot = &regn;
         else if (memcmp(d, "TIDX", 4) == 0) slot = &pack->index;
         else if (memcmp(d, "TILE", 4) == 0) slot = &pack->tiles;
-        /* Any other section (a name index, overlays) is a later minor
-         * version's, and read past. */
+        else if (memcmp(d, "OVLY", 4) == 0) slot = &ovly;  /* 1.1 */
+        /* Any other section (a name index) is a later minor version's,
+         * and read past. */
         if (!slot) continue;
         if (slot->present || !section_fits(&s, first, file_size)) return MAP_PACK_ERR_DAMAGED;
         *slot = s;
@@ -255,6 +360,8 @@ static map_pack_err_t open_file(map_pack_t *pack, unsigned *newer_major)
     bool ok = parse_regions(pack, buf, regn.length);
     free(buf);
     if (!ok) return MAP_PACK_ERR_DAMAGED;
+
+    if (ovly.present && !load_overlays(pack, &ovly)) return MAP_PACK_ERR_NO_MEMORY;
 
     pack->payload = alloc_psram(MAX_PAYLOAD);
     if (!pack->payload) return MAP_PACK_ERR_NO_MEMORY;
@@ -286,6 +393,8 @@ void map_pack_close(map_pack_t *pack)
     if (pack->file) fclose(pack->file);
     free(pack->credit);
     free(pack->payload);  /* heap_caps memory is free()d too */
+    free(pack->ovly);
+    free(pack->item_at);
     free(pack);
 }
 
@@ -371,4 +480,79 @@ map_tile_result_t map_pack_read_tile(map_pack_t *pack, int z, uint32_t x, uint32
     if (!map_inflate(pack->payload, length, out, MAP_TILE_BYTES)) return MAP_TILE_BAD;
     if (map_crc32(0, out, MAP_TILE_BYTES) != crc) return MAP_TILE_BAD;
     return MAP_TILE_OK;
+}
+
+/* ------------------------------------------------------------------ */
+/* Baked overlays                                                       */
+/* ------------------------------------------------------------------ */
+
+int map_pack_overlay_count(const map_pack_t *pack) { return pack ? pack->overlay_count : 0; }
+bool map_pack_overlays_damaged(const map_pack_t *pack) { return pack && pack->ovly_damaged; }
+
+const char *map_pack_overlay_name(const map_pack_t *pack, int overlay)
+{
+    if (!pack || overlay < 0 || overlay >= pack->overlay_count) return NULL;
+    return pack->overlays[overlay].name;
+}
+
+int map_pack_overlay_items(const map_pack_t *pack, int overlay)
+{
+    if (!pack || overlay < 0 || overlay >= pack->overlay_count) return 0;
+    return pack->overlays[overlay].items;
+}
+
+/* Item `item`'s bytes: kind, icon, n, its vertices, label, props. NULL if
+ * there is none such. parse_overlays() checked every length in it. */
+static const uint8_t *item_bytes(const map_pack_t *pack, int overlay, int item)
+{
+    if (!pack || overlay < 0 || overlay >= pack->overlay_count || item < 0 ||
+        item >= pack->overlays[overlay].items) {
+        return NULL;
+    }
+    return pack->ovly + pack->item_at[pack->overlays[overlay].first + item];
+}
+
+/* Its label's length byte, after the vertices. */
+static const uint8_t *item_label(const uint8_t *it) { return it + 4 + 8 * (size_t)rd16(it + 2); }
+
+bool map_pack_overlay_item(const map_pack_t *pack, int overlay, int item, map_pack_item_t *out)
+{
+    const uint8_t *it = item_bytes(pack, overlay, item);
+    if (!it) return false;
+    out->kind = it[0];
+    out->icon = it[1];
+    out->vertices = rd16(it + 2);
+    const uint8_t *label = item_label(it);
+    copy_text(out->label, sizeof out->label, label + 1, label[0]);
+    out->props = label[1 + label[0]];
+    return true;
+}
+
+bool map_pack_overlay_vertex(const map_pack_t *pack, int overlay, int item, int v, double *lat,
+                             double *lon)
+{
+    const uint8_t *it = item_bytes(pack, overlay, item);
+    if (!it || v < 0 || v >= rd16(it + 2)) return false;
+    *lat = (int32_t)rd32(it + 4 + 8 * (size_t)v) / 1e7;
+    *lon = (int32_t)rd32(it + 8 + 8 * (size_t)v) / 1e7;
+    return true;
+}
+
+bool map_pack_overlay_prop(const map_pack_t *pack, int overlay, int item, int p, char *key,
+                           size_t key_cap, char *value, size_t value_cap)
+{
+    const uint8_t *it = item_bytes(pack, overlay, item);
+    if (!it || key_cap == 0 || value_cap == 0) return false;
+    const uint8_t *at = item_label(it);
+    at += 1 + at[0];
+    int props = *at++;
+    if (p < 0 || p >= props) return false;
+    for (int k = 0; k < p; k++) {
+        at += 1 + at[0];
+        at += 1 + at[0];
+    }
+    copy_text(key, key_cap, at + 1, at[0]);
+    at += 1 + at[0];
+    copy_text(value, value_cap, at + 1, at[0]);
+    return true;
 }

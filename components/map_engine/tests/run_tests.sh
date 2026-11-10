@@ -30,4 +30,5 @@ $cc -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Werror $sanitize $includes \
     "$engine/src/map_pack.c" "$engine/src/map_inflate.c" "$engine/src/map_compose.c" \
     "$here/test_map_pack.c" "$work/tinflate.o" "$work/adler32.o" "$work/crc32.o" -lm -o "$work/test_map_pack"
 
-"$work/test_map_pack" "$root/tools/maps/testdata/fixture.tmap" "$work"
+"$work/test_map_pack" "$root/tools/maps/testdata/fixture.tmap" "$work" \
+    "$root/tools/maps/testdata/fixture-transit.tmap"

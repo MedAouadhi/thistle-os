@@ -89,6 +89,30 @@
   </node>
   <node id="1065" version="1" lat="36.7191520" lon="10.1800000"/>
   <node id="1066" version="1" lat="36.7191520" lon="10.1856093"/>
+  <node id="1067" version="1" lat="36.8012576" lon="10.1732688"/>
+  <node id="1068" version="1" lat="36.8012576" lon="10.1777563"/>
+  <node id="1069" version="1" lat="36.8012576" lon="10.1811219"/>
+  <node id="1070" version="1" lat="36.8012576" lon="10.1867312"/>
+  <node id="1071" version="1" lat="36.8013475" lon="10.1777563">
+    <tag k="public_transport" v="platform"/>
+    <tag k="name" v="Place Barcelone"/>
+  </node>
+  <node id="1072" version="1" lat="36.8013475" lon="10.1811219">
+    <tag k="public_transport" v="platform"/>
+    <tag k="name" v="Bab Bhar"/>
+  </node>
+  <node id="1073" version="1" lat="36.8011678" lon="10.1811219">
+    <tag k="public_transport" v="platform"/>
+    <tag k="name" v="Bab Bhar"/>
+  </node>
+  <node id="1074" version="1" lat="36.7995508" lon="10.1797756">
+    <tag k="public_transport" v="platform"/>
+    <tag k="name" v="Avenue de France"/>
+  </node>
+  <node id="1075" version="1" lat="36.7192418" lon="10.1828047">
+    <tag k="public_transport" v="platform"/>
+    <tag k="name" v="Far Stop"/>
+  </node>
   <way id="2001" version="1">
     <nd ref="1001"/>
     <nd ref="1002"/>
@@ -219,11 +243,49 @@
     <tag k="highway" v="primary"/>
     <tag k="name" v="Far Road"/>
   </way>
+  <way id="2020" version="1">
+    <nd ref="1067"/>
+    <nd ref="1068"/>
+    <nd ref="1069"/>
+    <nd ref="1070"/>
+    <tag k="railway" v="tram"/>
+  </way>
   <relation id="3001" version="1">
     <member type="way" ref="2008" role="outer"/>
     <member type="way" ref="2009" role="inner"/>
     <tag k="type" v="multipolygon"/>
     <tag k="natural" v="water"/>
     <tag k="name" v="Lac"/>
+  </relation>
+  <relation id="3002" version="1">
+    <member type="way" ref="2020" role=""/>
+    <member type="node" ref="1071" role="platform"/>
+    <member type="node" ref="1072" role="platform"/>
+    <member type="node" ref="1073" role="platform"/>
+    <tag k="type" v="route"/>
+    <tag k="route" v="tram"/>
+    <tag k="ref" v="T1"/>
+    <tag k="name" v="Tram T1"/>
+  </relation>
+  <relation id="3003" version="1">
+    <member type="way" ref="2001" role=""/>
+    <member type="node" ref="1074" role="platform"/>
+    <tag k="type" v="route"/>
+    <tag k="route" v="bus"/>
+    <tag k="ref" v="23"/>
+  </relation>
+  <relation id="3004" version="1">
+    <member type="way" ref="2001" role=""/>
+    <member type="node" ref="1074" role="platform"/>
+    <tag k="type" v="route"/>
+    <tag k="route" v="bus"/>
+    <tag k="ref" v="5"/>
+  </relation>
+  <relation id="3005" version="1">
+    <member type="way" ref="2019" role=""/>
+    <member type="node" ref="1075" role="platform"/>
+    <tag k="type" v="route"/>
+    <tag k="route" v="bus"/>
+    <tag k="ref" v="99"/>
   </relation>
 </osm>

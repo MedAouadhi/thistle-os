@@ -241,6 +241,38 @@ int map_overlay_add_polygon(map_overlay_t *o, const map_lat_lon_t *points, int c
     return add_path(o, MAP_ITEM_POLYGON, points, count, id);
 }
 
+int map_overlay_add_from_pack(map_overlay_t *o, const map_pack_t *pack, int overlay)
+{
+    int items = map_pack_overlay_items(pack, overlay);
+    if (!o || !map_pack_overlay_name(pack, overlay)) return -1;
+    int added = 0;
+    for (int i = 0; i < items; i++) {
+        map_pack_item_t pi;
+        if (!map_pack_overlay_item(pack, overlay, i, &pi)) break;
+        double lat, lon;
+        int got = -1;
+        if (pi.kind == MAP_ITEM_POINT || pi.kind == MAP_ITEM_TEXT) {
+            if (map_pack_overlay_vertex(pack, overlay, i, 0, &lat, &lon)) {
+                got = add_labelled(o, (map_item_kind_t)pi.kind, lat, lon, (map_icon_t)pi.icon,
+                                   pi.label[0] ? pi.label : NULL, (uint32_t)i);
+            }
+        } else {
+            /* Straight from the Pack's bytes: no buffer of points. */
+            item_t *it = new_item(o, (map_item_kind_t)pi.kind, (uint32_t)i);
+            if (it && reserve_vertices(o, (uint32_t)pi.vertices)) {
+                for (int v = 0; v < pi.vertices; v++) {
+                    map_pack_overlay_vertex(pack, overlay, i, v, &lat, &lon);
+                    push_vertex(o, lat, lon);
+                }
+                it->count = (uint32_t)pi.vertices;
+                got = o->count++;
+            }
+        }
+        if (got >= 0) added++;
+    }
+    return added;
+}
+
 void map_overlay_clear(map_overlay_t *o)
 {
     if (!o) return;

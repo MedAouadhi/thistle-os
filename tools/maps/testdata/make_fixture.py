@@ -13,7 +13,8 @@ fixture.tmap, is built from these two files by the real tool
 
 Region "Medina" is a circle of 350 m around (36.8000, 10.1800), as deep as
 z17; region "Lac Nord" a freehand polygon around (36.8150, 10.2000), as deep
-as z15. The quarter's name, "محمد", sits alone 120 m north-east of the
+as z15. A transit network (transit()) is in the extract as route relations
+and in fixture-gtfs/ as a GTFS feed, for --transit. The quarter's name, "محمد", sits alone 120 m north-east of the
 Medina's centre, with nothing else drawn near it: a test finds it on the
 screen and checks that its letters are joined.
 """
@@ -105,8 +106,8 @@ def build() -> Extract:
 
     # Roads, one of each class the renderer draws, none near the quarter's
     # name in the north-east.
-    e.way([at(m, -700, -60), at(m, 0, -60), at(m, 700, -60)],
-          {"highway": "primary", "name": "Avenue de France"})
+    avenue = e.way([at(m, -700, -60), at(m, 0, -60), at(m, 700, -60)],
+                   {"highway": "primary", "name": "Avenue de France"})
     e.way([at(m, -100, -700), at(m, -100, 0), at(m, -100, 700)],
           {"highway": "secondary", "name": "نهج الحرية"})
     e.way([at(m, -500, 180), at(m, -150, 180)],
@@ -157,8 +158,92 @@ def build() -> Extract:
     e.node(at(n, 0, 150), {"place": "suburb", "name": "Les Berges"})
 
     # Far from both Regions: clipped away.
-    e.way([at(m, 0, -9000), at(m, 500, -9000)], {"highway": "primary", "name": "Far Road"})
+    far = e.way([at(m, 0, -9000), at(m, 500, -9000)], {"highway": "primary", "name": "Far Road"})
+
+    transit(e, avenue, far)
     return e
+
+
+# The transit network, in the extract as route relations and in
+# fixture-gtfs/ as a GTFS feed: tram T1 across the Medina's north, with
+# its stops Place Barcelone and Bab Bhar (a platform each side, one stop);
+# buses 5 and 23 along the Avenue de France, calling at its stop; bus 99
+# on the Far Road, outside every Region. None of it is drawn in the
+# tiles: a tram track and a platform are not, and the bus stop is no
+# highway=bus_stop, so fixture.tmap stays as it was.
+TRAM = [(-600, 140), (-200, 140), (100, 140), (600, 140)]
+STOPS = {
+    "Place Barcelone": [(-200, 150)],
+    "Bab Bhar": [(100, 150), (100, 130)],
+    "Avenue de France": [(-20, -50)],
+}
+FAR_STOP = (250, -8990)
+# Bus 7, in the GTFS feed alone, has no shape: drawn stop to stop.
+RUE_D_ALGER = (250, -300)
+
+
+def transit(e: Extract, avenue: int, far: int) -> None:
+    m = MEDINA
+    tram = e.way([at(m, x, y) for x, y in TRAM], {"railway": "tram"})
+    stop = {}
+    for name, places in STOPS.items():
+        stop[name] = [e.node(at(m, x, y), {"public_transport": "platform", "name": name})
+                      for x, y in places]
+    far_stop = e.node(at(m, *FAR_STOP), {"public_transport": "platform", "name": "Far Stop"})
+    e.relation([("way", tram, "")] + [("node", n, "platform") for n in
+                                      stop["Place Barcelone"] + stop["Bab Bhar"]],
+               {"type": "route", "route": "tram", "ref": "T1", "name": "Tram T1"})
+    for ref in ("23", "5"):
+        e.relation([("way", avenue, ""), ("node", stop["Avenue de France"][0], "platform")],
+                   {"type": "route", "route": "bus", "ref": ref})
+    e.relation([("way", far, ""), ("node", far_stop, "platform")],
+               {"type": "route", "route": "bus", "ref": "99"})
+
+
+def gtfs() -> dict[str, str]:
+    """The same network as a GTFS feed, file name to text."""
+    m = MEDINA
+
+    def table(header: str, rows: list[tuple]) -> str:
+        return header + "\n" + "".join(",".join(str(v) for v in r) + "\n" for r in rows)
+
+    def ll(x, y):
+        lat, lon = at(m, x, y)
+        return f"{lat:.7f}", f"{lon:.7f}"
+
+    stops = [("BB", "Bab Bhar", *ll(100, 140), 1, ""),
+             ("BB1", "Bab Bhar", *ll(100, 150), 0, "BB"),
+             ("BB2", "Bab Bhar", *ll(100, 130), 0, "BB"),
+             ("PB", "Place Barcelone", *ll(-200, 150), 0, ""),
+             ("AF", "Avenue de France", *ll(-20, -50), 0, ""),
+             ("RA", "Rue d'Alger", *ll(*RUE_D_ALGER), 0, ""),
+             ("FS", "Far Stop", *ll(*FAR_STOP), 0, "")]
+    routes = [("T1", "T1", "Tram T1", 0), ("R23", "23", "", 3), ("R5", "5", "", 3),
+              ("R7", "7", "", 3), ("R99", "99", "", 3)]
+    # T1 runs both ways, on two shapes; 5 and 23 share one.
+    trips = [("T1", "D", "t1-east", "s-t1-east"), ("T1", "D", "t1-west", "s-t1-west"),
+             ("R23", "D", "t23", "s-avenue"), ("R5", "D", "t5", "s-avenue"),
+             ("R7", "D", "t7", ""), ("R99", "D", "t99", "s-far")]
+    shapes = []
+    for sid, points in (("s-t1-east", TRAM), ("s-t1-west", TRAM[::-1]),
+                        ("s-avenue", [(-700, -60), (0, -60), (700, -60)]),
+                        ("s-far", [(0, -9000), (500, -9000)])):
+        shapes += [(sid, *ll(x, y), i + 1) for i, (x, y) in enumerate(points)]
+    calls = {"t1-east": ["PB", "BB1"], "t1-west": ["BB2", "PB"], "t23": ["AF"], "t5": ["AF"],
+             "t7": ["AF", "RA"], "t99": ["FS"]}
+    stop_times = [(trip, "08:00:00", "08:00:00", s, i + 1)
+                  for trip, ss in calls.items() for i, s in enumerate(ss)]
+    return {
+        "agency.txt": table("agency_id,agency_name,agency_url,agency_timezone",
+                            [("A", "Fixture Transit", "https://example.org", "Africa/Tunis")]),
+        "stops.txt": table("stop_id,stop_name,stop_lat,stop_lon,location_type,parent_station",
+                           stops),
+        "routes.txt": table("route_id,route_short_name,route_long_name,route_type", routes),
+        "trips.txt": table("route_id,service_id,trip_id,shape_id", trips),
+        "shapes.txt": table("shape_id,shape_pt_lat,shape_pt_lon,shape_pt_sequence", shapes),
+        "stop_times.txt": table("trip_id,arrival_time,departure_time,stop_id,stop_sequence",
+                                stop_times),
+    }
 
 
 def regions() -> dict:
@@ -184,6 +269,10 @@ def main() -> None:
     (HERE / "fixture.osm").write_text(build().xml(), encoding="utf-8")
     (HERE / "fixture-regions.geojson").write_text(
         json.dumps(regions(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    feed = HERE / "fixture-gtfs"
+    feed.mkdir(exist_ok=True)
+    for name, text in gtfs().items():
+        (feed / name).write_text(text, encoding="utf-8")
 
 
 if __name__ == "__main__":
