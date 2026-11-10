@@ -5,13 +5,18 @@ Regions a user drew.
 
     thistle_maps.py build REGIONS.geojson -o my-places.tmap
     thistle_maps.py build REGIONS.geojson --extract tunisia.osm.pbf -o my-places.tmap
+    thistle_maps.py build REGIONS.geojson --transit osm -o my-places.tmap
+    thistle_maps.py build REGIONS.geojson --transit gtfs.zip -o my-places.tmap
     thistle_maps.py estimate REGIONS.geojson [--json] [--extract FILE | --measure]
     thistle_maps.py serve REGIONS.geojson [-o my-places.tmap]
 
 `build` fetches the Geofabrik extract that holds the Regions (once; it is
 cached, so later builds need no network), clips it to them, draws every
 tile each Region needs from z14 to its own deepest level, and writes the
-Pack. Copy the Pack to the card's /sdcard/maps/.
+Pack. Copy the Pack to the card's /sdcard/maps/. With --transit it also
+bakes in the stops and lines inside the Regions, from the extract's route
+relations (osm) or a GTFS feed (a .zip or a folder), as two overlays the
+Maps app switches on and off (transit.py).
 
 `estimate` says how big the Pack would be, without building it: priced
 as a city's tiles, or measured from a sample drawn from the extract
@@ -39,6 +44,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from estimate import DEFAULT_BUDGET_BYTES as DEFAULT_BUDGET  # noqa: E402
 from regions import RegionsError, load_regions, pack_tiles  # noqa: E402
+from transit import TransitError  # noqa: E402
 
 
 def parse_size(text: str) -> int:
@@ -121,7 +127,14 @@ def cmd_build(args) -> int:
             print(f"  drawn {done} of {total} blocks", flush=True)
 
     bitmaps = render.render_tiles(data, tiles, fonts, progress)
-    size = pack_writer.write_pack(args.output, regions, bitmaps)
+    overlays = None
+    if args.transit:
+        import transit
+
+        network = transit.read_transit(args.transit, extracts, regions)
+        print(network.summary())
+        overlays = network.overlays
+    size = pack_writer.write_pack(args.output, regions, bitmaps, overlays=overlays)
     print(f"wrote {args.output}: {len(bitmaps)} tiles, {size} bytes")
     return 0
 
@@ -173,6 +186,9 @@ def main(argv=None) -> int:
     build.add_argument("regions", help="the Regions file (GeoJSON)")
     build.add_argument("-o", "--output", required=True, help="the Pack to write (.tmap)")
     add_source_arguments(build)
+    build.add_argument("--transit", metavar="SOURCE",
+                       help="bake a static transit network into the Pack: 'osm' for the "
+                            "extract's route relations, or a GTFS feed (.zip or folder)")
     build.add_argument("--quiet", action="store_true")
     build.set_defaults(run=cmd_build)
 
@@ -213,7 +229,7 @@ def main(argv=None) -> int:
         args.attribution = args.attribution or browser.OSM_ATTRIBUTION
     try:
         return args.run(args)
-    except RegionsError as exc:
+    except (RegionsError, TransitError) as exc:
         print(f"thistle_maps: {exc}", file=sys.stderr)
         return 2
     except (LookupError, OSError, RuntimeError) as exc:

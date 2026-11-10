@@ -14,7 +14,12 @@
 // read one at a time and the hatching docs/maps/map-pack-format.md
 // specifies.
 //
-//     test_map_pack FIXTURE.tmap WORK_DIR
+// The baked overlays (OVLY, format 1.1) are read from the transit fixture
+// (fixture-transit.tmap, the same Pack with the fixture's transit network
+// baked in) and from copies of its OVLY damaged every way: a damaged OVLY
+// leaves the Pack with no overlays and its tiles as they were.
+//
+//     test_map_pack FIXTURE.tmap WORK_DIR [TRANSIT.tmap]
 
 #include "map_engine/map_pack.h"
 #include "map_engine/map_projection.h"
@@ -1021,10 +1026,278 @@ static void random_damage_never_escapes(void)
     free(tile);
 }
 
+/* ------------------------------------------------------------------ */
+/* Baked overlays                                                       */
+/* ------------------------------------------------------------------ */
+
+static buf_t s_transit;
+
+static buf_t read_file(const char *path)
+{
+    buf_t b = {NULL, 0};
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        perror(path);
+        exit(2);
+    }
+    fseek(f, 0, SEEK_END);
+    b.len = (size_t)ftell(f);
+    b.d = malloc(b.len ? b.len : 1);
+    fseek(f, 0, SEEK_SET);
+    if (fread(b.d, 1, b.len, f) != b.len) exit(2);
+    fclose(f);
+    return b;
+}
+
+static const sect_t *transit_ovly(void)
+{
+    static sect_t s[64];
+    int n = sections(&s_transit, s, 64);
+    return find(s, n, "OVLY");
+}
+
+static int find_item(map_pack_t *pack, int o, const char *label)
+{
+    map_pack_item_t it;
+    for (int i = 0; map_pack_overlay_item(pack, o, i, &it); i++)
+        if (strcmp(it.label, label) == 0) return i;
+    return -1;
+}
+
+static void the_transit_pack_has_its_overlays(void)
+{
+    map_pack_t *pack = NULL;
+    EXPECT(open_buf(&s_transit, &pack) == MAP_PACK_OK);
+    if (!pack) return;
+    EXPECT(map_pack_version_major(pack) == 1 && map_pack_version_minor(pack) == 1);
+    EXPECT(!map_pack_overlays_damaged(pack));
+    EXPECT(map_pack_overlay_count(pack) == 2);
+    EXPECT(strcmp(map_pack_overlay_name(pack, 0), "Transit lines") == 0);
+    EXPECT(strcmp(map_pack_overlay_name(pack, 1), "Transit stops") == 0);
+    EXPECT(map_pack_overlay_name(pack, 2) == NULL && map_pack_overlay_name(pack, -1) == NULL);
+    EXPECT(map_pack_overlay_items(pack, 0) == 2 && map_pack_overlay_items(pack, 1) == 3);
+
+    map_pack_item_t it;
+    EXPECT(map_pack_overlay_item(pack, 0, 0, &it));
+    EXPECT(it.kind == 1 && it.vertices == 2 && strcmp(it.label, "T1") == 0 && it.props == 1);
+    double lat = 0, lon = 0;
+    EXPECT(map_pack_overlay_vertex(pack, 0, 0, 1, &lat, &lon));
+    /* make_fixture.py: the tram runs 140 m north of the Medina's centre. */
+    EXPECT(fabs(lat - (36.8 + 140 / 111320.0)) < 1e-5 && fabs(lon - 10.18) < 0.01);
+    EXPECT(!map_pack_overlay_vertex(pack, 0, 0, 2, &lat, &lon));
+    EXPECT(!map_pack_overlay_item(pack, 0, 2, &it));
+
+    int bab = find_item(pack, 1, "Bab Bhar");
+    EXPECT(bab >= 0);
+    EXPECT(map_pack_overlay_item(pack, 1, bab, &it));
+    EXPECT(it.kind == 0 && it.icon == 1 && it.vertices == 1 && it.props == 2);
+    char key[MAP_PACK_KEY_MAX], value[MAP_PACK_VALUE_MAX];
+    EXPECT(map_pack_overlay_prop(pack, 1, bab, 0, key, sizeof key, value, sizeof value));
+    EXPECT(strcmp(key, "lines") == 0 && strcmp(value, "T1") == 0);
+    EXPECT(map_pack_overlay_prop(pack, 1, bab, 1, key, sizeof key, value, sizeof value));
+    EXPECT(strcmp(key, "mode") == 0 && strcmp(value, "tram") == 0);
+    EXPECT(!map_pack_overlay_prop(pack, 1, bab, 2, key, sizeof key, value, sizeof value));
+    /* Cut to fit, at a character's end. */
+    char small[3];
+    EXPECT(map_pack_overlay_prop(pack, 1, bab, 1, key, 3, small, sizeof small));
+    EXPECT(strcmp(key, "mo") == 0 && strcmp(small, "tr") == 0);
+    map_pack_close(pack);
+
+    /* The plain fixture has none. */
+    EXPECT(open_buf(&s_golden, &pack) == MAP_PACK_OK);
+    if (pack) {
+        EXPECT(map_pack_overlay_count(pack) == 0 && !map_pack_overlays_damaged(pack));
+        EXPECT(!map_pack_overlay_item(pack, 0, 0, &it));
+        map_pack_close(pack);
+    }
+}
+
+/* Reads every item of every overlay, as an app would, so ASan sees any
+ * read outside the section; how many items there were. */
+static int read_every_item(map_pack_t *pack)
+{
+    int total = 0;
+    for (int o = 0; o < map_pack_overlay_count(pack); o++) {
+        EXPECT(map_pack_overlay_name(pack, o) != NULL);
+        map_pack_item_t it;
+        for (int i = 0; map_pack_overlay_item(pack, o, i, &it); i++) {
+            total++;
+            EXPECT(it.kind >= 0 && it.kind <= 3 && it.icon >= 0 && it.icon <= 4);
+            EXPECT(strlen(it.label) < MAP_PACK_LABEL_MAX);
+            double lat, lon;
+            for (int v = 0; map_pack_overlay_vertex(pack, o, i, v, &lat, &lon); v++)
+                EXPECT(lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180);
+            char k[MAP_PACK_KEY_MAX], val[MAP_PACK_VALUE_MAX];
+            for (int p = 0; map_pack_overlay_prop(pack, o, i, p, k, sizeof k, val, sizeof val); p++)
+                EXPECT(k[0] != '\0');
+        }
+    }
+    return total;
+}
+
+/* The plain golden Pack with ovly as its OVLY, every CRC right, opened:
+ * it always opens, its tiles read; whether its overlays held. */
+static bool open_with_ovly(const uint8_t *ovly, size_t len, bool *damaged, int *items)
+{
+    rep_t add[] = {{"OVLY", ovly, len}};
+    buf_t b = rebuild(add, 1);
+    wr16(b.d + 10, 1);
+    rehash(&b);
+    map_pack_t *pack = NULL;
+    bool ok = open_buf(&b, &pack) == MAP_PACK_OK;
+    if (pack) {
+        *damaged = map_pack_overlays_damaged(pack);
+        EXPECT(!*damaged || map_pack_overlay_count(pack) == 0);
+        *items = read_every_item(pack);
+        uint8_t *tile = malloc(MAP_TILE_BYTES);
+        EXPECT(read_entry(pack, 0, tile) == MAP_TILE_OK);
+        free(tile);
+        map_pack_close(pack);
+    }
+    free(b.d);
+    return ok;
+}
+
+static void damaged_overlays_leave_the_map(void)
+{
+    const sect_t *o = transit_ovly();
+    EXPECT(o != NULL);
+    if (!o) return;
+    const uint8_t *ovly = s_transit.d + o->off;
+    bool damaged = true;
+    int items = 0;
+    EXPECT(open_with_ovly(ovly, o->len, &damaged, &items) && !damaged && items == 5);
+
+    /* Cut short at every length, its CRC made right: never read past. */
+    for (uint32_t len = 0; len < o->len; len++) {
+        EXPECT_AT(open_with_ovly(ovly, len, &damaged, &items), "OVLY length", len);
+        EXPECT_AT(damaged, "OVLY length", len);
+    }
+    /* Trailing bytes. */
+    uint8_t *more = malloc(o->len + 3);
+    memcpy(more, ovly, o->len);
+    memset(more + o->len, 0, 3);
+    EXPECT(open_with_ovly(more, o->len + 3, &damaged, &items) && damaged);
+    free(more);
+
+    /* Every bit flipped, the CRC made right: whatever it now says, it is
+     * read inside the section or left out. */
+    uint8_t *flip = malloc(o->len);
+    for (uint32_t i = 0; i < o->len * 8; i++) {
+        memcpy(flip, ovly, o->len);
+        flip[i / 8] ^= (uint8_t)(1u << (i % 8));
+        EXPECT_AT(open_with_ovly(flip, o->len, &damaged, &items), "OVLY bit", i);
+    }
+    free(flip);
+
+    /* Its CRC wrong: left out, the map opens. */
+    buf_t b = copy(&s_transit);
+    b.d[o->off + o->len / 2] ^= 0x10;
+    rehash_some(&b, false);
+    map_pack_t *pack = NULL;
+    EXPECT(open_buf(&b, &pack) == MAP_PACK_OK);
+    if (pack) {
+        EXPECT(map_pack_overlays_damaged(pack) && map_pack_overlay_count(pack) == 0);
+        map_pack_close(pack);
+    }
+    free(b.d);
+
+    /* Two OVLY sections: the Pack does not hold. */
+    sect_t s[64];
+    int n = sections(&s_transit, s, 64);
+    for (int i = 0; i < n; i++) {
+        if (strcmp(s[i].tag, "TILE") == 0) {
+            b = copy(&s_transit);
+            memcpy(b.d + 32 + 16 * i, "OVLY", 4);
+            rehash(&b);
+            expect_open(&b, MAP_PACK_ERR_DAMAGED, "two OVLY");
+            free(b.d);
+        }
+    }
+}
+
+/* Hand-made sections: the limits the format sets. */
+static void overlays_past_the_limits_are_left_out(void)
+{
+    static uint8_t d[600000];
+    bool damaged;
+    int items;
+    size_t at;
+
+    /* 9 overlays, each empty. */
+    at = 0;
+    d[at++] = 9;
+    d[at++] = 0;
+    for (int i = 0; i < 9; i++) {
+        d[at++] = 1;
+        d[at++] = 'a';
+        d[at++] = 0;
+        d[at++] = 0;
+    }
+    EXPECT(open_with_ovly(d, at, &damaged, &items) && damaged);
+    d[0] = 8;
+    EXPECT(open_with_ovly(d, at - 4, &damaged, &items) && !damaged && items == 0);
+
+    /* 257 points in one overlay. */
+    at = 0;
+    d[at++] = 1;
+    d[at++] = 0;
+    d[at++] = 1;
+    d[at++] = 'p';
+    wr16(d + at, 257);
+    at += 2;
+    for (int i = 0; i < 257; i++) {
+        d[at++] = 0; /* point */
+        d[at++] = 0;
+        wr16(d + at, 1);
+        at += 2;
+        wr32(d + at, 368000000);
+        wr32(d + at + 4, 101800000);
+        at += 8;
+        d[at++] = 0; /* label */
+        d[at++] = 0; /* props */
+    }
+    EXPECT(open_with_ovly(d, at, &damaged, &items) && damaged);
+    wr16(d + 4, 256);
+    EXPECT(open_with_ovly(d, at - 14, &damaged, &items) && !damaged && items == 256);
+
+    /* A line of 16385 vertices; an icon past the last; a latitude past the pole. */
+    at = 0;
+    d[at++] = 1;
+    d[at++] = 0;
+    d[at++] = 1;
+    d[at++] = 'l';
+    wr16(d + at, 1);
+    at += 2;
+    d[at++] = 1;
+    d[at++] = 0;
+    size_t count_at = at;
+    at += 2;
+    for (int i = 0; i < 16385; i++) {
+        wr32(d + at, 368000000 + (uint32_t)i);
+        wr32(d + at + 4, 101800000);
+        at += 8;
+    }
+    d[at++] = 0;
+    d[at++] = 0;
+    wr16(d + count_at, 16385 & 0xFFFF);
+    EXPECT(open_with_ovly(d, at, &damaged, &items) && damaged);
+
+    uint8_t point[] = {1, 0, 1, 'p', 1, 0, 0, 5, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    EXPECT(open_with_ovly(point, sizeof point, &damaged, &items) && damaged); /* icon 5 */
+    point[7] = 4;
+    wr32(point + 10, (uint32_t)(int32_t)910000000); /* 91 degrees */
+    EXPECT(open_with_ovly(point, sizeof point, &damaged, &items) && damaged);
+    wr32(point + 10, 368000000);
+    EXPECT(open_with_ovly(point, sizeof point, &damaged, &items) && !damaged && items == 1);
+    point[6] = 1; /* a line of one point */
+    EXPECT(open_with_ovly(point, sizeof point, &damaged, &items) && damaged);
+}
+
 int main(int argc, char **argv)
 {
-    if (argc != 3) {
-        fprintf(stderr, "usage: %s FIXTURE.tmap WORK_DIR\n", argv[0]);
+    if (argc != 3 && argc != 4) {
+        fprintf(stderr, "usage: %s FIXTURE.tmap WORK_DIR [TRANSIT.tmap]\n", argv[0]);
         return 2;
     }
     snprintf(s_path, sizeof s_path, "%s/pack.tmap", argv[2]);
@@ -1055,6 +1328,13 @@ int main(int argc, char **argv)
     views_are_their_tiles_and_hatching();
     a_damaged_tile_is_hatched();
     random_damage_never_escapes();
+    if (argc == 4) {
+        s_transit = read_file(argv[3]);
+        the_transit_pack_has_its_overlays();
+        damaged_overlays_leave_the_map();
+        overlays_past_the_limits_are_left_out();
+        free(s_transit.d);
+    }
 
     free(s_golden.d);
     if (s_failures) {

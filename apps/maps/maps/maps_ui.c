@@ -23,9 +23,10 @@
  *
  * The tracks the Navigator recorded, every *.gpx in /sdcard/tracks/, are
  * one overlay (map_overlay.h), beneath the others and shown at first; the
- * Tracks button or the t key switches it. Every GeoJSON file in
- * /sdcard/maps/overlays/ is a switchable overlay too, with an info card
- * for a tapped item (maps_layers.c).
+ * Tracks button or the t key switches it. The overlays baked into the
+ * Pack (a transit network's lines and stops), and every GeoJSON file in
+ * /sdcard/maps/overlays/, are switchable overlays too, in the Layers
+ * panel, with an info card for a tapped item (maps_layers.c).
  */
 #include "maps/maps_app.h"
 #include "maps/maps_layers.h"
@@ -603,7 +604,7 @@ static void open_and_show(bool mono)
     lv_obj_align(loc, LV_ALIGN_BOTTOM_LEFT, ZOOM_MARGIN, -(ABOUT_H + ZOOM_MARGIN));
     load_tracks();
     make_about(mono);
-    bool refresh = maps_layers_open(s_ui.view, s_ui.root, ABOUT_H);
+    bool refresh = maps_layers_open(s_ui.view, s_ui.pack, s_ui.root, ABOUT_H);
     if (s_ui.tracks) make_tracks_button(refresh);
 
     lv_obj_update_layout(s_ui.root);

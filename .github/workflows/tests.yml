@@ -617,6 +617,10 @@ jobs:
         working-directory: simulator
         run: python3 tests/test_map_overlays.py --sim build/thistle_sim
 
+      - name: Run Maps transit network tests (a network baked into the Pack, on and off)
+        working-directory: simulator
+        run: python3 tests/test_map_transit.py --sim build/thistle_sim
+
       - name: Run Transit tests against a fake Berlin Provider (stops, live items, departures, Refresh)
         working-directory: simulator
         run: python3 tests/test_transit.py --sim build/thistle_sim

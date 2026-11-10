@@ -1,0 +1,7 @@
+route_id,service_id,trip_id,shape_id
+T1,D,t1-east,s-t1-east
+T1,D,t1-west,s-t1-west
+R23,D,t23,s-avenue
+R5,D,t5,s-avenue
+R7,D,t7,
+R99,D,t99,s-far

@@ -1,4 +1,4 @@
-# The Map Pack format, version 1.0
+# The Map Pack format, version 1.1
 
 A **Map Pack** is one file holding a map of the **Regions** a user drew,
 pre-drawn as one-bit tiles, for the Maps app (`apps/maps/`) and any app
@@ -55,17 +55,17 @@ sections           where the directory says
 
 ### Header
 
-| Offset | Size | Field | Version 1.0 |
+| Offset | Size | Field | Version 1.1 |
 |---|---|---|---|
 | 0 | 8 | magic | `THSTMAP` and a zero byte |
 | 8 | 2 | major version | 1 |
-| 10 | 2 | minor version | 0 |
+| 10 | 2 | minor version | 0, or 1 with an OVLY section |
 | 12 | 2 | header length | 32 |
 | 14 | 1 | variant | 0: 256 x 256 tiles, one bit a pixel, 1 is ink (black) |
 | 15 | 1 | reserved | 0 |
 | 16 | 1 | lowest zoom | 14 |
 | 17 | 1 | deepest zoom | 17 |
-| 18 | 2 | section count | 4 in 1.0; at most 32 |
+| 18 | 2 | section count | 4, or 5 with OVLY; at most 32 |
 | 20 | 4 | tile count | entries in TIDX |
 | 24 | 4 | reserved | 0 |
 | 28 | 4 | header CRC | CRC-32 of bytes 0 to 27, then of the whole directory |
@@ -94,13 +94,13 @@ CRC-32 is IEEE 802.3's, zlib's `crc32()`.
 | 8 | 4 | length |
 | 12 | 4 | CRC-32 of the section's bytes; 0 for TILE |
 
-Each of ATTR, REGN, TIDX and TILE is present exactly once in 1.0. A section
-lies wholly inside the file, after the directory. A reader ignores a tag it
-does not know. Reserved for later minor versions:
+Each of ATTR, REGN, TIDX and TILE is present exactly once. OVLY, added in
+1.1, is present at most once, and only in a Pack the tool built with
+`--transit`; a Pack without it stays 1.0. A section lies wholly inside the
+file, after the directory. A reader ignores a tag it does not know.
+Reserved for a later minor version:
 
-- `NAME`, a **name index** for place and street search;
-- `OVLY`, vector overlay items baked into the Pack, such as a static transit
-  network (ticket 06).
+- `NAME`, a **name index** for place and street search.
 
 ### ATTR: the credit
 
@@ -157,6 +157,74 @@ leftmost pixel the high bit, 1 for ink. The section's own CRC is 0: a reader
 checks each tile against its index entry's CRC instead, after inflating it.
 A payload longer than 16 KB is damage.
 
+### OVLY: overlays baked in (1.1)
+
+Vector items the Maps app draws over the tiles as switchable **Overlays**
+(`docs/maps/overlay-api.md`), unlike the tiles, which hold nothing that
+switches. The tool writes one when asked for a static transit network
+(below).
+
+```
+u16 count                   overlays, at most 8
+count times:
+    u8  name length         1 to 31
+    ... name                UTF-8: "Transit lines"
+    u16 items               at most 256
+    items times:
+        u8  kind            0 point, 1 line, 2 polygon, 3 text
+        u8  icon            a point's: 0 dot, 1 ring, 2 square, 3 triangle, 4 cross;
+                            0 for any other kind
+        u16 n               vertices: 1 for a point or a text, at least 2 for a
+                            line, 3 for a polygon (a ring, not closed)
+        n times:  i32 latitude x 1e7, i32 longitude x 1e7
+                            within -90 to 90 and -180 to 180
+        u8  label length    at most 63
+        ... label           UTF-8: a point's or a text's label; a line's or a
+                            polygon's is shown only on its info card
+        u8  properties      at most 10
+        properties times:
+            u8  key length      1 to 31
+            ... key             UTF-8
+            u8  value length    at most 159
+            ... value           UTF-8
+```
+
+The section ends exactly after the last overlay, and an overlay's items hold
+at most 16384 vertices between them: the map engine's limits
+(`map_overlay.h`). The section is at most 2 MB. Its order is the order the
+items are drawn and decluttered in: the first item of an overlay is placed
+first, so the tool puts the important ones first.
+
+A reader checks OVLY whole when it opens the Pack: its CRC, then every
+count, length, kind, icon and coordinate above. One that does not hold is
+left out, and the Pack opens with no overlays (the Maps app logs "the
+Pack's overlays are damaged: left out"): the tiles are as good as ever.
+
+### A static transit network
+
+`thistle_maps.py build REGIONS.geojson --transit SOURCE -o X.tmap` bakes
+the transit network inside the Regions into OVLY (`tools/maps/transit.py`).
+SOURCE is `osm`, the extract's own route relations (`type=route` with
+`route` one of train, subway, light_rail, monorail, tram, ferry,
+trolleybus, bus: their ways, and their nodes whose role is `stop*` or
+`platform*`), or a GTFS feed, a `.zip` or a folder (`routes.txt`,
+`trips.txt`, `stops.txt`, and `shapes.txt` and `stop_times.txt` if it has
+them; a route with no shape is drawn stop to stop along its first trip). It
+writes two overlays:
+
+| Overlay | Items |
+|---|---|
+| `Transit lines` | a line for each stretch the same routes run along, each way and every variant drawn once; its label the routes' names, `5, 23`; the property `mode` (`bus`, `tram, bus`) |
+| `Transit stops` | a point for a stop with its platforms and stop positions, those of one name within 300 m being one (a GTFS stop is its parent station), at their middle; labelled with its name; icon a square for train, subway or light rail, a ring for tram, a triangle for ferry, a dot for bus; the properties `lines` and `mode` |
+
+Lines are kept where they cross the Pack's z14 tiles, stops inside them;
+lines are simplified to a pixel at z17. The most important come first, and
+past 256 items or 16384 vertices the rest is left out, which the build
+says (`transit: 90 lines, 256 stops (412 left out, 256 at most)`): lines
+by mode (rail, subway, light rail, monorail, tram, ferry, trolleybus, bus),
+then the longest; stops by mode, then stations, then the most routes. The
+same source gives the same bytes.
+
 ## Reading it safely
 
 The Pack is not signed: it is data, copied by hand, and read as untrusted.
@@ -170,7 +238,9 @@ The device:
 - reads one index entry at a time, refusing a payload outside TILE or longer
   than 16 KB;
 - inflates a payload into a fixed 8192-byte buffer, and requires the stream
-  to fill it exactly and the result to match the entry's CRC.
+  to fill it exactly and the result to match the entry's CRC;
+- checks OVLY, if there is one, as its section says, and leaves it out if it
+  does not hold.
 
 A Pack that fails at opening is refused with its reason, and the app says
 so. A tile that fails is drawn as **No map here**, as a missing tile is.

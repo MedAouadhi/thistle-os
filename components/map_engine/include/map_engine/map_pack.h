@@ -59,6 +59,28 @@ typedef enum {
     MAP_TILE_BAD,   /* damaged: an entry, a payload or a CRC that does not hold */
 } map_tile_result_t;
 
+/* Overlay items baked into the Pack (its OVLY section, format 1.1), such
+ * as a static transit network: points, lines, polygons and texts, each
+ * with a label and up to MAP_PACK_ITEM_PROPS "key: value" properties.
+ * Read and checked whole at opening; a damaged OVLY leaves the Pack
+ * without them (map_pack_overlays_damaged()), its tiles shown as ever.
+ * map_overlay_add_from_pack() (map_overlay.h) puts one on a view. */
+#define MAP_PACK_MAX_OVERLAYS  8
+#define MAP_PACK_ITEMS_MAX     256      /* an overlay's, as map_overlay.h's */
+#define MAP_PACK_VERTICES_MAX  16384
+#define MAP_PACK_LABEL_MAX     64       /* bytes with the terminator */
+#define MAP_PACK_ITEM_PROPS    10
+#define MAP_PACK_KEY_MAX       32
+#define MAP_PACK_VALUE_MAX     160
+
+typedef struct {
+    int  kind;      /* as map_item_kind_t: 0 point, 1 line, 2 polygon, 3 text */
+    int  icon;      /* as map_icon_t, for a point */
+    int  vertices;  /* 1 for a point or a text */
+    int  props;
+    char label[MAP_PACK_LABEL_MAX];
+} map_pack_item_t;
+
 /* Opens the Pack at path. On failure *out is NULL and, for
  * MAP_PACK_ERR_NEWER, *newer_major (if not NULL) is the Pack's format. */
 map_pack_err_t map_pack_open(const char *path, map_pack_t **out, unsigned *newer_major);
@@ -85,6 +107,21 @@ bool map_pack_has_tile(map_pack_t *pack, int z, uint32_t x, uint32_t y);
  * nothing useful. */
 map_tile_result_t map_pack_read_tile(map_pack_t *pack, int z, uint32_t x, uint32_t y,
                                      uint8_t out[MAP_TILE_BYTES]);
+
+int map_pack_overlay_count(const map_pack_t *pack);
+/* Whether the Pack had an OVLY section that did not hold, and so none. */
+bool map_pack_overlays_damaged(const map_pack_t *pack);
+/* Overlay i's name ("Transit stops"), or NULL. */
+const char *map_pack_overlay_name(const map_pack_t *pack, int overlay);
+int map_pack_overlay_items(const map_pack_t *pack, int overlay);
+/* Item `item` of an overlay; false if there is none such. */
+bool map_pack_overlay_item(const map_pack_t *pack, int overlay, int item, map_pack_item_t *out);
+/* Its vertex v, in degrees. */
+bool map_pack_overlay_vertex(const map_pack_t *pack, int overlay, int item, int v, double *lat,
+                             double *lon);
+/* Its property p, cut to fit key and value (UTF-8, at a character's end). */
+bool map_pack_overlay_prop(const map_pack_t *pack, int overlay, int item, int p, char *key,
+                           size_t key_cap, char *value, size_t value_cap);
 
 /* CRC-32 (IEEE 802.3), as the Pack's checks use, continued as zlib's
  * crc32() is: start with 0, pass each result on with the next bytes. */
