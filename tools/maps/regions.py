@@ -132,8 +132,60 @@ def tile_bounds(z: int, x: int, y: int) -> tuple[float, float, float, float]:
     return lat(y + 1), x / n * 360.0 - 180.0, lat(y), (x + 1) / n * 360.0 - 180.0
 
 
+def _tile_range(points, z: int) -> tuple[int, int, int, int]:
+    """x0, y0, x1, y1 of the tiles around points, one more each way, as a
+    point on a tile's edge is in both tiles."""
+    xs, ys = zip(*(world_pixel(lat, lon, z) for lat, lon in points))
+    return (int(min(xs) // 256) - 1, int(min(ys) // 256) - 1,
+            int(max(xs) // 256) + 1, int(max(ys) // 256) + 1)
+
+
+def _segment_meets_box(a, b, south, west, north, east) -> bool:
+    if any(south <= p[0] <= north and west <= p[1] <= east for p in (a, b)):
+        return True
+    corners = [(south, west), (south, east), (north, east), (north, west)]
+    return any(_segments_cross(a, b, corners[k], corners[(k + 1) % 4]) for k in range(4))
+
+
+def _polygon_tiles(ring, z: int) -> set[tuple[int, int]]:
+    """What _polygon_meets_box gives for every tile, quick enough for the
+    browser mode's estimate of a freehand Region tens of kilometres across.
+
+    A tile the outline passes through is the polygon's; any other tile is
+    wholly inside or wholly outside, so its centre says which. The first
+    are found edge by edge, the second row by row along a line through the
+    row's centres."""
+    out: set[tuple[int, int]] = set()
+    n = len(ring)
+    for i in range(n):
+        a, b = ring[i], ring[(i + 1) % n]
+        x0, y0, x1, y1 = _tile_range((a, b), z)
+        for x in range(x0, x1 + 1):
+            for y in range(y0, y1 + 1):
+                if (x, y) not in out and _segment_meets_box(a, b, *tile_bounds(z, x, y)):
+                    out.add((x, y))
+    size = 1 << z
+    x0, y0, x1, y1 = _tile_range(ring, z)
+    for y in range(max(y0, 0), min(y1, size - 1) + 1):
+        south, _w, north, _e = tile_bounds(z, 0, y)
+        lat = (south + north) / 2
+        crossings = sorted(
+            y1_lon + (lat - y1_lat) * (y2_lon - y1_lon) / (y2_lat - y1_lat)
+            for (y1_lat, y1_lon), (y2_lat, y2_lon) in zip(ring, ring[1:] + ring[:1])
+            if (y1_lat > lat) != (y2_lat > lat))
+        for left, right in zip(crossings[0::2], crossings[1::2]):
+            first = max(int((left + 180.0) / 360.0 * size), x0)
+            for x in range(first, min(int((right + 180.0) / 360.0 * size), x1) + 1):
+                centre = (x + 0.5) / size * 360.0 - 180.0
+                if left < centre < right:
+                    out.add((x, y))
+    return out
+
+
 def region_tiles(region: Region, z: int) -> set[tuple[int, int]]:
     """The (x, y) of every tile at z that the Region touches."""
+    if not region.is_circle:
+        return _polygon_tiles(list(region.points), z)
     s, w, n, e = region.bbox()
     x0, y0 = (int(v // 256) for v in world_pixel(n, w, z))
     x1, y1 = (int(v // 256) for v in world_pixel(s, e, z))

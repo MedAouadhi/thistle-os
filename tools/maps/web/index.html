@@ -1,0 +1,44 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: BSD-3-Clause -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ThistleOS Map Pack tool</title>
+<link rel="stylesheet" href="leaflet/leaflet.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<aside id="panel">
+  <h1>Map Pack</h1>
+  <p class="file" id="file"></p>
+
+  <div class="tools" role="toolbar" aria-label="Drawing tools">
+    <button id="tool-pan" class="tool active" title="Move the map (Esc)">Move</button>
+    <button id="tool-circle" class="tool" title="Press at the centre, let go on the edge (C)">Circle</button>
+    <button id="tool-freehand" class="tool" title="Hold the button and draw round the place (F)">Freehand</button>
+  </div>
+  <p class="hint" id="hint">Choose Circle or Freehand, then draw on the map.</p>
+
+  <h2>Regions</h2>
+  <ol id="regions"></ol>
+  <p class="empty" id="no-regions">No Regions yet.</p>
+
+  <h2>Size</h2>
+  <p id="estimate" data-bytes="0">0 tiles</p>
+  <p id="warning" class="warning" hidden></p>
+  <p class="budget"><label>Budget <input id="budget" size="8" title="Warn above this size: 500 MB, 2 GB, ..."></label></p>
+
+  <div class="actions">
+    <button id="save">Save</button>
+    <button id="measure" title="Draw a sample of the tiles from the map data for a closer estimate">Measure</button>
+    <button id="build" title="Save, then build the Map Pack">Build</button>
+  </div>
+  <p id="status" role="status"></p>
+  <pre id="log"></pre>
+</aside>
+<main id="map"></main>
+<script src="leaflet/leaflet.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
