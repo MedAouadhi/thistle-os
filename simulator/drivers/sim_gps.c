@@ -5,6 +5,7 @@
 #include "sim_gps.h"
 #include <stddef.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -14,6 +15,50 @@ static float    s_alt  = 15.0f;
 static uint8_t  s_sats = 10;
 static bool     s_fix  = true;
 
+/* A fix that moves: THISTLE_SIM_GPS_PATH="MS:LAT,LON;MS:LAT,LON;...", each
+ * position taken from MS milliseconds after the driver's start until the
+ * next. Before the first, the scenario's position. */
+#define PATH_MAX_POINTS 32
+static struct { long ms; double lat, lon; } s_path[PATH_MAX_POINTS];
+static int             s_path_len   = -1;  /* -1: not read yet */
+static struct timespec s_started;
+
+static void path_read(void)
+{
+    s_path_len = 0;
+    clock_gettime(CLOCK_MONOTONIC, &s_started);
+    const char *spec = getenv("THISTLE_SIM_GPS_PATH");
+    while (spec && *spec && s_path_len < PATH_MAX_POINTS) {
+        long ms;
+        double lat, lon;
+        if (sscanf(spec, "%ld:%lf,%lf", &ms, &lat, &lon) != 3) {
+            fprintf(stderr, "[sim_gps] THISTLE_SIM_GPS_PATH: cannot read \"%s\"\n", spec);
+            break;
+        }
+        s_path[s_path_len].ms = ms;
+        s_path[s_path_len].lat = lat;
+        s_path[s_path_len].lon = lon;
+        s_path_len++;
+        spec = strchr(spec, ';');
+        if (spec) spec++;
+    }
+}
+
+/* Where the path has the fix now, if it has started. */
+static void path_now(void)
+{
+    if (s_path_len < 0) path_read();
+    if (s_path_len == 0) return;
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    long ms = (now.tv_sec - s_started.tv_sec) * 1000 + (now.tv_nsec - s_started.tv_nsec) / 1000000;
+    for (int i = 0; i < s_path_len && s_path[i].ms <= ms; i++) {
+        s_lat = s_path[i].lat;
+        s_lon = s_path[i].lon;
+        s_fix = true;
+    }
+}
+
 static hal_gps_cb_t s_cb        = NULL;
 static void        *s_cb_user   = NULL;
 
@@ -22,6 +67,7 @@ static void        *s_cb_user   = NULL;
 static esp_err_t sim_gps_init(const void *config)
 {
     (void)config;
+    if (s_path_len < 0) path_read();
     return ESP_OK;
 }
 
@@ -43,6 +89,7 @@ static esp_err_t sim_gps_get_position(hal_gps_position_t *pos)
 {
     if (!pos) return ESP_ERR_INVALID_ARG;
 
+    path_now();
     pos->latitude    = s_lat;
     pos->longitude   = s_lon;
     pos->altitude_m  = s_alt;

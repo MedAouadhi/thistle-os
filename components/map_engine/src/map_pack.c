@@ -328,27 +328,38 @@ static int compare_key(int z, uint32_t x, uint32_t y, const uint8_t *entry)
     return 0;
 }
 
-map_tile_result_t map_pack_read_tile(map_pack_t *pack, int z, uint32_t x, uint32_t y,
-                                     uint8_t out[MAP_TILE_BYTES])
+/* Finds tile (z, x, y)'s index entry: MAP_TILE_OK with it in entry. */
+static map_tile_result_t find_entry(map_pack_t *pack, int z, uint32_t x, uint32_t y,
+                                    uint8_t entry[INDEX_ENTRY_LEN])
 {
     if (!pack || z < MAP_MIN_ZOOM || z > MAP_MAX_ZOOM) return MAP_TILE_NONE;
     uint32_t lo = 0, hi = pack->tile_count;
-    uint8_t entry[INDEX_ENTRY_LEN];
-    bool found = false;
     while (lo < hi) {
         uint32_t mid = lo + (hi - lo) / 2;
-        if (!read_at(pack->file, pack->index.offset + mid * INDEX_ENTRY_LEN, entry, sizeof entry)) {
+        if (!read_at(pack->file, pack->index.offset + mid * INDEX_ENTRY_LEN, entry,
+                     INDEX_ENTRY_LEN)) {
             return MAP_TILE_BAD;
         }
         int c = compare_key(z, x, y, entry);
-        if (c == 0) {
-            found = true;
-            break;
-        }
+        if (c == 0) return MAP_TILE_OK;
         if (c < 0) hi = mid;
         else lo = mid + 1;
     }
-    if (!found) return MAP_TILE_NONE;
+    return MAP_TILE_NONE;
+}
+
+bool map_pack_has_tile(map_pack_t *pack, int z, uint32_t x, uint32_t y)
+{
+    uint8_t entry[INDEX_ENTRY_LEN];
+    return find_entry(pack, z, x, y, entry) == MAP_TILE_OK;
+}
+
+map_tile_result_t map_pack_read_tile(map_pack_t *pack, int z, uint32_t x, uint32_t y,
+                                     uint8_t out[MAP_TILE_BYTES])
+{
+    uint8_t entry[INDEX_ENTRY_LEN];
+    map_tile_result_t found = find_entry(pack, z, x, y, entry);
+    if (found != MAP_TILE_OK) return found;
 
     uint32_t offset = rd32(entry + 12), length = rd32(entry + 16), crc = rd32(entry + 20);
     const section_t *t = &pack->tiles;

@@ -28,6 +28,7 @@
  */
 #pragma once
 
+#include "map_engine/map_overlay.h"
 #include "map_engine/map_pack.h"
 #include "map_engine/map_projection.h"
 #include "lvgl.h"
@@ -39,6 +40,8 @@ extern "C" {
 #endif
 
 typedef struct map_view map_view_t;
+
+#define MAP_VIEW_MAX_OVERLAYS 16
 
 /* What a view now on the screen is, and what composing it took. */
 typedef struct {
@@ -79,6 +82,36 @@ void map_view_pan(map_view_t *view, int dx, int dy);
 /* Zooms by levels (positive is in), keeping the world pixel at the view's
  * middle there. False, and nothing asked, when already at the end. */
 bool map_view_zoom_by(map_view_t *view, int levels);
+
+/* The app covers px at the bottom of the view (an About line, say): the
+ * marker counts as off the view there, and near its edge above it. */
+void map_view_set_bottom_inset(map_view_t *view, int px);
+
+/* The device's position, from each fix: the view draws a marker there, a
+ * ring with a dot. It is redrawn only once the fix has moved more than
+ * 12 px on the screen, and at most every 5 s, so a refresh of its own
+ * stays rare and small (only the marker's old and new places). A marker
+ * the fix walks to within 24 px of the view's edge makes the map jump a
+ * step, half the view, that way, again at most every 5 s; a marker the
+ * user panned to the edge or away is left there. Logs what it does:
+ * "marker moved 30 px to 150,148, 5.0 s after the last", "marker held:
+ * ...", "page jump east to keep the marker in view: ...". */
+void map_view_set_position(map_view_t *view, double lat, double lon);
+
+/* Shows the position in the middle of the view at the zoom asked for
+ * last. False, and nothing asked, without a position yet. */
+bool map_view_locate(map_view_t *view);
+
+/* Adds overlay to the view, shown or not; it is drawn over the tiles from
+ * the next view composed on (at once, if it is shown and a view is). The
+ * view does not own it: destroy it after the view. False past
+ * MAP_VIEW_MAX_OVERLAYS. */
+bool map_view_add_overlay(map_view_t *view, map_overlay_t *overlay, bool visible);
+
+/* Shows or hides an overlay added to the view: the view is composed again
+ * where it is, one refresh. Logs "overlay tracks off: z16 at X,Y". */
+void map_view_set_overlay_visible(map_view_t *view, map_overlay_t *overlay, bool visible);
+bool map_view_overlay_visible(const map_view_t *view, const map_overlay_t *overlay);
 
 /* The view asked for last, which may not be on the screen yet. */
 int map_view_zoom(const map_view_t *view);

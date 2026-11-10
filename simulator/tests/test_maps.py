@@ -77,10 +77,14 @@ class Shown:
 
 
 def run_app(pack: Optional[bytes], name: str = "fixture.tmap", timeout_ms: int = 3000,
-            steps: tuple[str, ...] = (), extra: tuple[str, ...] = ()) -> Shown:
+            steps: tuple[str, ...] = (), extra: tuple[str, ...] = (),
+            fix: Optional[list[tuple[int, float, float]]] = None,
+            files: Optional[dict[str, str]] = None) -> Shown:
     """Runs the app on a scratch card holding pack. Each step is a --tap
     (X,Y, or type:KEYS) or a --drag (X1,Y1,X2,Y2), 1.5 s apart, the first
-    2.25 s after startup."""
+    2.25 s after startup. fix is the GPS fix's path, (ms, lat, lon) each
+    from ms after startup; without it, the simulator's fix, far from every
+    Region. files are more files for the card, by path."""
     with tempfile.TemporaryDirectory(prefix="thistle-maps-") as tmp:
         card = Path(tmp) / "card"
         shutil.copytree(SDCARD, card)
@@ -89,8 +93,14 @@ def run_app(pack: Optional[bytes], name: str = "fixture.tmap", timeout_ms: int =
         maps.mkdir()
         if pack is not None:
             (maps / name).write_bytes(pack)
+        for path, text in (files or {}).items():
+            (card / path).parent.mkdir(parents=True, exist_ok=True)
+            (card / path).write_text(text)
         shot_path = Path(tmp) / "shot.ppm"
         env = dict(__import__("os").environ, THISTLE_SIM_SDCARD=str(card))
+        if fix:
+            env["THISTLE_SIM_GPS_PATH"] = ";".join(f"{ms}:{lat:.9f},{lon:.9f}"
+                                                   for ms, lat, lon in fix)
         command = [str(SIMULATOR), "--headless", "--device", "tdeck-max",
                    "--launch-app", APP, "--timeout", str(timeout_ms),
                    "--screenshot", str(shot_path), "--log-flushes", *extra]
@@ -147,17 +157,31 @@ def zoom_buttons(log: str) -> dict[str, tuple[int, int]]:
     return {k: tuple(int(v) for v in xy.split(",")) for k, xy in found.items()}
 
 
+def controls(log: str) -> list[tuple[int, int, int, int]]:
+    """The rectangles of the app's buttons over the map, in the view's
+    pixels, as the app logs them: "(maps) locate button X1,Y1-X2,Y2"."""
+    vx, vy, _, _ = view_rect(log)
+    found = re.findall(r"\(maps\) \w+ button (\d+),(\d+)-(\d+),(\d+)", log)
+    return [(int(a) - vx - 1, int(b) - vy - 1, int(c) - vx + 1, int(d) - vy + 1)
+            for a, b, c, d in found]
+
+
 def check_screen(shown: Shown, pack: Pack, z: int, left: int, top: int,
-                 damaged: frozenset = frozenset()) -> int:
-    """Every pixel of the view, but the About line and the zoom buttons,
-    against the Pack's tiles and the hatching: a tile the Pack lacks, or one
-    in damaged, is hatched. Returns how many of the Pack's tiles show."""
+                 damaged: frozenset = frozenset(), skip: tuple = (),
+                 ink: Optional[Callable[[int, int], bool]] = None) -> int:
+    """Every pixel of the view, but the About line, the buttons and the
+    rectangles in skip (the view's pixels, inclusive), against the Pack's
+    tiles and the hatching: a tile the Pack lacks, or one in damaged, is
+    hatched. ink(gx, gy), if given, says where something drawn over the map
+    should show instead, ink or paper (None: the map; "either": not
+    checked). Returns how many of the Pack's tiles show."""
     vx, vy, w, h = view_rect(shown.log)
     if (vx, w) != (0, 240):
         raise AssertionError(f"the view is {w} wide at x {vx}, not the screen's width")
     buttons = zoom_buttons(shown.log)
     bx = min(x for x, _ in buttons.values()) - BUTTON_HALF
     by = min(y for _, y in buttons.values()) - BUTTON_HALF - vy
+    rects = controls(shown.log) + list(skip)
     index = pack.index()
     tiles: dict = {}
     wrong = []
@@ -165,9 +189,16 @@ def check_screen(shown: Shown, pack: Pack, z: int, left: int, top: int,
         for sx in range(w):
             if sx >= bx and sy >= by:
                 continue
+            if any(x1 <= sx <= x2 and y1 <= sy <= y2 for x1, y1, x2, y2 in rects):
+                continue
             gx, gy = left + sx, top + sy
             key = (z, gx // 256, gy // 256)
-            if key in index and key not in damaged:
+            over = ink(gx, gy) if ink else None
+            if over == "either":
+                continue
+            if over is not None:
+                want = over
+            elif key in index and key not in damaged:
                 if key not in tiles:
                     tiles[key] = pack.tile(*key)
                 bitmap = tiles[key]
@@ -240,7 +271,7 @@ def a_newer_format_is_refused_with_a_message() -> None:
 # Moving: what each step drew, and how many refreshes it cost
 # --------------------------------------------------------------------------
 
-ACTION = re.compile(r"\(map_view\) (pan \w+|zoom in|zoom out|already at z\d+)")
+ACTION = re.compile(r"\(map_view\) (pan \w+|zoom in|zoom out|already at z\d+|locate|page jump|overlay \S+ o(?:n|ff)\b)")
 SHOWN = re.compile(r"\(maps\) shown z(\d+) at (-?\d+),(-?\d+): (\d+) tiles, (\d+) places "
                    r"with none, (\d+) damaged")
 FLUSH = re.compile(r"\[sim\] flush \((\d+),(\d+)\)-\((\d+),(\d+)\)")
@@ -433,6 +464,274 @@ def logs_memory_and_the_tile_tasks_stack() -> None:
     need(shown.log, "(map_view) tile task stopping;")
 
 
+# --------------------------------------------------------------------------
+# The position: opening on it, locate, the marker and the page jump
+# --------------------------------------------------------------------------
+
+MARKER_HALF = 11      # the marker is 21 px a side, centred on the fix
+MOVE_PX = 12          # the marker is redrawn only past this
+MARKER_GAP_S = 5.0    # and at most this often
+EDGE_PX = 24          # nearer the view's edge than this, the map jumps a step
+
+MARKER = re.compile(r"\(map_view\) marker (?:at|moved \d+ px to) (\d+),(\d+)")
+MARKER_OFF = "(map_view) marker off the view"
+
+
+def lat_lon(gx: float, gy: float, z: int) -> tuple[float, float]:
+    """The inverse of world_pixel: where world pixel (gx, gy) is."""
+    size = 256 * (1 << z)
+    lon = gx / size * 360.0 - 180.0
+    lat = math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * gy / size))))
+    return lat, lon
+
+
+def medina(pack: Pack) -> tuple[int, int]:
+    """The first Region's centre, the world pixel at z16."""
+    lat, lon = pack.regions()[0]["centre"]
+    gx, gy = world_pixel(lat, lon, 16)
+    return math.floor(gx + 0.5), math.floor(gy + 0.5)
+
+
+def fix_at(ms: int, gx: int, gy: int) -> tuple[int, float, float]:
+    """A fix from ms after startup at world pixel (gx, gy) of z16."""
+    return (ms, *lat_lon(gx, gy, 16))
+
+
+def marker_skip(x: int, y: int) -> tuple[int, int, int, int]:
+    return (x - MARKER_HALF, y - MARKER_HALF, x + MARKER_HALF, y + MARKER_HALF)
+
+
+def markers(log: str) -> list[tuple[int, int]]:
+    return [(int(x), int(y)) for x, y in MARKER.findall(log)]
+
+
+def check_marker(shown: Shown, x: int, y: int) -> None:
+    """The marker on the screen at (x, y) of the view: a black dot in a ring,
+    paper between them."""
+    vx, vy, _, _ = view_rect(shown.log)
+    sx, sy = vx + x, vy + y
+    if not dark(shown.shot, sx, sy):
+        raise AssertionError(f"no marker dot at {x},{y} of the view")
+    ring = [dark(shown.shot, sx + dx, sy) for dx in range(-MARKER_HALF + 1, MARKER_HALF)]
+    if ring.count(True) < 5 or ring.count(False) < 4:
+        raise AssertionError(f"no marker at {x},{y}: across it {ring}")
+
+
+def opens_on_the_fix_with_the_marker_in_the_middle() -> None:
+    """With a fix inside a Region, the map opens around it, the marker in the
+    middle of the view and the map around it as the Pack has it."""
+    pack = Pack(GOLDEN.read_bytes())
+    cx, cy = medina(pack)
+    gx, gy = cx + 37, cy - 21
+    shown = run_app(GOLDEN.read_bytes(), timeout_ms=3500, fix=[fix_at(0, gx, gy)])
+    lat, lon = lat_lon(gx, gy, 16)
+    need(shown.log, f"(maps) showing z16 around {lat:.7f}, {lon:.7f} (your position)")
+    vx, vy, w, h = view_rect(shown.log)
+    left, top = gx - w // 2, gy - h // 2
+    if first_shown(shown.log) != (16, left, top):
+        raise AssertionError(f"the map opened at {first_shown(shown.log)}, not z16 {left},{top}")
+    if markers(shown.log) != [(w // 2, h // 2)]:
+        raise AssertionError(f"the marker was drawn at {markers(shown.log)}")
+    check_marker(shown, w // 2, h // 2)
+    check_screen(shown, pack, 16, left, top, skip=(marker_skip(w // 2, h // 2),))
+
+
+def opens_on_the_region_without_a_fix_there() -> None:
+    """A fix outside every Region (the simulator's own, in San Francisco):
+    the map opens on the first Region, and no marker shows."""
+    shown = run_app(GOLDEN.read_bytes(), timeout_ms=3500)
+    need(shown.log, "(maps) showing z16 around 36.8000000, 10.1800000 (Medina)")
+    if markers(shown.log):
+        raise AssertionError(f"a marker was drawn at {markers(shown.log)}")
+
+
+def control_centre(log: str, name: str) -> str:
+    found = re.search(rf"\(maps\) {name} button (\d+),(\d+)-(\d+),(\d+)", log)
+    if not found:
+        raise AssertionError(f"the app did not say where its {name} button is")
+    x1, y1, x2, y2 = (int(v) for v in found.groups())
+    return f"{(x1 + x2) // 2},{(y1 + y2) // 2}"
+
+
+def locate_after_panning_away() -> None:
+    """Two steps east take the marker off the view; locate, by its button or
+    the l key, brings the fix back to the middle, marker and all, in one
+    refresh."""
+    pack = Pack(GOLDEN.read_bytes())
+    cx, cy = medina(pack)
+    gx, gy = cx - 15, cy + 9
+    probe = run_app(GOLDEN.read_bytes(), timeout_ms=1500)
+    for locate in (control_centre(probe.log, "locate"), "type:l"):
+        shown = run_app(GOLDEN.read_bytes(), timeout_ms=8000, fix=[fix_at(0, gx, gy)],
+                        steps=("type:d", "type:d", locate))
+        vx, vy, w, h = view_rect(shown.log)
+        left, top = gx - w // 2, gy - h // 2
+        expect_steps(shown.log, [("pan east", (16, left + w // 2, top)),
+                                 ("pan east", (16, left + w, top)),
+                                 ("locate", (16, left, top))])
+        after = shown.log.split("(map_view) locate")[1]
+        before = shown.log.split("(map_view) locate")[0]
+        if MARKER_OFF not in before:
+            raise AssertionError("the marker stayed on the view two steps away")
+        if markers(after) != [(w // 2, h // 2)]:
+            raise AssertionError(f"after locate the marker was drawn at {markers(after)}")
+        check_marker(shown, w // 2, h // 2)
+        check_screen(shown, pack, 16, left, top, skip=(marker_skip(w // 2, h // 2),))
+
+
+HELD = re.compile(r"\(map_view\) marker held: (\d+) px from where it is drawn, "
+                  r"(\d+\.\d) s after the last")
+MOVED = re.compile(r"\(map_view\) marker moved (\d+) px to (\d+),(\d+), "
+                   r"(\d+\.\d) s after the last")
+
+
+def flushes_after(log: str, line: str) -> list[tuple[int, int, int, int]]:
+    """The flushes that followed line, up to the refresh that showed them."""
+    rest = log.split(line, 1)[1]
+    found = []
+    for l in rest.splitlines():
+        if REFRESH in l:
+            break
+        if (f := FLUSH.search(l)):
+            found.append(tuple(int(v) for v in f.groups()))
+    return found
+
+
+def the_marker_moves_past_12_px_at_most_every_5_s() -> None:
+    """A fix that moves 30 px soon after the marker was drawn waits out the
+    5 s, then the marker moves, refreshing only around it; 8 px more, and
+    then 4 px more (12 in all), and it stays where it is."""
+    pack = Pack(GOLDEN.read_bytes())
+    cx, cy = medina(pack)
+    shown = run_app(GOLDEN.read_bytes(), timeout_ms=13000, fix=[
+        fix_at(0, cx, cy), fix_at(2500, cx + 30, cy), fix_at(8500, cx + 38, cy),
+        fix_at(10500, cx + 42, cy)])
+    vx, vy, w, h = view_rect(shown.log)
+    mx, my = w // 2, h // 2
+    held = [(int(px), float(s)) for px, s in HELD.findall(shown.log)]
+    moved = [(int(px), int(x), int(y), float(s)) for px, x, y, s in MOVED.findall(shown.log)]
+    if [m[:3] for m in moved] != [(30, mx + 30, my)]:
+        raise AssertionError(f"the marker moved {moved}, not once, 30 px")
+    if moved[0][3] < MARKER_GAP_S:
+        raise AssertionError(f"the marker moved {moved[0][3]} s after the last, under 5 s")
+    if not held or held[0][0] != 30 or held[0][1] >= MARKER_GAP_S:
+        raise AssertionError(f"a move of 30 px within 5 s was not held: {held}")
+    if [p for p, _ in held[1:]] != [8, 12]:
+        raise AssertionError(f"after the move, held {held[1:]}, not 8 px and 12 px")
+    if "(map_view) page jump" in shown.log or len(steps_of(shown.log)) != 0:
+        raise AssertionError("the map moved")
+    # Only the marker's old and new places are drawn again.
+    for x1, y1, x2, y2 in flushes_after(shown.log, "(map_view) marker moved"):
+        if x2 - x1 > 2 * MARKER_HALF + 30 + 2 or y2 - y1 > 2 * MARKER_HALF + 2:
+            raise AssertionError(f"the marker's move flushed ({x1},{y1})-({x2},{y2})")
+    left, top = cx - w // 2, cy - h // 2
+    check_marker(shown, mx + 30, my)
+    check_screen(shown, pack, 16, left, top, skip=(marker_skip(mx + 30, my),))
+
+
+def the_map_jumps_a_step_when_the_marker_nears_the_edge() -> None:
+    """Walking east to within 24 px of the view's edge: the map moves a step
+    east, half the view, the marker with it, in one refresh."""
+    pack = Pack(GOLDEN.read_bytes())
+    cx, cy = medina(pack)
+    vx, vy, w, h = view_rect(run_app(GOLDEN.read_bytes(), timeout_ms=1500).log)
+    edge = cx - w // 2 + w - EDGE_PX + 2
+    shown = run_app(GOLDEN.read_bytes(), timeout_ms=10000, fix=[
+        fix_at(0, cx, cy), fix_at(6500, edge, cy)])
+    left, top = cx - w // 2, cy - h // 2
+    need(shown.log, f"(map_view) page jump east to keep the marker in view: z16 at "
+                    f"{left + w // 2},{top}")
+    expect_steps(shown.log, [("page jump", (16, left + w // 2, top))])
+    after = shown.log.split("(map_view) page jump")[1]
+    x = edge - (left + w // 2)
+    if markers(after) != [(x, h // 2)]:
+        raise AssertionError(f"after the jump the marker was drawn at {markers(after)}")
+    check_marker(shown, x, h // 2)
+    check_screen(shown, pack, 16, left + w // 2, top, skip=(marker_skip(x, h // 2),))
+
+
+# --------------------------------------------------------------------------
+# The Navigator's recorded tracks
+# --------------------------------------------------------------------------
+
+def gpx(points: list[tuple[float, float]]) -> str:
+    """A track as the Navigator records it (apps/navigator)."""
+    rows = "".join(f'    <trkpt lat="{lat:.7f}" lon="{lon:.7f}"><ele>12.0</ele>'
+                   f"<time>2026-11-01T10:15:00Z</time></trkpt>\n" for lat, lon in points)
+    return ('<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<gpx version="1.1" creator="ThistleOS Navigator">\n'
+            "  <trk><name>ThistleOS Track</name><trkseg>\n" + rows +
+            "  </trkseg></trk>\n</gpx>\n")
+
+
+def segment_distance(px: float, py: float, a: tuple, b: tuple) -> float:
+    (ax, ay), (bx, by) = a, b
+    dx, dy = bx - ax, by - ay
+    t = 0.0 if dx == dy == 0 else max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) /
+                                                (dx * dx + dy * dy)))
+    return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+
+
+# A track is drawn as a black line 3 px wide in a paper casing 7 px wide:
+# ink within 1.5 px of it, paper to 3.5 px. Pixels near either edge are not
+# checked, for rounding.
+TRACK_INK, TRACK_CASING = 1.5, 3.5
+
+
+def track_ink(line: list[tuple[float, float]]):
+    def ink(gx: int, gy: int):
+        d = min(segment_distance(gx + 0.5, gy + 0.5, a, b) for a, b in zip(line, line[1:]))
+        if d < TRACK_INK - 0.2:
+            return True
+        if d < TRACK_INK + 0.2:
+            return "either"
+        if d < TRACK_CASING - 0.2:
+            return False
+        if d < TRACK_CASING + 0.2:
+            return "either"
+        return None
+    return ink
+
+
+def a_recorded_track_is_drawn_and_can_be_switched_off() -> None:
+    """A track the Navigator recorded in /sdcard/tracks/ is drawn over the
+    map, and stays drawn as the map moves; the Tracks button takes it off,
+    and t puts it back, a refresh each."""
+    pack = Pack(GOLDEN.read_bytes())
+    cx, cy = medina(pack)
+    corners = [(cx - 100, cy - 60), (cx + 20, cy - 60), (cx + 20, cy + 80), (cx + 170, cy + 90)]
+    points = [lat_lon(x, y, 16) for x, y in corners]
+    files = {"tracks/2026-11-01_101500.gpx": gpx(points)}
+    probe = run_app(GOLDEN.read_bytes(), timeout_ms=1500, files=files)
+    need(probe.log, "(maps) tracks: 1 track, 4 points")
+    vx, vy, w, h = view_rect(probe.log)
+    left, top = expected_origin(pack, 16, w, h)
+    line = [world_pixel(lat, lon, 16) for lat, lon in points]
+    check_screen(probe, pack, 16, left, top, ink=track_ink(line))
+
+    # A step east: still drawn where it is on the map.
+    east = run_app(GOLDEN.read_bytes(), timeout_ms=4000, files=files, steps=("type:d",))
+    check_screen(east, pack, 16, left + w // 2, top, ink=track_ink(line))
+
+    # Off by the button: the map alone; on again by the key.
+    off = run_app(GOLDEN.read_bytes(), timeout_ms=4000, files=files,
+                  steps=(control_centre(probe.log, "tracks"),))
+    expect_steps(off.log, [("overlay tracks off", (16, left, top))])
+    check_screen(off, pack, 16, left, top)
+    on = run_app(GOLDEN.read_bytes(), timeout_ms=5500, files=files,
+                 steps=(control_centre(probe.log, "tracks"), "type:t"))
+    expect_steps(on.log, [("overlay tracks off", (16, left, top)),
+                          ("overlay tracks on", (16, left, top))])
+    check_screen(on, pack, 16, left, top, ink=track_ink(line))
+
+
+def no_tracks_no_button() -> None:
+    shown = run_app(GOLDEN.read_bytes(), timeout_ms=1500)
+    need(shown.log, "(maps) tracks: none in /sdcard/tracks")
+    if "(maps) tracks button" in shown.log:
+        raise AssertionError("a Tracks button with no track")
+
+
 CASES: tuple[tuple[str, Callable[[], None]], ...] = (
     ("opens-the-pack-on-the-first-region", opens_the_pack_on_the_first_region),
     ("shows-the-packs-tiles-pixel-for-pixel", shows_the_packs_tiles_pixel_for_pixel),
@@ -450,6 +749,17 @@ CASES: tuple[tuple[str, Callable[[], None]], ...] = (
     ("a-truncated-pack-is-refused-and-the-app-goes-on",
      a_truncated_pack_is_refused_and_the_app_goes_on),
     ("logs-memory-and-the-tile-tasks-stack", logs_memory_and_the_tile_tasks_stack),
+    ("opens-on-the-fix-with-the-marker-in-the-middle",
+     opens_on_the_fix_with_the_marker_in_the_middle),
+    ("opens-on-the-region-without-a-fix-there", opens_on_the_region_without_a_fix_there),
+    ("locate-after-panning-away", locate_after_panning_away),
+    ("the-marker-moves-past-12-px-at-most-every-5-s",
+     the_marker_moves_past_12_px_at_most_every_5_s),
+    ("the-map-jumps-a-step-when-the-marker-nears-the-edge",
+     the_map_jumps_a_step_when_the_marker_nears_the_edge),
+    ("a-recorded-track-is-drawn-and-can-be-switched-off",
+     a_recorded_track_is_drawn_and_can_be_switched_off),
+    ("no-tracks-no-button", no_tracks_no_button),
 )
 
 SIMULATOR = Path("build/thistle_sim")

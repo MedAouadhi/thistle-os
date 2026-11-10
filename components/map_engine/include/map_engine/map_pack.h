@@ -76,6 +76,10 @@ const map_region_t *map_pack_region(const map_pack_t *pack, int i);
 /* The data's credit, as the Pack holds it: OpenStreetMap's. Never NULL. */
 const char *map_pack_credit(const map_pack_t *pack);
 
+/* Whether the Pack's index has tile (z, x, y), damaged or not: whether
+ * (z, x, y) is inside a Region. Reads the index only. */
+bool map_pack_has_tile(map_pack_t *pack, int z, uint32_t x, uint32_t y);
+
 /* Reads tile (z, x, y) into out, MAP_TILE_BYTES: rows top down, the left
  * pixel the high bit, 1 for ink. On anything but MAP_TILE_OK, out holds
  * nothing useful. */
