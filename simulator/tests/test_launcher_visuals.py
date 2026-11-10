@@ -94,7 +94,8 @@ CASES = (
     # again when Podcasts joined, after the Reader, and Phone after Podcasts,
     # and File Transfer after Files, Tailscale after File Transfer,
     # Hermes after Tailscale, To-do after Notes, and Chat after Hermes; and once more when
-    # Notes, Weather, WiFi Scanner and Flashlight moved to the App Store.
+    # Notes, Weather, WiFi Scanner and Flashlight moved to the App Store, and
+    # when Maps joined after the Navigator.
     Case(
         "lcd-apps",
         "tdeck",
@@ -102,7 +103,7 @@ CASES = (
         "160,222",
         320,
         240,
-        "135e81813cc7b51b03ca9178b4e57ec58bfa2d68f6fc4b47c9240d307255477f",
+        "b893205294c496a5467653df3fb92a528102390f46afa424bded7f7c6eef8649",
     ),
     # What an e-paper board boots by default: the LVGL grid, three columns
     # wide on a 240 px screen. Its first hash had the tile under the tap
@@ -111,7 +112,7 @@ CASES = (
     # of white to half, which inks more of each letter's antialiased edge,
     # and when Podcasts joined the grid, Phone, File Transfer, Tailscale,
     # Hermes and To-do, and when Notes, Weather, WiFi Scanner and Flashlight
-    # moved to the App Store.
+    # moved to the App Store, and when Maps joined.
     Case(
         "eink-lvgl-apps",
         "tdeck-max",
@@ -119,7 +120,7 @@ CASES = (
         "120,302",
         240,
         320,
-        "45691a0ed58fe01004b4e74413a75b34ff73870779469e4dcf550b631e5d9f08",
+        "dc6ae35c3c936d6e461f9813d8d85168456d95d2e1fbeafcff3ffbaa23d2c6ad",
     ),
 )
 

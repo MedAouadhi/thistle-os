@@ -146,3 +146,25 @@ _Avoid_: video call, voice call (as two kinds of call)
 **Video-capable** (chat peer):
 A chat peer that says it can take part in video, whether or not it has a camera: one without a camera still sees the other side's. A chat peer is video-capable by what it announces, never by the machine it runs on; the T-Deck is not, nor is an older companion app.
 _Avoid_: supported device, video device
+
+### Maps
+
+**Region**:
+A place a user wants on their offline map, drawn by hand on a real map as a circle or a freehand polygon, with the deepest of the four zoom levels it needs. A Regions file holds any number of them.
+_Avoid_: area, zone, bounding box, extract
+
+**Map Pack**:
+One file holding every Region's map, pre-drawn as one-bit tiles with their labels, built offline by the Map Pack tool and copied to the card. Unsigned: the device reads it as untrusted data.
+_Avoid_: map file, tile cache, mbtiles, map database
+
+**Extract**:
+The OpenStreetMap data the Map Pack tool draws from: a Geofabrik download covering a country or a part of one, fetched once and kept in the tool's cache. Not what the user chose; the Regions are.
+_Avoid_: map data (for the download), dump, planet file
+
+**Overlay**:
+A switchable layer an app draws over the map: points, lines, polygons and text, in latitude and longitude, owned by the app that embeds the map. Nothing in a tile is switchable; anything that should be is an overlay.
+_Avoid_: layer (unqualified), marker set, annotation
+
+**Provider**:
+The part of a map app that fetches live data for one city or service, the Berlin transit Provider first, and returns it as overlay items, while its app is open.
+_Avoid_: service (a Service is something a device authenticates to), backend, feed
