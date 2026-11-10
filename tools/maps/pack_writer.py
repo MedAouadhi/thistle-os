@@ -35,7 +35,8 @@ def _e7(value: float) -> int:
 def regions_section(regions: list[Region]) -> bytes:
     out = bytearray(struct.pack("<H", len(regions)))
     for region in regions:
-        name = region.name.encode("utf-8")[:255]
+        # At most 255 bytes, cut at a character's end.
+        name = region.name.encode("utf-8")[:255].decode("utf-8", "ignore").encode("utf-8")
         out += struct.pack("<BBH", 0 if region.is_circle else 1, region.deepest_zoom, len(name))
         out += name
         if region.is_circle:

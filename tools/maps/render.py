@@ -31,7 +31,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, features
+from PIL import Image, ImageChops, ImageDraw, ImageFont, features
 
 import icons
 from osm_source import MapData
@@ -253,8 +253,10 @@ class Metatile:
 
     def label(self, text: str, at: tuple[float, float], size: int, angle: float = 0.0,
               halo: int = 2) -> bool:
-        """Draws text centred on at, turned by angle degrees, with a white
-        halo, if it meets no label already drawn. Whether it was drawn.
+        """Draws text centred on at, turned by angle degrees, on a white
+        plate halo pixels wider than it, if it meets no label already drawn.
+        Whether it was drawn. A plate, not an outline of the letters, so a
+        road's casing does not show between the words of its name.
 
         The text is drawn anti-aliased and then cut at a third of full ink:
         FreeType's own one-bit mode drops the thin joins of Arabic letters
@@ -266,11 +268,12 @@ class Metatile:
         w, h = r - l + 2 * pad, b - t + 2 * pad
         text_img = Image.new("L", (w, h), 0)
         ImageDraw.Draw(text_img).text((pad - l, pad - t), text, font=font, fill=255)
+        plate = Image.new("L", (w, h), 255)
         if angle:
             text_img = text_img.rotate(angle, resample=Image.BILINEAR, expand=True)
+            plate = plate.rotate(angle, resample=Image.NEAREST, expand=True)
         glyphs = text_img.point(lambda v: 255 if v >= INK_THRESHOLD else 0, "1")
-        around = glyphs.convert("L").filter(ImageFilter.MaxFilter(2 * halo + 1)).point(
-            lambda v: 255 if v else 0, "1")
+        around = plate.point(lambda v: 255 if v else 0, "1")
         w, h = glyphs.size
         x0 = int(round(at[0] - w / 2))
         y0 = int(round(at[1] - h / 2))

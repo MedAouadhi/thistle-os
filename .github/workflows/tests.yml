@@ -600,6 +600,10 @@ jobs:
         working-directory: simulator
         run: python3 tests/test_todo.py --sim build/thistle_sim
 
+      - name: Run Maps tests against the Map Pack tool's golden Pack
+        working-directory: simulator
+        run: python3 tests/test_maps.py --sim build/thistle_sim
+
       - name: Run Tailnet chat conformance, messages, card, restart and app tests
         working-directory: simulator
         run: python3 tests/test_tailchat.py --sim build/thistle_sim

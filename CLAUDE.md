@@ -868,6 +868,41 @@ the reasons; hermes_esp32's `protocol/README.md` and its plugin's
   `simulator/tests/test_hermes.py` runs the app against
   `fake_hermes_bridge.py`, a stdlib bridge that speaks as the plugin does.
 
+### Maps
+
+An offline map of the places the user chose, drawn on a computer and only
+shown on the device (ADR-0017; `.scratch/maps/spec.md`, the vocabulary in
+`CONTEXT.md`). Three parts:
+
+- **The Map Pack tool**, `tools/maps/thistle_maps.py` (Python: Pillow with
+  raqm, pyosmium; `tools/maps/requirements.txt`). `build REGIONS.geojson -o
+  X.tmap` fetches the Geofabrik extract holding the Regions into
+  `~/.cache/thistle-maps` (once; later builds are offline), clips it, draws
+  one-bit tiles from z14 to each Region's `deepest_zoom`, and writes the
+  Pack; `--extract FILE` reads a local extract instead. `estimate` counts the
+  tiles and prices them (`estimate.py`, for the browser mode).
+  `test_thistle_maps.py` reads the golden fixture, `testdata/fixture.tmap`,
+  through a reader of its own; it says how to rebuild it, and
+  `testdata/make_fixture.py` makes the made-up extract it is built from.
+- **The format**, `docs/maps/map-pack-format.md`: version 1.0, a section
+  directory with room for a name index and overlays, a colour variant
+  reserved, raw DEFLATE and a CRC per tile, the "no map here" hatching.
+- **The map engine**, `components/map_engine/` (`map_engine/map_pack.h`,
+  `map_view.h`), a library component like none other yet: it reads a Pack
+  as untrusted, inflates with the S3 ROM's tinfl (uzlib, the Reader's, in
+  the simulators: `ESP_PLATFORM` decides), and composes the view into an
+  RGB565 buffer in PSRAM that an `lv_image` shows undecoded. A one-bit
+  (`I1`) image would be decoded to ARGB8888 from LVGL's 64 KB pool. The
+  simulators take its sources from `cmake/thistle_apps.cmake`.
+
+The Maps app (`apps/maps/`) opens the first `*.tmap` by name in
+`/sdcard/maps/` on the first Region's centre, at z16 or the Region's
+depth if shallower, with the credit on an About line at the bottom; it
+logs `(maps) opened X: format 1.0, ...`, `(maps) showing z16 around ...`,
+`(maps) view WxH at X,Y`. Pan, zoom, the marker and overlays are tickets
+02 to 04. `simulator/tests/test_maps.py` compares the screen with the
+golden Pack pixel for pixel.
+
 ### To-do
 
 `apps/todo/` is a checklist: type a task and press Enter, tap it when it is
@@ -1088,9 +1123,9 @@ The kernel is **100% Rust and hardware-independent**. It never calls ESP-IDF har
 - **Kernel (Rust)** (`components/kernel_rs/`): 100% Rust. 57 modules: manifest parser, permissions, IPC, events, app manager, version, crypto, HAL registry, driver manager, WM, app store, wifi/ble/net managers, OTA, and more.
 - **Display Server** (`components/kernel/src/display_server.c`): Surface management, compositor, WM vtable interface.
 - **UI** (`components/ui/`): thistle-tk WM (default). LVGL-based WM also available. Both loadable as `.wm.elf`.
-- **Apps**: 16 built in, and 4 from the App Store (Notes, Weather, WiFi
+- **Apps**: 17 built in, and 4 from the App Store (Notes, Weather, WiFi
   Scanner, Flashlight: `standalone_apps/`). Five remain in
-  `components/apps_builtin/`; the other eleven are their own components under
+  `components/apps_builtin/`; the other twelve are their own components under
   `apps/`, listed once in `cmake/thistle_apps.cmake` for the simulators and
   found by `EXTRA_COMPONENT_DIRS` for the firmware, which excludes the four
   store apps' old LVGL versions still there. The app manager has 32
@@ -1165,8 +1200,8 @@ launching them under thistle-tk segfaults. App Store and Flashlight exist in
 both toolkits under the same IDs, and the app manager keeps the first
 registration of an ID, so each manager registers only its own:
 `lvgl_apps_register_builtin()` under LVGL, `tk_native_apps_register()` under
-thistle-tk. All sixteen built-in apps are reachable by default on every S3
-board; naming `thistle-tk` trades fourteen of them for its refresh behaviour.
+thistle-tk. All seventeen built-in apps are reachable by default on every S3
+board; naming `thistle-tk` trades fifteen of them for its refresh behaviour.
 
 `simulator/tests/test_app_matrix.py` launches every app on every simulated
 device profile, and the simulator's `--wm NAME` overrides `system.json` for a
