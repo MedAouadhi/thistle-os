@@ -5,19 +5,27 @@ Regions a user drew.
 
     thistle_maps.py build REGIONS.geojson -o my-places.tmap
     thistle_maps.py build REGIONS.geojson --extract tunisia.osm.pbf -o my-places.tmap
-    thistle_maps.py estimate REGIONS.geojson [--json]
+    thistle_maps.py estimate REGIONS.geojson [--json] [--extract FILE | --measure]
+    thistle_maps.py serve REGIONS.geojson [-o my-places.tmap]
 
 `build` fetches the Geofabrik extract that holds the Regions (once; it is
 cached, so later builds need no network), clips it to them, draws every
 tile each Region needs from z14 to its own deepest level, and writes the
 Pack. Copy the Pack to the card's /sdcard/maps/.
 
-`estimate` says how big the Pack would be, without building it.
+`estimate` says how big the Pack would be, without building it: priced
+as a city's tiles, or measured from a sample drawn from the extract
+(estimate.py has how close each comes).
 
-The browser mode, where Regions are drawn on a real map, is ticket 05's.
+`serve` is the browser mode: a page on this computer with an OpenStreetMap
+map, where Regions are drawn as circles and freehand polygons, each given
+its deepest zoom, with the estimate kept up to date and a warning above
+the budget (1 GB). It saves the Regions file, opens it again later, and
+builds the Pack (browser.py).
+
 docs/maps/map-pack-format.md has the Regions file and the Pack's format.
 Needs Pillow (with its raqm, for Arabic) and osmium: pip install -r
-tools/requirements.txt.
+tools/maps/requirements.txt.
 """
 
 from __future__ import annotations
@@ -29,6 +37,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from estimate import DEFAULT_BUDGET_BYTES as DEFAULT_BUDGET  # noqa: E402
 from regions import RegionsError, load_regions, pack_tiles  # noqa: E402
 
 
@@ -117,7 +126,6 @@ def cmd_build(args) -> int:
     return 0
 
 
-DEFAULT_BUDGET = 1 << 30  # the 1 GB warning of the estimate and the browser mode
 
 
 def add_source_arguments(parser) -> None:
@@ -132,6 +140,29 @@ def add_source_arguments(parser) -> None:
     parser.add_argument("--refresh", action="store_true",
                         help="fetch the index and the extracts again")
     parser.add_argument("--font", help="the TTF labels are drawn in (default DejaVu Sans)")
+
+
+def source_arguments(args) -> list[str]:
+    """add_source_arguments' options again, for a build the browser mode starts."""
+    out = []
+    for extract in args.extract or []:
+        out += ["--extract", str(Path(extract).resolve())]
+    if args.cache:
+        out += ["--cache", str(Path(args.cache).resolve())]
+    out += ["--geofabrik-index", args.geofabrik_index]
+    if args.font:
+        out += ["--font", args.font]
+    return out
+
+
+def cmd_serve(args) -> int:
+    import browser
+
+    regions = Path(args.regions).resolve()
+    output = Path(args.output).resolve() if args.output else regions.with_suffix(".tmap")
+    session = browser.Session(regions, output, args.budget, args.tiles, args.attribution,
+                              source_arguments(args), lambda r: measure(args, r))
+    return browser.serve(session, args.port, not args.no_browser)
 
 
 def main(argv=None) -> int:
@@ -157,7 +188,29 @@ def main(argv=None) -> int:
     add_source_arguments(est)
     est.set_defaults(run=cmd_estimate)
 
+    serve = sub.add_parser("serve", help="draw Regions on a map in the browser, "
+                                         "see the estimate, save and build")
+    serve.add_argument("regions", help="the Regions file to open and save (GeoJSON); "
+                                       "made on the first save if it is not there")
+    serve.add_argument("-o", "--output", help="the Pack a build writes "
+                                              "(default: the Regions file's name, .tmap)")
+    serve.add_argument("--port", type=int, default=8765, help="0 picks a free one")
+    serve.add_argument("--budget", type=parse_size, default=DEFAULT_BUDGET,
+                       help="warn when the estimate is above this (default 1GB)")
+    serve.add_argument("--tiles", default=None,
+                       help="the basemap's tile URL, {z}/{x}/{y} "
+                            "(default OpenStreetMap's own)")
+    serve.add_argument("--attribution", default=None, help="the basemap's credit")
+    serve.add_argument("--no-browser", action="store_true", help="do not open a browser")
+    add_source_arguments(serve)
+    serve.set_defaults(run=cmd_serve)
+
     args = parser.parse_args(argv)
+    if args.command == "serve":
+        import browser
+
+        args.tiles = args.tiles or browser.OSM_TILES
+        args.attribution = args.attribution or browser.OSM_ATTRIBUTION
     try:
         return args.run(args)
     except RegionsError as exc:

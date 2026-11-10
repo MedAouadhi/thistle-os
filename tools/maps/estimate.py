@@ -15,7 +15,9 @@ Two estimates, both counting the tiles exactly as a build would:
   Regions, and prices the rest at the sample's average. Within 5 % of
   the built Pack on the fixture, where the sample is every tile
   (test_thistle_maps.py); on a big Pack, as good as the sample is
-  typical of the rest.
+  typical of the rest. Where town and sea or fields mix, a small sample
+  misses: 2 km around Monaco, six blocks a level came out 21 % under the
+  built Pack and three 4 % over. Twelve is every block there, 27 s.
 """
 
 from __future__ import annotations
@@ -33,7 +35,7 @@ DEFAULT_BUDGET_BYTES = 1 << 30  # 1 GB, the browser mode's warning
 
 # Blocks a level drawn for measure_pack(): each block is drawn whole, as a
 # build draws it, so its tiles' labels and edges are as they will be.
-SAMPLE_BLOCKS = 6
+SAMPLE_BLOCKS = 12
 
 
 @dataclass(frozen=True)
