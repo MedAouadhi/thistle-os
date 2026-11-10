@@ -186,7 +186,7 @@ static void show_sign_in(const char *url)
 {
     if (strcmp(url, s_ui.qr_url) != 0) {
         lv_qrcode_update(s_ui.qr, url, strlen(url));
-        strlcpy(s_ui.qr_url, url, sizeof s_ui.qr_url);
+        snprintf(s_ui.qr_url, sizeof s_ui.qr_url, "%s", url);
     }
     const char *bare = strstr(url, "://");
     set_text(s_ui.url, bare ? bare + 3 : url);
