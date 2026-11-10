@@ -1008,6 +1008,40 @@ view, owned by it and retained; no syscall, no registry.
 - `simulator/tests/test_map_overlays.py` drives it, changing a file while
   the simulator runs for the 20 s case.
 
+### Transit
+
+`apps/transit/` shows the card's Map Pack, as the Maps app does, with a
+city's stops (squares) and moving vehicles (triangles) over it as two
+overlays; a tapped stop shows its next departures on a card, a tapped
+vehicle its direction; Refresh (top right, or r) fetches now. The city is
+its **Provider**: one interface, `fetch(box, stop, now)` plus a minimum
+interval (`transit/transit_provider.h`); Berlin's
+(`transit/providers/berlin.c`) reads vbb-rest 6, no key, every 30 s.
+Another city is a new file in `providers/` and its name in
+`TRANSIT_PROVIDERS`. `docs/maps/transit-providers.md` has the rules,
+ticket 07's research the API.
+
+- **It fetches only while the app is open**, on its own task, `transit`
+  (8 KB internal stack, `transit_session.c`), holding the device awake for
+  each fetch. Opening fetches at once; leaving stops the task, and a fetch
+  under way finishes with none after. Never a background check.
+- **The first result and Refresh's are drawn at once**; a later change
+  under the overlay's 20 s rule. A failure keeps the map as it is, backs
+  off (the interval, doubling, 5 minutes at most) and says why on the
+  status line; vehicles go after 10 minutes without live data.
+- **`config/transit.json`**: `provider`, `base_url` (a self-hosted vbb-rest
+  on the tailnet, say), `min_interval_s` (5 at least), `save_geojson`,
+  which writes each result to `/sdcard/maps/overlays/transit-<id>.geojson`
+  for the Maps app.
+- It opens on the GPS fix if a Region holds it, else the Provider's city if
+  one does, else the first Region; the box asked for is the view grown by
+  half of itself each way. The log says `(transit) berlin: fetched 12
+  stops, 9 vehicles, 0 departures in 840 ms, for the 30 s interval`,
+  `(transit) card: Alexanderplatz; 16:47 M10 S+U Hauptbahnhof +2`,
+  `(transit) berlin: stopped fetching`.
+- `simulator/tests/test_transit.py` runs it against
+  `fake_transit_provider.py`, a stdlib vbb-rest.
+
 ### To-do
 
 `apps/todo/` is a checklist: type a task and press Enter, tap it when it is
@@ -1228,9 +1262,9 @@ The kernel is **100% Rust and hardware-independent**. It never calls ESP-IDF har
 - **Kernel (Rust)** (`components/kernel_rs/`): 100% Rust. 57 modules: manifest parser, permissions, IPC, events, app manager, version, crypto, HAL registry, driver manager, WM, app store, wifi/ble/net managers, OTA, and more.
 - **Display Server** (`components/kernel/src/display_server.c`): Surface management, compositor, WM vtable interface.
 - **UI** (`components/ui/`): thistle-tk WM (default). LVGL-based WM also available. Both loadable as `.wm.elf`.
-- **Apps**: 17 built in, and 4 from the App Store (Notes, Weather, WiFi
+- **Apps**: 19 built in, and 4 from the App Store (Notes, Weather, WiFi
   Scanner, Flashlight: `standalone_apps/`). Five remain in
-  `components/apps_builtin/`; the other twelve are their own components under
+  `components/apps_builtin/`; the other fourteen are their own components under
   `apps/`, listed once in `cmake/thistle_apps.cmake` for the simulators and
   found by `EXTRA_COMPONENT_DIRS` for the firmware, which excludes the four
   store apps' old LVGL versions still there. The app manager has 32
@@ -1305,8 +1339,8 @@ launching them under thistle-tk segfaults. App Store and Flashlight exist in
 both toolkits under the same IDs, and the app manager keeps the first
 registration of an ID, so each manager registers only its own:
 `lvgl_apps_register_builtin()` under LVGL, `tk_native_apps_register()` under
-thistle-tk. All seventeen built-in apps are reachable by default on every S3
-board; naming `thistle-tk` trades fifteen of them for its refresh behaviour.
+thistle-tk. All nineteen built-in apps are reachable by default on every S3
+board; naming `thistle-tk` trades seventeen of them for its refresh behaviour.
 
 `simulator/tests/test_app_matrix.py` launches every app on every simulated
 device profile, and the simulator's `--wm NAME` overrides `system.json` for a

@@ -10,6 +10,7 @@ Each app is an independent ESP-IDF component today, on a path to becoming a sign
 | Directory      | App ID                     | Description                        |
 |----------------|----------------------------|------------------------------------|
 | `todo/`        | com.thistle.todo           | Checklist, kept as Markdown on the SD card |
+| `transit/`     | com.thistle.transit        | Live stops, vehicles and departures on the map, from a city's Provider (Berlin first) |
 | `tailchat/`    | com.thistle.tailchat       | Tailnet chat: conversations, contacts and contact requests |
 | `reader/`      | com.thistle.reader         | Document/ebook reader               |
 | `podcasts/`    | com.thistle.podcasts       | PodcastIndex podcast player         |

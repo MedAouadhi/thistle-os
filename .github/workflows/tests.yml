@@ -621,6 +621,10 @@ jobs:
         working-directory: simulator
         run: python3 tests/test_map_transit.py --sim build/thistle_sim
 
+      - name: Run Transit tests against a fake Berlin Provider (stops, live items, departures, Refresh)
+        working-directory: simulator
+        run: python3 tests/test_transit.py --sim build/thistle_sim
+
       - name: Run Tailnet chat conformance, messages, card, restart and app tests
         working-directory: simulator
         run: python3 tests/test_tailchat.py --sim build/thistle_sim
