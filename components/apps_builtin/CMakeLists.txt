@@ -27,5 +27,5 @@ idf_component_register(
     # components under apps/, and lvgl_apps.h exposes none of them, so this
     # dependency is an implementation detail rather than part of the interface.
     PRIV_REQUIRES appstore file_manager filexfer hermes maps navigator
-                  phone podcasts reader tailchat tailscale todo vault
+                  phone podcasts reader tailchat tailscale todo transit vault
 )
