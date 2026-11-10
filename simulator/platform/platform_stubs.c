@@ -250,6 +250,16 @@ int xQueueReceive(void *queue, void *buf, unsigned int ticks) {
     return 1;
 }
 
+void vQueueDelete(void *queue) {
+    sim_queue_impl_t *q = (sim_queue_impl_t *)queue;
+    if (!q) return;
+    pthread_mutex_destroy(&q->mutex);
+    pthread_cond_destroy(&q->not_empty);
+    pthread_cond_destroy(&q->not_full);
+    free(q->buf);
+    free(q);
+}
+
 /* Wrappers for C callers (headers declare xQueueCreate/xQueueSend) */
 void *xQueueCreate(unsigned int length, unsigned int item_size) {
     return xQueueGenericCreate(length, item_size, 0);

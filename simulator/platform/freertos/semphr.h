@@ -24,3 +24,9 @@ static inline BaseType_t xSemaphoreGive(SemaphoreHandle_t sem) {
     pthread_mutex_unlock((pthread_mutex_t *)sem);
     return pdTRUE;
 }
+
+static inline void vSemaphoreDelete(SemaphoreHandle_t sem) {
+    if (!sem) return;
+    pthread_mutex_destroy((pthread_mutex_t *)sem);
+    free(sem);
+}

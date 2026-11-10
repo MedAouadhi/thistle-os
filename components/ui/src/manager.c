@@ -603,6 +603,11 @@ static void epaper_commit(const hal_registry_t *reg)
     }
 }
 
+void ui_manager_epaper_commit(void)
+{
+    epaper_commit(hal_get_registry());
+}
+
 /* -------------------------------------------------------------------------
  * LVGL timer handler task — runs lv_timer_handler() every 10 ms
  * ------------------------------------------------------------------------- */

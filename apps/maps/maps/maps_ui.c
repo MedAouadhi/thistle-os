@@ -4,10 +4,10 @@
  *
  *   ┌──────────────────────────────┐
  *   │                              │
- *   │     the Map Pack's tiles     │  the first Region's centre in the
- *   │         (map_engine)         │  middle, at z16 (or the Region's
- *   │                              │  deepest level, if shallower)
- *   │                              │
+ *   │     the Map Pack's tiles     │  opens on the first Region's centre,
+ *   │         (map_engine)         │  at z16 (or the Region's deepest
+ *   │                        [ + ] │  level, if shallower)
+ *   │                        [ - ] │  zoom in and out, a level a tap
  *   ├──────────────────────────────┤
  *   │ © OpenStreetMap contributors │  the About line: the Pack's credit
  *   └──────────────────────────────┘
@@ -15,8 +15,9 @@
  * The Pack is the first *.tmap, by name, in /sdcard/maps/. Without one, or
  * with one that does not open, the page says why instead.
  *
- * For now the map stays where it opens; pan, zoom, the position marker and
- * overlays are the next tickets' (.scratch/maps/).
+ * A swipe or the keys pan half a screen; the zoom buttons and keys go
+ * through the four levels (map_view.h). The position marker and overlays
+ * are the next tickets' (.scratch/maps/).
  */
 #include "maps/maps_app.h"
 
@@ -31,6 +32,7 @@
 #include "lvgl.h"
 
 #include <dirent.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -43,6 +45,8 @@ static const char *TAG = "maps";
 #define NAME_MAX_LEN   96
 #define ABOUT_H        22
 #define DEFAULT_ZOOM   16
+#define ZOOM_BUTTON    36   /* px a side */
+#define ZOOM_MARGIN    6
 
 /* The Reader's font, Latin-1 with it, for the credit's ©, which Montserrat
  * lacks: the Podcasts app borrows it the same way. */
@@ -55,6 +59,11 @@ static struct {
     map_view_t *view;
     map_pack_t *pack;
 } s_ui;
+
+/* The zoom buttons' look: shared, and with no pressed state, as a press
+ * that drew would be a refresh of its own on e-paper. */
+static lv_style_t s_zoom_style;
+static bool s_zoom_style_ready;
 
 /* Montserrat 14 falling back on the Reader's font: a copy, so LVGL's own
  * keeps no fallback. */
@@ -145,6 +154,61 @@ static void make_about(bool mono)
     ESP_LOGI(TAG, "about: %s", credit);
 }
 
+/* ------------------------------------------------------------------ */
+/* Moving                                                               */
+/* ------------------------------------------------------------------ */
+
+static void shown_cb(map_view_t *view, const map_view_shown_t *shown, void *user)
+{
+    (void)view;
+    (void)user;
+    ESP_LOGI(TAG, "shown z%d at %lld,%lld: %d tiles, %d places with none, %d damaged; "
+                  "%d read, %d from the cache, %u ms",
+             shown->zoom, (long long)shown->left, (long long)shown->top, shown->tiles,
+             shown->missing, shown->damaged, shown->read, shown->cached,
+             (unsigned)shown->compose_ms);
+}
+
+static void zoom_cb(lv_event_t *e)
+{
+    if (s_ui.view) map_view_zoom_by(s_ui.view, (int)(intptr_t)lv_event_get_user_data(e));
+}
+
+/* A zoom button, its bottom `from_bottom` px above the map's bottom edge. */
+static lv_obj_t *make_zoom_button(const char *text, int levels, int from_bottom)
+{
+    if (!s_zoom_style_ready) {
+        lv_style_init(&s_zoom_style);
+        lv_style_set_bg_color(&s_zoom_style, lv_color_white());
+        lv_style_set_bg_opa(&s_zoom_style, LV_OPA_COVER);
+        lv_style_set_border_color(&s_zoom_style, lv_color_black());
+        lv_style_set_border_width(&s_zoom_style, 2);
+        lv_style_set_radius(&s_zoom_style, 4);
+        lv_style_set_text_color(&s_zoom_style, lv_color_black());
+        lv_style_set_text_font(&s_zoom_style, &lv_font_montserrat_18);
+        s_zoom_style_ready = true;
+    }
+    lv_obj_t *button = lv_obj_create(s_ui.root);
+    lv_obj_remove_style_all(button);
+    lv_obj_add_style(button, &s_zoom_style, LV_PART_MAIN);
+    lv_obj_add_flag(button, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_remove_flag(button, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(button, ZOOM_BUTTON, ZOOM_BUTTON);
+    lv_obj_align(button, LV_ALIGN_BOTTOM_RIGHT, -ZOOM_MARGIN, -from_bottom);
+    lv_obj_add_event_cb(button, zoom_cb, LV_EVENT_CLICKED, (void *)(intptr_t)levels);
+    lv_obj_t *label = lv_label_create(button);
+    lv_label_set_text(label, text);
+    lv_obj_center(label);
+    return button;
+}
+
+static void log_centre(const char *what, lv_obj_t *obj)
+{
+    lv_area_t a;
+    lv_obj_get_coords(obj, &a);
+    ESP_LOGI(TAG, "%s at %d,%d", what, (int)(a.x1 + a.x2) / 2, (int)(a.y1 + a.y2) / 2);
+}
+
 static void open_and_show(bool mono)
 {
     char name[NAME_MAX_LEN];
@@ -177,23 +241,22 @@ static void open_and_show(bool mono)
              map_pack_version_major(s_ui.pack), map_pack_version_minor(s_ui.pack),
              map_pack_region_count(s_ui.pack), (unsigned)map_pack_tile_count(s_ui.pack));
 
-    s_ui.view = map_view_create(s_ui.root);
+    s_ui.view = map_view_create(s_ui.root, s_ui.pack, shown_cb, NULL);
     if (!s_ui.view) {
         ESP_LOGE(TAG, "no memory for the map");
         show_message("Cannot show this map", "There is not enough memory for the map.");
         return;
     }
 
-    /* A fixed position for now: the first Region's centre. */
+    /* Until there is a position: the first Region's centre. */
     const map_region_t *first = map_pack_region(s_ui.pack, 0);
     int zoom = first->deepest_zoom < DEFAULT_ZOOM ? first->deepest_zoom : DEFAULT_ZOOM;
-    map_view_stats_t drawn = map_view_show(s_ui.view, s_ui.pack, first->centre_lat,
-                                           first->centre_lon, zoom);
+    map_view_go_to(s_ui.view, first->centre_lat, first->centre_lon, zoom);
     ESP_LOGI(TAG, "showing z%d around %.7f, %.7f (%s)", zoom, first->centre_lat,
              first->centre_lon, first->name);
-    ESP_LOGI(TAG, "drew %d tiles, %d places with none, %d damaged", drawn.tiles,
-             drawn.missing, drawn.damaged);
 
+    lv_obj_t *out = make_zoom_button("-", -1, ABOUT_H + ZOOM_MARGIN);
+    lv_obj_t *in = make_zoom_button("+", 1, ABOUT_H + ZOOM_MARGIN * 2 + ZOOM_BUTTON);
     make_about(mono);
 
     lv_obj_update_layout(s_ui.root);
@@ -201,6 +264,8 @@ static void open_and_show(bool mono)
     lv_obj_get_coords(map_view_obj(s_ui.view), &at);
     ESP_LOGI(TAG, "view %dx%d at %d,%d", map_view_width(s_ui.view), map_view_height(s_ui.view),
              (int)at.x1, (int)at.y1);
+    log_centre("zoom in", in);
+    log_centre("zoom out", out);
 }
 
 esp_err_t maps_ui_create(lv_obj_t *parent)
