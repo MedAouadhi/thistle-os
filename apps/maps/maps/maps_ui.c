@@ -4,10 +4,11 @@
  *
  *   ┌──────────────────────────────┐
  *   │                              │
- *   │     the Map Pack's tiles     │  opens on the first Region's centre,
- *   │         (map_engine)         │  at z16 (or the Region's deepest
- *   │                        [ + ] │  level, if shallower)
- *   │                        [ - ] │  zoom in and out, a level a tap
+ *   │     the Map Pack's tiles     │  opens on the GPS fix if a Region
+ *   │         (map_engine)    (o)  │  holds it, else on the first
+ *   │                        [ ⌖ ] │  Region's centre; at z16 (or the
+ *   │                        [ + ] │  Region's deepest level, if shallower)
+ *   │                        [ - ] │  locate; zoom in and out
  *   ├──────────────────────────────┤
  *   │ © OpenStreetMap contributors │  the About line: the Pack's credit
  *   └──────────────────────────────┘
@@ -16,8 +17,10 @@
  * with one that does not open, the page says why instead.
  *
  * A swipe or the keys pan half a screen; the zoom buttons and keys go
- * through the four levels (map_view.h). The position marker and overlays
- * are the next tickets' (.scratch/maps/).
+ * through the four levels (map_view.h). The GPS fix is read once a second
+ * and handed to the view, which draws the marker (o) and keeps it in view
+ * as the device moves; locate, its button or the l key, centres on it.
+ * Overlays are the next ticket's (.scratch/maps/).
  */
 #include "maps/maps_app.h"
 
@@ -26,7 +29,9 @@
 
 #include "hal/board.h"
 #include "hal/sdcard_path.h"
+#include "thistle/gps_manager.h"
 #include "ui/theme.h"
+#include "ui/toast.h"
 
 #include "esp_log.h"
 #include "lvgl.h"
@@ -47,6 +52,7 @@ static const char *TAG = "maps";
 #define DEFAULT_ZOOM   16
 #define ZOOM_BUTTON    36   /* px a side */
 #define ZOOM_MARGIN    6
+#define FIX_POLL_MS    1000
 
 /* The Reader's font, Latin-1 with it, for the credit's ©, which Montserrat
  * lacks: the Podcasts app borrows it the same way. */
@@ -58,12 +64,13 @@ static struct {
     lv_obj_t   *about;
     map_view_t *view;
     map_pack_t *pack;
+    lv_timer_t *fix_poll;
 } s_ui;
 
-/* The zoom buttons' look: shared, and with no pressed state, as a press
+/* The buttons' look: shared, and with no pressed state, as a press
  * that drew would be a refresh of its own on e-paper. */
-static lv_style_t s_zoom_style;
-static bool s_zoom_style_ready;
+static lv_style_t s_button_style;
+static bool s_button_style_ready;
 
 /* Montserrat 14 falling back on the Reader's font: a copy, so LVGL's own
  * keeps no fallback. */
@@ -174,28 +181,94 @@ static void zoom_cb(lv_event_t *e)
     if (s_ui.view) map_view_zoom_by(s_ui.view, (int)(intptr_t)lv_event_get_user_data(e));
 }
 
-/* A zoom button, its bottom `from_bottom` px above the map's bottom edge. */
-static lv_obj_t *make_zoom_button(const char *text, int levels, int from_bottom)
+/* ------------------------------------------------------------------ */
+/* The position                                                         */
+/* ------------------------------------------------------------------ */
+
+/* The GPS fix now, if there is one. */
+static bool read_fix(double *lat, double *lon)
 {
-    if (!s_zoom_style_ready) {
-        lv_style_init(&s_zoom_style);
-        lv_style_set_bg_color(&s_zoom_style, lv_color_white());
-        lv_style_set_bg_opa(&s_zoom_style, LV_OPA_COVER);
-        lv_style_set_border_color(&s_zoom_style, lv_color_black());
-        lv_style_set_border_width(&s_zoom_style, 2);
-        lv_style_set_radius(&s_zoom_style, 4);
-        lv_style_set_text_color(&s_zoom_style, lv_color_black());
-        lv_style_set_text_font(&s_zoom_style, &lv_font_montserrat_18);
-        s_zoom_style_ready = true;
+    const hal_registry_t *reg = hal_get_registry();
+    if (!reg || !reg->gps || !reg->gps->get_position) return false;
+    hal_gps_position_t pos;
+    if (reg->gps->get_position(&pos) != ESP_OK || !pos.fix_valid) return false;
+    *lat = pos.latitude;
+    *lon = pos.longitude;
+    return true;
+}
+
+static void fix_poll_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    double lat, lon;
+    if (s_ui.view && read_fix(&lat, &lon)) map_view_set_position(s_ui.view, lat, lon);
+}
+
+static void locate(void)
+{
+    if (!s_ui.view) return;
+    double lat, lon;
+    if (read_fix(&lat, &lon)) map_view_set_position(s_ui.view, lat, lon);
+    if (map_view_locate(s_ui.view)) return;
+    bool off = rs_gps_available() && !rs_gps_is_enabled();
+    ESP_LOGI(TAG, "locate: %s", off ? "GPS is off" : "no fix yet");
+    toast_info(off ? "GPS is off" : "No GPS fix yet");
+}
+
+static void locate_cb(lv_event_t *e)
+{
+    (void)e;
+    locate();
+}
+
+/* Keys the view leaves to the app. */
+static void key_cb(lv_event_t *e)
+{
+    switch (lv_event_get_key(e)) {
+    case 'l': case 'L': locate(); break;
+    default: break;
+    }
+}
+
+/* The zoom level to open the fix at: z16, or shallower where only a
+ * shallower level of a Region holds it. 0 if no Region does. */
+static int zoom_holding(double lat, double lon)
+{
+    for (int z = DEFAULT_ZOOM; z >= MAP_MIN_ZOOM; z--) {
+        double gx, gy;
+        map_world_pixel(lat, lon, z, &gx, &gy);
+        if (gx < 0 || gy < 0) return 0;
+        if (map_pack_has_tile(s_ui.pack, z, (uint32_t)(gx / MAP_TILE_PX),
+                              (uint32_t)(gy / MAP_TILE_PX))) {
+            return z;
+        }
+    }
+    return 0;
+}
+
+/* A button over the map, its bottom `from_bottom` px above the map's
+ * bottom edge, at the right. */
+static lv_obj_t *make_button(const char *text, lv_event_cb_t cb, void *user, int from_bottom)
+{
+    if (!s_button_style_ready) {
+        lv_style_init(&s_button_style);
+        lv_style_set_bg_color(&s_button_style, lv_color_white());
+        lv_style_set_bg_opa(&s_button_style, LV_OPA_COVER);
+        lv_style_set_border_color(&s_button_style, lv_color_black());
+        lv_style_set_border_width(&s_button_style, 2);
+        lv_style_set_radius(&s_button_style, 4);
+        lv_style_set_text_color(&s_button_style, lv_color_black());
+        lv_style_set_text_font(&s_button_style, &lv_font_montserrat_18);
+        s_button_style_ready = true;
     }
     lv_obj_t *button = lv_obj_create(s_ui.root);
     lv_obj_remove_style_all(button);
-    lv_obj_add_style(button, &s_zoom_style, LV_PART_MAIN);
+    lv_obj_add_style(button, &s_button_style, LV_PART_MAIN);
     lv_obj_add_flag(button, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_remove_flag(button, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_size(button, ZOOM_BUTTON, ZOOM_BUTTON);
     lv_obj_align(button, LV_ALIGN_BOTTOM_RIGHT, -ZOOM_MARGIN, -from_bottom);
-    lv_obj_add_event_cb(button, zoom_cb, LV_EVENT_CLICKED, (void *)(intptr_t)levels);
+    lv_obj_add_event_cb(button, cb, LV_EVENT_CLICKED, user);
     lv_obj_t *label = lv_label_create(button);
     lv_label_set_text(label, text);
     lv_obj_center(label);
@@ -207,6 +280,14 @@ static void log_centre(const char *what, lv_obj_t *obj)
     lv_area_t a;
     lv_obj_get_coords(obj, &a);
     ESP_LOGI(TAG, "%s at %d,%d", what, (int)(a.x1 + a.x2) / 2, (int)(a.y1 + a.y2) / 2);
+}
+
+/* Where a button covers the map, for a test to look past it. */
+static void log_button(const char *what, lv_obj_t *obj)
+{
+    lv_area_t a;
+    lv_obj_get_coords(obj, &a);
+    ESP_LOGI(TAG, "%s button %d,%d-%d,%d", what, (int)a.x1, (int)a.y1, (int)a.x2, (int)a.y2);
 }
 
 static void open_and_show(bool mono)
@@ -248,15 +329,35 @@ static void open_and_show(bool mono)
         return;
     }
 
-    /* Until there is a position: the first Region's centre. */
-    const map_region_t *first = map_pack_region(s_ui.pack, 0);
-    int zoom = first->deepest_zoom < DEFAULT_ZOOM ? first->deepest_zoom : DEFAULT_ZOOM;
-    map_view_go_to(s_ui.view, first->centre_lat, first->centre_lon, zoom);
-    ESP_LOGI(TAG, "showing z%d around %.7f, %.7f (%s)", zoom, first->centre_lat,
-             first->centre_lon, first->name);
+    map_view_set_bottom_inset(s_ui.view, ABOUT_H);
 
-    lv_obj_t *out = make_zoom_button("-", -1, ABOUT_H + ZOOM_MARGIN);
-    lv_obj_t *in = make_zoom_button("+", 1, ABOUT_H + ZOOM_MARGIN * 2 + ZOOM_BUTTON);
+    /* The fix, if a Region holds it; else the first Region's centre. The
+     * Pack is read here before the view's task reads it: nothing is asked
+     * of the view yet. */
+    double lat, lon;
+    int zoom = 0;
+    if (read_fix(&lat, &lon)) {
+        map_view_set_position(s_ui.view, lat, lon);
+        zoom = zoom_holding(lat, lon);
+    }
+    if (zoom) {
+        map_view_go_to(s_ui.view, lat, lon, zoom);
+        ESP_LOGI(TAG, "showing z%d around %.7f, %.7f (your position)", zoom, lat, lon);
+    } else {
+        const map_region_t *first = map_pack_region(s_ui.pack, 0);
+        zoom = first->deepest_zoom < DEFAULT_ZOOM ? first->deepest_zoom : DEFAULT_ZOOM;
+        map_view_go_to(s_ui.view, first->centre_lat, first->centre_lon, zoom);
+        ESP_LOGI(TAG, "showing z%d around %.7f, %.7f (%s)", zoom, first->centre_lat,
+                 first->centre_lon, first->name);
+    }
+    s_ui.fix_poll = lv_timer_create(fix_poll_cb, FIX_POLL_MS, NULL);
+    lv_obj_add_event_cb(map_view_obj(s_ui.view), key_cb, LV_EVENT_KEY, NULL);
+
+    lv_obj_t *out = make_button("-", zoom_cb, (void *)(intptr_t)-1, ABOUT_H + ZOOM_MARGIN);
+    lv_obj_t *in = make_button("+", zoom_cb, (void *)(intptr_t)1,
+                               ABOUT_H + ZOOM_MARGIN * 2 + ZOOM_BUTTON);
+    lv_obj_t *loc = make_button(LV_SYMBOL_GPS, locate_cb, NULL,
+                                ABOUT_H + ZOOM_MARGIN * 3 + ZOOM_BUTTON * 2);
     make_about(mono);
 
     lv_obj_update_layout(s_ui.root);
@@ -266,6 +367,7 @@ static void open_and_show(bool mono)
              (int)at.x1, (int)at.y1);
     log_centre("zoom in", in);
     log_centre("zoom out", out);
+    log_button("locate", loc);
 }
 
 esp_err_t maps_ui_create(lv_obj_t *parent)
@@ -292,6 +394,7 @@ esp_err_t maps_ui_create(lv_obj_t *parent)
 
 void maps_ui_destroy(void)
 {
+    if (s_ui.fix_poll) lv_timer_delete(s_ui.fix_poll);
     map_view_destroy(s_ui.view);
     if (s_ui.root) lv_obj_delete(s_ui.root);
     map_pack_close(s_ui.pack);

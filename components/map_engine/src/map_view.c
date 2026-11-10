@@ -42,6 +42,16 @@ static const char *TAG = "map_view";
 #define SWIPE_MIN_PX  24   /* shorter is a tap, left for the app */
 #define STOP_WAIT_MS  5000
 
+/* The position marker: redrawn only once the fix has moved more than
+ * MARKER_MOVE_PX on the screen, and at most every MARKER_GAP_MS; within
+ * MARKER_EDGE_PX of the view's edge the map jumps a step. */
+#define MARKER_PX       21   /* a side: a ring with a dot */
+#define MARKER_RING_PX  3
+#define MARKER_DOT_PX   7
+#define MARKER_MOVE_PX  12
+#define MARKER_GAP_MS   5000
+#define MARKER_EDGE_PX  24
+
 typedef struct {
     uint32_t seq;  /* 0: nothing asked yet */
     int      zoom;
@@ -61,6 +71,22 @@ struct map_view {
     void            *user;
     lv_point_t       press_at;
     bool             pressing;
+    int              bottom_inset;  /* px the app covers at the bottom */
+
+    /* What is on the screen: the last view swapped in. */
+    uint32_t         shown_seq;     /* 0: nothing yet */
+    int              shown_zoom;
+    int64_t          shown_left, shown_top;
+
+    /* The position and its marker, the UI task's alone. */
+    lv_obj_t        *marker;
+    bool             has_pos;
+    double           pos_lat, pos_lon;
+    bool             marker_on;      /* drawn on the view */
+    int              marker_x, marker_y;  /* its centre, in the view */
+    int64_t          marker_us;      /* esp_timer when it was last drawn */
+    bool             marker_ever;
+    int              held_x, held_y; /* the last place said to be held */
 
     SemaphoreHandle_t lock;
     QueueHandle_t    wake;   /* to the task: something changed */
@@ -172,6 +198,91 @@ out:
     vTaskDelete(NULL);
 }
 
+
+/* ------------------------------------------------------------------ */
+/* The position marker                                                  */
+/* ------------------------------------------------------------------ */
+
+/* Where the position is on the view now on the screen, its pixel. */
+static void marker_spot(const map_view_t *v, int64_t *x, int64_t *y)
+{
+    double gx, gy;
+    map_world_pixel(v->pos_lat, v->pos_lon, v->shown_zoom, &gx, &gy);
+    *x = (int64_t)floor(gx + 0.5) - v->shown_left;
+    *y = (int64_t)floor(gy + 0.5) - v->shown_top;
+}
+
+static int usable_h(const map_view_t *v)
+{
+    return v->h - v->bottom_inset;
+}
+
+static bool on_view(const map_view_t *v, int64_t x, int64_t y)
+{
+    return x >= 0 && x < v->w && y >= 0 && y < usable_h(v);
+}
+
+/* Within MARKER_EDGE_PX of an edge, or off the view. */
+static bool near_edge(const map_view_t *v, int64_t x, int64_t y)
+{
+    return x < MARKER_EDGE_PX || x >= v->w - MARKER_EDGE_PX || y < MARKER_EDGE_PX ||
+           y >= usable_h(v) - MARKER_EDGE_PX;
+}
+
+static void draw_marker(map_view_t *v, int x, int y)
+{
+    lv_obj_set_pos(v->marker, x - MARKER_PX / 2, y - MARKER_PX / 2);
+    lv_obj_remove_flag(v->marker, LV_OBJ_FLAG_HIDDEN);
+    v->marker_on = true;
+    v->marker_x = x;
+    v->marker_y = y;
+    v->held_x = x;
+    v->held_y = y;
+    v->marker_us = esp_timer_get_time();
+    v->marker_ever = true;
+}
+
+/* Puts the marker where the position is on the view just swapped in. */
+static void place_marker(map_view_t *v)
+{
+    if (!v->has_pos || !v->marker) return;
+    int64_t x, y;
+    marker_spot(v, &x, &y);
+    if (on_view(v, x, y)) {
+        draw_marker(v, (int)x, (int)y);
+        ESP_LOGI(TAG, "marker at %d,%d", (int)x, (int)y);
+    } else {
+        if (v->marker_on) lv_obj_add_flag(v->marker, LV_OBJ_FLAG_HIDDEN);
+        v->marker_on = false;
+        ESP_LOGI(TAG, "marker off the view");
+    }
+}
+
+static lv_obj_t *make_marker(lv_obj_t *parent)
+{
+    lv_obj_t *ring = lv_obj_create(parent);
+    lv_obj_remove_style_all(ring);
+    lv_obj_set_size(ring, MARKER_PX, MARKER_PX);
+    lv_obj_set_style_radius(ring, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(ring, lv_color_white(), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(ring, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_color(ring, lv_color_black(), LV_PART_MAIN);
+    lv_obj_set_style_border_width(ring, MARKER_RING_PX, LV_PART_MAIN);
+    lv_obj_remove_flag(ring, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_remove_flag(ring, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(ring, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_t *dot = lv_obj_create(ring);
+    lv_obj_remove_style_all(dot);
+    lv_obj_set_size(dot, MARKER_DOT_PX, MARKER_DOT_PX);
+    lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(dot, lv_color_black(), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_remove_flag(dot, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_center(dot);
+    return ring;
+}
+
 /* ------------------------------------------------------------------ */
 /* The UI task's side                                                   */
 /* ------------------------------------------------------------------ */
@@ -201,6 +312,12 @@ static void poll_cb(lv_timer_t *timer)
     v->dsc.data = (const uint8_t *)v->front;
     lv_image_set_src(v->image, &v->dsc);
     lv_obj_invalidate(v->image);
+    v->shown_seq = v->made_seq;
+    v->shown_zoom = shown.zoom;
+    v->shown_left = shown.left;
+    v->shown_top = shown.top;
+    /* In the same pass as the map: the panel refreshes once for both. */
+    place_marker(v);
     if (v->shown_cb) v->shown_cb(v, &shown, v->user);
 }
 
@@ -332,6 +449,7 @@ map_view_t *map_view_create(lv_obj_t *parent, map_pack_t *pack, map_view_shown_c
         lv_group_add_obj(group, v->image);
         lv_group_focus_obj(v->image);
     }
+    v->marker = make_marker(parent);
 
     if (!v->inline_compose) {
         if (xTaskCreate(tile_task, "map_tiles", TASK_STACK, v, TASK_PRIORITY, NULL) != pdPASS) {
@@ -360,10 +478,12 @@ void map_view_destroy(map_view_t *v)
             /* Stuck reading the card: freeing the view under it would be
              * worse than keeping it. */
             ESP_LOGE(TAG, "the tile task did not stop; its view is kept");
+            if (v->marker) lv_obj_delete(v->marker);
             if (v->image) lv_obj_delete(v->image);
             return;
         }
     }
+    if (v->marker) lv_obj_delete(v->marker);
     if (v->image) {
         lv_image_cache_drop(&v->dsc);
         lv_obj_delete(v->image);
@@ -444,4 +564,120 @@ void map_view_origin(const map_view_t *v, int64_t *x, int64_t *y)
 {
     *x = v->want.left;
     *y = v->want.top;
+}
+
+void map_view_set_bottom_inset(map_view_t *v, int px)
+{
+    v->bottom_inset = px < 0 ? 0 : px >= v->h ? v->h - 1 : px;
+}
+
+static const char *compass(int dx, int dy)
+{
+    static const char *const names[3][3] = {
+        { "north-west", "north", "north-east" },
+        { "west",       "here",  "east" },
+        { "south-west", "south", "south-east" },
+    };
+    return names[dy + 1][dx + 1];
+}
+
+/* -1, 0 or 1: which way a spot in the edge band lies. */
+static int side(int64_t at, int size)
+{
+    return at < MARKER_EDGE_PX ? -1 : at >= size - MARKER_EDGE_PX ? 1 : 0;
+}
+
+static void say_held(map_view_t *v, int64_t x, int64_t y, uint32_t since)
+{
+    if (x == v->held_x && y == v->held_y) return;  /* said already */
+    v->held_x = (int)x;
+    v->held_y = (int)y;
+    int moved = (int)lround(hypot((double)(x - v->marker_x), (double)(y - v->marker_y)));
+    ESP_LOGI(TAG, "marker held: %d px from where it is drawn, %.1f s after the last", moved,
+             since / 1000.0);
+}
+
+void map_view_set_position(map_view_t *v, double lat, double lon)
+{
+    v->has_pos = true;
+    v->pos_lat = lat;
+    v->pos_lon = lon;
+    lock(v);
+    bool pending = v->want.seq != v->shown_seq;
+    unlock(v);
+    /* A view on its way places the marker as it is swapped in. */
+    if (pending || v->shown_seq == 0) return;
+
+    int64_t x, y;
+    marker_spot(v, &x, &y);
+    /* esp_timer, not lv_tick: the simulator's lv_tick runs fast. */
+    uint32_t since = v->marker_ever
+                         ? (uint32_t)((esp_timer_get_time() - v->marker_us) / 1000)
+                         : MARKER_GAP_MS;
+    bool following = v->marker_on && !near_edge(v, v->marker_x, v->marker_y);
+
+    if (following && near_edge(v, x, y)) {
+        if (since < MARKER_GAP_MS) {
+            say_held(v, x, y, since);
+            return;
+        }
+        int dx = side(x, v->w), dy = side(y, usable_h(v));
+        int64_t left = v->shown_left + (int64_t)dx * (v->w / 2);
+        int64_t top = v->shown_top + (int64_t)dy * (v->h / 2);
+        int64_t nx = x - (left - v->shown_left), ny = y - (top - v->shown_top);
+        if (!near_edge(v, nx, ny)) {
+            ESP_LOGI(TAG, "page jump %s to keep the marker in view: z%d at %lld,%lld",
+                     compass(dx, dy), v->shown_zoom, (long long)left, (long long)top);
+        } else {
+            /* Further than a step: the fix itself in the middle. */
+            left = v->shown_left + x - v->w / 2;
+            top = v->shown_top + y - usable_h(v) / 2;
+            ESP_LOGI(TAG, "page jump to the marker, a step being too short: z%d at %lld,%lld",
+                     v->shown_zoom, (long long)left, (long long)top);
+        }
+        ask(v, v->shown_zoom, left, top);
+        return;
+    }
+
+    if (!on_view(v, x, y)) {
+        if (v->marker_on) {
+            /* Gone off the view from its edge band: not followed. */
+            lv_obj_add_flag(v->marker, LV_OBJ_FLAG_HIDDEN);
+            v->marker_on = false;
+            ESP_LOGI(TAG, "marker off the view");
+        }
+        return;
+    }
+    if (!v->marker_on) {
+        if (since < MARKER_GAP_MS) {
+            say_held(v, x, y, since);
+            return;
+        }
+        draw_marker(v, (int)x, (int)y);
+        ESP_LOGI(TAG, "marker at %d,%d", (int)x, (int)y);
+        return;
+    }
+    int moved = (int)lround(hypot((double)(x - v->marker_x), (double)(y - v->marker_y)));
+    if (moved <= MARKER_MOVE_PX || since < MARKER_GAP_MS) {
+        say_held(v, x, y, since);
+        return;
+    }
+    draw_marker(v, (int)x, (int)y);
+    ESP_LOGI(TAG, "marker moved %d px to %d,%d, %.1f s after the last", moved, (int)x, (int)y,
+             since / 1000.0);
+}
+
+bool map_view_locate(map_view_t *v)
+{
+    if (!v->has_pos) return false;
+    lock(v);
+    int zoom = v->want.seq ? v->want.zoom : MAP_MAX_ZOOM - 1;
+    unlock(v);
+    double gx, gy;
+    map_world_pixel(v->pos_lat, v->pos_lon, zoom, &gx, &gy);
+    int64_t left = (int64_t)floor(gx + 0.5) - v->w / 2;
+    int64_t top = (int64_t)floor(gy + 0.5) - v->h / 2;
+    ESP_LOGI(TAG, "locate: z%d at %lld,%lld", zoom, (long long)left, (long long)top);
+    ask(v, zoom, left, top);
+    return true;
 }

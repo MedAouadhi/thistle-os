@@ -80,6 +80,25 @@ void map_view_pan(map_view_t *view, int dx, int dy);
  * middle there. False, and nothing asked, when already at the end. */
 bool map_view_zoom_by(map_view_t *view, int levels);
 
+/* The app covers px at the bottom of the view (an About line, say): the
+ * marker counts as off the view there, and near its edge above it. */
+void map_view_set_bottom_inset(map_view_t *view, int px);
+
+/* The device's position, from each fix: the view draws a marker there, a
+ * ring with a dot. It is redrawn only once the fix has moved more than
+ * 12 px on the screen, and at most every 5 s, so a refresh of its own
+ * stays rare and small (only the marker's old and new places). A marker
+ * the fix walks to within 24 px of the view's edge makes the map jump a
+ * step, half the view, that way, again at most every 5 s; a marker the
+ * user panned to the edge or away is left there. Logs what it does:
+ * "marker moved 30 px to 150,148, 5.0 s after the last", "marker held:
+ * ...", "page jump east to keep the marker in view: ...". */
+void map_view_set_position(map_view_t *view, double lat, double lon);
+
+/* Shows the position in the middle of the view at the zoom asked for
+ * last. False, and nothing asked, without a position yet. */
+bool map_view_locate(map_view_t *view);
+
 /* The view asked for last, which may not be on the screen yet. */
 int map_view_zoom(const map_view_t *view);
 void map_view_origin(const map_view_t *view, int64_t *x, int64_t *y);
