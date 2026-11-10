@@ -173,8 +173,8 @@ def check_screen(shown: Shown, pack: Pack, z: int, left: int, top: int,
     rectangles in skip (the view's pixels, inclusive), against the Pack's
     tiles and the hatching: a tile the Pack lacks, or one in damaged, is
     hatched. ink(gx, gy), if given, says where something drawn over the map
-    should show instead, ink or paper (None: the map). Returns how many of
-    the Pack's tiles show."""
+    should show instead, ink or paper (None: the map; "either": not
+    checked). Returns how many of the Pack's tiles show."""
     vx, vy, w, h = view_rect(shown.log)
     if (vx, w) != (0, 240):
         raise AssertionError(f"the view is {w} wide at x {vx}, not the screen's width")
@@ -194,6 +194,8 @@ def check_screen(shown: Shown, pack: Pack, z: int, left: int, top: int,
             gx, gy = left + sx, top + sy
             key = (z, gx // 256, gy // 256)
             over = ink(gx, gy) if ink else None
+            if over == "either":
+                continue
             if over is not None:
                 want = over
             elif key in index and key not in damaged:
@@ -269,7 +271,7 @@ def a_newer_format_is_refused_with_a_message() -> None:
 # Moving: what each step drew, and how many refreshes it cost
 # --------------------------------------------------------------------------
 
-ACTION = re.compile(r"\(map_view\) (pan \w+|zoom in|zoom out|already at z\d+|locate|page jump)")
+ACTION = re.compile(r"\(map_view\) (pan \w+|zoom in|zoom out|already at z\d+|locate|page jump|overlay \S+ o(?:n|ff)\b)")
 SHOWN = re.compile(r"\(maps\) shown z(\d+) at (-?\d+),(-?\d+): (\d+) tiles, (\d+) places "
                    r"with none, (\d+) damaged")
 FLUSH = re.compile(r"\[sim\] flush \((\d+),(\d+)\)-\((\d+),(\d+)\)")
@@ -648,6 +650,88 @@ def the_map_jumps_a_step_when_the_marker_nears_the_edge() -> None:
     check_screen(shown, pack, 16, left + w // 2, top, skip=(marker_skip(x, h // 2),))
 
 
+# --------------------------------------------------------------------------
+# The Navigator's recorded tracks
+# --------------------------------------------------------------------------
+
+def gpx(points: list[tuple[float, float]]) -> str:
+    """A track as the Navigator records it (apps/navigator)."""
+    rows = "".join(f'    <trkpt lat="{lat:.7f}" lon="{lon:.7f}"><ele>12.0</ele>'
+                   f"<time>2026-11-01T10:15:00Z</time></trkpt>\n" for lat, lon in points)
+    return ('<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<gpx version="1.1" creator="ThistleOS Navigator">\n'
+            "  <trk><name>ThistleOS Track</name><trkseg>\n" + rows +
+            "  </trkseg></trk>\n</gpx>\n")
+
+
+def segment_distance(px: float, py: float, a: tuple, b: tuple) -> float:
+    (ax, ay), (bx, by) = a, b
+    dx, dy = bx - ax, by - ay
+    t = 0.0 if dx == dy == 0 else max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) /
+                                                (dx * dx + dy * dy)))
+    return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+
+
+# A track is drawn as a black line 3 px wide in a paper casing 7 px wide:
+# ink within 1.5 px of it, paper to 3.5 px. Pixels near either edge are not
+# checked, for rounding.
+TRACK_INK, TRACK_CASING = 1.5, 3.5
+
+
+def track_ink(line: list[tuple[float, float]]):
+    def ink(gx: int, gy: int):
+        d = min(segment_distance(gx + 0.5, gy + 0.5, a, b) for a, b in zip(line, line[1:]))
+        if d < TRACK_INK - 0.2:
+            return True
+        if d < TRACK_INK + 0.2:
+            return "either"
+        if d < TRACK_CASING - 0.2:
+            return False
+        if d < TRACK_CASING + 0.2:
+            return "either"
+        return None
+    return ink
+
+
+def a_recorded_track_is_drawn_and_can_be_switched_off() -> None:
+    """A track the Navigator recorded in /sdcard/tracks/ is drawn over the
+    map, and stays drawn as the map moves; the Tracks button takes it off,
+    and t puts it back, a refresh each."""
+    pack = Pack(GOLDEN.read_bytes())
+    cx, cy = medina(pack)
+    corners = [(cx - 100, cy - 60), (cx + 20, cy - 60), (cx + 20, cy + 80), (cx + 170, cy + 90)]
+    points = [lat_lon(x, y, 16) for x, y in corners]
+    files = {"tracks/2026-11-01_101500.gpx": gpx(points)}
+    probe = run_app(GOLDEN.read_bytes(), timeout_ms=1500, files=files)
+    need(probe.log, "(maps) tracks: 1 track, 4 points")
+    vx, vy, w, h = view_rect(probe.log)
+    left, top = expected_origin(pack, 16, w, h)
+    line = [world_pixel(lat, lon, 16) for lat, lon in points]
+    check_screen(probe, pack, 16, left, top, ink=track_ink(line))
+
+    # A step east: still drawn where it is on the map.
+    east = run_app(GOLDEN.read_bytes(), timeout_ms=4000, files=files, steps=("type:d",))
+    check_screen(east, pack, 16, left + w // 2, top, ink=track_ink(line))
+
+    # Off by the button: the map alone; on again by the key.
+    off = run_app(GOLDEN.read_bytes(), timeout_ms=4000, files=files,
+                  steps=(control_centre(probe.log, "tracks"),))
+    expect_steps(off.log, [("overlay tracks off", (16, left, top))])
+    check_screen(off, pack, 16, left, top)
+    on = run_app(GOLDEN.read_bytes(), timeout_ms=5500, files=files,
+                 steps=(control_centre(probe.log, "tracks"), "type:t"))
+    expect_steps(on.log, [("overlay tracks off", (16, left, top)),
+                          ("overlay tracks on", (16, left, top))])
+    check_screen(on, pack, 16, left, top, ink=track_ink(line))
+
+
+def no_tracks_no_button() -> None:
+    shown = run_app(GOLDEN.read_bytes(), timeout_ms=1500)
+    need(shown.log, "(maps) tracks: none in /sdcard/tracks")
+    if "(maps) tracks button" in shown.log:
+        raise AssertionError("a Tracks button with no track")
+
+
 CASES: tuple[tuple[str, Callable[[], None]], ...] = (
     ("opens-the-pack-on-the-first-region", opens_the_pack_on_the_first_region),
     ("shows-the-packs-tiles-pixel-for-pixel", shows_the_packs_tiles_pixel_for_pixel),
@@ -673,6 +757,9 @@ CASES: tuple[tuple[str, Callable[[], None]], ...] = (
      the_marker_moves_past_12_px_at_most_every_5_s),
     ("the-map-jumps-a-step-when-the-marker-nears-the-edge",
      the_map_jumps_a_step_when_the_marker_nears_the_edge),
+    ("a-recorded-track-is-drawn-and-can-be-switched-off",
+     a_recorded_track_is_drawn_and_can_be_switched_off),
+    ("no-tracks-no-button", no_tracks_no_button),
 )
 
 SIMULATOR = Path("build/thistle_sim")

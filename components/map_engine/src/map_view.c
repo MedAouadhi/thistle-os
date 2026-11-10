@@ -56,6 +56,9 @@ typedef struct {
     uint32_t seq;  /* 0: nothing asked yet */
     int      zoom;
     int64_t  left, top;
+    /* The overlays shown, as they were when it was asked. */
+    const map_overlay_t *overlays[MAP_VIEW_MAX_OVERLAYS];
+    int      overlay_count;
 } want_t;
 
 struct map_view {
@@ -72,6 +75,12 @@ struct map_view {
     lv_point_t       press_at;
     bool             pressing;
     int              bottom_inset;  /* px the app covers at the bottom */
+
+    /* The app's overlays, the UI task's alone; each view asked for takes
+     * the visible ones with it. */
+    map_overlay_t   *overlays[MAP_VIEW_MAX_OVERLAYS];
+    bool             overlay_on[MAP_VIEW_MAX_OVERLAYS];
+    int              overlay_count;
 
     /* What is on the screen: the last view swapped in. */
     uint32_t         shown_seq;     /* 0: nothing yet */
@@ -153,6 +162,9 @@ static void compose(map_view_t *v, want_t want)
     int64_t started = esp_timer_get_time();
     map_compose_stats_t st;
     map_compose(v->cache, v->pack, want.zoom, want.left, want.top, v->w, v->h, v->back, &st);
+    for (int i = 0; i < want.overlay_count; i++) {
+        map_overlay_draw(want.overlays[i], want.zoom, want.left, want.top, v->w, v->h, v->back);
+    }
     v->done_seq = want.seq;
     uint32_t ms = (uint32_t)((esp_timer_get_time() - started + 999) / 1000);
 
@@ -328,6 +340,10 @@ static void ask(map_view_t *v, int zoom, int64_t left, int64_t top)
     v->want.zoom = zoom;
     v->want.left = left;
     v->want.top = top;
+    v->want.overlay_count = 0;
+    for (int i = 0; i < v->overlay_count; i++) {
+        if (v->overlay_on[i]) v->want.overlays[v->want.overlay_count++] = v->overlays[i];
+    }
     unlock(v);
     wake(v);
 }
@@ -680,4 +696,41 @@ bool map_view_locate(map_view_t *v)
     ESP_LOGI(TAG, "locate: z%d at %lld,%lld", zoom, (long long)left, (long long)top);
     ask(v, zoom, left, top);
     return true;
+}
+
+bool map_view_add_overlay(map_view_t *v, map_overlay_t *overlay, bool visible)
+{
+    if (!overlay || v->overlay_count >= MAP_VIEW_MAX_OVERLAYS) return false;
+    v->overlays[v->overlay_count] = overlay;
+    v->overlay_on[v->overlay_count] = visible;
+    v->overlay_count++;
+    lock(v);
+    want_t w = v->want;
+    unlock(v);
+    if (visible && w.seq != 0) ask(v, w.zoom, w.left, w.top);
+    return true;
+}
+
+void map_view_set_overlay_visible(map_view_t *v, map_overlay_t *overlay, bool visible)
+{
+    for (int i = 0; i < v->overlay_count; i++) {
+        if (v->overlays[i] != overlay || v->overlay_on[i] == visible) continue;
+        v->overlay_on[i] = visible;
+        lock(v);
+        want_t w = v->want;
+        unlock(v);
+        if (w.seq == 0) return;
+        ESP_LOGI(TAG, "overlay %s %s: z%d at %lld,%lld", map_overlay_name(overlay),
+                 visible ? "on" : "off", w.zoom, (long long)w.left, (long long)w.top);
+        ask(v, w.zoom, w.left, w.top);
+        return;
+    }
+}
+
+bool map_view_overlay_visible(const map_view_t *v, const map_overlay_t *overlay)
+{
+    for (int i = 0; i < v->overlay_count; i++) {
+        if (v->overlays[i] == overlay) return v->overlay_on[i];
+    }
+    return false;
 }

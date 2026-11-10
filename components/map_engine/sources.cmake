@@ -4,5 +4,6 @@ set(THISTLE_MAP_ENGINE_SRCS
     src/map_pack.c
     src/map_inflate.c
     src/map_compose.c
+    src/map_overlay.c
     src/map_view.c
 )
