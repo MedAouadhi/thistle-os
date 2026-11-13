@@ -927,6 +927,180 @@ the reasons; hermes_esp32's `protocol/README.md` and its plugin's
   `simulator/tests/test_hermes.py` runs the app against
   `fake_hermes_bridge.py`, a stdlib bridge that speaks as the plugin does.
 
+### Maps
+
+An offline map of the places the user chose, drawn on a computer and only
+shown on the device (ADR-0017; `.scratch/maps/spec.md`, the vocabulary in
+`CONTEXT.md`). Three parts:
+
+- **The Map Pack tool**, `tools/maps/thistle_maps.py` (Python: Pillow with
+  raqm, pyosmium; `tools/maps/requirements.txt`). `build REGIONS.geojson -o
+  X.tmap` fetches the Geofabrik extract holding the Regions into
+  `~/.cache/thistle-maps` (once; later builds are offline), clips it, draws
+  one-bit tiles from z14 to each Region's `deepest_zoom`, and writes the
+  Pack; `--extract FILE` reads a local extract instead. `estimate` counts the
+  tiles exactly and prices them as a city's (Monaco's Pack came out 13 %
+  under it, sparser places far under: an upper bound for the budget), or,
+  with `--extract` or `--measure`, draws twelve blocks a level from the
+  extract and prices the rest at their average (within 5 % of the built
+  fixture; `estimate.py`). `test_thistle_maps.py` reads the golden fixture,
+  `testdata/fixture.tmap`, through a reader of its own; it says how to
+  rebuild it, and `testdata/make_fixture.py` makes the made-up extract it
+  is built from.
+- **The browser mode**, `thistle_maps.py serve REGIONS.geojson`
+  (`browser.py`, the page `tools/maps/web/`, Leaflet 1.9.4 vendored in
+  `web/leaflet/`): an OpenStreetMap basemap (`--tiles` names another) on
+  which circles and freehand polygons are drawn with the mouse, each with
+  its name, radius and deepest zoom, deleted with Delete; the quick
+  estimate after every change, a warning above `--budget` (1 GB), Measure,
+  Save (the Regions file, opened again at the next `serve`) and Build,
+  which saves and runs `build` with the same extract options. The server
+  listens on 127.0.0.1 only and refuses another Host and posts not in
+  JSON. `test_browser_mode.py` drives it in headless Chromium through
+  Playwright, against a blank basemap of its own, and skips without
+  Playwright.
+- **The format**, `docs/maps/map-pack-format.md`: version 1.0, a section
+  directory with room for a name index and overlays, a colour variant
+  reserved, raw DEFLATE and a CRC per tile, the "no map here" hatching.
+- **The map engine**, `components/map_engine/` (`map_engine/map_pack.h`,
+  `map_view.h`), a library component like none other yet: it reads a Pack
+  as untrusted, inflates with the S3 ROM's tinfl (uzlib, the Reader's, in
+  the simulators: `ESP_PLATFORM` decides; a stream must end exactly at
+  the tile's last byte on both), and composes the view into an RGB565
+  buffer in PSRAM that an `lv_image` shows undecoded. A one-bit (`I1`)
+  image would be decoded to ARGB8888 from LVGL's 64 KB pool. The
+  simulators take its sources from `cmake/thistle_apps.cmake`.
+- **A view moves a step at a time, one refresh a step**: a swipe, the
+  arrows or w/a/s/d pan half the view; +, = or i and - or o zoom a level,
+  keeping the middle. The tiles are read, inflated and composed on the
+  view's own task, `map_tiles` (8 KB internal stack), through a 12-tile
+  cache in PSRAM (`map_compose.c`), into a second buffer the UI task swaps
+  in whole only if it is still the view last asked for: a step overtaken
+  by the next is never drawn. The browser's simulator has no tasks and
+  composes on the UI task. The view logs `(map_view) pan east: z16 at
+  X,Y`, `zoom in: ...`, `already at z17`, internal RAM around its making,
+  and the task's unused stack after its first view and as it stops
+  (measured on a device only).
+- **The simulator refreshes its e-paper as a device does**
+  (`ui_manager_epaper_commit()` after each `lv_timer_handler()`), so a
+  run logs `refreshing the e-paper panel (fast)` and a test can count the
+  refreshes an action costs, as `test_maps.py` does with `--log-flushes`.
+- `components/map_engine/tests/run_tests.sh` reads the golden Pack, every
+  length of it cut short, a bit flipped in every byte, fields made wrong
+  with their CRCs made right, and random damage, composing views over
+  them, under ASan and UBSan. It found uzlib using a decoding error as a
+  table index, patched in `apps/reader/third_party/uzlib/tinflate.c`.
+
+- **The position marker is the view's** (`map_view_set_position()`,
+  `map_view_locate()`): an LVGL ring with a dot over the map, so moving it
+  flushes only its old and new places. It is redrawn only once the fix
+  has moved more than 12 px on the screen, and at most every 5 s; a fix
+  that walks it to within 24 px of the view's edge (the About line
+  counted off, `map_view_set_bottom_inset()`) makes the map jump a step
+  that way, marker and map in one refresh. A marker the user panned to
+  the edge or away is left there. It is timed with `esp_timer`: the
+  simulator's `lv_tick` runs fast. The log says `marker moved 30 px to
+  150,148, 5.0 s after the last`, `marker held: ...`, `page jump east to
+  keep the marker in view: ...`, `locate: ...`.
+- **A static transit network can be baked into the Pack**: `build
+  --transit osm` (the extract's route relations) or `--transit FEED`
+  (GTFS, a .zip or a folder) writes an OVLY section, format 1.1, of two
+  overlays, "Transit lines" (a line a stretch the same routes share,
+  labelled `5, 23`) and "Transit stops" (one point a stop and its
+  platforms, with its `lines`), 256 items each, the most important kept
+  (`transit.py`, `docs/maps/map-pack-format.md`). The engine checks OVLY
+  whole at opening and leaves a damaged one out, the tiles shown as ever
+  (`map_pack_overlay_*()`, `map_overlay_add_from_pack()`); the Maps app
+  lists them first in its Layers panel, beneath the files on the map, with
+  a card of their properties. `testdata/fixture-transit.tmap` is the
+  golden fixture's tiles with the network baked in;
+  `simulator/tests/test_map_transit.py`.
+- **The Navigator's tracks are an overlay** (Overlays, below): a line a
+  GPX `trkseg`, black 3 px in a paper casing 7 px, drawn in the same pass
+  as the view swapped in, so a step with them on is still one refresh.
+
+The Maps app (`apps/maps/`) opens the first `*.tmap` by name in
+`/sdcard/maps/` on the GPS fix if a Region holds it
+(`map_pack_has_tile()`), else on the first Region's centre, at z16 or the
+Region's depth if shallower, with zoom buttons at the bottom right, locate
+(the arrow, or l) at the bottom left, and the credit on an About line at
+the bottom. It reads the fix once a second and hands it to the view.
+Every `*.gpx` in `/sdcard/tracks/`, where the Navigator records, is one
+overlay, beneath the GeoJSON files', shown at first; Tracks at the top
+right (left of Refresh when there is one), or t, switches it. It
+logs `(maps) opened X: format 1.0, ...`, `(maps) showing z16 around ...
+(your position)`, `(maps) view WxH at X,Y`, `(maps) zoom in at X,Y`,
+`(maps) locate button X1,Y1-X2,Y2`, `(maps) tracks: 1 track, 57 points`,
+and each view swapped in, `(maps) shown z16 at X,Y: 4 tiles, 0 places
+with none, 0 damaged; 4 read, 0 from the cache, 1 ms`.
+`simulator/tests/test_maps.py` compares the screen with the golden Pack
+pixel for pixel, after each pan and zoom, and with damaged Packs; walks a
+fix along `THISTLE_SIM_GPS_PATH` for the marker and the page jump; and
+draws a recorded track.
+
+**Overlays** (`map_engine/map_overlay.h`, `docs/maps/overlay-api.md`,
+ADR-0018) are a built-in app's own points, lines, polygons and text on its
+view, owned by it and retained; no syscall, no registry.
+
+- **Drawn over the tiles on the UI task**, one bit a pixel, in z order, at
+  most 256 items an overlay, decluttered (`map_overlay.c`). The image shows
+  a third buffer, the tiles with the overlays over them; labels go through
+  `lv_draw_label` on a layer over those pixels, so Arabic is shaped by the
+  usual wraps, then thresholded. Four screen buffers in PSRAM in all.
+- **A change shows at most every 20 s, and only the rectangle that
+  changed**: the view draws the next screen into a scratch buffer, compares
+  it with the shown one, copies the rectangle that differs and invalidates
+  only that (never `lv_image_set_src`, which invalidates the whole image).
+  `map_view_refresh()` draws at once; on/off, pan and zoom draw at once.
+  LVGL grows an invalidated area by a pixel.
+- **A tap that is not a swipe, or Enter, selects** the nearest drawn item
+  within 16 px and calls its overlay's callback; a miss calls the view's.
+- **In the Maps app** (`maps_layers.c`), each `*.geojson` or `*.json` in
+  `/sdcard/maps/overlays/`, eight at most, is an overlay, read with the
+  Podcasts app's `pod_json.c`, on and off in the Layers panel (top left);
+  a file that changes is read again within 2 s; Refresh (top right, `r`)
+  draws at once; a tapped item's card shows its name and properties. The
+  logs: `(maps) overlay X.geojson: N items[, M left out (256 at most)]`,
+  `(map_view) overlays drawn: ...`, `overlays redrawn for a change, 20.0 s
+  after the last: changed X1,Y1-X2,Y2`, `tap at X,Y: "name" item N, D px
+  away`, `(maps) info card: NAME; key: value`.
+- `simulator/tests/test_map_overlays.py` drives it, changing a file while
+  the simulator runs for the 20 s case.
+
+### Transit
+
+`apps/transit/` shows the card's Map Pack, as the Maps app does, with a
+city's stops (squares) and moving vehicles (triangles) over it as two
+overlays; a tapped stop shows its next departures on a card, a tapped
+vehicle its direction; Refresh (top right, or r) fetches now. The city is
+its **Provider**: one interface, `fetch(box, stop, now)` plus a minimum
+interval (`transit/transit_provider.h`); Berlin's
+(`transit/providers/berlin.c`) reads vbb-rest 6, no key, every 30 s.
+Another city is a new file in `providers/` and its name in
+`TRANSIT_PROVIDERS`. `docs/maps/transit-providers.md` has the rules,
+ticket 07's research the API.
+
+- **It fetches only while the app is open**, on its own task, `transit`
+  (8 KB internal stack, `transit_session.c`), holding the device awake for
+  each fetch. Opening fetches at once; leaving stops the task, and a fetch
+  under way finishes with none after. Never a background check.
+- **The first result and Refresh's are drawn at once**; a later change
+  under the overlay's 20 s rule. A failure keeps the map as it is, backs
+  off (the interval, doubling, 5 minutes at most) and says why on the
+  status line; vehicles go after 10 minutes without live data.
+- **`config/transit.json`**: `provider`, `base_url` (a self-hosted vbb-rest
+  on the tailnet, say), `min_interval_s` (5 at least), `save_geojson`,
+  which writes each result to `/sdcard/maps/overlays/transit-<id>.geojson`
+  for the Maps app.
+- It opens on the GPS fix if a Region holds it, else the Provider's city if
+  one does, else the first Region; the box asked for is the view grown by
+  half of itself each way. The log says `(transit) berlin: fetched 12
+  stops, 9 vehicles, 0 departures in 840 ms, for the 30 s interval`,
+  `(transit) card: Alexanderplatz; 16:47 M10 S+U Hauptbahnhof +2`,
+  `(transit) berlin: stopped fetching`.
+- `simulator/tests/test_transit.py` runs it against
+  `fake_transit_provider.py`, a stdlib vbb-rest.
+
 ### To-do
 
 `apps/todo/` is a checklist: type a task and press Enter, tap it when it is
@@ -1148,9 +1322,9 @@ The kernel is **100% Rust and hardware-independent**. It never calls ESP-IDF har
 - **Kernel (Rust)** (`components/kernel_rs/`): 100% Rust. 57 modules: manifest parser, permissions, IPC, events, app manager, version, crypto, HAL registry, driver manager, WM, app store, wifi/ble/net managers, OTA, and more.
 - **Display Server** (`components/kernel/src/display_server.c`): Surface management, compositor, WM vtable interface.
 - **UI** (`components/ui/`): thistle-tk WM (default). LVGL-based WM also available. Both loadable as `.wm.elf`.
-- **Apps**: 18 built in, and 4 from the App Store (Notes, Weather, WiFi
+- **Apps**: 20 built in, and 4 from the App Store (Notes, Weather, WiFi
   Scanner, Flashlight: `standalone_apps/`). Four remain in
-  `components/apps_builtin/`; the other fourteen are their own components
+  `components/apps_builtin/`; the other sixteen are their own components
   under `apps/` (with `chatkit/`, which SMS and MeshCore share), listed once
   in `cmake/thistle_apps.cmake` for the simulators and
   found by `EXTRA_COMPONENT_DIRS` for the firmware, which excludes the four
@@ -1226,9 +1400,9 @@ launching them under thistle-tk segfaults. App Store and Flashlight exist in
 both toolkits under the same IDs, and the app manager keeps the first
 registration of an ID, so each manager registers only its own:
 `lvgl_apps_register_builtin()` under LVGL, `tk_native_apps_register()` under
-thistle-tk. All eighteen built-in apps are reachable by default on every S3
+thistle-tk. All twenty built-in apps are reachable by default on every S3
 board (MeshCore and Navigator only with a radio and a GPS); naming
-`thistle-tk` trades sixteen of them for its refresh behaviour.
+`thistle-tk` trades eighteen of them for its refresh behaviour.
 
 `simulator/tests/test_app_matrix.py` launches every app on every simulated
 device profile, and the simulator's `--wm NAME` overrides `system.json` for a

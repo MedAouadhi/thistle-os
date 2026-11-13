@@ -15,6 +15,7 @@ set(THISTLE_OPTIONAL_APPS
     "file_manager|FILEMGR|filemgr"
     "filexfer|FILEXFER|filexfer"
     "hermes|HERMES|hermes"
+    "maps|MAPS|maps"
     "meshchat|MESHCHAT|meshchat"
     "navigator|NAVIGATOR|navigator"
     "phone|PHONE|phone"
@@ -24,6 +25,7 @@ set(THISTLE_OPTIONAL_APPS
     "tailchat|TAILCHAT|tailchat"
     "tailscale|TAILSCALE|tailscale"
     "todo|TODO|todo"
+    "transit|TRANSIT|transit"
     "vault|VAULT|vault"
 )
 
@@ -104,6 +106,19 @@ macro(thistle_collect_optional_apps)
         # component root goes on the include path.
         list(APPEND THISTLE_APP_INCLUDE_DIRS "${_root}")
     endforeach()
+
+    # The map engine, a library component the Maps and Transit apps embed,
+    # which neither simulator has a component system to find. With no ROM
+    # to inflate with, it uses the Reader's uzlib there.
+    if(THISTLE_HAVE_MAPS OR THISTLE_HAVE_TRANSIT)
+        include("${THISTLE_DIR}/components/map_engine/sources.cmake")
+        foreach(_src IN LISTS THISTLE_MAP_ENGINE_SRCS)
+            list(APPEND THISTLE_SRCS "${THISTLE_DIR}/components/map_engine/${_src}")
+        endforeach()
+        list(APPEND THISTLE_APP_INCLUDE_DIRS
+            "${THISTLE_DIR}/components/map_engine/include"
+            "${THISTLE_DIR}/apps/reader/third_party/uzlib")
+    endif()
 
     unset(_entry)
     unset(_src)

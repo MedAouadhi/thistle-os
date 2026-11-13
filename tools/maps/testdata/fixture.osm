@@ -1,0 +1,291 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<osm version="0.6" generator="thistle-maps make_fixture.py">
+  <node id="1001" version="1" lat="36.7994610" lon="10.1721470"/>
+  <node id="1002" version="1" lat="36.7994610" lon="10.1800000"/>
+  <node id="1003" version="1" lat="36.7994610" lon="10.1878530"/>
+  <node id="1004" version="1" lat="36.7937118" lon="10.1788781"/>
+  <node id="1005" version="1" lat="36.8000000" lon="10.1788781"/>
+  <node id="1006" version="1" lat="36.8062882" lon="10.1788781"/>
+  <node id="1007" version="1" lat="36.8016170" lon="10.1743907"/>
+  <node id="1008" version="1" lat="36.8016170" lon="10.1783172"/>
+  <node id="1009" version="1" lat="36.7946101" lon="10.1828047"/>
+  <node id="1010" version="1" lat="36.7991017" lon="10.1828047"/>
+  <node id="1011" version="1" lat="36.7955084" lon="10.1749516"/>
+  <node id="1012" version="1" lat="36.7977542" lon="10.1777563"/>
+  <node id="1013" version="1" lat="36.8035932" lon="10.1732688"/>
+  <node id="1014" version="1" lat="36.8053899" lon="10.1766344"/>
+  <node id="1015" version="1" lat="36.8026949" lon="10.1699032"/>
+  <node id="1016" version="1" lat="36.7973051" lon="10.1699032"/>
+  <node id="1017" version="1" lat="36.7962271" lon="10.1752882"/>
+  <node id="1018" version="1" lat="36.7962271" lon="10.1808975"/>
+  <node id="1019" version="1" lat="36.7976644" lon="10.1808975"/>
+  <node id="1020" version="1" lat="36.7976644" lon="10.1752882"/>
+  <node id="1021" version="1" lat="36.7966762" lon="10.1775319"/>
+  <node id="1022" version="1" lat="36.7966762" lon="10.1782050"/>
+  <node id="1023" version="1" lat="36.7971254" lon="10.1782050"/>
+  <node id="1024" version="1" lat="36.7971254" lon="10.1775319"/>
+  <node id="1025" version="1" lat="36.7937118" lon="10.1833656"/>
+  <node id="1026" version="1" lat="36.7969457" lon="10.1808975"/>
+  <node id="1027" version="1" lat="36.8008983" lon="10.1829168"/>
+  <node id="1028" version="1" lat="36.8008983" lon="10.1856093"/>
+  <node id="1029" version="1" lat="36.8031441" lon="10.1856093"/>
+  <node id="1030" version="1" lat="36.8031441" lon="10.1829168"/>
+  <node id="1031" version="1" lat="36.7986525" lon="10.1793269"/>
+  <node id="1032" version="1" lat="36.7986525" lon="10.1796634"/>
+  <node id="1033" version="1" lat="36.7990119" lon="10.1796634"/>
+  <node id="1034" version="1" lat="36.7990119" lon="10.1793269"/>
+  <node id="1035" version="1" lat="36.7986525" lon="10.1798317"/>
+  <node id="1036" version="1" lat="36.7986525" lon="10.1801683"/>
+  <node id="1037" version="1" lat="36.7990119" lon="10.1801683"/>
+  <node id="1038" version="1" lat="36.7990119" lon="10.1798317"/>
+  <node id="1039" version="1" lat="36.7986525" lon="10.1803366"/>
+  <node id="1040" version="1" lat="36.7986525" lon="10.1806731"/>
+  <node id="1041" version="1" lat="36.7990119" lon="10.1806731"/>
+  <node id="1042" version="1" lat="36.7990119" lon="10.1803366"/>
+  <node id="1043" version="1" lat="36.7986525" lon="10.1808414"/>
+  <node id="1044" version="1" lat="36.7986525" lon="10.1811780"/>
+  <node id="1045" version="1" lat="36.7990119" lon="10.1811780"/>
+  <node id="1046" version="1" lat="36.7990119" lon="10.1808414"/>
+  <node id="1047" version="1" lat="36.7986525" lon="10.1813462"/>
+  <node id="1048" version="1" lat="36.7986525" lon="10.1816828"/>
+  <node id="1049" version="1" lat="36.7990119" lon="10.1816828"/>
+  <node id="1050" version="1" lat="36.7990119" lon="10.1813462"/>
+  <node id="1051" version="1" lat="36.8004492" lon="10.1771953">
+    <tag k="amenity" v="place_of_worship"/>
+    <tag k="religion" v="muslim"/>
+    <tag k="name" v="جامع الزيتونة"/>
+  </node>
+  <node id="1052" version="1" lat="36.7982034" lon="10.1816828">
+    <tag k="amenity" v="pharmacy"/>
+    <tag k="name" v="Pharmacie"/>
+  </node>
+  <node id="1053" version="1" lat="36.7986525" lon="10.1766344">
+    <tag k="amenity" v="hospital"/>
+    <tag k="name" v="Hôpital"/>
+  </node>
+  <node id="1054" version="1" lat="36.7989220" lon="10.1839265">
+    <tag k="amenity" v="fuel"/>
+  </node>
+  <node id="1055" version="1" lat="36.8026949" lon="10.1800000">
+    <tag k="amenity" v="cafe"/>
+    <tag k="name" v="Café"/>
+  </node>
+  <node id="1056" version="1" lat="36.8025153" lon="10.1762979">
+    <tag k="amenity" v="school"/>
+  </node>
+  <node id="1057" version="1" lat="36.8010780" lon="10.1813462">
+    <tag k="place" v="neighbourhood"/>
+    <tag k="name" v="محمد"/>
+  </node>
+  <node id="1058" version="1" lat="36.8148203" lon="10.1955117"/>
+  <node id="1059" version="1" lat="36.8151797" lon="10.2044883"/>
+  <node id="1060" version="1" lat="36.8153593" lon="10.2003366"/>
+  <node id="1061" version="1" lat="36.8153593" lon="10.2007855"/>
+  <node id="1062" version="1" lat="36.8157186" lon="10.2007855"/>
+  <node id="1063" version="1" lat="36.8157186" lon="10.2003366"/>
+  <node id="1064" version="1" lat="36.8163475" lon="10.2000000">
+    <tag k="place" v="suburb"/>
+    <tag k="name" v="Les Berges"/>
+  </node>
+  <node id="1065" version="1" lat="36.7191520" lon="10.1800000"/>
+  <node id="1066" version="1" lat="36.7191520" lon="10.1856093"/>
+  <node id="1067" version="1" lat="36.8012576" lon="10.1732688"/>
+  <node id="1068" version="1" lat="36.8012576" lon="10.1777563"/>
+  <node id="1069" version="1" lat="36.8012576" lon="10.1811219"/>
+  <node id="1070" version="1" lat="36.8012576" lon="10.1867312"/>
+  <node id="1071" version="1" lat="36.8013475" lon="10.1777563">
+    <tag k="public_transport" v="platform"/>
+    <tag k="name" v="Place Barcelone"/>
+  </node>
+  <node id="1072" version="1" lat="36.8013475" lon="10.1811219">
+    <tag k="public_transport" v="platform"/>
+    <tag k="name" v="Bab Bhar"/>
+  </node>
+  <node id="1073" version="1" lat="36.8011678" lon="10.1811219">
+    <tag k="public_transport" v="platform"/>
+    <tag k="name" v="Bab Bhar"/>
+  </node>
+  <node id="1074" version="1" lat="36.7995508" lon="10.1797756">
+    <tag k="public_transport" v="platform"/>
+    <tag k="name" v="Avenue de France"/>
+  </node>
+  <node id="1075" version="1" lat="36.7192418" lon="10.1828047">
+    <tag k="public_transport" v="platform"/>
+    <tag k="name" v="Far Stop"/>
+  </node>
+  <way id="2001" version="1">
+    <nd ref="1001"/>
+    <nd ref="1002"/>
+    <nd ref="1003"/>
+    <tag k="highway" v="primary"/>
+    <tag k="name" v="Avenue de France"/>
+  </way>
+  <way id="2002" version="1">
+    <nd ref="1004"/>
+    <nd ref="1005"/>
+    <nd ref="1006"/>
+    <tag k="highway" v="secondary"/>
+    <tag k="name" v="نهج الحرية"/>
+  </way>
+  <way id="2003" version="1">
+    <nd ref="1007"/>
+    <nd ref="1008"/>
+    <tag k="highway" v="residential"/>
+    <tag k="name" v="Rue de Rome"/>
+  </way>
+  <way id="2004" version="1">
+    <nd ref="1009"/>
+    <nd ref="1010"/>
+    <tag k="highway" v="tertiary"/>
+    <tag k="name" v="Rue d'Alger"/>
+  </way>
+  <way id="2005" version="1">
+    <nd ref="1011"/>
+    <nd ref="1012"/>
+    <tag k="highway" v="service"/>
+  </way>
+  <way id="2006" version="1">
+    <nd ref="1013"/>
+    <nd ref="1014"/>
+    <tag k="highway" v="footway"/>
+  </way>
+  <way id="2007" version="1">
+    <nd ref="1015"/>
+    <nd ref="1016"/>
+    <tag k="highway" v="motorway"/>
+    <tag k="name" v="A1"/>
+  </way>
+  <way id="2008" version="1">
+    <nd ref="1017"/>
+    <nd ref="1018"/>
+    <nd ref="1019"/>
+    <nd ref="1020"/>
+    <nd ref="1017"/>
+  </way>
+  <way id="2009" version="1">
+    <nd ref="1021"/>
+    <nd ref="1022"/>
+    <nd ref="1023"/>
+    <nd ref="1024"/>
+    <nd ref="1021"/>
+  </way>
+  <way id="2010" version="1">
+    <nd ref="1025"/>
+    <nd ref="1026"/>
+    <tag k="waterway" v="stream"/>
+  </way>
+  <way id="2011" version="1">
+    <nd ref="1027"/>
+    <nd ref="1028"/>
+    <nd ref="1029"/>
+    <nd ref="1030"/>
+    <nd ref="1027"/>
+    <tag k="leisure" v="park"/>
+    <tag k="name" v="Jardin"/>
+  </way>
+  <way id="2012" version="1">
+    <nd ref="1031"/>
+    <nd ref="1032"/>
+    <nd ref="1033"/>
+    <nd ref="1034"/>
+    <nd ref="1031"/>
+    <tag k="building" v="yes"/>
+  </way>
+  <way id="2013" version="1">
+    <nd ref="1035"/>
+    <nd ref="1036"/>
+    <nd ref="1037"/>
+    <nd ref="1038"/>
+    <nd ref="1035"/>
+    <tag k="building" v="yes"/>
+  </way>
+  <way id="2014" version="1">
+    <nd ref="1039"/>
+    <nd ref="1040"/>
+    <nd ref="1041"/>
+    <nd ref="1042"/>
+    <nd ref="1039"/>
+    <tag k="building" v="yes"/>
+  </way>
+  <way id="2015" version="1">
+    <nd ref="1043"/>
+    <nd ref="1044"/>
+    <nd ref="1045"/>
+    <nd ref="1046"/>
+    <nd ref="1043"/>
+    <tag k="building" v="yes"/>
+  </way>
+  <way id="2016" version="1">
+    <nd ref="1047"/>
+    <nd ref="1048"/>
+    <nd ref="1049"/>
+    <nd ref="1050"/>
+    <nd ref="1047"/>
+    <tag k="building" v="yes"/>
+  </way>
+  <way id="2017" version="1">
+    <nd ref="1058"/>
+    <nd ref="1059"/>
+    <tag k="highway" v="tertiary"/>
+    <tag k="name" v="Rue de Marseille"/>
+  </way>
+  <way id="2018" version="1">
+    <nd ref="1060"/>
+    <nd ref="1061"/>
+    <nd ref="1062"/>
+    <nd ref="1063"/>
+    <nd ref="1060"/>
+    <tag k="building" v="yes"/>
+  </way>
+  <way id="2019" version="1">
+    <nd ref="1065"/>
+    <nd ref="1066"/>
+    <tag k="highway" v="primary"/>
+    <tag k="name" v="Far Road"/>
+  </way>
+  <way id="2020" version="1">
+    <nd ref="1067"/>
+    <nd ref="1068"/>
+    <nd ref="1069"/>
+    <nd ref="1070"/>
+    <tag k="railway" v="tram"/>
+  </way>
+  <relation id="3001" version="1">
+    <member type="way" ref="2008" role="outer"/>
+    <member type="way" ref="2009" role="inner"/>
+    <tag k="type" v="multipolygon"/>
+    <tag k="natural" v="water"/>
+    <tag k="name" v="Lac"/>
+  </relation>
+  <relation id="3002" version="1">
+    <member type="way" ref="2020" role=""/>
+    <member type="node" ref="1071" role="platform"/>
+    <member type="node" ref="1072" role="platform"/>
+    <member type="node" ref="1073" role="platform"/>
+    <tag k="type" v="route"/>
+    <tag k="route" v="tram"/>
+    <tag k="ref" v="T1"/>
+    <tag k="name" v="Tram T1"/>
+  </relation>
+  <relation id="3003" version="1">
+    <member type="way" ref="2001" role=""/>
+    <member type="node" ref="1074" role="platform"/>
+    <tag k="type" v="route"/>
+    <tag k="route" v="bus"/>
+    <tag k="ref" v="23"/>
+  </relation>
+  <relation id="3004" version="1">
+    <member type="way" ref="2001" role=""/>
+    <member type="node" ref="1074" role="platform"/>
+    <tag k="type" v="route"/>
+    <tag k="route" v="bus"/>
+    <tag k="ref" v="5"/>
+  </relation>
+  <relation id="3005" version="1">
+    <member type="way" ref="2019" role=""/>
+    <member type="node" ref="1075" role="platform"/>
+    <tag k="type" v="route"/>
+    <tag k="route" v="bus"/>
+    <tag k="ref" v="99"/>
+  </relation>
+</osm>

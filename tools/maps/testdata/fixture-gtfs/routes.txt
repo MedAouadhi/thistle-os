@@ -1,0 +1,6 @@
+route_id,route_short_name,route_long_name,route_type
+T1,T1,Tram T1,0
+R23,23,,3
+R5,5,,3
+R7,7,,3
+R99,99,,3

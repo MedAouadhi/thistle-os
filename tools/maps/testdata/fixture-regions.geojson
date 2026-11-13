@@ -1,0 +1,63 @@
+{
+  "type": "FeatureCollection",
+  "thistle_regions": 1,
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Medina",
+        "radius_m": 350,
+        "deepest_zoom": 17
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          10.18,
+          36.8
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Lac Nord",
+        "deepest_zoom": 15
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              10.1966338,
+              36.8132034
+            ],
+            [
+              10.200561,
+              36.8126644
+            ],
+            [
+              10.2035907,
+              36.813922
+            ],
+            [
+              10.2031418,
+              36.8168865
+            ],
+            [
+              10.1993268,
+              36.8176949
+            ],
+            [
+              10.1964093,
+              36.816078
+            ],
+            [
+              10.1966338,
+              36.8132034
+            ]
+          ]
+        ]
+      }
+    }
+  ]
+}

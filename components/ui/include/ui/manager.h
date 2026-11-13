@@ -30,6 +30,13 @@ void ui_manager_request_refresh(void);
 /* Force an immediate full refresh */
 void ui_manager_force_refresh(void);
 
+/* Hands what LVGL has drawn to the e-paper panel once the screen has
+ * settled, as lvgl_task does after each lv_timer_handler(): for a host that
+ * runs LVGL's timers itself and starts no lvgl_task, the simulator. It logs
+ * each refresh, "refreshing the e-paper panel (fast)", which is how the
+ * simulator's tests count them. Nothing on an LCD. */
+void ui_manager_epaper_commit(void);
+
 /* Lock/unlock LVGL mutex (must hold when modifying LVGL objects) */
 void ui_manager_lock(void);
 void ui_manager_unlock(void);

@@ -416,6 +416,12 @@ static int tinf_inflate_block_data(TINF_DATA *d, TINF_TREE *lt, TINF_TREE *dt)
             return TINF_DATA_ERROR;
         }
 
+        /* ThistleOS: an error decoding (a code longer than any), which
+         * upstream wrote out as a literal byte. */
+        if (sym < 0) {
+            return TINF_DATA_ERROR;
+        }
+
         /* literal byte */
         if (sym < 256) {
             TINF_PUT(d, sym);
@@ -437,7 +443,9 @@ static int tinf_inflate_block_data(TINF_DATA *d, TINF_TREE *lt, TINF_TREE *dt)
         d->curlen = tinf_read_bits(d, length_bits[sym], length_base[sym]);
 
         dist = tinf_decode_symbol(d, dt);
-        if (dist >= 30) {
+        /* ThistleOS: an error decoding, negative, which upstream used as
+         * an index into dist_bits and dist_base. */
+        if (dist < 0 || dist >= 30) {
             return TINF_DATA_ERROR;
         }
 

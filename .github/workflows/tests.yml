@@ -203,6 +203,9 @@ jobs:
       - name: Test the Chat app's text under sanitizers
         run: apps/tailchat/tests/run_tests.sh
 
+      - name: Test the map engine's Pack reader and views over damaged Packs under sanitizers
+        run: components/map_engine/tests/run_tests.sh
+
       - name: Test the chat apps' conversation store under sanitizers
         run: apps/chatkit/tests/run_tests.sh
 
@@ -247,6 +250,18 @@ jobs:
         run: |
           python3 tools/tailnet_chat/make_vectors.py --check
           python3 tools/test_tailnet_chat.py
+
+      - name: Test the Map Pack tool against its fixture and golden Pack
+        run: |
+          python3 -m pip install -r tools/maps/requirements.txt
+          sudo apt-get install -y fonts-dejavu-core
+          python3 tools/maps/test_thistle_maps.py
+
+      - name: Test the Map Pack tool's browser mode in a real browser
+        run: |
+          python3 -m pip install playwright
+          python3 -m playwright install --with-deps chromium
+          python3 tools/maps/test_browser_mode.py
 
       - name: Test transactional recovery bundle activation
         run: |
@@ -639,6 +654,22 @@ jobs:
       - name: Run To-do add, tick, remove and clear tests
         working-directory: simulator
         run: python3 tests/test_todo.py --sim build/thistle_sim
+
+      - name: Run Maps tests against the Map Pack tool's golden Pack
+        working-directory: simulator
+        run: python3 tests/test_maps.py --sim build/thistle_sim
+
+      - name: Run Maps overlay tests (GeoJSON files, declutter, the 20 s cap, selection)
+        working-directory: simulator
+        run: python3 tests/test_map_overlays.py --sim build/thistle_sim
+
+      - name: Run Maps transit network tests (a network baked into the Pack, on and off)
+        working-directory: simulator
+        run: python3 tests/test_map_transit.py --sim build/thistle_sim
+
+      - name: Run Transit tests against a fake Berlin Provider (stops, live items, departures, Refresh)
+        working-directory: simulator
+        run: python3 tests/test_transit.py --sim build/thistle_sim
 
       - name: Run Tailnet chat conformance, messages, card, restart and app tests
         working-directory: simulator

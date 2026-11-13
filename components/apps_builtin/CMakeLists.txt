@@ -23,8 +23,8 @@ idf_component_register(
     # lvgl_apps.c is the only caller of the apps that live as their own
     # components under apps/, and lvgl_apps.h exposes none of them, so this
     # dependency is an implementation detail rather than part of the interface.
-    PRIV_REQUIRES appstore file_manager filexfer hermes meshchat navigator
-                  phone podcasts reader sms tailchat tailscale todo vault
+    PRIV_REQUIRES appstore file_manager filexfer hermes maps meshchat navigator
+                  phone podcasts reader sms tailchat tailscale todo transit vault
 )
 
 # ui and apps_builtin require each other, so the linker sees the cycle's

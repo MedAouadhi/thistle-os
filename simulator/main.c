@@ -593,6 +593,9 @@ int main(int argc, char **argv)
             /* Run LVGL timer handler (renders, processes animations) */
             pthread_mutex_lock(&s_lvgl_mutex);
             lv_timer_handler();
+            /* The panel refreshes once the screen settles, as on a device:
+             * a test counts the refreshes an action costs. */
+            ui_manager_epaper_commit();
             pthread_mutex_unlock(&s_lvgl_mutex);
         }
 

@@ -169,6 +169,8 @@ static const char *app_icon_symbol(const char *app_id)
     if (strstr(app_id, ".sms"))        return LV_SYMBOL_ENVELOPE;
     if (strstr(app_id, "phone"))       return LV_SYMBOL_CALL;
     if (strstr(app_id, "navigator"))   return LV_SYMBOL_GPS;
+    if (strstr(app_id, "maps"))        return LV_SYMBOL_IMAGE;
+    if (strstr(app_id, "transit"))     return LV_SYMBOL_LOOP;
     if (strstr(app_id, "notes"))       return LV_SYMBOL_EDIT;
     if (strstr(app_id, "todo"))        return LV_SYMBOL_OK;
     if (strstr(app_id, "assistant"))   return LV_SYMBOL_EYE_OPEN;

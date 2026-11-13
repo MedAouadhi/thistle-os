@@ -97,7 +97,8 @@ CASES = (
     # again when Podcasts joined, after the Reader, and Phone after Podcasts,
     # and File Transfer after Files, Tailscale after File Transfer,
     # Hermes after Tailscale, To-do after Notes, and Chat after Hermes; and once more when
-    # Notes, Weather, WiFi Scanner and Flashlight moved to the App Store.
+    # Notes, Weather, WiFi Scanner and Flashlight moved to the App Store, and
+    # when Maps joined after the Navigator.
     Case(
         "lcd-apps",
         "tdeck",
@@ -114,7 +115,7 @@ CASES = (
     # of white to half, which inks more of each letter's antialiased edge,
     # and when Podcasts joined the grid, Phone, File Transfer, Tailscale,
     # Hermes and To-do, and when Notes, Weather, WiFi Scanner and Flashlight
-    # moved to the App Store.
+    # moved to the App Store, and when Maps joined.
     Case(
         "eink-lvgl-apps",
         "tdeck-max",

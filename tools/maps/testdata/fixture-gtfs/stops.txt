@@ -1,0 +1,8 @@
+stop_id,stop_name,stop_lat,stop_lon,location_type,parent_station
+BB,Bab Bhar,36.8012576,10.1811219,1,
+BB1,Bab Bhar,36.8013475,10.1811219,0,BB
+BB2,Bab Bhar,36.8011678,10.1811219,0,BB
+PB,Place Barcelone,36.8013475,10.1777563,0,
+AF,Avenue de France,36.7995508,10.1797756,0,
+RA,Rue d'Alger,36.7973051,10.1828047,0,
+FS,Far Stop,36.7192418,10.1828047,0,
