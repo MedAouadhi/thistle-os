@@ -7,7 +7,7 @@ Regions file and starts the build.
 
 The page is web/index.html, with Leaflet 1.9.4 (BSD-2-Clause) kept in
 web/leaflet/, so nothing but the basemap's tiles comes from elsewhere. The
-server listens on 127.0.0.1 alone and answers only requests addressed to it
+server listens on 127.0.0.1 alone (unless started with --listen) and answers only requests addressed to it
 by that name (a page elsewhere cannot reach it through DNS rebinding) that
 carry JSON (a form elsewhere cannot post here without the browser asking
 first, and the server never says yes).
@@ -25,6 +25,7 @@ first, and the server never says yes).
 from __future__ import annotations
 
 import http.server
+import ipaddress
 import json
 import subprocess
 import sys
@@ -130,7 +131,12 @@ class Session:
         return {"saved": str(self.regions_path)}
 
 
-def make_handler(session: Session):
+def make_handler(session: Session, lan: bool = False, allow_hosts=()):
+    """lan: the server listens beyond loopback, so a Host that is an IP
+    address is answered too; a name still is not unless allow_hosts has it
+    (a name is what DNS rebinding needs)."""
+    names = {"127.0.0.1", "localhost", *allow_hosts}
+
     class Handler(http.server.BaseHTTPRequestHandler):
         server_version = "thistle-maps"
 
@@ -151,10 +157,16 @@ def make_handler(session: Session):
 
         def _ours(self) -> bool:
             host = (self.headers.get("Host") or "").rsplit(":", 1)[0]
-            if host not in ("127.0.0.1", "localhost"):
-                self._json(403, {"error": "this server answers only on 127.0.0.1"})
-                return False
-            return True
+            if host in names:
+                return True
+            if lan:
+                try:
+                    ipaddress.ip_address(host.strip("[]"))
+                    return True
+                except ValueError:
+                    pass
+            self._json(403, {"error": "this server answers only on the addresses it was started for"})
+            return False
 
         def do_GET(self):
             if not self._ours():
@@ -207,11 +219,18 @@ def make_handler(session: Session):
     return Handler
 
 
-def serve(session: Session, port: int, open_browser: bool) -> int:
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", port), make_handler(session))
+def serve(session: Session, port: int, open_browser: bool,
+          listen: str = "127.0.0.1", allow_hosts=()) -> int:
+    lan = listen not in ("127.0.0.1", "localhost", "::1")
+    server = http.server.ThreadingHTTPServer((listen, port),
+                                             make_handler(session, lan, allow_hosts))
     server.daemon_threads = True
-    url = f"http://127.0.0.1:{server.server_address[1]}/"
+    url = f"http://{'127.0.0.1' if listen in ('0.0.0.0', '') else listen}:{server.server_address[1]}/"
     print(f"The Map Pack tool is at {url}", flush=True)
+    if lan:
+        print(f"Listening on {listen}: anyone who can reach this port can change the "
+              "Regions file and start builds; there is no sign-in. Use it on a "
+              "network you trust.", flush=True)
     print(f"Regions file {session.regions_path}, Pack {session.output}; Ctrl-C stops it",
           flush=True)
     if open_browser:

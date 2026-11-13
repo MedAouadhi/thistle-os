@@ -175,7 +175,8 @@ def cmd_serve(args) -> int:
     output = Path(args.output).resolve() if args.output else regions.with_suffix(".tmap")
     session = browser.Session(regions, output, args.budget, args.tiles, args.attribution,
                               source_arguments(args), lambda r: measure(args, r))
-    return browser.serve(session, args.port, not args.no_browser)
+    return browser.serve(session, args.port, not args.no_browser,
+                         args.listen, args.allow_host)
 
 
 def main(argv=None) -> int:
@@ -217,6 +218,12 @@ def main(argv=None) -> int:
                        help="the basemap's tile URL, {z}/{x}/{y} "
                             "(default OpenStreetMap's own)")
     serve.add_argument("--attribution", default=None, help="the basemap's credit")
+    serve.add_argument("--listen", default="127.0.0.1",
+                       help="the address to listen on; 0.0.0.0 lets another machine on "
+                            "the network use the page (there is no sign-in)")
+    serve.add_argument("--allow-host", action="append", default=[],
+                       help="a name other machines reach this one by, with --listen; "
+                            "IP addresses are always answered then")
     serve.add_argument("--no-browser", action="store_true", help="do not open a browser")
     add_source_arguments(serve)
     serve.set_defaults(run=cmd_serve)
