@@ -879,6 +879,16 @@ static int check_view(map_pack_t *pack, int zoom, int64_t left, int64_t top, int
     return places;
 }
 
+static int *s_lock_taken;
+static void count_take(void *ctx)
+{
+    int *depth = ctx;
+    EXPECT(*depth == 0);
+    (*depth)++;
+    if (s_lock_taken) (*s_lock_taken)++;
+}
+static void count_give(void *ctx) { (*(int *)ctx)--; }
+
 static void views_are_their_tiles_and_hatching(void)
 {
     enum { W = 240, H = 296 };
@@ -933,6 +943,49 @@ static void views_are_their_tiles_and_hatching(void)
 
     free(px);
     map_tile_cache_destroy(cache);
+    map_pack_close(pack);
+}
+
+/* A zoom in is refused where the Pack holds nothing closer: whether a
+ * view holds any tile follows the index, Region by Region. */
+static void where_a_closer_map_is_held(void)
+{
+    enum { W = 240, H = 296 };
+    map_pack_t *pack = NULL;
+    EXPECT(open_buf(&s_golden, &pack) == MAP_PACK_OK);
+    if (!pack) return;
+    const map_region_t *medina = map_pack_region(pack, 0), *lac = map_pack_region(pack, 1);
+    for (int zoom = MAP_MIN_ZOOM; zoom <= MAP_MAX_ZOOM; zoom++) {
+        double gx, gy;
+        map_world_pixel(lac->centre_lat, lac->centre_lon, zoom, &gx, &gy);
+        bool held = map_compose_holds_tiles(pack, zoom, (int64_t)gx - W / 2, (int64_t)gy - H / 2,
+                                            W, H);
+        EXPECT_AT(held == (zoom <= lac->deepest_zoom), "Lac Nord at z", zoom);
+        map_world_pixel(medina->centre_lat, medina->centre_lon, zoom, &gx, &gy);
+        held = map_compose_holds_tiles(pack, zoom, (int64_t)gx - W / 2, (int64_t)gy - H / 2, W, H);
+        EXPECT_AT(held, "Medina at z", zoom);
+    }
+    /* Far from both Regions, and past the world's edges. */
+    double gx, gy;
+    map_world_pixel(48.85, 2.35, 16, &gx, &gy);
+    EXPECT(!map_compose_holds_tiles(pack, 16, (int64_t)gx, (int64_t)gy, W, H));
+    EXPECT(!map_compose_holds_tiles(pack, 14, -10 * W, -10 * H, W, H));
+    EXPECT(!map_compose_holds_tiles(pack, 18, 0, 0, W, H));
+    EXPECT(!map_compose_holds_tiles(NULL, 16, 0, 0, W, H));
+
+    /* A lock, when one is set, is taken around every read and given back. */
+    int depth = 0, taken = 0;
+    map_pack_set_lock(pack, count_take, count_give, &depth);
+    s_lock_taken = &taken;
+    map_world_pixel(medina->centre_lat, medina->centre_lon, 16, &gx, &gy);
+    EXPECT(map_compose_holds_tiles(pack, 16, (int64_t)gx - W / 2, (int64_t)gy - H / 2, W, H));
+    uint8_t *tile = malloc(MAP_TILE_BYTES);
+    (void)map_pack_read_tile(pack, 16, (uint32_t)(gx / MAP_TILE_PX), (uint32_t)(gy / MAP_TILE_PX),
+                             tile);
+    free(tile);
+    EXPECT(taken >= 2 && depth == 0);
+    map_pack_set_lock(pack, NULL, NULL, NULL);
+    s_lock_taken = NULL;
     map_pack_close(pack);
 }
 
@@ -1326,6 +1379,7 @@ int main(int argc, char **argv)
     index_entries_that_do_not_hold();
     payloads_that_do_not_hold();
     views_are_their_tiles_and_hatching();
+    where_a_closer_map_is_held();
     a_damaged_tile_is_hatched();
     random_damage_never_escapes();
     if (argc == 4) {

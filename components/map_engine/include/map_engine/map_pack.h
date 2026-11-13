@@ -98,6 +98,12 @@ const map_region_t *map_pack_region(const map_pack_t *pack, int i);
 /* The data's credit, as the Pack holds it: OpenStreetMap's. Never NULL. */
 const char *map_pack_credit(const map_pack_t *pack);
 
+/* Makes map_pack_has_tile() and map_pack_read_tile() take lock(ctx) and
+ * release it with unlock(ctx), so two tasks may ask (a view's tile task
+ * reading tiles, the UI task asking where there is map). NULL for none,
+ * the default. */
+void map_pack_set_lock(map_pack_t *pack, void (*lock)(void *), void (*unlock)(void *), void *ctx);
+
 /* Whether the Pack's index has tile (z, x, y), damaged or not: whether
  * (z, x, y) is inside a Region. Reads the index only. */
 bool map_pack_has_tile(map_pack_t *pack, int z, uint32_t x, uint32_t y);

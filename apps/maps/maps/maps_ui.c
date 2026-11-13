@@ -192,6 +192,17 @@ static void shown_cb(map_view_t *view, const map_view_shown_t *shown, void *user
              (unsigned)shown->compose_ms);
 }
 
+/* A zoom in the Pack has no closer map for: its Regions here were built
+ * no deeper than this level. */
+static void no_closer_cb(map_view_t *view, int zoom, void *user)
+{
+    (void)view;
+    (void)user;
+    static char text[40];
+    snprintf(text, sizeof text, "No closer map here (z%d)", zoom);
+    toast_info(text);
+}
+
 static void zoom_cb(lv_event_t *e)
 {
     if (s_ui.view) map_view_zoom_by(s_ui.view, (int)(intptr_t)lv_event_get_user_data(e));
@@ -573,6 +584,7 @@ static void open_and_show(bool mono)
     }
 
     map_view_set_bottom_inset(s_ui.view, ABOUT_H);
+    map_view_set_no_closer_cb(s_ui.view, no_closer_cb, NULL);
 
     /* The fix, if a Region holds it; else the first Region's centre. The
      * Pack is read here before the view's task reads it: nothing is asked

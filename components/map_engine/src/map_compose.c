@@ -154,3 +154,17 @@ void map_compose(map_tile_cache_t *cache, map_pack_t *pack, int zoom, int64_t le
         }
     }
 }
+
+bool map_compose_holds_tiles(map_pack_t *pack, int zoom, int64_t left, int64_t top, int w, int h)
+{
+    if (!pack || zoom < MAP_MIN_ZOOM || zoom > MAP_MAX_ZOOM) return false;
+    int64_t side = (int64_t)1 << zoom;
+    for (int64_t ty = tile_of(top); ty <= tile_of(top + h - 1); ty++) {
+        if (ty < 0 || ty >= side) continue;
+        for (int64_t tx = tile_of(left); tx <= tile_of(left + w - 1); tx++) {
+            if (tx < 0 || tx >= side) continue;
+            if (map_pack_has_tile(pack, zoom, (uint32_t)tx, (uint32_t)ty)) return true;
+        }
+    }
+    return false;
+}

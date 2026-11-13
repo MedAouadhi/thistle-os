@@ -106,8 +106,11 @@ struct map_view {
     int64_t          drawn_us;     /* when the overlays were last drawn */
     map_view_miss_cb_t miss_cb;
     void            *miss_user;
+    map_view_no_closer_cb_t no_closer_cb;
+    void            *no_closer_user;
 
     SemaphoreHandle_t lock;
+    SemaphoreHandle_t pack_lock;  /* the Pack's file, shared with the UI task */
     QueueHandle_t    wake;   /* to the task: something changed */
     QueueHandle_t    ended;  /* from the task: it has stopped */
     bool             task_running;
@@ -126,6 +129,9 @@ static void *alloc_psram(size_t len)
     void *p = heap_caps_malloc(len, MALLOC_CAP_SPIRAM);
     return p ? p : malloc(len);
 }
+
+static void pack_take(void *m) { xSemaphoreTake((SemaphoreHandle_t)m, portMAX_DELAY); }
+static void pack_give(void *m) { xSemaphoreGive((SemaphoreHandle_t)m); }
 
 static void lock(map_view_t *v) { xSemaphoreTake(v->lock, portMAX_DELAY); }
 static void unlock(map_view_t *v) { xSemaphoreGive(v->lock); }
@@ -447,6 +453,12 @@ void map_view_refresh(map_view_t *v)
     redraw_overlays(v, "Refresh");
 }
 
+void map_view_set_no_closer_cb(map_view_t *v, map_view_no_closer_cb_t cb, void *user)
+{
+    v->no_closer_cb = cb;
+    v->no_closer_user = user;
+}
+
 void map_view_set_miss_cb(map_view_t *v, map_view_miss_cb_t miss, void *user)
 {
     v->miss_cb = miss;
@@ -598,6 +610,7 @@ map_view_t *map_view_create(lv_obj_t *parent, map_pack_t *pack, map_view_shown_c
     v->scratch = alloc_psram((size_t)w * h * sizeof(uint16_t));
     v->cache = map_tile_cache_create(CACHE_SLOTS);
     v->lock = xSemaphoreCreateMutex();
+    v->pack_lock = xSemaphoreCreateMutex();
 #ifdef __EMSCRIPTEN__
     /* The browser's simulator runs no tasks. */
     v->inline_compose = true;
@@ -606,11 +619,13 @@ map_view_t *map_view_create(lv_obj_t *parent, map_pack_t *pack, map_view_shown_c
     v->ended = xQueueCreate(1, sizeof(uint8_t));
 #endif
     if (!v->front || !v->back || !v->screen || !v->scratch || !v->cache || !v->lock ||
+        !v->pack_lock ||
         (!v->inline_compose && (!v->wake || !v->ended))) {
         map_view_destroy(v);
         return NULL;
     }
     for (size_t i = 0; i < (size_t)w * h; i++) v->front[i] = v->screen[i] = MAP_PAPER;
+    map_pack_set_lock(pack, pack_take, pack_give, v->pack_lock);
 
     v->dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
     v->dsc.header.cf = LV_COLOR_FORMAT_RGB565;
@@ -686,6 +701,10 @@ void map_view_destroy(map_view_t *v)
     if (v->wake) vQueueDelete(v->wake);
     if (v->ended) vQueueDelete(v->ended);
     if (v->lock) vSemaphoreDelete(v->lock);
+    if (v->pack_lock) {
+        map_pack_set_lock(v->pack, NULL, NULL, NULL);
+        vSemaphoreDelete(v->pack_lock);
+    }
     free(v);
 }
 
@@ -741,6 +760,14 @@ bool map_view_zoom_by(map_view_t *v, int levels)
     int64_t cx = scale(w.left + v->w / 2, zoom - w.zoom);
     int64_t cy = scale(w.top + v->h / 2, zoom - w.zoom);
     int64_t left = cx - v->w / 2, top = cy - v->h / 2;
+    /* Zooming in where the Pack has nothing closer would show only
+     * hatching: its Regions there stop at this level. */
+    if (zoom > w.zoom && v->pack &&
+        !map_compose_holds_tiles(v->pack, zoom, left, top, v->w, v->h)) {
+        ESP_LOGI(TAG, "no closer map here: the Pack holds no z%d tile in view", zoom);
+        if (v->no_closer_cb) v->no_closer_cb(v, w.zoom, v->no_closer_user);
+        return false;
+    }
     ESP_LOGI(TAG, "zoom %s: z%d at %lld,%lld", zoom > w.zoom ? "in" : "out", zoom,
              (long long)left, (long long)top);
     ask(v, zoom, left, top);

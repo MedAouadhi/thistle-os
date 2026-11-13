@@ -14,6 +14,7 @@
 
 #include "map_engine/map_pack.h"
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -46,6 +47,11 @@ void map_tile_cache_destroy(map_tile_cache_t *cache);
  * damaged. pack may be NULL, which is all hatching. */
 void map_compose(map_tile_cache_t *cache, map_pack_t *pack, int zoom, int64_t left, int64_t top,
                  int w, int h, uint16_t *pixels, map_compose_stats_t *stats);
+
+/* Whether the Pack holds any tile the w x h view whose top left is world
+ * pixel (left, top) at zoom touches: a view with none is all hatching.
+ * Reads only the index. False for a NULL pack or a zoom outside z14..z17. */
+bool map_compose_holds_tiles(map_pack_t *pack, int zoom, int64_t left, int64_t top, int w, int h);
 
 #ifdef __cplusplus
 }

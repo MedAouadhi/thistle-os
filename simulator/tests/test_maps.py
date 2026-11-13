@@ -413,6 +413,33 @@ def zooms_through_the_four_levels() -> None:
             raise AssertionError(f"no tile of the Pack shows at z{z}")
 
 
+def zoom_in_stops_at_the_regions_deepest_level() -> None:
+    """Over a Region built to z15, zooming in goes no deeper than z15: the
+    Pack has nothing closer there, and the view would be all hatching."""
+    pack = Pack(GOLDEN.read_bytes())
+    lac = pack.regions()[1]
+    if lac["deepest_zoom"] != 15:
+        raise AssertionError(f"the fixture's second Region stops at z{lac['deepest_zoom']}")
+    lats, lons = zip(*lac["points"])
+    lat, lon = (min(lats) + max(lats)) / 2, (min(lons) + max(lons)) / 2  # as the app takes it
+    gx, gy = world_pixel(lat, lon, 16)
+    fix = fix_at(0, math.floor(gx + 0.5), math.floor(gy + 0.5))
+    probe = run_app(GOLDEN.read_bytes(), timeout_ms=1500, fix=[fix])
+    buttons = zoom_buttons(probe.log)
+    keys = ("type:i", "out", "in", "in")
+    steps = tuple(f"{buttons[k][0]},{buttons[k][1]}" if k in buttons else k for k in keys)
+    shown = run_app(GOLDEN.read_bytes(), timeout_ms=3000 + 1500 * len(steps), fix=[fix],
+                    steps=steps)
+    if first_shown(shown.log)[0] != 15:
+        raise AssertionError(f"the map opened at z{first_shown(shown.log)[0]}, not z15")
+    refused = shown.log.count("(map_view) no closer map here: the Pack holds no z16 tile in view")
+    actions = [found.group(1) for found in ACTION.finditer(shown.log)]
+    if refused != 2 or actions != ["zoom out", "zoom in"]:
+        raise AssertionError(f"{refused} zoom ins refused; the view did {actions}")
+    if not all(z <= 15 for z, *_ in (s for st in steps_of(shown.log) for s in st.shown)):
+        raise AssertionError("a view deeper than z15 was shown")
+
+
 def outside_every_region_is_hatched() -> None:
     """Far enough east, the Pack has no tile: the view is all hatching."""
     pack = Pack(GOLDEN.read_bytes())
@@ -754,6 +781,7 @@ CASES: tuple[tuple[str, Callable[[], None]], ...] = (
     ("pans-half-a-screen-a-step-with-one-refresh-each",
      pans_half_a_screen_a_step_with_one_refresh_each),
     ("zooms-through-the-four-levels", zooms_through_the_four_levels),
+    ("zoom-in-stops-at-the-regions-deepest-level", zoom_in_stops_at_the_regions_deepest_level),
     ("outside-every-region-is-hatched", outside_every_region_is_hatched),
     ("a-bit-flipped-tile-is-hatched-and-the-rest-shown",
      a_bit_flipped_tile_is_hatched_and_the_rest_shown),

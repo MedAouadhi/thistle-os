@@ -26,7 +26,9 @@
  * map_view_obj()).
  *
  * For built-in apps, on the UI task; the view does not own the Pack, which
- * must outlive it and which nothing else may read meanwhile.
+ * must outlive it. The view makes the Pack's tile reads take a lock of
+ * its own (map_pack_set_lock()), so the UI task may ask the Pack where it
+ * has tiles while the view is up; nothing else may read it meanwhile.
  */
 #pragma once
 
@@ -79,8 +81,16 @@ void map_view_go_to(map_view_t *view, double lat, double lon, int zoom);
 void map_view_pan(map_view_t *view, int dx, int dy);
 
 /* Zooms by levels (positive is in), keeping the world pixel at the view's
- * middle there. False, and nothing asked, when already at the end. */
+ * middle there. False, and nothing asked, when already at the end, or when
+ * zooming in would show no tile of the Pack at all (its Regions there stop
+ * at the level shown): that logs "no closer map here: ..." and calls the
+ * no-closer callback. */
 bool map_view_zoom_by(map_view_t *view, int levels);
+
+/* Called on the UI task when a zoom in is refused for want of a closer
+ * map, with the level shown, so the app can say so. */
+typedef void (*map_view_no_closer_cb_t)(map_view_t *view, int zoom, void *user);
+void map_view_set_no_closer_cb(map_view_t *view, map_view_no_closer_cb_t cb, void *user);
 
 /* The app covers px at the bottom of the view (an About line, say): the
  * marker counts as off the view there, and near its edge above it. */

@@ -62,6 +62,11 @@ struct map_pack {
         int      first;  /* its first item's place in item_at */
     } overlays[MAP_PACK_MAX_OVERLAYS];
     uint32_t    *item_at;  /* each item's offset in ovly, PSRAM */
+
+    /* map_pack_set_lock()'s: around each use of file and payload. */
+    void       (*lock)(void *);
+    void       (*unlock)(void *);
+    void        *lock_ctx;
 };
 
 /* ------------------------------------------------------------------ */
@@ -457,14 +462,47 @@ static map_tile_result_t find_entry(map_pack_t *pack, int z, uint32_t x, uint32_
     return MAP_TILE_NONE;
 }
 
+void map_pack_set_lock(map_pack_t *pack, void (*lock)(void *), void (*unlock)(void *), void *ctx)
+{
+    if (!pack) return;
+    pack->lock = lock && unlock ? lock : NULL;
+    pack->unlock = lock && unlock ? unlock : NULL;
+    pack->lock_ctx = ctx;
+}
+
+static void take(map_pack_t *pack)
+{
+    if (pack && pack->lock) pack->lock(pack->lock_ctx);
+}
+
+static void give(map_pack_t *pack)
+{
+    if (pack && pack->unlock) pack->unlock(pack->lock_ctx);
+}
+
 bool map_pack_has_tile(map_pack_t *pack, int z, uint32_t x, uint32_t y)
 {
     uint8_t entry[INDEX_ENTRY_LEN];
-    return find_entry(pack, z, x, y, entry) == MAP_TILE_OK;
+    take(pack);
+    bool has = find_entry(pack, z, x, y, entry) == MAP_TILE_OK;
+    give(pack);
+    return has;
 }
+
+static map_tile_result_t read_tile(map_pack_t *pack, int z, uint32_t x, uint32_t y,
+                                   uint8_t out[MAP_TILE_BYTES]);
 
 map_tile_result_t map_pack_read_tile(map_pack_t *pack, int z, uint32_t x, uint32_t y,
                                      uint8_t out[MAP_TILE_BYTES])
+{
+    take(pack);
+    map_tile_result_t r = read_tile(pack, z, x, y, out);
+    give(pack);
+    return r;
+}
+
+static map_tile_result_t read_tile(map_pack_t *pack, int z, uint32_t x, uint32_t y,
+                                   uint8_t out[MAP_TILE_BYTES])
 {
     uint8_t entry[INDEX_ENTRY_LEN];
     map_tile_result_t found = find_entry(pack, z, x, y, entry);
