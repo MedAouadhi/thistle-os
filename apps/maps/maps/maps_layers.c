@@ -699,7 +699,7 @@ static void find_files(void)
         layer_t *l = &first[s.files++];
         memset(l, 0, sizeof *l);
         l->pack_overlay = -1;
-        snprintf(l->file, sizeof l->file, "%s", e->d_name);
+        snprintf(l->file, sizeof l->file, "%.*s", (int)sizeof l->file - 1, e->d_name);
     }
     closedir(dir);
     qsort(first, (size_t)s.files, sizeof *s.layers, by_name);

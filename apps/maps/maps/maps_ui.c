@@ -114,7 +114,7 @@ static bool find_pack(char *name, size_t cap)
         if (e->d_name[0] == '.' || !ends_with(e->d_name, PACK_SUFFIX)) continue;
         if (strlen(e->d_name) >= cap) continue;
         if (!found || strcmp(e->d_name, name) < 0) {
-            snprintf(name, cap, "%s", e->d_name);
+            snprintf(name, cap, "%.*s", (int)cap - 1, e->d_name);
             found = true;
         }
     }
@@ -447,7 +447,7 @@ static void load_tracks(void)
         if (e->d_name[0] == '.' || !ends_with(e->d_name, TRACK_SUFFIX)) continue;
         char path[sizeof TRACKS_DIR + NAME_MAX_LEN + 1];
         if (strlen(e->d_name) >= NAME_MAX_LEN) continue;
-        snprintf(path, sizeof path, "%s/%s", TRACKS_DIR, e->d_name);
+        snprintf(path, sizeof path, "%s/%.*s", TRACKS_DIR, NAME_MAX_LEN - 1, e->d_name);
         int got = read_gpx(path);
         if (got > 0) files++;
         points += got;

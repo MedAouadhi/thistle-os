@@ -374,7 +374,7 @@ static void show_departures(const transit_result_t *r)
     int logged = snprintf(log, sizeof log, "%s", s_ui.card_title);
     for (int i = 0; i < r->departure_count; i++) {
         const transit_departure_t *d = &r->departures[i];
-        char late[12] = "";
+        char late[16] = "";
         if (d->live && d->delay_min > 0) snprintf(late, sizeof late, " +%d", d->delay_min);
         int n = snprintf(body + used, sizeof body - used, "%s%s %s %s%s", i ? "\n" : "", d->when,
                          d->line, d->direction, late);
@@ -603,7 +603,7 @@ static map_pack_t *open_pack(void)
     while ((e = readdir(dir)) != NULL) {
         if (e->d_name[0] == '.' || !ends_with(e->d_name, PACK_SUFFIX)) continue;
         if (strlen(e->d_name) >= sizeof name) continue;
-        if (!name[0] || strcmp(e->d_name, name) < 0) snprintf(name, sizeof name, "%s", e->d_name);
+        if (!name[0] || strcmp(e->d_name, name) < 0) snprintf(name, sizeof name, "%.*s", (int)sizeof name - 1, e->d_name);
     }
     closedir(dir);
     if (!name[0]) {
