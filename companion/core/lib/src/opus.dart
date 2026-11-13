@@ -68,7 +68,16 @@ class _Lib {
     final names = Platform.isAndroid
         ? ['libopus.so']
         : Platform.isMacOS
-        ? ['libopus.0.dylib', 'libopus.dylib']
+        // The app's own, in Contents/Frameworks (app/tool/make_dmg.sh),
+        // else Homebrew's (`brew install opus`), which an app started from
+        // the Finder finds only by its path.
+        ? [
+            '${File(Platform.resolvedExecutable).parent.parent.path}/Frameworks/libopus.dylib',
+            'libopus.0.dylib',
+            'libopus.dylib',
+            '/opt/homebrew/lib/libopus.0.dylib',
+            '/usr/local/lib/libopus.0.dylib',
+          ]
         : ['libopus.so.0', 'libopus.so'];
     Object? last;
     for (final n in names) {

@@ -130,7 +130,7 @@ class WebrtcCall {
         children.cameraClosed();
       }
       await _unroute();
-      audioProblem = 'The call has no audio: $e';
+      audioProblem = 'The call has no audio.';
       log?.call('${callLabel(id)}: WebRTC did not start: $e');
       if (_live) peer().endCall(id, reason: 'error', fault: CallFault.webrtcFailed);
       changed();
@@ -145,6 +145,7 @@ class WebrtcCall {
     _session = session
       ..muted = _muted
       ..volume = _volume;
+    log?.call('${callLabel(id)}: echo cancellation ${session.echoCancellation}');
     for (final p in _waiting) {
       _take(session, p);
     }

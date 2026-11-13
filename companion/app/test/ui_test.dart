@@ -467,7 +467,9 @@ void main() {
     await tester.pump();
     expect(find.text('thistle-46cf20'), findsWidgets);
     expect(find.text('0:00'), findsOneWidget);
-    expect(find.textContaining('Echo cancellation: none (test)'), findsOneWidget);
+    // What cancels the echo is the log's, not the screen's.
+    expect(app.talk.echoCancellation, 'none (test)');
+    expect(find.textContaining('Echo cancellation'), findsNothing);
     await tester.tap(find.byKey(const Key('call-mute')));
     await tester.pump();
     expect(app.talk.muted, isTrue);
@@ -480,7 +482,7 @@ void main() {
     await finish(tester);
   });
 
-  testWidgets("a call with another companion app is WebRTC, and the echo line names WebRTC's canceller", (
+  testWidgets("a call with another companion app is WebRTC, on WebRTC's canceller, which the screen does not show", (
     tester,
   ) async {
     await launch(tester, videoCapable: true);
@@ -490,7 +492,8 @@ void main() {
     await until(tester, () => app.talk.call?.state == 'connected' && app.talk.echoCancellation != null);
     await tester.pump(const Duration(seconds: 1)); // the call screen has slid in
     expect(app.talk.call!.transport, 'webrtc');
-    expect(find.textContaining('Echo cancellation: on (WebRTC, fake)'), findsOneWidget);
+    expect(app.talk.echoCancellation, 'on (WebRTC, fake)');
+    expect(find.textContaining('Echo cancellation'), findsNothing);
     await tester.tap(find.byKey(const Key('call-hangup')));
     await until(tester, () => device.calls.values.single.state == 'ended:hangup');
     await until(tester, () => find.byKey(const Key('call-close')).evaluate().isNotEmpty);
